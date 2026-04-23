@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES6",
+    "module": "commonjs",
+    "rootDir": "../",
+    "outDir": "./dist",
+    "esModuleInterop": true,
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": false
+  },
+  "exclude": [
+    "db.ts",
+    "storage.ts",
+    "storage.js",
+    "routes.ts"
+  ]
+}
