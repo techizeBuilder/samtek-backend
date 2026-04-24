@@ -3,7 +3,7 @@ import { createServer } from "http";
 // Import environment configuration
 import { config } from "./config/environment.js";
 // Removed cookieParser - using JWT Bearer tokens only
-// Main entry point - Trigger restart
+// Main entry point - Trigger restart - Force picked up HR-Admin role
 import express from 'express';
 import cors from 'cors';
 import path from "path";

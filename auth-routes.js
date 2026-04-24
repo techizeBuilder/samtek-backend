@@ -220,6 +220,12 @@ router.post('/auth/login', async (req, res) => {
       filteredPermissions.modules = user.permissions.modules.filter(module =>
         module.name === 'production'
       );
+    } else if (user.role === 'HR-Admin') {
+      console.log('✅ Applying HR-Admin filtering');
+      // HR-Admin should only have hrms module
+      filteredPermissions.modules = user.permissions.modules.filter(module =>
+        module.name === 'hrms'
+      );
     }
     // For other roles, keep all their modules as-is
 
