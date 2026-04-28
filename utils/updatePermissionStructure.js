@@ -158,7 +158,7 @@ export const updatePermissionStructure = async () => {
     }
 
     // Update Super Admin users - add new module permissions
-    const superAdminUsers = await User.find({ role: 'Super Admin' });
+    const superAdminUsers = await User.find({ role: 'Superadmin' });
     for (const user of superAdminUsers) {
       // Update production module
       let productionModule = user.permissions.modules.find(m => m.name === 'production');

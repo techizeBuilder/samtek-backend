@@ -1,11 +1,11 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
-    required: true,
+    required: false,
     unique: true,
     trim: true,
     minlength: 3,
@@ -40,7 +40,32 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: false
   },
-  
+
+  // HRMS Fields
+  mobile: {
+    type: String,
+    trim: true
+  },
+  gender: {
+    type: String,
+    enum: ['Male', 'Female', 'Other', 'Select', '']
+  },
+  dob: {
+    type: Date
+  },
+  joiningDate: {
+    type: Date
+  },
+  reportingManager: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false
+  },
+  employeeType: {
+    type: String,
+    required: false
+  },
+
   // Company assignment for location-specific access
   companyId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -105,9 +130,9 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
-userSchema.pre('save', async function() {
+userSchema.pre('save', async function () {
   if (!this.isModified('password')) return;
-  
+
   try {
     const salt = await bcrypt.genSalt(12);
     this.password = await bcrypt.hash(this.password, salt);
@@ -116,7 +141,7 @@ userSchema.pre('save', async function() {
   }
 });
 
-userSchema.methods.comparePassword = async function(candidatePassword) {
+userSchema.methods.comparePassword = async function (candidatePassword) {
   try {
     return await bcrypt.compare(candidatePassword, this.password);
   } catch (error) {
@@ -124,7 +149,7 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
   }
 };
 
-userSchema.methods.toJSON = function() {
+userSchema.methods.toJSON = function () {
   const user = this.toObject();
   delete user.password;
   return user;

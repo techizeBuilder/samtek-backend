@@ -157,7 +157,7 @@ export const getCustomers = [
       console.log('🔍 getCustomers called by user:', req.user?.username, 'Role:', req.user?.role);
 
       // STRICT company filtering based on user role
-      if (req.user.role === 'Super Admin') {
+      if (req.user.role === 'Superadmin') {
         // Super Admin can see all customers
         console.log('🔐 Super Admin access - no company filtering');
       } else {

@@ -3,7 +3,7 @@ import Manufacturing from '../models/Manufacturing.js';
 import Dispatch from '../models/Dispatch.js';
 import Sale from '../models/Sale.js';
 import { Item } from '../models/Inventory.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 export const getDashboardMetrics = async (req, res) => {
   try {
@@ -57,24 +57,24 @@ export const getDashboardMetrics = async (req, res) => {
     const totalRevenue = revenueResult.length > 0 ? revenueResult[0].total : 0;
 
     const revenueThisMonth = await Sale.aggregate([
-      { 
-        $match: { 
-          ...query, 
+      {
+        $match: {
+          ...query,
           paymentStatus: 'Paid',
           createdAt: { $gte: startOfMonth }
-        } 
+        }
       },
       { $group: { _id: null, total: { $sum: '$totalAmount' } } }
     ]);
     const revenueCurrentMonth = revenueThisMonth.length > 0 ? revenueThisMonth[0].total : 0;
 
     const revenueLastMonth = await Sale.aggregate([
-      { 
-        $match: { 
-          ...query, 
+      {
+        $match: {
+          ...query,
           paymentStatus: 'Paid',
           createdAt: { $gte: startOfLastMonth, $lte: endOfLastMonth }
-        } 
+        }
       },
       { $group: { _id: null, total: { $sum: '$totalAmount' } } }
     ]);
@@ -146,9 +146,9 @@ export const getProductionChart = async (req, res) => {
       const date = new Date();
       date.setDate(date.getDate() - i);
       const dateString = date.toISOString().split('T')[0];
-      
+
       labels.push(date.toLocaleDateString('en-US', { weekday: 'short' }));
-      
+
       const dayData = productionData.find(d => d._id.date === dateString);
       productionValues.push(dayData ? dayData.production : 0);
       plannedValues.push(dayData ? dayData.planned : 0);

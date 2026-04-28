@@ -267,6 +267,44 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/packing', packingRoutes);
       console.log('Packing routes registered at /api/packing');
 
+      // HRMS Routes
+      const attendanceRouter = (await import('./routes/attendance.routes.js')).default;
+      const holidayRouter = (await import('./routes/holiday.routes.js')).default;
+      const payrollRouter = (await import('./routes/payroll.routes.js')).default;
+      const payslipRouter = (await import('./routes/payslip.routes.js')).default;
+      const jobOpeningRouter = (await import('./routes/jobOpening.routes.js')).default;
+      const candidateRouter = (await import('./routes/candidate.routes.js')).default;
+      const salaryStructureRouter = (await import('./routes/salaryStrctureRoute.js')).default;
+      const hrPolicyRouter = (await import('./routes/hrPolicy.routes.js')).default;
+      const leaveRouter = (await import('./routes/leave.routes.js')).default;
+
+      app.use('/api/attendance', attendanceRouter);
+      app.use('/api/holidays', holidayRouter);
+      app.use('/api/payroll', payrollRouter);
+      app.use('/api/payslips', payslipRouter);
+      app.use('/api/job-openings', jobOpeningRouter);
+      app.use('/api/candidates', candidateRouter);
+      app.use('/api/salary-structures', salaryStructureRouter);
+      app.use('/api/hr-policies', hrPolicyRouter);
+      app.use('/api/leaves', leaveRouter);
+      
+      const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
+      const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;
+      const expenseRequestRouter = (await import('./routes/expenseRequest.routes.js')).default;
+      const profileUpdateRouter = (await import('./routes/profileUpdate.routes.js')).default;
+      const overtimeRouter = (await import('./routes/overtime.routes.js')).default;
+      const resignationRouter = (await import('./routes/resignation.routes.js')).default;
+      const documentRouter = (await import('./routes/document.routes.js')).default;
+
+      app.use('/api/travel-requests', travelRequestRouter);
+      app.use('/api/attendance-requests', attendanceRequestRouter);
+      app.use('/api/expense-requests', expenseRequestRouter);
+      app.use('/api/profile-updates', profileUpdateRouter);
+      app.use('/api/overtime', overtimeRouter);
+      app.use('/api/resignation', resignationRouter);
+      app.use('/api/documents', documentRouter);
+      console.log('HRMS routes registered (including documents)');
+
       // Dispatch routes
       const dispatchRoutes = (await import('./routes/dispatchRoutes.js')).default;
       app.use('/api/dispatches', dispatchRoutes);

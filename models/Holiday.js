@@ -25,6 +25,11 @@ const holidaySchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: false,
+    },
   },
   {
     timestamps: true,

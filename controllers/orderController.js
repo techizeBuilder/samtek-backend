@@ -241,7 +241,7 @@ const getOrders = async (req, res) => {
       console.log('Filter applied:', { salesPerson: salespersonId, companyId: userCompanyId });
     }
     // Super Admin can see all orders
-    else if (userRole === 'Super Admin') {
+    else if (userRole === 'Superadmin') {
       console.log('👑 SUPER ADMIN - No filtering applied (all orders)');
     }
     // For other roles, also filter by company if available  
@@ -582,7 +582,7 @@ const updateOrderStatus = async (req, res) => {
     const userRole = req.user.role;
     
     // Unit Manager can update any status
-    if (userRole === 'Unit Manager' || userRole === 'Super Admin') {
+    if (userRole === 'Unit Manager' || userRole === 'Superadmin') {
       // Allow all status updates
     }
     // Sales can only update to Cancelled if pending

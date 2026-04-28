@@ -71,7 +71,7 @@ const authorizeRoles = (...roles) => {
 
     if (!roles.includes(req.user.role)) {
       console.log(`❌ Auth - Role mismatch! User role: "${req.user.role}", Required roles: [${roles.join(', ')}]`);
-      return res.status(403).json({ 
+      return res.status(403).json({
         message: 'Access denied. Insufficient permissions.',
         debug: {
           userRole: req.user.role,
@@ -91,8 +91,8 @@ const checkUnitAccess = (req, res, next) => {
     return res.status(401).json({ message: 'User not authenticated.' });
   }
 
-  // Super Admins have access to all units
-  if (req.user.role === 'Super Admin') {
+  // Super Admins have access to all units (support both variants)
+  if (req.user.role === 'Superadmin' || req.user.role === 'Super Admin') {
     return next();
   }
 
@@ -129,6 +129,7 @@ const generateToken = (payload) => {
 
 export {
   authenticateToken,
+  authenticateToken as authMiddleware, // Alias for backward compatibility
   authorizeRoles,
   checkUnitAccess,
   generateToken

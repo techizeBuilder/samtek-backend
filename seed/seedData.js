@@ -16,7 +16,7 @@ import Purchase from '../models/Purchase.js';
 import Settings from '../models/Settings.js';
 
 // Import constants
-import { USER_ROLES, ORDER_STATUS, PRODUCTION_STATUS, DISPATCH_STATUS, PAYMENT_STATUS } from '../../shared/schema.js';
+import { USER_ROLES, ORDER_STATUS, PRODUCTION_STATUS, DISPATCH_STATUS, PAYMENT_STATUS } from '../shared/schema.js';
 
 const seedData = async () => {
   try {

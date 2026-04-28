@@ -1,5 +1,5 @@
 import Expense from '../models/Expense.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 export const getExpenses = async (req, res) => {
     try {

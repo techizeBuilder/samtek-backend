@@ -18,7 +18,7 @@ export const checkRole = (allowedRoles) => {
           message: `Access denied. Required roles: ${allowedRoles.join(', ')}. Your role: ${req.user.role}`
         });
       }
-    } 
+    }
     // If allowedRoles is a string, check exact match
     else if (typeof allowedRoles === 'string') {
       if (req.user.role !== allowedRoles) {
@@ -78,7 +78,7 @@ export const checkModulePermission = (moduleName, permission = 'view') => {
 
     // Check specific feature permission
     if (permission !== 'dashboard') {
-      const hasPermission = modulePermission.features?.some(feature => 
+      const hasPermission = modulePermission.features?.some(feature =>
         feature[permission] === true
       );
 

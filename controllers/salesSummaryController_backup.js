@@ -44,10 +44,10 @@ export const getSalesSummary = async (req, res) => {
         });
       }
       filterCompanyId = userCompanyId;
-    } else if (userRole === 'Super Admin' && companyId) {
+    } else if (userRole === 'Superadmin' && companyId) {
       // Super admin can filter by specific company
       filterCompanyId = companyId;
-    } else if (userRole === 'Super Admin') {
+    } else if (userRole === 'Superadmin') {
       // Super admin sees all companies if no filter
       filterCompanyId = null;
     } else {
@@ -391,7 +391,7 @@ export const updateSalesSummary = async (req, res) => {
         });
       }
       summaryCompanyId = userCompanyId;
-    } else if (userRole === 'Super Admin') {
+    } else if (userRole === 'Superadmin') {
       // For super admin, use the company from existing summary or user's company
       summaryCompanyId = userCompanyId; // Default fallback
     } else {

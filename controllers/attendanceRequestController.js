@@ -1,0 +1,192 @@
+/** @format */
+
+import AttendanceRequest from "../models/AttendanceRequest.js";
+import Attendance from "../models/Attendance.js";
+import User from "../models/User.js";
+
+/* ================= EMPLOYEE: CREATE REQUEST ================= */
+export const createAttendanceRequest = async (req, res) => {
+  try {
+    const { date, type, punchIn, punchOut, reason } = req.body;
+    const userId = req.user._id;
+
+    const request = new AttendanceRequest({
+      user: userId,
+      date,
+      type,
+      punchIn,
+      punchOut,
+      reason,
+      status: "PENDING",
+    });
+
+    await request.save();
+    res.status(201).json({
+      message: "Attendance request submitted successfully",
+      request,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to submit attendance request" });
+  }
+};
+
+/* ================= EMPLOYEE: GET MY REQUESTS ================= */
+export const getMyAttendanceRequests = async (req, res) => {
+  try {
+    const requests = await AttendanceRequest.find({ user: req.user._id }).sort({
+      createdAt: -1,
+    });
+    res.json(requests);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to fetch attendance requests" });
+  }
+};
+
+/* ================= EMPLOYEE: UPDATE REQUEST ================= */
+export const updateAttendanceRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { date, type, punchIn, punchOut, reason } = req.body;
+
+    const request = await AttendanceRequest.findOne({
+      _id: id,
+      user: req.user._id,
+    });
+
+    if (!request) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    if (request.status !== "PENDING") {
+      return res
+        .status(400)
+        .json({ message: "Cannot update processed request" });
+    }
+
+    request.date = date || request.date;
+    request.type = type || request.type;
+    request.punchIn = punchIn || request.punchIn;
+    request.punchOut = punchOut || request.punchOut;
+    request.reason = reason || request.reason;
+
+    await request.save();
+    res.json({ message: "Attendance request updated successfully", request });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to update attendance request" });
+  }
+};
+
+/* ================= EMPLOYEE: DELETE REQUEST ================= */
+export const deleteAttendanceRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const request = await AttendanceRequest.findOneAndDelete({
+      _id: id,
+      user: req.user._id,
+      status: "PENDING",
+    });
+
+    if (!request) {
+      return res
+        .status(404)
+        .json({ message: "Request not found or already processed" });
+    }
+
+    res.json({ message: "Attendance request deleted successfully" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to delete attendance request" });
+  }
+};
+
+/* ================= MANAGER: GET TEAM REQUESTS ================= */
+export const getTeamAttendanceRequests = async (req, res) => {
+  try {
+    const managerId = req.user._id;
+
+    // 1️⃣ Get team members
+    const teamMembers = await User.find({ managerId }, "_id name email role");
+    const teamIds = teamMembers.map((u) => u._id);
+
+    // 2️⃣ Get attendance requests for those members
+    const requests = await AttendanceRequest.find({
+      user: { $in: teamIds },
+    })
+      .populate("user", "name email role")
+      .sort({ createdAt: -1 });
+
+    res.json(requests);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      message: "Failed to fetch team attendance requests",
+    });
+  }
+};
+
+/* ================= MANAGER: UPDATE STATUS ================= */
+export const updateAttendanceRequestStatus = async (req, res) => {
+  try {
+    const { status, adminRemark } = req.body;
+    const { id } = req.params;
+
+    if (!["APPROVED", "REJECTED"].includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const request = await AttendanceRequest.findById(id);
+    if (!request) {
+      return res.status(404).json({ message: "Attendance request not found" });
+    }
+
+    if (request.status !== "PENDING") {
+      return res.status(400).json({ message: "Request already processed" });
+    }
+
+    request.status = status;
+    request.adminRemark = adminRemark;
+
+    /* 🔄 IF APPROVED, UPDATE ACTUAL ATTENDANCE 🔄 */
+    if (status === "APPROVED") {
+      const { user, date, punchIn, punchOut } = request;
+
+      // Update or Create actual attendance record
+      await Attendance.findOneAndUpdate(
+        { user, date },
+        {
+          punchIn: punchIn ? new Date(`${date}T${punchIn}`) : undefined,
+          punchOut: punchOut ? new Date(`${date}T${punchOut}`) : undefined,
+          status: "PRESENT",
+        },
+        { upsert: true, new: true }
+      );
+    }
+
+    await request.save();
+    res.json(request);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      message: "Failed to update attendance request status",
+    });
+  }
+};
+
+/* ================= ADMIN / HR: GET ALL REQUESTS ================= */
+export const getAllAttendanceRequests = async (req, res) => {
+  try {
+    const requests = await AttendanceRequest.find()
+      .populate("user", "name email role")
+      .sort({ createdAt: -1 });
+
+    res.json(requests);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      message: "Failed to fetch all attendance requests",
+    });
+  }
+};

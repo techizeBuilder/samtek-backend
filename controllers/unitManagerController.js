@@ -511,7 +511,7 @@ export const fixOrdersSalesPersonAssignment = async (req, res) => {
     const user = req.user;
 
     // Only allow Unit Manager or Super Admin role for this operation
-    if (user.role !== 'Unit Manager' && user.role !== 'Super Admin') {
+    if (user.role !== 'Unit Manager' && user.role !== 'Superadmin') {
       return res.status(403).json({
         success: false,
         message: 'Access denied - Unit Manager or Super Admin role required'

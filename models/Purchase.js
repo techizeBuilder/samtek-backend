@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { PAYMENT_STATUS } from '../../shared/schema.js';
+import { PAYMENT_STATUS } from '../shared/schema.js';
 
 const purchaseItemSchema = new mongoose.Schema({
   item: {
@@ -120,16 +120,16 @@ const purchaseSchema = new mongoose.Schema({
   timestamps: true
 });
 
-purchaseSchema.pre('save', function(next) {
+purchaseSchema.pre('save', function (next) {
   if (!this.purchaseOrderNumber) {
     this.purchaseOrderNumber = `PO-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
   }
-  
+
   // Calculate pending quantities
   this.items.forEach(item => {
     item.pendingQuantity = item.quantity - item.receivedQuantity;
   });
-  
+
   next();
 });
 

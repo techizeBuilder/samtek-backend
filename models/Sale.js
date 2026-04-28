@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { PAYMENT_STATUS } from '../../shared/schema.js';
+import { PAYMENT_STATUS } from '../shared/schema.js';
 
 const saleItemSchema = new mongoose.Schema({
   productName: {

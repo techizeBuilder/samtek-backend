@@ -65,11 +65,7 @@ export const getAllSalaryStructures = async (req, res) => {
     const salaryList = await SalaryStructure.find(filter)
       .populate({
         path: "employee",
-        populate: [
-          { path: "designationId" },
-          { path: "departmentId" },
-          { path: "branchId" }
-        ]
+        select: "fullName email mobile role"
       })
       .sort({ createdAt: -1 });
 
@@ -89,11 +85,7 @@ export const getSalaryStructureById = async (req, res) => {
   try {
     const salary = await SalaryStructure.find({ employee: req.params.id }).populate({
       path: "employee",
-      populate: [
-        { path: "designationId" },
-        { path: "departmentId" },
-        { path: "branchId" }
-      ]
+      select: "fullName email mobile role"
     });
     if (!salary) {
       return res.status(404).json({ message: "Salary structure not found" });
@@ -131,12 +123,7 @@ export const updateSalaryStructure = async (req, res) => {
       { new: true }
     ).populate({
       path: "employee",
-      select: "name employeeId joiningDate designationId departmentId branchId",
-      populate: [
-        { path: "designationId", select: "name" },
-        { path: "departmentId", select: "name" },
-        { path: "branchId", select: "name" }
-      ]
+      select: "fullName email mobile role"
     });
 
     if (!salary) {

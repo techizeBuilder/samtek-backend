@@ -9,7 +9,7 @@ export const cleanupUserPermissions = async () => {
     // Super Admin should only have superAdmin module permissions
     const superAdminResult = await User.updateMany(
       { 
-        role: 'Super Admin',
+        role: 'Superadmin',
         'permissions.modules.name': 'production'
       },
       { 

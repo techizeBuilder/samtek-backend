@@ -2,7 +2,7 @@ import Sale from '../models/Sale.js';
 import Return from '../models/Return.js';
 import Expense from '../models/Expense.js';
 import mongoose from 'mongoose';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 export const getFinanceSummary = async (req, res) => {
     try {

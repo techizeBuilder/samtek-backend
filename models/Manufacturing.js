@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { PRODUCTION_STATUS } from '../../shared/schema.js';
+import { PRODUCTION_STATUS } from '../shared/schema.js';
 
 const materialUsageSchema = new mongoose.Schema({
   materialId: {
@@ -91,7 +91,7 @@ const manufacturingSchema = new mongoose.Schema({
   timestamps: true
 });
 
-manufacturingSchema.pre('save', function(next) {
+manufacturingSchema.pre('save', function (next) {
   if (!this.jobNumber) {
     this.jobNumber = `JOB-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
   }

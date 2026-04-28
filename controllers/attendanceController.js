@@ -15,7 +15,7 @@ const secondsBetween = (start, end) =>
  ===================================================== */
 export const punchIn = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user._id;
     const date = todayDate();
 
     const exists = await Attendance.findOne({ user: userId, date });
@@ -36,6 +36,7 @@ export const punchIn = async (req, res) => {
 
     res.json({ message: "Punch in successful", attendance });
   } catch (err) {
+    console.error("Punch In Error:", err);
     res.status(500).json({ message: "Punch in failed" });
   }
 };
@@ -45,7 +46,7 @@ export const punchIn = async (req, res) => {
  ===================================================== */
 export const punchOut = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user._id;
     const date = todayDate();
 
     const attendance = await Attendance.findOne({ user: userId, date });
@@ -68,6 +69,7 @@ export const punchOut = async (req, res) => {
 
     res.json({ message: "Punch out successful", attendance });
   } catch (err) {
+    console.error("Punch Out Error:", err);
     res.status(500).json({ message: "Punch out failed" });
   }
 };
@@ -77,7 +79,7 @@ export const punchOut = async (req, res) => {
  ===================================================== */
 export const startBreak = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user._id;
     const date = todayDate();
 
     const attendance = await Attendance.findOne({ user: userId, date });
@@ -99,6 +101,7 @@ export const startBreak = async (req, res) => {
 
     res.json({ message: "Break started", attendance });
   } catch (err) {
+    console.error("Start Break Error:", err);
     res.status(500).json({ message: "Start break failed" });
   }
 };
@@ -108,7 +111,7 @@ export const startBreak = async (req, res) => {
  ===================================================== */
 export const endBreak = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user._id;
     const date = todayDate();
 
     const attendance = await Attendance.findOne({ user: userId, date });
@@ -133,6 +136,7 @@ export const endBreak = async (req, res) => {
 
     res.json({ message: "Break ended", attendance });
   } catch (err) {
+    console.error("End Break Error:", err);
     res.status(500).json({ message: "End break failed" });
   }
 };
@@ -142,7 +146,7 @@ export const endBreak = async (req, res) => {
  ===================================================== */
 export const getMyAttendance = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user._id;
 
     const records = await Attendance.find({ user: userId }).sort({
       date: -1,
@@ -150,6 +154,7 @@ export const getMyAttendance = async (req, res) => {
 
     res.json(records);
   } catch (err) {
+    console.error("Get My Attendance Error:", err);
     res.status(500).json({ message: "Fetch failed" });
   }
 };
@@ -158,7 +163,7 @@ export const getMyAttendance = async (req, res) => {
  ===================================================== */
 export const getTeamAttendance = async (req, res) => {
   try {
-    const managerId = req.user.id;
+    const managerId = req.user._id;
     const { month, year } = req.query;
 
     if (!month || !year) {
@@ -190,7 +195,7 @@ export const getTeamAttendance = async (req, res) => {
 
     return res.json(filtered);
   } catch (err) {
-    console.error(err);
+    console.error("Get Team Attendance Error:", err);
     return res.status(500).json({ message: "Failed to load team attendance" });
   }
 };
@@ -231,7 +236,14 @@ export const getAllAttendance = async (req, res) => {
     const skip = (pageNum - 1) * limitNum;
 
     /* 1️⃣ USERS QUERY */
-    let usersQuery = User.find(searchQuery, "name role").lean();
+    const userFilter = { ...searchQuery };
+    
+    // Filter by companyId if user is not a Super Admin
+    if (req.user.role !== 'Superadmin' && req.user.companyId) {
+      userFilter.companyId = req.user.companyId;
+    }
+
+    let usersQuery = User.find(userFilter, "name role").lean();
 
     if (isPaginated) {
       usersQuery = usersQuery.skip(skip).limit(limitNum);
@@ -239,7 +251,7 @@ export const getAllAttendance = async (req, res) => {
 
     const [users, totalUsers] = await Promise.all([
       usersQuery,
-      User.countDocuments(searchQuery),
+      User.countDocuments(userFilter),
     ]);
 
     const userIds = users.map((u) => u._id);

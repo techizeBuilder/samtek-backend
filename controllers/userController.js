@@ -1,77 +1,95 @@
 import User from '../models/User.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 import bcrypt from 'bcryptjs';
 
 export const getUsers = async (req, res) => {
   try {
-    console.log('=== getUsers API called ===');
-    console.log('Query parameters:', req.query);
-    console.log('User role:', req.user?.role);
-    
-    const { 
-      page = 1, 
-      limit = 10, // Changed default limit to 10 for better pagination
-      role, 
-      unit, 
+    const currentUser = req.user;
+    const {
+      page = 1,
+      limit = 15,
+      role,
+      unit,
       search,
+      status,
       sortBy = 'createdAt',
-      sortOrder = 'desc',
-      status
+      sortOrder = 'desc'
     } = req.query;
-    
-    const skip = (page - 1) * limit;
 
+    const skip = (page - 1) * parseInt(limit);
     let query = {};
 
-    // Non-super users can only see users from their unit
-    if (req.user.role !== USER_ROLES.SUPER_USER && req.user.role !== 'Super Admin') {
-      query.unit = req.user.unit;
+    // 1. Enforce Role-Based Data Isolation
+    if (currentUser.role !== 'Superadmin' && currentUser.role !== 'Super Admin' && currentUser.role !== 'super_user') {
+      // Non-super admins must be restricted to their own company
+      if (currentUser.companyId) {
+        query.companyId = currentUser.companyId;
+      }
+
+      // If role is Manager, only show users reporting to them
+      if (currentUser.role === 'Manager') {
+        query.reportingManager = currentUser._id;
+      }
+
+      // Filter by unit only if the current user has a specific unit assigned in the DB
+      if (currentUser.unit && currentUser.unit !== currentUser.company?.unitName) {
+        query.unit = currentUser.unit;
+      }
     }
 
-    // Filter by role
+    // 2. Apply Frontend Filters
+    if (search) {
+      query.$or = [
+        { username: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { fullName: { $regex: search, $options: 'i' } }
+      ];
+    }
+
     if (role && role !== 'all') {
       query.role = role;
     }
 
-    // Filter by unit
     if (unit && unit !== 'all') {
       query.unit = unit;
     }
 
-    // Filter by status
     if (status && status !== 'all') {
       query.isActive = status === 'active';
     }
 
-    // Search functionality
-    if (search) {
-      query.$or = [
-        { fullName: { $regex: search, $options: 'i' } },
-        { username: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    // Sorting
+    // 3. Execute Query
     const sort = {};
     sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
 
-    // Fetch users with pagination
-    const users = await User.find(query)
-      .select('-password')
-      .populate('companyId', 'name unitName city state displayName') // Populate company info
-      .sort(sort)
-      .skip(skip)
-      .limit(parseInt(limit))
-      .lean();
+    // Use mongoose.Types.ObjectId for aggregation match if it's a string
+    const aggregateQuery = { ...query };
+    if (aggregateQuery.companyId && typeof aggregateQuery.companyId === 'string') {
+      try {
+        const mongoose = await import('mongoose');
+        aggregateQuery.companyId = new mongoose.default.Types.ObjectId(aggregateQuery.companyId);
+      } catch (e) {
+        console.error('ObjectId casting error:', e);
+      }
+    }
 
-    // Get total count for pagination
-    const total = await User.countDocuments(query);
+    console.log('=== getUsers Query ===', JSON.stringify(query));
 
-    // Get summary statistics
+    const [users, totalUsers] = await Promise.all([
+      User.find(query)
+        .select('-password')
+        .populate('companyId', 'name unitName city state displayName')
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      User.countDocuments(query)
+    ]);
+
+    // 4. Get Summary for the restricted scope
     const stats = await User.aggregate([
-      { $match: {} }, // Get all users for stats
+      { $match: aggregateQuery }, // Use the casted query for aggregate!
       {
         $group: {
           _id: null,
@@ -84,59 +102,46 @@ export const getUsers = async (req, res) => {
       }
     ]);
 
-    const summary = stats[0] || { totalUsers: 0, activeUsers: 0, roleBreakdown: [] };
-
-    // Process role breakdown
+    const summaryData = stats[0] || { totalUsers: 0, activeUsers: 0, roleBreakdown: [] };
     const roleStats = {};
-    if (summary.roleBreakdown) {
-      summary.roleBreakdown.forEach(role => {
-        roleStats[role] = (roleStats[role] || 0) + 1;
+    if (summaryData.roleBreakdown) {
+      summaryData.roleBreakdown.forEach(r => {
+        roleStats[r] = (roleStats[r] || 0) + 1;
       });
     }
 
-    console.log('=== getUsers response ===');
-    console.log('Total users found:', total);
-    console.log('Users count:', users.length);
-    console.log('Sample user:', users[0] ? { id: users[0]._id, username: users[0].username, role: users[0].role } : 'No users');
-
-    // Format response to maintain frontend compatibility
-    res.json({
+    // 5. Return Response
+    res.status(200).json({
       success: true,
-      users, // Keep this for backward compatibility
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      },
-      summary: {
-        totalUsers: summary.totalUsers,
-        activeUsers: summary.activeUsers,
-        inactiveUsers: summary.totalUsers - summary.activeUsers,
-        roleStats
-      },
+      users,
       data: {
         users,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
-          total,
-          pages: Math.ceil(total / limit)
-        },
-        summary: {
-          totalUsers: summary.totalUsers,
-          activeUsers: summary.activeUsers,
-          inactiveUsers: summary.totalUsers - summary.activeUsers,
-          roleStats
+          total: totalUsers,
+          pages: Math.ceil(totalUsers / limit)
         }
+      },
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: totalUsers,
+        pages: Math.ceil(totalUsers / limit)
+      },
+      summary: {
+        totalUsers: summaryData.totalUsers,
+        activeUsers: summaryData.activeUsers,
+        inactiveUsers: summaryData.totalUsers - summaryData.activeUsers,
+        roleStats
       }
     });
 
   } catch (error) {
     console.error('❌ Get users error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: 'Failed to fetch users',
       error: error.message
     });
   }
@@ -165,44 +170,71 @@ export const getUserById = async (req, res) => {
 export const createUser = async (req, res) => {
   try {
     console.log('Create user request body:', req.body);
-    const { username, email, password, fullName, role, unit, companyId, permissions, isActive } = req.body;
+    const {
+      username, email, password, fullName, role, unit, companyId, permissions, isActive,
+      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType
+    } = req.body;
 
-    // Validate required fields (unit and companyId are optional)
-    if (!username || !email || !password || !role) {
+    // Validate required fields
+    if (!email || !password || !role) {
       console.log('Validation failed - missing required fields');
-      return res.status(400).json({ 
-        message: 'Username, email, password, and role are required',
-        success: false 
+      return res.status(400).json({
+        message: 'Email, password, and role are required',
+        success: false
       });
     }
 
-    // Check if username or email already exists
-    const existingUser = await User.findOne({
-      $or: [{ username }, { email }]
-    });
+    // Check if email already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
 
     if (existingUser) {
-      console.log('User already exists:', username, email);
-      return res.status(400).json({ 
-        message: 'Username or email already exists',
-        success: false 
+      console.log('User already exists with email:', email);
+      return res.status(400).json({
+        message: 'Email already exists',
+        success: false
       });
+    }
+
+    // Auto-inherit company and unit for HR-Admin
+    let finalCompanyId = companyId;
+    let finalUnit = unit;
+
+    if (req.user && (req.user.role === 'HR-Admin' || req.user.role === 'Hr Admin')) {
+      finalCompanyId = req.user.companyId || finalCompanyId;
+      finalUnit = req.user.unit || finalUnit;
+    }
+
+    // Build default permissions object - permissions.role is required by User model
+    const defaultPermissions = permissions || {
+      role: role,
+      canAccessAllUnits: false,
+      modules: []
+    };
+    if (!defaultPermissions.role) {
+      defaultPermissions.role = role;
     }
 
     const userData = {
-      username,
+      username: username || email.toLowerCase(),
       email: email.toLowerCase(),
       password,
       fullName: fullName || '',
       role,
-      unit: unit || '',
-      companyId: companyId || null, // Add company assignment
+      unit: finalUnit || '',
+      companyId: finalCompanyId || null,
       isActive: isActive !== undefined ? isActive : true,
-      permissions: permissions || {}
+      permissions: defaultPermissions,
+      // HRMS fields
+      mobile: mobile || '',
+      gender: gender || '',
+      dob: dob || null,
+      joiningDate: joiningDate || null,
+      reportingManager: reportingManager || managerId || null,
+      employeeType: employeeType || employmentType || ''
     };
 
     console.log('Creating user with data:', userData);
-    
+
     const user = new User(userData);
     await user.save();
 
@@ -217,10 +249,10 @@ export const createUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Create user error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Internal server error',
       success: false,
-      error: error.message 
+      error: error.message
     });
   }
 };
@@ -229,48 +261,74 @@ export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
     console.log('Update user request:', id, req.body);
-    const { username, email, password, fullName, role, unit, companyId, permissions, isActive } = req.body;
+    const {
+      username, email, password, fullName, role, unit, companyId, permissions, isActive,
+      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType
+    } = req.body;
 
     // Check if user exists
     const user = await User.findById(id);
     if (!user) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         message: 'User not found',
-        success: false 
+        success: false
       });
     }
 
     // Validate required fields
-    if (!username || !email || !role) {
-      return res.status(400).json({ 
-        message: 'Username, email, and role are required',
-        success: false 
+    if (!email || !role) {
+      return res.status(400).json({
+        message: 'Email and role are required',
+        success: false
       });
     }
 
-    // Check for duplicate username/email (excluding current user)
+    // Check for duplicate email (excluding current user)
     const existingUser = await User.findOne({
       _id: { $ne: id },
-      $or: [{ username }, { email }]
+      email: email.toLowerCase()
     });
 
     if (existingUser) {
-      return res.status(400).json({ 
-        message: 'Username or email already exists',
-        success: false 
+      return res.status(400).json({
+        message: 'Email already exists',
+        success: false
       });
     }
 
-    const updateData = {
-      username,
-      email: email.toLowerCase(),
-      fullName: fullName || '',
-      role,
-      unit: unit || '',
-      companyId: companyId || null, // Add company assignment
-      isActive: isActive !== undefined ? isActive : true,
-      permissions: permissions || {}
-    };
+    const updateData = {};
+
+    // Map status to isActive
+    if (req.body.status !== undefined) {
+      updateData.isActive = req.body.status === 'ACTIVE' || req.body.status === 'active' || req.body.status === true;
+    } else if (isActive !== undefined) {
+      updateData.isActive = isActive;
+    }
+
+    if (username !== undefined) updateData.username = username || email?.toLowerCase();
+    if (email !== undefined) updateData.email = email.toLowerCase();
+    if (fullName !== undefined) updateData.fullName = fullName;
+    if (role !== undefined) updateData.role = role;
+    if (unit !== undefined) updateData.unit = unit;
+    if (companyId !== undefined) updateData.companyId = companyId || null;
+    if (permissions !== undefined) updateData.permissions = permissions;
+
+    // HRMS fields
+    if (mobile !== undefined) updateData.mobile = mobile;
+    if (gender !== undefined) updateData.gender = gender;
+    if (dob !== undefined) updateData.dob = dob || null;
+    if (joiningDate !== undefined) updateData.joiningDate = joiningDate || null;
+    if (reportingManager !== undefined || managerId !== undefined) {
+      updateData.reportingManager = reportingManager || managerId || null;
+    }
+    if (employeeType !== undefined || employmentType !== undefined) {
+      updateData.employeeType = employeeType || employmentType || '';
+    }
+
+    // Profile Picture
+    if (req.file) {
+      updateData.profilePicture = req.file.filename;
+    }
 
     // Hash password if provided
     if (password && password.trim() !== '') {
@@ -295,10 +353,10 @@ export const updateUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Update user error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Internal server error',
       success: false,
-      error: error.message 
+      error: error.message
     });
   }
 };
@@ -386,10 +444,10 @@ export const updateUserPassword = async (req, res) => {
     // Hash the new password with bcrypt for encryption
     const hashedPassword = await bcrypt.hash(newPassword, 12);
     console.log('Password hashed successfully with bcrypt');
-    
+
     const user = await User.findByIdAndUpdate(
       id,
-      { 
+      {
         password: hashedPassword,
         updatedAt: new Date()
       },
@@ -397,9 +455,9 @@ export const updateUserPassword = async (req, res) => {
     ).select('-password');
 
     if (!user) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        message: 'User not found' 
+        message: 'User not found'
       });
     }
 
@@ -412,9 +470,9 @@ export const updateUserPassword = async (req, res) => {
     });
   } catch (error) {
     console.error('Update password error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Server error during password update' 
+      message: 'Server error during password update'
     });
   }
 };

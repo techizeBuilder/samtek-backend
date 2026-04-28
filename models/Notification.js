@@ -23,7 +23,7 @@ const notificationSchema = new mongoose.Schema({
   },
   targetRole: {
     type: String,
-    enum: ['Super Admin', 'Unit Head', 'Unit Manager', 'Sales', 'Production', 'Manufacturing', 'Packing', 'Dispatch', 'Accounts', 'all'],
+    enum: ['Superadmin', 'Unit Head', 'Unit Manager', 'Sales', 'Production', 'Manufacturing', 'Packing', 'Dispatch', 'Accounts', 'all'],
     default: 'all'
   },
   targetUserId: {
@@ -102,7 +102,7 @@ notificationSchema.statics.getUnreadCount = async function(userId, userRole, use
   };
 
   // Apply unit and company filtering based on role
-  if (userRole === 'Super Admin') {
+  if (userRole === 'Superadmin') {
     // Super Admin sees all notifications - no additional filtering
   } else if (userRole === 'Unit Head' || userRole === 'Unit Manager' || userRole === 'Sales' || 
              userRole === 'Production' || userRole === 'Manufacturing' || userRole === 'Packing' || 

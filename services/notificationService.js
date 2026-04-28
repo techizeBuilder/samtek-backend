@@ -93,7 +93,7 @@ class NotificationService {
         'Unit Manager': 'unitManager',
         'Production': 'production',
         'Accounts': 'accounts',
-        'Super Admin': 'superAdmin'
+        'Superadmin': 'superAdmin'
       };
       
       const roleKey = roleKeyMapping[userRole];
@@ -127,7 +127,7 @@ class NotificationService {
       };
 
       // Apply unit and company filtering based on role
-      if (userRole === 'Super Admin') {
+      if (userRole === 'Superadmin') {
         // Super Admin sees all notifications - no additional filtering
       } else if (userRole === 'Unit Head' || userRole === 'Unit Manager' || userRole === 'Sales' || 
                  userRole === 'Production' || userRole === 'Manufacturing' || userRole === 'Packing' || 
@@ -234,7 +234,7 @@ class NotificationService {
         'Unit Manager': 'unitManager',
         'Production': 'production',
         'Accounts': 'accounts',
-        'Super Admin': 'superAdmin'
+        'Superadmin': 'superAdmin'
       };
       
       const roleKey = roleKeyMapping[userRole];
@@ -260,7 +260,7 @@ class NotificationService {
       };
 
       // Apply unit and company filtering based on role (same as getUserNotifications)
-      if (userRole === 'Super Admin') {
+      if (userRole === 'Superadmin') {
         // Super Admin sees all notifications - no additional filtering
       } else if (userRole === 'Unit Head' || userRole === 'Unit Manager' || userRole === 'Sales' || 
                  userRole === 'Production' || userRole === 'Manufacturing' || userRole === 'Packing' || 
@@ -316,7 +316,7 @@ class NotificationService {
         'Unit Manager': 'unitManager',
         'Production': 'production',
         'Accounts': 'accounts',
-        'Super Admin': 'superAdmin'
+        'Superadmin': 'superAdmin'
       };
       
       const roleKey = roleKeyMapping[userRole];
@@ -376,7 +376,7 @@ class NotificationService {
         message: `Order ${orderData.orderCode} has been ${actionText}`,
         type: 'order',
         icon: 'shopping-cart',
-        targetRole: 'Super Admin',
+        targetRole: 'Superadmin',
         data: { orderId: orderData._id, orderCode: orderData.orderCode, action },
         priority: 'medium'
       }));
@@ -441,7 +441,7 @@ class NotificationService {
       message: `Unit Manager sent order for production`,
       type: 'order',
       icon: 'factory',
-      targetRole: 'Super Admin',
+      targetRole: 'Superadmin',
       data: { orderId: orderData?._id, action: 'production_request' },
       priority: 'low'
     }));
@@ -494,7 +494,7 @@ class NotificationService {
       message: `Production approved batch ${productionData.batchNo || 'N/A'}`,
       type: 'order',
       icon: 'check-circle',
-      targetRole: 'Super Admin',
+      targetRole: 'Superadmin',
       data: { productionId: productionData._id, action: 'production_approved' },
       priority: 'low'
     }));
@@ -542,7 +542,7 @@ class NotificationService {
       message: `Package ${packageData.dcno || 'N/A'} ready for dispatch`,
       type: 'order',
       icon: 'truck',
-      targetRole: 'Super Admin',
+      targetRole: 'Superadmin',
       data: { packageId: packageData._id, action: 'ready_for_dispatch' },
       priority: 'low'
     }));
@@ -588,7 +588,7 @@ class NotificationService {
       message: `${actionText} recorded in production`,
       type: 'inventory',
       icon: 'alert-triangle',
-      targetRole: 'Super Admin',
+      targetRole: 'Superadmin',
       data: { groupId: groupData._id, action },
       priority: 'medium'
     }));

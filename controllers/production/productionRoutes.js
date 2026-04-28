@@ -25,71 +25,71 @@ router.use(authenticateToken);
 
 // Dashboard Routes (Both Super Admin and Unit Head can view)
 router.get('/dashboard', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   getProductionDashboard
 );
 
 // Batch Planning Routes
 router.get('/batch-plans', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   getBatchPlans
 );
 
 router.post('/batch-plans', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   createBatchPlan
 );
 
 router.put('/batch-plans/:id', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   updateBatchPlan
 );
 
 router.patch('/batch-plans/:id/approve', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   approveBatchPlan
 );
 
 // Production Execution Routes
 router.get('/batches', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   getProductionBatches
 );
 
 router.post('/batches', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   createProductionBatch
 );
 
 router.put('/batches/:id', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   updateProductionBatch
 );
 
 // Production Register Routes
 router.get('/records', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   getProductionRecords
 );
 
 router.post('/records', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   createProductionRecord
 );
 
 router.put('/records/:id', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   updateProductionRecord
 );
 
 // Verification & Approval Routes
 router.get('/verifications/pending', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   getPendingVerifications
 );
 
 router.post('/verify/:id', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   verifyProduction
 );
 
@@ -97,7 +97,7 @@ router.post('/verify/:id',
 
 // Delete Routes (Super Admin only for safety)
 router.delete('/batch-plans/:id', 
-  checkRole(['Super Admin']), 
+  checkRole(['Superadmin']), 
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -118,7 +118,7 @@ router.delete('/batch-plans/:id',
 );
 
 router.delete('/batches/:id', 
-  checkRole(['Super Admin']), 
+  checkRole(['Superadmin']), 
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -139,7 +139,7 @@ router.delete('/batches/:id',
 );
 
 router.delete('/records/:id', 
-  checkRole(['Super Admin']), 
+  checkRole(['Superadmin']), 
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -161,7 +161,7 @@ router.delete('/records/:id',
 
 // Bulk Operations (Super Admin only)
 router.post('/batch-plans/bulk-approve', 
-  checkRole(['Super Admin']), 
+  checkRole(['Superadmin']), 
   async (req, res) => {
     try {
       const { planIds } = req.body;
@@ -192,7 +192,7 @@ router.post('/batch-plans/bulk-approve',
 
 // Reports Routes
 router.get('/reports/production-summary', 
-  checkRole(['Super Admin', 'Unit Head']), 
+  checkRole(['Superadmin', 'Unit Head']), 
   async (req, res) => {
     try {
       const { startDate, endDate } = req.query;

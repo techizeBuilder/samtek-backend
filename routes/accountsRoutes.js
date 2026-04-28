@@ -62,28 +62,28 @@ accountsRouter.use(authenticateToken);
 // Can be used by: Unit Manager, Unit Head, Sales Person, Super Admin, Admin, Accounts
 accountsRouter.get(
   '/sales/invoices',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Sales Person', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Sales Person', 'Superadmin', 'Admin', 'Accounts'),
   getCompanySalesInvoices
 );
 
 // Get detailed invoice information
 accountsRouter.get(
   '/sales/invoices/:invoiceId',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Sales Person', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Sales Person', 'Superadmin', 'Admin', 'Accounts'),
   getInvoiceDetail
 );
 
 // Update invoice payment status or details
 accountsRouter.put(
   '/sales/invoices/:invoiceId',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   updateInvoice
 );
 
 // Get sales analytics
 accountsRouter.get(
   '/sales/analytics',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Sales Person', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Sales Person', 'Superadmin', 'Admin', 'Accounts'),
   getSalesAnalytics
 );
 
@@ -92,28 +92,28 @@ accountsRouter.get(
 // Get all sales persons for the company
 accountsRouter.get(
   '/sales-persons',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getAllSalesPersons
 );
 
 // Get specific sales person details
 accountsRouter.get(
   '/sales-persons/:salesPersonId',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getSalesPersonById
 );
 
 // Get all orders for a specific sales person
 accountsRouter.get(
   '/sales-persons/:salesPersonId/orders',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getSalesPersonOrders
 );
 
 // Debug endpoint - check for sales persons
 accountsRouter.get(
   '/debug/check-sales-persons',
-  authorizeRoles('Super Admin', 'Admin', 'Accounts', 'Unit Head'),
+  authorizeRoles('Superadmin', 'Admin', 'Accounts', 'Unit Head'),
   debugCheckSalesPersons
 );
 
@@ -122,35 +122,35 @@ accountsRouter.get(
 // Get daily settlement stats
 accountsRouter.get(
   '/sales-persons/daily-settlement/stats',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getSalesmanDailyStats
 );
 
 // Create daily settlement
 accountsRouter.post(
   '/sales-persons/daily-settlement',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   createDailySettlement
 );
 
 // Get ledger for a specific salesman
 accountsRouter.get(
   '/sales-persons/:id/ledger',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getSalesmanLedger
 );
 
 // Commission calculation
 accountsRouter.post(
   '/sales-persons/commission/calculate',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   calculateCommission
 );
 
 // Post commission to ledger
 accountsRouter.post(
   '/sales-persons/commission/post',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   postCommissionToLedger
 );
 
@@ -159,14 +159,14 @@ accountsRouter.post(
 // Get all damage and expiry items for the company
 accountsRouter.get(
   '/damage-expiry',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getDamageExpiryList
 );
 
 // Get specific damage/expiry item details
 accountsRouter.get(
   '/damage-expiry/:id',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getDamageExpiryDetail
 );
 
@@ -176,7 +176,7 @@ accountsRouter.get(
 // Available for: Unit Manager, Unit Head, Super Admin, Admin, Accounts
 accountsRouter.get(
   '/purchases/items',
-  authorizeRoles('Unit Manager', 'Unit Head', 'Super Admin', 'Admin', 'Accounts'),
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts'),
   getPurchaseItems
 );
 
@@ -195,63 +195,63 @@ import {
   getSuppliersForAccounts
 } from '../controllers/purchaseInvoiceController.js';
 
-accountsRouter.post('/purchases/invoices', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), createPurchaseInvoice);
-accountsRouter.get('/purchases/invoices', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getPurchaseInvoices);
-accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), createVendorPayment);
-accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getVendorOutstanding);
-accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getPaymentStats);
+accountsRouter.post('/purchases/invoices', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), createPurchaseInvoice);
+accountsRouter.get('/purchases/invoices', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getPurchaseInvoices);
+accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), createVendorPayment);
+accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getVendorOutstanding);
+accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getPaymentStats);
 
 // Purchase Returns
-accountsRouter.post('/purchases/returns', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), createPurchaseReturn);
-accountsRouter.get('/purchases/returns', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getPurchaseReturns);
-accountsRouter.get('/purchases/returns/:id', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getPurchaseReturnById);
-accountsRouter.put('/purchases/returns/:id', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), updatePurchaseReturn);
-accountsRouter.get('/purchases/vendor-items', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getVendorPurchasedItems);
-accountsRouter.get('/purchases/vendors', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getSuppliersForAccounts);
+accountsRouter.post('/purchases/returns', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), createPurchaseReturn);
+accountsRouter.get('/purchases/returns', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getPurchaseReturns);
+accountsRouter.get('/purchases/returns/:id', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getPurchaseReturnById);
+accountsRouter.put('/purchases/returns/:id', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), updatePurchaseReturn);
+accountsRouter.get('/purchases/vendor-items', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getVendorPurchasedItems);
+accountsRouter.get('/purchases/vendors', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getSuppliersForAccounts);
 
 // Purchase Reports
-accountsRouter.get('/purchases/reports/summary', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getPurchaseSummary);
+accountsRouter.get('/purchases/reports/summary', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getPurchaseSummary);
 
 // ==================== SALES ACCOUNTING (NEW MODULE) ====================
 // Sales Invoices
-accountsRouter.post('/sales/account/invoices', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), createSalesInvoice);
-accountsRouter.get('/sales/account/invoices', authorizeRoles('Accounts', 'Super Admin', 'Unit Head', 'Sales Person'), getSalesInvoices);
-accountsRouter.get('/sales/account/items', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getSalesItems);
+accountsRouter.post('/sales/account/invoices', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), createSalesInvoice);
+accountsRouter.get('/sales/account/invoices', authorizeRoles('Accounts', 'Superadmin', 'Unit Head', 'Sales Person'), getSalesInvoices);
+accountsRouter.get('/sales/account/items', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getSalesItems);
 
 // Customer Payments (Receipts)
-accountsRouter.post('/sales/payments', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), createCustomerPayment);
-accountsRouter.get('/sales/payments', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getCustomerPayments);
-accountsRouter.get('/sales/payment/stats', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getCustomerPaymentStats);
+accountsRouter.post('/sales/payments', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), createCustomerPayment);
+accountsRouter.get('/sales/payments', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getCustomerPayments);
+accountsRouter.get('/sales/payment/stats', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getCustomerPaymentStats);
 
 // Receivables & Reports
-accountsRouter.get('/sales/receivables/ageing', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getReceivableAgeing);
-accountsRouter.get('/sales/reports/summary', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getSalesSummary);
-accountsRouter.get('/sales/summary', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getSalesSummary);
+accountsRouter.get('/sales/receivables/ageing', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getReceivableAgeing);
+accountsRouter.get('/sales/reports/summary', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getSalesSummary);
+accountsRouter.get('/sales/summary', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getSalesSummary);
 
 // Tax Reporting
-accountsRouter.get('/tax/summary', authorizeRoles('Accounts', 'Super Admin', 'Unit Head', 'Unit Manager', 'Admin'), getTaxSummary);
+accountsRouter.get('/tax/summary', authorizeRoles('Accounts', 'Superadmin', 'Unit Head', 'Unit Manager', 'Admin'), getTaxSummary);
 
 // ==================== BANK & CASH MANAGEMENT ====================
-accountsRouter.get('/bank-cash/summary', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getBankCashSummary);
-accountsRouter.put('/bank-cash/reconcile/:id', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), reconcileTransaction);
-accountsRouter.get('/transactions', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getTransactions);
-accountsRouter.post('/transactions/general', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), createGeneralTransaction);
-accountsRouter.get('/ledger', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getLedgerRecords);
+accountsRouter.get('/bank-cash/summary', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getBankCashSummary);
+accountsRouter.put('/bank-cash/reconcile/:id', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), reconcileTransaction);
+accountsRouter.get('/transactions', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getTransactions);
+accountsRouter.post('/transactions/general', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), createGeneralTransaction);
+accountsRouter.get('/ledger', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getLedgerRecords);
 
 // Account Management (Chart of Accounts)
-accountsRouter.get('/', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getAccounts);
-accountsRouter.post('/', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), createAccount);
-accountsRouter.get('/:id', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), getAccountById);
-accountsRouter.put('/:id', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), updateAccount);
-accountsRouter.delete('/:id', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), deleteAccount);
+accountsRouter.get('/', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getAccounts);
+accountsRouter.post('/', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), createAccount);
+accountsRouter.get('/:id', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), getAccountById);
+accountsRouter.put('/:id', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), updateAccount);
+accountsRouter.delete('/:id', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), deleteAccount);
 
 
 // ==================== SALES RETURNS & DAMAGES (Accounts Role) ====================
-accountsRouter.get('/sales/returns', authorizeRoles('Accounts', 'Super Admin', 'Unit Head', 'Unit Manager'), getSalesReturnsList);
-accountsRouter.get('/sales/damages', authorizeRoles('Accounts', 'Super Admin', 'Unit Head', 'Unit Manager'), getSalesDamagesList);
+accountsRouter.get('/sales/returns', authorizeRoles('Accounts', 'Superadmin', 'Unit Head', 'Unit Manager'), getSalesReturnsList);
+accountsRouter.get('/sales/damages', authorizeRoles('Accounts', 'Superadmin', 'Unit Head', 'Unit Manager'), getSalesDamagesList);
 
 // DEBUG endpoint - remove after fixing
-accountsRouter.get('/debug/returns', authorizeRoles('Accounts', 'Super Admin', 'Unit Head'), debugReturnCollection);
+accountsRouter.get('/debug/returns', authorizeRoles('Accounts', 'Superadmin', 'Unit Head'), debugReturnCollection);
 accountsRouter.get('/debug/user-and-returns', debugUserAndReturns);
 accountsRouter.get('/debug/show-all-returns', debugShowAllReturns);
 

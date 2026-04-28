@@ -1,6 +1,7 @@
 /** @format */
 
 import Candidate from "../models/Candidate.js";
+import JobOpening from "../models/JobOpenings.js";
 
 /**
  * ➕ Add Candidate
@@ -146,12 +147,21 @@ export const deleteCandidate = async (req, res) => {
  */
 export const getCandidatesForManager = async (req, res) => {
   try {
-    const managerId = req.user.id;
+    const managerId = req.user._id;
+
+    // 1. Find jobs where this manager is the recruiting manager
+    const jobs = await JobOpening.find({ recruitingManager: managerId }).select("_id");
+    const jobIds = jobs.map((job) => job._id);
+
+    // 2. Find candidates for these jobs OR directly assigned candidates
     const candidates = await Candidate.find({
       $or: [
+        { jobId: { $in: jobIds } },
         { recruitingManager: managerId },
-      ]
-    }).populate("jobId").sort({ createdAt: -1 });
+      ],
+    })
+      .populate("jobId")
+      .sort({ createdAt: -1 });
 
     res.json(candidates);
   } catch (error) {

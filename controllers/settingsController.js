@@ -1,5 +1,5 @@
 import Settings from '../models/Settings.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -29,7 +29,7 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-export const upload = multer({ 
+export const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
@@ -58,10 +58,10 @@ export const updateSettings = async (req, res) => {
     }
 
     const updateData = req.body;
-    
+
     // Get existing settings
     let settings = await Settings.getSettings();
-    
+
     // Update the settings
     Object.keys(updateData).forEach(key => {
       if (updateData[key] !== undefined) {
@@ -88,13 +88,13 @@ export const updateCompanySettings = async (req, res) => {
     }
 
     console.log('Received company settings update request:', req.body);
-    
+
     const { name, address, contact, gstNumber, panNumber, email, logo, phone, website } = req.body;
 
     const settings = await Settings.getSettings();
-    
+
     console.log('Before update - settings.company:', JSON.stringify(settings.company, null, 2));
-    
+
     // Initialize company object if it doesn't exist
     if (!settings.company) {
       settings.company = {
@@ -103,16 +103,16 @@ export const updateCompanySettings = async (req, res) => {
         address: {}
       };
     }
-    
+
     if (!settings.company.contact) settings.company.contact = {};
     if (!settings.company.address) settings.company.address = {};
-    
+
     // Update fields
     if (name !== undefined) {
       console.log('Updating name:', name);
       settings.company.name = name;
     }
-    
+
     // Handle address field directly (map to address.street)
     if (address !== undefined) {
       console.log('Updating address:', address);
@@ -120,46 +120,46 @@ export const updateCompanySettings = async (req, res) => {
       // Mark the path as modified to ensure Mongoose saves it
       settings.markModified('company.address');
     }
-    
+
     // Handle nested contact object
     if (contact) {
       console.log('Updating contact object:', contact);
       settings.company.contact = { ...settings.company.contact, ...contact };
       settings.markModified('company.contact');
     }
-    
+
     // Handle email field directly (map to contact.email)
     if (email !== undefined) {
       console.log('Updating email:', email);
       settings.company.contact.email = email;
       settings.markModified('company.contact');
     }
-    
+
     // Handle phone field directly (map to contact.phone)
     if (phone !== undefined) {
       console.log('Updating phone:', phone);
       settings.company.contact.phone = phone;
       settings.markModified('company.contact');
     }
-    
+
     // Handle website field directly (map to contact.website)
     if (website !== undefined) {
       console.log('Updating website:', website);
       settings.company.contact.website = website;
       settings.markModified('company.contact');
     }
-    
+
     // Handle logo field directly
     if (logo !== undefined) {
       console.log('Updating logo:', logo);
       settings.company.logo = logo;
     }
-    
+
     if (gstNumber !== undefined) {
       console.log('Updating GST number:', gstNumber);
       settings.company.gstNumber = gstNumber;
     }
-    
+
     if (panNumber !== undefined) {
       console.log('Updating PAN number:', panNumber);
       settings.company.panNumber = panNumber;
@@ -167,9 +167,9 @@ export const updateCompanySettings = async (req, res) => {
 
     // Mark the entire company object as modified to ensure it saves
     settings.markModified('company');
-    
+
     console.log('Before save - settings.company:', JSON.stringify(settings.company, null, 2));
-    
+
     await settings.save();
 
     console.log('After save - settings.company:', JSON.stringify(settings.company, null, 2));
@@ -193,7 +193,7 @@ export const updateSystemSettings = async (req, res) => {
     const { currency, timezone, dateFormat, timeFormat, language } = req.body;
 
     const settings = await Settings.getSettings();
-    
+
     if (currency) settings.system.currency = currency;
     if (timezone) settings.system.timezone = timezone;
     if (dateFormat) settings.system.dateFormat = dateFormat;
@@ -223,19 +223,19 @@ export const updateNotificationSettings = async (req, res) => {
 
     const settings = await Settings.getSettings();
     console.log('Current settings before update:', JSON.stringify(settings.notifications, null, 2));
-    
+
     // Update role-based notification settings
     if (roleNotifications) {
       if (!settings.notifications) settings.notifications = {};
       if (!settings.notifications.roleSettings) settings.notifications.roleSettings = {};
-      
+
       Object.keys(roleNotifications).forEach(role => {
         settings.notifications.roleSettings[role] = {
           ...settings.notifications.roleSettings[role],
           ...roleNotifications[role]
         };
       });
-      
+
       // Mark the nested object as modified for MongoDB
       settings.markModified('notifications.roleSettings');
     }
@@ -263,7 +263,7 @@ export const updateBackupSettings = async (req, res) => {
     const { enabled, frequency, time } = req.body;
 
     const settings = await Settings.getSettings();
-    
+
     if (typeof enabled === 'boolean') settings.backup.enabled = enabled;
     if (frequency) settings.backup.frequency = frequency;
     if (time) settings.backup.time = time;
@@ -289,7 +289,7 @@ export const updateThemeSettings = async (req, res) => {
     const { defaultTheme, allowUserThemeChange } = req.body;
 
     const settings = await Settings.getSettings();
-    
+
     if (defaultTheme) settings.theme.defaultTheme = defaultTheme;
     if (typeof allowUserThemeChange === 'boolean') settings.theme.allowUserThemeChange = allowUserThemeChange;
 
@@ -316,7 +316,7 @@ export const uploadCompanyLogo = async (req, res) => {
     }
 
     const settings = await Settings.getSettings();
-    
+
     // Delete old logo if exists
     if (settings.company.logo) {
       const oldLogoPath = path.join(process.cwd(), settings.company.logo.substring(1)); // Remove leading slash
@@ -326,7 +326,7 @@ export const uploadCompanyLogo = async (req, res) => {
         console.log('Deleted old logo');
       }
     }
-    
+
     // Save new logo path - store the web-accessible path
     const logoWebPath = `/uploads/${req.file.filename}`;
     settings.company.logo = logoWebPath;

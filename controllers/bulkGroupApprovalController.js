@@ -15,7 +15,7 @@ export const bulkApproveGroup = async (req, res) => {
     console.log('🎯 BULK GROUP APPROVAL:', { groupName, groupId, date, productsCount: products?.length, userRole });
 
     // Validate user permissions
-    if (userRole !== 'Unit Manager' && userRole !== 'Super Admin') {
+    if (userRole !== 'Unit Manager' && userRole !== 'Superadmin') {
       return res.status(403).json({
         success: false,
         message: 'Only Unit Manager or Super Admin can approve products'

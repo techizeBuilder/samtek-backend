@@ -59,9 +59,9 @@ export const getSalesSummary = async (req, res) => {
         });
       }
       filterCompanyId = userCompanyId;
-    } else if (userRole === 'Super Admin' && companyId) {
+    } else if (userRole === 'Superadmin' && companyId) {
       filterCompanyId = companyId;
-    } else if (userRole === 'Super Admin') {
+    } else if (userRole === 'Superadmin') {
       filterCompanyId = null;
     } else {
       return res.status(403).json({

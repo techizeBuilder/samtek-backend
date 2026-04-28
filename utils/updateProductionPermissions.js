@@ -25,7 +25,7 @@ export const updateUsersWithProductionPermissions = async () => {
     // Update Super Admin users
     const superAdminResult = await User.updateMany(
       { 
-        role: 'Super Admin',
+        role: 'Superadmin',
         'permissions.modules.name': { $ne: 'production' }
       },
       { 

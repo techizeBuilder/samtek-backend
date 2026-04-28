@@ -1,5 +1,5 @@
 import User from '../models/User.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 import { Company } from '../models/Company.js';
 import bcrypt from 'bcryptjs';
 
@@ -9,7 +9,7 @@ export const getUnitManagers = async (req, res) => {
     console.log('=== getUnitManagers API called ===');
     console.log('Query parameters:', req.query);
     console.log('Unit Head user:', req.user?.username, 'Unit:', req.user?.unit, 'CompanyId:', req.user?.companyId);
-    
+
     // Debug: Check if companyId exists
     if (!req.user?.companyId) {
       console.log('🚨 WARNING: Unit Head has no companyId assigned!');
@@ -23,16 +23,16 @@ export const getUnitManagers = async (req, res) => {
         }
       });
     }
-    
-    const { 
-      page = 1, 
+
+    const {
+      page = 1,
       limit = 100,
       search,
       sortBy = 'createdAt',
       sortOrder = 'desc',
       status = 'all'
     } = req.query;
-    
+
     const skip = (page - 1) * limit;
 
     // Unit Head can only see Unit Managers from their own unit AND company
@@ -76,12 +76,12 @@ export const getUnitManagers = async (req, res) => {
 
     // Get summary statistics for this unit and company
     const stats = await User.aggregate([
-      { 
-        $match: { 
-          unit: req.user.unit, 
+      {
+        $match: {
+          unit: req.user.unit,
           role: 'Unit Manager',
           companyId: req.user.companyId // Filter by company
-        } 
+        }
       },
       {
         $group: {
@@ -97,19 +97,19 @@ export const getUnitManagers = async (req, res) => {
       }
     ]);
 
-    const summary = stats[0] || { 
-      totalManagers: 0, 
-      activeManagers: 0, 
-      inactiveManagers: 0 
+    const summary = stats[0] || {
+      totalManagers: 0,
+      activeManagers: 0,
+      inactiveManagers: 0
     };
 
     console.log('=== getUnitManagers response ===');
     console.log('Total unit managers found:', total);
     console.log('Unit managers count:', unitManagers.length);
-    console.log('Unit managers sample:', unitManagers.slice(0, 2).map(u => ({ 
-      username: u.username, 
-      unit: u.unit, 
-      companyId: u.companyId 
+    console.log('Unit managers sample:', unitManagers.slice(0, 2).map(u => ({
+      username: u.username,
+      unit: u.unit,
+      companyId: u.companyId
     })));
 
     res.json({
@@ -128,10 +128,10 @@ export const getUnitManagers = async (req, res) => {
     });
   } catch (error) {
     console.error('Get unit managers error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch unit managers', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch unit managers',
+      error: error.message
     });
   }
 };
@@ -142,7 +142,7 @@ export const createUnitManager = async (req, res) => {
     console.log('=== createUnitManager API called ===');
     console.log('Request body:', req.body);
     console.log('Unit Head user:', req.user.username, 'Company ID:', req.user.companyId);
-    
+
     const { username, email, password, fullName, permissions, isActive = true } = req.body;
 
     // Check if Unit Head has company assignment
@@ -216,10 +216,10 @@ export const createUnitManager = async (req, res) => {
     });
   } catch (error) {
     console.error('Create unit manager error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to create unit manager', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create unit manager',
+      error: error.message
     });
   }
 };
@@ -230,7 +230,7 @@ export const updateUnitManager = async (req, res) => {
     console.log('=== updateUnitManager API called ===');
     console.log('User ID:', req.params.userId);
     console.log('Request body:', req.body);
-    
+
     const { userId } = req.params;
     const { username, email, fullName, permissions, isActive } = req.body;
 
@@ -299,10 +299,10 @@ export const updateUnitManager = async (req, res) => {
     });
   } catch (error) {
     console.error('Update unit manager error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update unit manager', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update unit manager',
+      error: error.message
     });
   }
 };
@@ -313,7 +313,7 @@ export const updateUnitManagerPassword = async (req, res) => {
     console.log('=== updateUnitManagerPassword API called ===');
     console.log('User ID:', req.params.userId);
     console.log('Unit Head:', req.user.username, 'Unit:', req.user.unit);
-    
+
     const { userId } = req.params;
     const { newPassword } = req.body;
 
@@ -364,10 +364,10 @@ export const updateUnitManagerPassword = async (req, res) => {
     });
   } catch (error) {
     console.error('Update unit manager password error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update password', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update password',
+      error: error.message
     });
   }
 };
@@ -377,7 +377,7 @@ export const deleteUnitManager = async (req, res) => {
   try {
     console.log('=== deleteUnitManager API called ===');
     console.log('User ID:', req.params.userId);
-    
+
     const { userId } = req.params;
     const { permanent = false } = req.body;
 
@@ -400,7 +400,7 @@ export const deleteUnitManager = async (req, res) => {
       // Permanently delete the user
       await User.findByIdAndDelete(userId);
       console.log('=== Unit Manager deleted permanently ===');
-      
+
       res.json({
         success: true,
         message: 'Unit Manager deleted permanently'
@@ -409,9 +409,9 @@ export const deleteUnitManager = async (req, res) => {
       // Just deactivate the user
       user.isActive = false;
       await user.save();
-      
+
       console.log('=== Unit Manager deactivated ===');
-      
+
       res.json({
         success: true,
         message: 'Unit Manager deactivated successfully',
@@ -424,10 +424,10 @@ export const deleteUnitManager = async (req, res) => {
     }
   } catch (error) {
     console.error('Delete unit manager error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to delete unit manager', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete unit manager',
+      error: error.message
     });
   }
 };
@@ -437,7 +437,7 @@ export const getUnitManagerById = async (req, res) => {
   try {
     console.log('=== getUnitManagerById API called ===');
     console.log('User ID:', req.params.userId);
-    
+
     const { userId } = req.params;
 
     // Find the user and ensure they are a Unit Manager in the same unit AND company
@@ -463,10 +463,10 @@ export const getUnitManagerById = async (req, res) => {
     });
   } catch (error) {
     console.error('Get unit manager by ID error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch unit manager', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch unit manager',
+      error: error.message
     });
   }
 };
@@ -475,7 +475,7 @@ export const getUnitManagerById = async (req, res) => {
 export const getUnitManagerModules = async (req, res) => {
   try {
     console.log('=== getUnitManagerModules API called ===');
-    
+
     // Define modules that Unit Managers can access
     const availableModules = [
       {
@@ -526,10 +526,10 @@ export const getUnitManagerModules = async (req, res) => {
     });
   } catch (error) {
     console.error('Get unit manager modules error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch modules', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch modules',
+      error: error.message
     });
   }
 };
@@ -571,10 +571,10 @@ export const getUnitHeadCompanyInfo = async (req, res) => {
     });
   } catch (error) {
     console.error('Get unit head company info error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch company information', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch company information',
+      error: error.message
     });
   }
 };
@@ -583,11 +583,11 @@ export const getUnitHeadCompanyInfo = async (req, res) => {
 
 // Unit Head manageable roles
 const UNIT_HEAD_MANAGEABLE_ROLES = [
-  'Unit Manager', 
-  'Sales', 
-  'Production', 
-  'Accounts', 
-  'Dispatch', 
+  'Unit Manager',
+  'Sales',
+  'Production',
+  'Accounts',
+  'Dispatch',
   'Packing'
 ];
 
@@ -596,23 +596,23 @@ export const getUnitUsers = async (req, res) => {
   try {
     console.log('=== getUnitUsers API called ===');
     console.log('Unit Head user:', req.user?.username, 'Unit:', req.user?.unit, 'CompanyId:', req.user?.companyId);
-    
+
     if (!req.user?.companyId) {
       return res.status(400).json({
         success: false,
         message: 'Unit Head must be assigned to a company. Please contact administrator.',
       });
     }
-    
-    const { 
-      page = 1, 
+
+    const {
+      page = 1,
       limit = 100,
       search,
       sortBy = 'createdAt',
       sortOrder = 'desc',
       status = 'all'
     } = req.query;
-    
+
     const skip = (page - 1) * limit;
 
     // Unit Head can only see users from their unit, company, and manageable roles
@@ -652,7 +652,7 @@ export const getUnitUsers = async (req, res) => {
     console.log('=== Unit Users Debug ===');
     console.log('Total users found:', unitUsers.length);
     console.log('Query used:', JSON.stringify(query, null, 2));
-    
+
     if (unitUsers.length > 0) {
       console.log('First user sample:', {
         username: unitUsers[0].username,
@@ -674,12 +674,12 @@ export const getUnitUsers = async (req, res) => {
 
     // Get summary statistics by role
     const stats = await User.aggregate([
-      { 
-        $match: { 
-          unit: req.user.unit, 
+      {
+        $match: {
+          unit: req.user.unit,
           role: { $in: UNIT_HEAD_MANAGEABLE_ROLES },
           companyId: req.user.companyId
-        } 
+        }
       },
       {
         $group: {
@@ -722,10 +722,10 @@ export const getUnitUsers = async (req, res) => {
     });
   } catch (error) {
     console.error('Get unit users error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch unit users', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch unit users',
+      error: error.message
     });
   }
 };
@@ -734,7 +734,7 @@ export const getUnitUsers = async (req, res) => {
 export const getUnitUserById = async (req, res) => {
   try {
     const { userId } = req.params;
-    
+
     const user = await User.findOne({
       _id: userId,
       role: { $in: UNIT_HEAD_MANAGEABLE_ROLES },
@@ -755,10 +755,10 @@ export const getUnitUserById = async (req, res) => {
     });
   } catch (error) {
     console.error('Get unit user by ID error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch user', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch user',
+      error: error.message
     });
   }
 };
@@ -792,8 +792,8 @@ export const createUnitUser = async (req, res) => {
     if (existingUser) {
       return res.status(400).json({
         success: false,
-        message: existingUser.username === username 
-          ? 'Username already exists' 
+        message: existingUser.username === username
+          ? 'Username already exists'
           : 'Email already exists'
       });
     }
@@ -826,10 +826,10 @@ export const createUnitUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Create unit user error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to create user', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create user',
+      error: error.message
     });
   }
 };
@@ -868,7 +868,7 @@ export const updateUnitUser = async (req, res) => {
       const duplicateQuery = { _id: { $ne: userId } };
       if (username) duplicateQuery.username = username;
       if (email) duplicateQuery.email = email;
-      
+
       const existingUser = await User.findOne({
         $or: [
           ...(username ? [{ username, _id: { $ne: userId } }] : []),
@@ -879,8 +879,8 @@ export const updateUnitUser = async (req, res) => {
       if (existingUser) {
         return res.status(400).json({
           success: false,
-          message: existingUser.username === username 
-            ? 'Username already exists' 
+          message: existingUser.username === username
+            ? 'Username already exists'
             : 'Email already exists'
         });
       }
@@ -908,10 +908,10 @@ export const updateUnitUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Update unit user error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update user', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update user',
+      error: error.message
     });
   }
 };
@@ -954,10 +954,10 @@ export const updateUnitUserPassword = async (req, res) => {
     });
   } catch (error) {
     console.error('Update unit user password error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update password', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update password',
+      error: error.message
     });
   }
 };
@@ -990,10 +990,10 @@ export const deleteUnitUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Delete unit user error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to delete user', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete user',
+      error: error.message
     });
   }
 };
@@ -1166,8 +1166,8 @@ export const bulkImportUnitUsers = async (req, res) => {
             row: rowNumber,
             username,
             email,
-            reason: existingUser.username === username 
-              ? 'Username already exists' 
+            reason: existingUser.username === username
+              ? 'Username already exists'
               : 'Email already exists'
           });
           continue;

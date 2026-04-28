@@ -13,7 +13,7 @@ router.get('/diagnose-sales-issue', async (req, res) => {
   try {
     const user = req.user;
     
-    if (user.role !== 'Unit Manager' && user.role !== 'Super Admin') {
+    if (user.role !== 'Unit Manager' && user.role !== 'Superadmin') {
       return res.status(403).json({
         success: false,
         message: 'Access denied - Unit Manager or Super Admin role required'
@@ -147,7 +147,7 @@ router.post('/fix-sales-issue', async (req, res) => {
     const user = req.user;
     const { action, targetCompanyId } = req.body;
     
-    if (user.role !== 'Super Admin') {
+    if (user.role !== 'Superadmin') {
       return res.status(403).json({
         success: false,
         message: 'Access denied - Super Admin role required for fixes'

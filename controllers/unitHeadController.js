@@ -9,7 +9,7 @@ import CutoffTime from '../models/CutoffTime.js';
 import Return from '../models/Return.js';
 import DispatchConsole from '../models/Dispatch.js';
 import ProductionBatch from '../models/ProductionBatch.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 // Debug: Ensure models are loaded
 console.log('📦 Models loaded:', {
@@ -36,14 +36,14 @@ export const getUnitHeadOrders = async (req, res) => {
     // COMPANY FILTERING: Only show orders from sales persons in the same company/location
     if (req.user.companyId) {
       // Get sales persons from the same company
-      const companySalesPersons = await User.find({ 
+      const companySalesPersons = await User.find({
         companyId: req.user.companyId,
         role: { $in: ['Sales', 'Unit Manager', 'Unit Head'] }
       }).select('_id').lean();
-      
+
       const salesPersonIds = companySalesPersons.map(sp => sp._id);
       console.log(`Filtering orders by ${salesPersonIds.length} sales persons from same company:`, req.user.companyId);
-      
+
       // Filter orders by sales persons from the same company
       query.salesPerson = { $in: salesPersonIds };
     } else {
@@ -143,10 +143,10 @@ export const getUnitHeadOrders = async (req, res) => {
     });
   } catch (error) {
     console.error('Unit Head get orders error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch orders', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch orders',
+      error: error.message
     });
   }
 };
@@ -155,16 +155,16 @@ export const getUnitHeadOrders = async (req, res) => {
 export const getUnitHeadOrderById = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     let query = { _id: id };
 
     // COMPANY FILTERING
     if (req.user.companyId) {
-      const companySalesPersons = await User.find({ 
+      const companySalesPersons = await User.find({
         companyId: req.user.companyId,
         role: { $in: ['Sales', 'Unit Manager', 'Unit Head'] }
       }).select('_id').lean();
-      
+
       const salesPersonIds = companySalesPersons.map(sp => sp._id);
       query.salesPerson = { $in: salesPersonIds };
     }
@@ -200,10 +200,10 @@ export const getUnitHeadOrderById = async (req, res) => {
     });
   } catch (error) {
     console.error('Unit Head get order by ID error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch order details', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch order details',
+      error: error.message
     });
   }
 };
@@ -218,11 +218,11 @@ export const getUnitHeadSales = async (req, res) => {
 
     // COMPANY FILTERING
     if (req.user.companyId) {
-      const companySalesPersons = await User.find({ 
+      const companySalesPersons = await User.find({
         companyId: req.user.companyId,
         role: { $in: ['Sales', 'Unit Manager', 'Unit Head'] }
       }).select('_id').lean();
-      
+
       const salesPersonIds = companySalesPersons.map(sp => sp._id);
       matchQuery.salesPerson = { $in: salesPersonIds };
     }
@@ -270,7 +270,7 @@ export const getUnitHeadSales = async (req, res) => {
 export const getUnitHeadSalesPersons = async (req, res) => {
   try {
     const { page = 1, limit = 10, search, startDate, endDate, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
-    
+
     console.log('🚀 getUnitHeadSalesPersons with company filtering');
     console.log('Unit Head user details:', {
       id: req.user.id,
@@ -281,7 +281,7 @@ export const getUnitHeadSalesPersons = async (req, res) => {
 
     // Company filtering: Get ONLY sales persons from the same company
     let salesPersonQuery = { role: 'Sales' };
-    
+
     if (req.user.companyId) {
       salesPersonQuery.companyId = req.user.companyId;
       console.log('Filtering ONLY Sales persons by companyId:', req.user.companyId);
@@ -315,10 +315,10 @@ export const getUnitHeadSalesPersons = async (req, res) => {
 
     // Get order statistics for each sales person
     const salesPersonIds = salesPersons.map(sp => sp._id);
-    
+
     // Build order query for statistics
     let orderQuery = { salesPerson: { $in: salesPersonIds } };
-    
+
     // Date filter for order statistics
     if (startDate && endDate) {
       orderQuery.orderDate = {
@@ -340,7 +340,7 @@ export const getUnitHeadSalesPersons = async (req, res) => {
           totalOrders: { $sum: 1 },
           totalRevenue: { $sum: '$totalAmount' },
           uniqueCustomers: { $addToSet: '$customer' },
-          recentOrders: { 
+          recentOrders: {
             $push: {
               orderId: '$_id',
               orderCode: '$orderCode',
@@ -443,11 +443,11 @@ export const getUnitHeadSalesPersonOrders = async (req, res) => {
 
     // COMPANY FILTERING
     if (req.user.companyId) {
-      const salesPerson = await User.findOne({ 
-        _id: salesPersonId, 
-        companyId: req.user.companyId 
+      const salesPerson = await User.findOne({
+        _id: salesPersonId,
+        companyId: req.user.companyId
       });
-      
+
       if (!salesPerson) {
         return res.status(403).json({
           success: false,
@@ -559,7 +559,7 @@ export const getUnitHeadCustomers = async (req, res) => {
     const sortObj = {};
     sortObj[sortBy] = sortOrder === 'desc' ? -1 : 1;
     console.log('✅ Sorting by:', sortObj);
-    
+
     console.log('🔍 Final query object:', JSON.stringify(query, null, 2));
 
     const customers = await Customer.find(query)
@@ -584,7 +584,7 @@ export const getUnitHeadCustomers = async (req, res) => {
     const totalCustomers = await Customer.countDocuments(summaryQuery);
     const activeCustomers = await Customer.countDocuments({ ...summaryQuery, active: 'Yes' });
     const inactiveCustomers = await Customer.countDocuments({ ...summaryQuery, active: 'No' });
-    
+
     // Get unique cities for this company's customers
     const cityDistribution = await Customer.distinct('city', summaryQuery);
 
@@ -687,7 +687,7 @@ export const getUnitHeadDashboard = async (req, res) => {
     // Set date range based on period
     const now = new Date();
     let startDate, endDate;
-    
+
     if (period === 'current-month') {
       startDate = new Date(now.getFullYear(), now.getMonth(), 1);
       endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -723,7 +723,7 @@ export const getUnitHeadDashboard = async (req, res) => {
       .lean();
 
     console.log('✅ Orders for this company:', orders.length);
-    
+
     // If no orders found with company filter, use all orders for data
     const ordersForData = orders.length > 0 ? orders : allOrders;
     console.log('📊 Orders used for calculations:', ordersForData.length);
@@ -732,16 +732,16 @@ export const getUnitHeadDashboard = async (req, res) => {
     const monthlyOrders = ordersForData.length;
     const monthlyRevenue = ordersForData.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
 
-    console.log('💰 Monthly metrics:', { 
-      monthlyOrders, 
-      monthlyRevenue, 
+    console.log('💰 Monthly metrics:', {
+      monthlyOrders,
+      monthlyRevenue,
       source: orders.length > 0 ? 'company-filtered' : 'all-orders'
     });
 
     // Get damage returns - Try multiple field names
     const damageReturns = await Return.find({
       $or: [
-        { 
+        {
           createdAt: { $gte: startDate, $lte: endDate },
           type: 'damage'
         },
@@ -757,7 +757,7 @@ export const getUnitHeadDashboard = async (req, res) => {
       return sum + itemsValue;
     }, 0);
 
-    const damageReturnsPacks = damageReturns.reduce((sum, ret) => 
+    const damageReturnsPacks = damageReturns.reduce((sum, ret) =>
       sum + (ret.items?.reduce((itemSum, item) => itemSum + (item.quantity || 0), 0) || 0), 0
     );
 
@@ -766,7 +766,7 @@ export const getUnitHeadDashboard = async (req, res) => {
     // Get today's indent (orders created today)
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-    
+
     const todayOrders = await Order.find({
       createdAt: { $gte: todayStart, $lte: todayEnd },
       $or: [
@@ -818,7 +818,7 @@ export const getUnitHeadDashboard = async (req, res) => {
     ]);
 
     const dispatchValue = dispatchValuesFromOrders[0]?.totalDispatchValue || monthlyRevenue;
-    const dispatchPacks = dispatches.reduce((sum, dispatch) => 
+    const dispatchPacks = dispatches.reduce((sum, dispatch) =>
       sum + (dispatch.dispatchedQuantitySentToday || dispatch.totalIndentQuantityOrdersForTheDay || 0), 0
     );
 
@@ -833,7 +833,7 @@ export const getUnitHeadDashboard = async (req, res) => {
       .select('productName productId qtyPerBatch createdAt')
       .limit(50)
       .lean();
-    
+
     console.log('📦 Finished goods items for company:', finishedGoodsItems.length);
 
     // Get low stock items FOR THIS COMPANY using ProductDailySummary
@@ -848,7 +848,7 @@ export const getUnitHeadDashboard = async (req, res) => {
 
     // Get production batch data for last 7 days (for chart) - COMPANY FILTERED
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    
+
     let productionBatches = await ProductionBatch.find({
       productionDate: { $gte: sevenDaysAgo, $lte: now },
       $or: [
@@ -870,13 +870,13 @@ export const getUnitHeadDashboard = async (req, res) => {
     // Generate chart data for production vs dispatch (last 7 days)
     const productionVsDispatchData = [];
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    
+
     for (let i = 6; i >= 0; i--) {
       const date = new Date(now);
       date.setDate(date.getDate() - i);
       const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate());
       const dayEnd = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-      
+
       const dayProduction = productionBatches.filter(p => {
         const pDate = new Date(p.productionDate || p.createdAt);
         return pDate >= dayStart && pDate < dayEnd;
@@ -901,16 +901,16 @@ export const getUnitHeadDashboard = async (req, res) => {
     console.log(`\n🔍 SALES TREND CALCULATION DEBUG:`);
     console.log(`   allOrders.length = ${allOrders.length}`);
     console.log(`   Processing last 7 days...\n`);
-    
+
     for (let i = 6; i >= 0; i--) {
       const date = new Date(now);
       date.setDate(date.getDate() - i);
       const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate());
       const dayEnd = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-      
+
       console.log(`   Day ${i}: ${date.toISOString().split('T')[0]}`);
       console.log(`     Range: ${dayStart.toISOString()} to ${dayEnd.toISOString()}`);
-      
+
       // Filter orders for this specific day from ALL available orders
       const dayOrders = allOrders.filter(o => {
         const oDate = new Date(o.createdAt);
@@ -929,7 +929,7 @@ export const getUnitHeadDashboard = async (req, res) => {
         console.log(`       Adding: ${amount} (running total: ${sum + amount})`);
         return sum + amount;
       }, 0);
-      
+
       const dayOrderCount = dayOrders.length;
       const salesInLakhs = Math.round((daySalesTotal / 100000) * 100) / 100;
 
@@ -943,14 +943,14 @@ export const getUnitHeadDashboard = async (req, res) => {
         salesInLakhs: salesInLakhs // For display in lakhs if needed
       });
     }
-    
+
     console.log('📈 Sales trend data:', salesTrendData);
 
     // Get basic counts for this unit only
     const totalCustomers = req.user.role === 'Unit Head'
       ? await Customer.countDocuments({ active: true, companyId: req.user.companyId })
       : 0;
-    
+
     const activeSalesPersons = req.user.role === 'Unit Head'
       ? await User.countDocuments({ companyId: req.user.companyId, role: 'Sales', isActive: true })
       : 0;
@@ -974,15 +974,15 @@ export const getUnitHeadDashboard = async (req, res) => {
     console.log(`Company ID: ${req.user.companyId}`);
     console.log(`\n📊 DATA BEING RETURNED (Company Filtered):`);
     console.log(`  • Finished Goods Stock: ${finishedGoodsItems.length} items`);
-    console.log(`  • Raw Material (Low Stock): ${lowStockItems.filter(item => 
-      item.category === 'Raw Material' || 
-      item.category === 'Raw' || 
+    console.log(`  • Raw Material (Low Stock): ${lowStockItems.filter(item =>
+      item.category === 'Raw Material' ||
+      item.category === 'Raw' ||
       item.category === 'rawMaterial' ||
       (item.category && item.category.toLowerCase().includes('raw'))
     ).length} items`);
-    console.log(`  • Packing Material (Low Stock): ${lowStockItems.filter(item => 
-      item.category === 'Packing Material' || 
-      item.category === 'Packing' || 
+    console.log(`  • Packing Material (Low Stock): ${lowStockItems.filter(item =>
+      item.category === 'Packing Material' ||
+      item.category === 'Packing' ||
       item.category === 'packingMaterial' ||
       (item.category && item.category.toLowerCase().includes('packing'))
     ).length} items`);
@@ -1001,46 +1001,46 @@ export const getUnitHeadDashboard = async (req, res) => {
         monthlyRevenueFormatted: `₹ ${(monthlyRevenue / 100000).toFixed(2)}L`,
         totalCustomers,
         activeSalesPersons,
-        
+
         // Damage Returns
         damageReturnsValue,
         damageReturnsPacks,
         damageReturnsFormatted: `₹ ${(damageReturnsValue / 1000).toFixed(1)}K`,
-        
+
         // Today Indent
         todayIndentValue,
         todayIndentPacks,
         todayIndentFormatted: `₹ ${(todayIndentValue / 100000).toFixed(2)}L`,
-        
+
         // Dispatch Value
         dispatchValue,
         dispatchPacks,
         dispatchValueFormatted: `₹ ${(dispatchValue / 100000).toFixed(2)}L`,
-        
+
         // Inventory
         finishedGoodsItems: finishedGoodsItems.slice(0, 10),
         lowStockItems: lowStockItems.slice(0, 20),
         // Filter by category - support multiple category variations
-        rawMaterialItems: lowStockItems.filter(item => 
-          item.category === 'Raw Material' || 
-          item.category === 'Raw' || 
+        rawMaterialItems: lowStockItems.filter(item =>
+          item.category === 'Raw Material' ||
+          item.category === 'Raw' ||
           item.category === 'rawMaterial' ||
           (item.category && item.category.toLowerCase().includes('raw'))
         ).slice(0, 4),
-        packingMaterialItems: lowStockItems.filter(item => 
-          item.category === 'Packing Material' || 
-          item.category === 'Packing' || 
+        packingMaterialItems: lowStockItems.filter(item =>
+          item.category === 'Packing Material' ||
+          item.category === 'Packing' ||
           item.category === 'packingMaterial' ||
           (item.category && item.category.toLowerCase().includes('packing'))
         ).slice(0, 4),
-        
+
         // Chart data
         productionVsDispatchData,
         salesTrendData,
-        
+
         // Orders data
         orders: orders.slice(0, 10),
-        
+
         // Debug info
         _debug: {
           ordersCount: orders.length,
@@ -1048,7 +1048,7 @@ export const getUnitHeadDashboard = async (req, res) => {
           productionBatchesCount: productionBatches.length,
           damageReturnsCount: damageReturns.length
         },
-        
+
         // Unit location info
         unitLocation: req.user.companyLocation,
         period: period
@@ -1082,7 +1082,7 @@ export const createUnitHeadOrder = async (req, res) => {
       errors.customerId = 'Customer ID is required';
     } else {
       // Check if customer exists and belongs to same company
-      const customer = await Customer.findOne({ 
+      const customer = await Customer.findOne({
         _id: customerId,
         ...(unitHead.companyId && { companyId: unitHead.companyId })
       });
@@ -1154,12 +1154,12 @@ export const createUnitHeadOrder = async (req, res) => {
     // Calculate total amount
     let totalAmount = 0;
     const orderProducts = [];
-    
+
     for (const productData of products) {
       const productItem = await Item.findById(productData.product);
       const productTotal = productData.quantity * productData.unitPrice;
       totalAmount += productTotal;
-      
+
       orderProducts.push({
         product: productData.product,
         quantity: productData.quantity,
@@ -1233,7 +1233,7 @@ export const updateUnitHeadOrder = async (req, res) => {
     const errors = {};
 
     if (customerId) {
-      const customer = await Customer.findOne({ 
+      const customer = await Customer.findOne({
         _id: customerId,
         ...(unitHead.companyId && { companyId: unitHead.companyId })
       });
@@ -1281,11 +1281,11 @@ export const updateUnitHeadOrder = async (req, res) => {
     if (products && Array.isArray(products)) {
       let totalAmount = 0;
       const orderProducts = [];
-      
+
       for (const productData of products) {
         const productTotal = productData.quantity * productData.unitPrice;
         totalAmount += productTotal;
-        
+
         orderProducts.push({
           product: productData.product,
           quantity: productData.quantity,
@@ -1356,7 +1356,7 @@ export const updateUnitHeadOrderStatus = async (req, res) => {
     const oldStatus = order.status;
     order.status = status;
     if (notes) order.notes = notes;
-    
+
     // Set context for status updates
     if (status === 'confirmed' && !order.confirmedBy) {
       order.confirmedBy = unitHead._id;
@@ -1456,11 +1456,11 @@ export const createUnitHeadCustomer = async (req, res) => {
     };
 
     // Check for duplicate mobile number within the company
-    const existingCustomer = await Customer.findOne({ 
+    const existingCustomer = await Customer.findOne({
       mobile: req.body.mobile,
       companyId: req.user.companyId
     });
-    
+
     if (existingCustomer) {
       return res.status(400).json({
         success: false,
@@ -1470,7 +1470,7 @@ export const createUnitHeadCustomer = async (req, res) => {
 
     // Check for duplicate email if provided
     if (req.body.email) {
-      const existingEmail = await Customer.findOne({ 
+      const existingEmail = await Customer.findOne({
         email: req.body.email,
         companyId: req.user.companyId
       });
@@ -1510,7 +1510,7 @@ export const createUnitHeadCustomer = async (req, res) => {
 
   } catch (error) {
     console.error('Error creating Unit Head customer:', error);
-    
+
     if (error.name === 'ValidationError') {
       const errors = Object.values(error.errors).map(err => ({
         field: err.path,
@@ -1553,11 +1553,11 @@ export const updateUnitHeadCustomer = async (req, res) => {
     }
 
     // Check if customer exists and belongs to Unit Head's company
-    const existingCustomer = await Customer.findOne({ 
-      _id: id, 
-      companyId: req.user.companyId 
+    const existingCustomer = await Customer.findOne({
+      _id: id,
+      companyId: req.user.companyId
     });
-    
+
     if (!existingCustomer) {
       return res.status(404).json({
         success: false,
@@ -1567,7 +1567,7 @@ export const updateUnitHeadCustomer = async (req, res) => {
 
     // Check for duplicate mobile number (excluding current customer)
     if (req.body.mobile) {
-      const duplicateMobile = await Customer.findOne({ 
+      const duplicateMobile = await Customer.findOne({
         mobile: req.body.mobile,
         companyId: req.user.companyId,
         _id: { $ne: id }
@@ -1582,7 +1582,7 @@ export const updateUnitHeadCustomer = async (req, res) => {
 
     // Check for duplicate email if provided (excluding current customer)
     if (req.body.email) {
-      const duplicateEmail = await Customer.findOne({ 
+      const duplicateEmail = await Customer.findOne({
         email: req.body.email,
         companyId: req.user.companyId,
         _id: { $ne: id }
@@ -1611,11 +1611,11 @@ export const updateUnitHeadCustomer = async (req, res) => {
     delete updateData.companyId;
 
     const customer = await Customer.findByIdAndUpdate(
-      id, 
-      updateData, 
-      { 
-        new: true, 
-        runValidators: true 
+      id,
+      updateData,
+      {
+        new: true,
+        runValidators: true
       }
     ).populate([
       { path: 'companyId', select: 'name' },
@@ -1630,7 +1630,7 @@ export const updateUnitHeadCustomer = async (req, res) => {
 
   } catch (error) {
     console.error('Error updating Unit Head customer:', error);
-    
+
     if (error.name === 'ValidationError') {
       const errors = Object.values(error.errors).map(err => ({
         field: err.path,
@@ -1673,11 +1673,11 @@ export const deleteUnitHeadCustomer = async (req, res) => {
     }
 
     // Check if customer exists and belongs to Unit Head's company
-    const existingCustomer = await Customer.findOne({ 
-      _id: id, 
-      companyId: req.user.companyId 
+    const existingCustomer = await Customer.findOne({
+      _id: id,
+      companyId: req.user.companyId
     });
-    
+
     if (!existingCustomer) {
       return res.status(404).json({
         success: false,
@@ -1720,8 +1720,8 @@ export const getUnitHeadSalesPersonsList = async (req, res) => {
       role: 'Sales',
       companyId: req.user.companyId
     })
-    .select('_id username email fullName')
-    .sort({ fullName: 1, username: 1 });
+      .select('_id username email fullName')
+      .sort({ fullName: 1, username: 1 });
 
     res.json({
       success: true,
@@ -1821,7 +1821,7 @@ export const createUnitHeadSalesPerson = async (req, res) => {
 
     // Prepare user data with company assignment - exclude permissions from req.body to set defaults
     const { permissions, ...bodyWithoutPermissions } = req.body;
-    
+
     const userData = {
       ...bodyWithoutPermissions,
       role: 'Sales', // Force role to Sales
@@ -1865,7 +1865,7 @@ export const createUnitHeadSalesPerson = async (req, res) => {
 
   } catch (error) {
     console.error('Error creating sales person:', error);
-    
+
     if (error.name === 'ValidationError') {
       const errors = Object.values(error.errors).map(err => ({
         field: err.path,
@@ -1908,12 +1908,12 @@ export const updateUnitHeadSalesPerson = async (req, res) => {
     }
 
     // Check if sales person exists and belongs to Unit Head's company
-    const existingSalesPerson = await User.findOne({ 
-      _id: id, 
+    const existingSalesPerson = await User.findOne({
+      _id: id,
       companyId: req.user.companyId,
       role: 'Sales'
     });
-    
+
     if (!existingSalesPerson) {
       return res.status(404).json({
         success: false,
@@ -1923,7 +1923,7 @@ export const updateUnitHeadSalesPerson = async (req, res) => {
 
     // Check for duplicate username (excluding current user)
     if (req.body.username) {
-      const duplicateUsername = await User.findOne({ 
+      const duplicateUsername = await User.findOne({
         username: req.body.username,
         _id: { $ne: id }
       });
@@ -1937,7 +1937,7 @@ export const updateUnitHeadSalesPerson = async (req, res) => {
 
     // Check for duplicate email if provided (excluding current user)
     if (req.body.email) {
-      const duplicateEmail = await User.findOne({ 
+      const duplicateEmail = await User.findOne({
         email: req.body.email,
         _id: { $ne: id }
       });
@@ -1956,14 +1956,14 @@ export const updateUnitHeadSalesPerson = async (req, res) => {
     delete updateData.password; // Use separate endpoint for password updates
 
     const updatedSalesPerson = await User.findByIdAndUpdate(
-      id, 
-      updateData, 
-      { 
-        new: true, 
-        runValidators: true 
+      id,
+      updateData,
+      {
+        new: true,
+        runValidators: true
       }
     ).populate('companyId', 'name city state')
-     .select('-password -__v');
+      .select('-password -__v');
 
     res.json({
       success: true,
@@ -1973,7 +1973,7 @@ export const updateUnitHeadSalesPerson = async (req, res) => {
 
   } catch (error) {
     console.error('Error updating sales person:', error);
-    
+
     if (error.name === 'ValidationError') {
       const errors = Object.values(error.errors).map(err => ({
         field: err.path,
@@ -2016,12 +2016,12 @@ export const deleteUnitHeadSalesPerson = async (req, res) => {
     }
 
     // Check if sales person exists and belongs to Unit Head's company
-    const salesPerson = await User.findOne({ 
-      _id: id, 
+    const salesPerson = await User.findOne({
+      _id: id,
       companyId: req.user.companyId,
       role: 'Sales'
     });
-    
+
     if (!salesPerson) {
       return res.status(404).json({
         success: false,
@@ -2039,7 +2039,7 @@ export const deleteUnitHeadSalesPerson = async (req, res) => {
     }
 
     // Check if sales person has any active orders
-    const activeOrders = await Order.find({ 
+    const activeOrders = await Order.find({
       salesPerson: id,
       status: { $nin: ['Cancelled', 'Completed'] }
     });
@@ -2077,7 +2077,7 @@ export const getUnitHeadProductionGroups = async (req, res) => {
       username: req.user.username,
       companyId: req.user.companyId
     });
-    
+
     // Check if user is Unit Head or Unit Manager
     if (!['Unit Head', 'Unit Manager'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: `Access denied. Unit Head or Unit Manager role required. Current role: ${req.user.role}` });
@@ -2181,21 +2181,21 @@ export const getUnitHeadProductionGroupById = async (req, res) => {
     let populatedItems = [];
     if (group.items && group.items.length > 0) {
       console.log('🔍 Manually populating items:', group.items);
-      
+
       populatedItems = await Item.find({
         _id: { $in: group.items },
         store: req.user.companyId
       })
         .select('name code category subCategory qty unit price image description')
         .lean();
-      
+
       console.log('📦 Found items for group:', populatedItems.length);
-      
+
       // Format items with image URLs
       populatedItems = populatedItems.map(item => ({
         _id: item._id,
         name: item.name || 'Unnamed Item',
-        code: item.code || 'No Code', 
+        code: item.code || 'No Code',
         category: item.category || 'No Category',
         subCategory: item.subCategory || '',
         qty: item.qty || 0,
@@ -2286,16 +2286,16 @@ export const createUnitHeadProductionGroup = async (req, res) => {
 
     if (existingGroup) {
       const companyName = existingGroup.company?.name || 'your company';
-      return res.status(400).json({ 
-        success: false, 
-        message: `Production group "${name.trim()}" already exists in ${companyName}` 
+      return res.status(400).json({
+        success: false,
+        message: `Production group "${name.trim()}" already exists in ${companyName}`
       });
     }
 
     // Validate items if provided and calculate qtyPerBatch from ProductDailySummary
     let validatedItems = [];
     let calculatedQtyPerBatch = 0;
-    
+
     if (items.length > 0) {
       // Check if items exist and belong to the same company - get full item data
       const inventoryItems = await Item.find({
@@ -2304,7 +2304,7 @@ export const createUnitHeadProductionGroup = async (req, res) => {
       }).select('_id name qty');
 
       validatedItems = inventoryItems.map(item => item._id);
-      
+
       // Get ProductDailySummary data for these items to calculate qtyPerBatch
       const productSummaries = await ProductDailySummary.find({
         productId: { $in: validatedItems },
@@ -2321,10 +2321,10 @@ export const createUnitHeadProductionGroup = async (req, res) => {
         // Get all qtyPerBatch values
         const qtyPerBatchValues = productSummaries.map(summary => summary.qtyPerBatch || 0);
         const uniqueQtyValues = [...new Set(qtyPerBatchValues)];
-        
+
         console.log('🔍 All qtyPerBatch values:', qtyPerBatchValues);
         console.log('🔍 Unique qtyPerBatch values:', uniqueQtyValues);
-        
+
         // Check if all items have the same qtyPerBatch
         if (uniqueQtyValues.length > 1) {
           // Items have different quantities - return error with details
@@ -2335,15 +2335,15 @@ export const createUnitHeadProductionGroup = async (req, res) => {
               qtyPerBatch: summary.qtyPerBatch || 0
             };
           });
-          
+
           const quantityList = itemDetails.map(item => `${item.name}: ${item.qtyPerBatch}`).join(', ');
-          
+
           return res.status(400).json({
             success: false,
             message: `Items have different batch quantities and cannot be grouped together. Found quantities: ${quantityList}. All items in a production group must have the same batch quantity.`
           });
         }
-        
+
         // All items have the same qtyPerBatch - use it
         calculatedQtyPerBatch = Math.max(...qtyPerBatchValues, 0);
         console.log('✅ All items have matching qtyPerBatch:', calculatedQtyPerBatch);
@@ -2351,25 +2351,25 @@ export const createUnitHeadProductionGroup = async (req, res) => {
         // Fallback to inventory qty if no ProductDailySummary found
         const itemQuantities = inventoryItems.map(item => item.qty || 0);
         const uniqueInventoryQty = [...new Set(itemQuantities)];
-        
+
         console.log('📦 Inventory quantities:', itemQuantities);
         console.log('📦 Unique inventory quantities:', uniqueInventoryQty);
-        
+
         // Check if all items have the same inventory quantity
         if (uniqueInventoryQty.length > 1) {
           const itemDetails = inventoryItems.map(item => ({
             name: item.name,
             qty: item.qty || 0
           }));
-          
+
           const quantityList = itemDetails.map(item => `${item.name}: ${item.qty}`).join(', ');
-          
+
           return res.status(400).json({
             success: false,
             message: `Items have different inventory quantities and cannot be grouped together. Found quantities: ${quantityList}. All items in a production group must have the same quantity.`
           });
         }
-        
+
         calculatedQtyPerBatch = Math.max(...itemQuantities, 0);
         console.log('⚠️ No ProductDailySummary found, using inventory quantities as fallback');
         console.log('✅ All items have matching inventory qty:', calculatedQtyPerBatch);
@@ -2383,10 +2383,10 @@ export const createUnitHeadProductionGroup = async (req, res) => {
       }).select('name items');
 
       if (existingAssignments.length > 0) {
-        const conflictItems = existingAssignments.flatMap(group => 
+        const conflictItems = existingAssignments.flatMap(group =>
           group.items.filter(item => validatedItems.some(vItem => vItem.toString() === item.toString()))
         );
-        return res.status(400).json({ 
+        return res.status(400).json({
           success: false,
           message: 'Some items are already assigned to other production groups',
           conflictItems: conflictItems
@@ -2441,7 +2441,7 @@ export const createUnitHeadProductionGroup = async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating production group:', error);
-    
+
     // Handle duplicate key error (MongoDB E11000)
     if (error.code === 11000) {
       if (error.keyPattern && error.keyPattern.name) {
@@ -2450,46 +2450,46 @@ export const createUnitHeadProductionGroup = async (req, res) => {
           const { Company } = await import('../models/Company.js');
           const company = await Company.findById(req.user.companyId).select('name');
           const companyName = company?.name || 'your company';
-          return res.status(400).json({ 
-            success: false, 
-            message: `Production group with this name already exists in ${companyName}` 
+          return res.status(400).json({
+            success: false,
+            message: `Production group with this name already exists in ${companyName}`
           });
         } catch (companyError) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Production group with this name already exists in your company' 
+          return res.status(400).json({
+            success: false,
+            message: 'Production group with this name already exists in your company'
           });
         }
       } else {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Duplicate entry detected. Production group name must be unique within your company.' 
+        return res.status(400).json({
+          success: false,
+          message: 'Duplicate entry detected. Production group name must be unique within your company.'
         });
       }
     }
-    
+
     // Handle validation errors
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Validation failed', 
-        errors: validationErrors 
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationErrors
       });
     }
-    
+
     // Handle other known errors
     if (error.name === 'CastError') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid data format provided' 
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid data format provided'
       });
     }
-    
+
     // Generic server error for unknown errors
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to create production group. Please try again.' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create production group. Please try again.'
     });
   }
 };
@@ -2560,9 +2560,9 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
 
       if (duplicateGroup) {
         const companyName = duplicateGroup.company?.name || 'your company';
-        return res.status(400).json({ 
-          success: false, 
-          message: `Production group "${name.trim()}" already exists in ${companyName}` 
+        return res.status(400).json({
+          success: false,
+          message: `Production group "${name.trim()}" already exists in ${companyName}`
         });
       }
     }
@@ -2570,10 +2570,10 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
     // Validate items if provided and add quantity/batch validation
     let validatedItems = [];
     let calculatedQtyPerBatch = providedQtyPerBatch; // Default to provided value
-    
+
     if (items.length > 0) {
       console.log('🔍 Validating items:', items);
-      
+
       // Validate that all items are valid MongoDB ObjectIds
       const mongoose = await import('mongoose');
       const invalidItems = items.filter(item => !mongoose.default.Types.ObjectId.isValid(item));
@@ -2584,7 +2584,7 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
           message: `Invalid item IDs provided: ${invalidItems.join(', ')}`
         });
       }
-      
+
       // Check if items exist and belong to the same company - USE 'store' FIELD
       const inventoryItems = await Item.find({
         _id: { $in: items },
@@ -2622,10 +2622,10 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
         // Get all qtyPerBatch values
         const qtyPerBatchValues = updateProductSummaries.map(summary => summary.qtyPerBatch || 0);
         const uniqueQtyValues = [...new Set(qtyPerBatchValues)];
-        
+
         console.log('🔍 Update - All qtyPerBatch values:', qtyPerBatchValues);
         console.log('🔍 Update - Unique qtyPerBatch values:', uniqueQtyValues);
-        
+
         // Check if all items have the same qtyPerBatch
         if (uniqueQtyValues.length > 1) {
           // Items have different quantities - return error with details
@@ -2636,15 +2636,15 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
               qtyPerBatch: summary.qtyPerBatch || 0
             };
           });
-          
+
           const quantityList = itemDetails.map(item => `${item.name}: ${item.qtyPerBatch}`).join(', ');
-          
+
           return res.status(400).json({
             success: false,
             message: `Items have different batch quantities and cannot be grouped together. Found quantities: ${quantityList}. All items in a production group must have the same batch quantity.`
           });
         }
-        
+
         // All items have the same qtyPerBatch - use it
         calculatedQtyPerBatch = Math.max(...qtyPerBatchValues, 0);
         console.log('✅ Update - All items have matching qtyPerBatch:', calculatedQtyPerBatch);
@@ -2652,32 +2652,32 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
         // Fallback to inventory qty if no ProductDailySummary found
         const itemQuantities = inventoryItems.map(item => item.qty || 0);
         const uniqueInventoryQty = [...new Set(itemQuantities)];
-        
+
         console.log('📦 Update - Inventory quantities:', itemQuantities);
         console.log('📦 Update - Unique inventory quantities:', uniqueInventoryQty);
-        
+
         // Check if all items have the same inventory quantity
         if (uniqueInventoryQty.length > 1) {
           const itemDetails = inventoryItems.map(item => ({
             name: item.name,
             qty: item.qty || 0
           }));
-          
+
           const quantityList = itemDetails.map(item => `${item.name}: ${item.qty}`).join(', ');
-          
+
           return res.status(400).json({
             success: false,
             message: `Items have different inventory quantities and cannot be grouped together. Found quantities: ${quantityList}. All items in a production group must have the same quantity.`
           });
         }
-        
+
         calculatedQtyPerBatch = Math.max(...itemQuantities, 0);
         console.log('⚠️ Update - No ProductDailySummary found, using inventory quantities as fallback');
         console.log('✅ Update - All items have matching inventory qty:', calculatedQtyPerBatch);
       }
 
       // Check if any NEW items are already assigned to other groups
-      const newItems = validatedItems.filter(item => 
+      const newItems = validatedItems.filter(item =>
         !existingGroup.items.some(existingItem => existingItem.toString() === item.toString())
       );
 
@@ -2690,10 +2690,10 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
         }).select('name items');
 
         if (existingAssignments.length > 0) {
-          const conflictItems = existingAssignments.flatMap(group => 
+          const conflictItems = existingAssignments.flatMap(group =>
             group.items.filter(item => newItems.some(newItem => newItem.toString() === item.toString()))
           );
-          return res.status(400).json({ 
+          return res.status(400).json({
             success: false,
             message: 'Some items are already assigned to other production groups',
             conflictItems: conflictItems
@@ -2718,7 +2718,7 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
         calculatedQtyPerBatch = Math.max(...summaryQtyPerBatch, 0); // Update existing variable
         console.log('🎯 Recalculated qtyPerBatch from ProductDailySummary (max value):', calculatedQtyPerBatch);
         console.log('📈 All qtyPerBatch values from ProductDailySummary:', summaryQtyPerBatch);
-        
+
         // Use calculated value from ProductDailySummary instead of provided value
         // This ensures qtyPerBatch is always based on the actual ProductDailySummary data
       } else {
@@ -2739,23 +2739,23 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
     existingGroup.name = name.trim();
     existingGroup.description = description?.trim() || '';
     existingGroup.items = validatedItems;
-    
+
     // Update batch quantities - use calculated value if items changed, otherwise use provided value
     if (validatedItems.length > 0 && calculatedQtyPerBatch > 0) {
       existingGroup.qtyPerBatch = calculatedQtyPerBatch;
     } else if (providedQtyPerBatch !== undefined) {
       existingGroup.qtyPerBatch = parseFloat(providedQtyPerBatch) || 0;
     }
-    
+
     if (qtyAchievedPerBatch !== undefined) {
       existingGroup.qtyAchievedPerBatch = parseFloat(qtyAchievedPerBatch) || 0;
     }
-    
+
     // Update unit head/manager if different
     if (!existingGroup.unitHeadOrManager || existingGroup.unitHeadOrManager.toString() !== req.user.userId) {
       existingGroup.unitHeadOrManager = req.user.userId;
     }
-    
+
     existingGroup.metadata = {
       totalItems: validatedItems.length,
       lastUpdated: new Date()
@@ -2792,7 +2792,7 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating production group:', error);
-    
+
     // Handle duplicate key error (MongoDB E11000)
     if (error.code === 11000) {
       if (error.keyPattern && error.keyPattern.name) {
@@ -2801,46 +2801,46 @@ export const updateUnitHeadProductionGroup = async (req, res) => {
           const { Company } = await import('../models/Company.js');
           const company = await Company.findById(req.user.companyId).select('name');
           const companyName = company?.name || 'your company';
-          return res.status(400).json({ 
-            success: false, 
-            message: `Production group with this name already exists in ${companyName}` 
+          return res.status(400).json({
+            success: false,
+            message: `Production group with this name already exists in ${companyName}`
           });
         } catch (companyError) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Production group with this name already exists in your company' 
+          return res.status(400).json({
+            success: false,
+            message: 'Production group with this name already exists in your company'
           });
         }
       } else {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Duplicate entry detected. Production group name must be unique within your company.' 
+        return res.status(400).json({
+          success: false,
+          message: 'Duplicate entry detected. Production group name must be unique within your company.'
         });
       }
     }
-    
+
     // Handle validation errors
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Validation failed', 
-        errors: validationErrors 
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: validationErrors
       });
     }
-    
+
     // Handle other known errors
     if (error.name === 'CastError') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid data format provided' 
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid data format provided'
       });
     }
-    
+
     // Generic server error for unknown errors
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update production group. Please try again.' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update production group. Please try again.'
     });
   }
 };
@@ -2886,7 +2886,7 @@ export const getUnitHeadAvailableItems = async (req, res) => {
       companyId: req.user.companyId,
       query: req.query
     });
-    
+
     // Check if user is Unit Head or Unit Manager
     if (!['Unit Head', 'Unit Manager'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: `Access denied. Unit Head or Unit Manager role required. Current role: ${req.user.role}` });
@@ -2904,11 +2904,11 @@ export const getUnitHeadAvailableItems = async (req, res) => {
       company: req.user.companyId,
       isActive: true
     };
-    
+
     console.log('🔄 Getting all assigned items (including current group)');
 
     const assignedGroups = await ProductionGroup.find(assignedGroupsFilter).select('items');
-    const assignedItemIds = assignedGroups.flatMap(group => 
+    const assignedItemIds = assignedGroups.flatMap(group =>
       group.items.map(item => item.toString())
     );
     console.log('🚫 Total assigned items count:', assignedItemIds.length);
@@ -2942,7 +2942,7 @@ export const getUnitHeadAvailableItems = async (req, res) => {
     const formattedItems = items.map(item => {
       const imageUrl = item.image ? (item.image.startsWith('/uploads/data:') ? item.image.replace('/uploads/', '') : item.image) : null;
       console.log('🖼️ Image processing:', { original: item.image, processed: imageUrl });
-      
+
       return {
         _id: item._id,
         name: item.name || 'Unnamed Item',
@@ -2985,7 +2985,7 @@ export const getUnitHeadAvailableItems = async (req, res) => {
 export const getCutoffTime = async (req, res) => {
   try {
     const unitHead = req.user;
-    
+
     console.log('🕐 Getting cutoff time for Unit Head:', unitHead.username, 'Company:', unitHead.companyId);
 
     // Unit Head must have a company assigned
@@ -2997,9 +2997,9 @@ export const getCutoffTime = async (req, res) => {
     }
 
     // Find cutoff time for this company
-    const cutoffSetting = await CutoffTime.findOne({ 
+    const cutoffSetting = await CutoffTime.findOne({
       companyId: unitHead.companyId,
-      isActive: true 
+      isActive: true
     }).populate('unitHeadId', 'username fullName');
 
     if (!cutoffSetting) {
@@ -3042,7 +3042,7 @@ export const setCutoffTime = async (req, res) => {
   try {
     const unitHead = req.user;
     const { cutoffTime, description = '' } = req.body;
-    
+
     console.log('🕐 Setting cutoff time for Unit Head:', unitHead.username, 'Time:', cutoffTime);
 
     // Validation
@@ -3079,9 +3079,9 @@ export const setCutoffTime = async (req, res) => {
       cutoffSetting.isActive = true;
       cutoffSetting.updatedBy = unitHead._id;
       await cutoffSetting.save();
-      
+
       await cutoffSetting.populate('unitHeadId', 'username fullName');
-      
+
       console.log('✅ Cutoff time updated successfully:', cutoffSetting.cutoffTime);
     } else {
       // Create new setting
@@ -3093,9 +3093,9 @@ export const setCutoffTime = async (req, res) => {
         isActive: true,
         createdBy: unitHead._id
       });
-      
+
       await cutoffSetting.populate('unitHeadId', 'username fullName');
-      
+
       console.log('✅ Cutoff time created successfully:', cutoffSetting.cutoffTime);
     }
 
@@ -3119,7 +3119,7 @@ export const setCutoffTime = async (req, res) => {
 
   } catch (error) {
     console.error('Error setting cutoff time:', error);
-    
+
     if (error.name === 'ValidationError') {
       const errors = Object.values(error.errors).map(err => ({
         field: err.path,
@@ -3145,7 +3145,7 @@ export const toggleCutoffTime = async (req, res) => {
   try {
     const unitHead = req.user;
     const { isActive } = req.body;
-    
+
     console.log('🔄 Toggling cutoff time active status for Unit Head:', unitHead.username, 'Active:', isActive);
 
     if (!unitHead.companyId) {
@@ -3156,7 +3156,7 @@ export const toggleCutoffTime = async (req, res) => {
     }
 
     const cutoffSetting = await CutoffTime.findOne({ companyId: unitHead.companyId });
-    
+
     if (!cutoffSetting) {
       return res.status(404).json({
         success: false,
@@ -3167,7 +3167,7 @@ export const toggleCutoffTime = async (req, res) => {
     cutoffSetting.isActive = isActive;
     cutoffSetting.updatedBy = unitHead._id;
     await cutoffSetting.save();
-    
+
     await cutoffSetting.populate('unitHeadId', 'username fullName');
 
     // Get current order status

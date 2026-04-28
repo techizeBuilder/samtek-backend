@@ -5,9 +5,18 @@ import Holiday from "../models/Holiday.js";
 /**
  * ➕ Add Holiday
  */
+/**
+ * ➕ Add Holiday
+ */
 export const addHoliday = async (req, res) => {
     try {
-        const { title, date } = req.body;
+        const { title, date, companyId } = req.body;
+        const currentUser = req.user;
+
+        // Prevent Manager from adding holidays
+        if (currentUser.role === 'Manager') {
+            return res.status(403).json({ message: "Access denied. Managers cannot add holidays." });
+        }
 
         if (!title || !date) {
             return res.status(400).json({
@@ -24,6 +33,7 @@ export const addHoliday = async (req, res) => {
             title,
             date: holidayDate,
             day,
+            companyId: currentUser.role === 'Superadmin' ? companyId : currentUser.companyId,
         });
 
         res.status(201).json({
@@ -42,10 +52,23 @@ export const addHoliday = async (req, res) => {
 /**
  * 📋 Get All Holidays
  */
-export const getAllHolidays = async (_req, res) => {
+export const getAllHolidays = async (req, res) => {
     try {
-        const holidays = await Holiday.find().sort({ date: 1 });
+        const currentUser = req.user;
+        let filter = {};
 
+        // Enforce Company Isolation
+        if (currentUser.role !== 'Superadmin' && currentUser.role !== 'Super Admin') {
+            if (currentUser.companyId) {
+                filter.companyId = currentUser.companyId;
+            }
+        } else {
+            // Superadmins can filter by companyId from query
+            const { companyId } = req.query;
+            if (companyId) filter.companyId = companyId;
+        }
+
+        const holidays = await Holiday.find(filter).sort({ date: 1 });
         res.json(holidays);
     } catch (error) {
         res.status(500).json({
@@ -81,6 +104,12 @@ export const getHolidayById = async (req, res) => {
 export const updateHoliday = async (req, res) => {
     try {
         const { title, date } = req.body;
+        const currentUser = req.user;
+
+        // Prevent Manager from updating holidays
+        if (currentUser.role === 'Manager') {
+            return res.status(403).json({ message: "Access denied. Managers cannot edit holidays." });
+        }
 
         const updateData = {};
         if (title) updateData.title = title;
@@ -116,6 +145,13 @@ export const updateHoliday = async (req, res) => {
  */
 export const deleteHolidayById = async (req, res) => {
     try {
+        const currentUser = req.user;
+
+        // Prevent Manager from deleting holidays
+        if (currentUser.role === 'Manager') {
+            return res.status(403).json({ message: "Access denied. Managers cannot delete holidays." });
+        }
+
         const holiday = await Holiday.findByIdAndDelete(req.params.id);
 
         if (!holiday) {

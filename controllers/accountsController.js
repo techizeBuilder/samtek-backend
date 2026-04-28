@@ -9,7 +9,7 @@ import CustomerPayment from '../models/CustomerPayment.js';
 import VendorPayment from '../models/VendorPayment.js';
 import Supplier from '../models/Supplier.js';
 import SalesmanDailySettlement from '../models/SalesmanDailySettlement.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 /**
  * Get all sales invoices for the company

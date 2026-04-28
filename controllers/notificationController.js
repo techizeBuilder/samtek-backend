@@ -151,7 +151,7 @@ export const deleteNotification = async (req, res) => {
       });
     }
 
-    if (userRole !== 'Super Admin' && notification.targetUserId?.toString() !== userId.toString()) {
+    if (userRole !== 'Superadmin' && notification.targetUserId?.toString() !== userId.toString()) {
       return res.status(403).json({
         success: false,
         message: 'Permission denied'

@@ -6,7 +6,7 @@ import Sale from '../models/Sale.js';
 import Return from '../models/Return.js';
 import { Item } from '../models/Inventory.js';
 import { Company } from '../models/Company.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 import PriorityProduct from '../models/PriorityProduct.js';
 import CutoffTime from '../models/CutoffTime.js';
 import { generateStandardizedInvoicePDF } from '../utils/invoicePdf.js';
@@ -383,7 +383,7 @@ export const getSalespersonCustomers = async (req, res) => {
       ];
     }
     // Unit Manager and Super Admin can see all customers from their company
-    else if (userRole !== 'Super Admin') {
+    else if (userRole !== 'Superadmin') {
       // For non-Super Admin roles, ensure company filtering
       query.companyId = userCompanyId;
     }
@@ -487,7 +487,7 @@ export const getSalespersonDeliveries = async (req, res) => {
     };
 
     // Role-based filtering
-    if (userRole === 'Sales' || (userRole !== 'Super Admin' && userRole !== 'Unit Manager' && userRole !== 'Unit Head')) {
+    if (userRole === 'Sales' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Unit Head')) {
       matchQuery.salesPerson = salespersonId;
     }
 
@@ -588,7 +588,7 @@ export const getSalespersonInvoices = async (req, res) => {
 
     // 1. Fetch Orders for the salesperson (company isolation included)
     let orderQuery = { companyId: userCompanyId };
-    if (userRole === 'Sales' || (userRole !== 'Super Admin' && userRole !== 'Unit Manager')) {
+    if (userRole === 'Sales' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager')) {
       orderQuery.salesPerson = salespersonId;
     }
 
@@ -603,10 +603,10 @@ export const getSalespersonInvoices = async (req, res) => {
       dcno: { $exists: true, $ne: null }
     };
 
-    if (userRole === 'Sales' || (userRole !== 'Super Admin' && userRole !== 'Unit Manager')) {
+    if (userRole === 'Sales' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager')) {
       dispatchMatch.salesPerson = salespersonId;
     }
-    
+
     if (search) {
       dispatchMatch.dcno = { $regex: search, $options: 'i' };
     }
@@ -617,7 +617,7 @@ export const getSalespersonInvoices = async (req, res) => {
     const salespersonDCNumbers = salespersonDispatches.map(d => d.dcno);
 
     // 2. Build filter query for existing Sale records (BROADENED)
-    let saleQuery = { 
+    let saleQuery = {
       companyId: userCompanyId,
       $or: [
         { order: { $in: orderIds } },
@@ -690,10 +690,10 @@ export const getSalespersonInvoices = async (req, res) => {
     for (const dInv of dispatchInvoicesRaw) {
       // Robust check: Skip if this DC number (normalized) exists in the Sales list
       const normalizedInvNo = dInv.invoiceNumber.replace(/^INV-/, '');
-      const isAlreadyInvoiced = sales.some(s => s.invoiceNumber === dInv.invoiceNumber) || 
-                               invoicedDCNumbers.includes(normalizedInvNo) ||
-                               invoicedDispatchIds.includes(dInv.dispatchId.toString());
-      
+      const isAlreadyInvoiced = sales.some(s => s.invoiceNumber === dInv.invoiceNumber) ||
+        invoicedDCNumbers.includes(normalizedInvNo) ||
+        invoicedDispatchIds.includes(dInv.dispatchId.toString());
+
       if (!isAlreadyInvoiced) {
         // Populate customer info (Aggregation doesn't populate nested models easily)
         const customer = await Customer.findById(dInv.customer).select('name email mobile gstin customerCode').lean();
@@ -786,7 +786,7 @@ export const downloadInvoicePDF = async (req, res) => {
 
       // Map Dispatch to PDF invoice format
       const company = await Company.findById(userCompanyId || dispatch.company).lean();
-      
+
       const invoiceData = {
         company: company || {},
         customer: dispatch.customer || {},
@@ -870,7 +870,7 @@ export const getSalespersonRefundReturns = async (req, res) => {
     }
     // Unit Manager can see all returns from their company
     // Super Admin can see all returns
-    else if (userRole !== 'Super Admin' && userRole !== 'Unit Manager') {
+    else if (userRole !== 'Superadmin' && userRole !== 'Unit Manager') {
       orderQuery.salesPerson = salespersonId;
     }
 

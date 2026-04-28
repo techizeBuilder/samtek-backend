@@ -2,7 +2,7 @@ import Dispatch from '../models/Dispatch.js';
 import Order from '../models/Order.js';
 import Customer from '../models/Customer.js';
 import PackingSheet from '../models/Packing.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 import mongoose from 'mongoose';
 import User from '../models/User.js';
 import { Item } from '../models/Inventory.js';
@@ -18,26 +18,26 @@ import { convertNumberToWords, generateStandardizedInvoicePDF } from '../utils/i
 const ensureSaleRecordForDC = async (dcNo, dispatches, user, companyId) => {
   try {
     if (!dispatches || dispatches.length === 0) return null;
-    
+
     const firstDispatch = dispatches[0];
-    
+
     // 1. Check if Sale already exists for this DC to prevent duplicates
     const existingSale = await Sale.findOne({ invoiceNumber: dcNo, companyId });
     if (existingSale) return existingSale;
 
     let subtotal = 0;
     let totalTax = 0;
-    
+
     const saleItems = dispatches.map(d => {
       const qty = d.qtyIssued || d.indentQty || 0;
       const rate = d.productId?.salePrice || d.rate || 0;
       const itemTotal = qty * rate;
       const gstPercent = d.productId?.gst || 0;
       const itemTax = itemTotal * (gstPercent / 100);
-      
+
       subtotal += itemTotal;
       totalTax += itemTax;
-      
+
       return {
         productName: d.productId?.name || d.productName || d.productGroup || 'Unknown',
         quantity: qty,
@@ -66,7 +66,7 @@ const ensureSaleRecordForDC = async (dcNo, dispatches, user, companyId) => {
     });
 
     await sale.save();
-    
+
     // Update Customer Outstanding Amount
     await Customer.findByIdAndUpdate(sale.customer, {
       $inc: { outstandingAmount: totalAmount }
@@ -96,7 +96,7 @@ const ensureSaleRecordForDC = async (dcNo, dispatches, user, companyId) => {
         createdBy: user.id || user._id,
         entries
       });
-      
+
       await txn.save();
 
       // Update account balances
@@ -107,7 +107,7 @@ const ensureSaleRecordForDC = async (dcNo, dispatches, user, companyId) => {
       await receivableAccount.save();
       await salesAccount.save();
       await gstAccount.save();
-      
+
       console.log(`📊 Ledger posting completed for DC Invoice: ${dcNo}`);
     }
 
@@ -578,10 +578,10 @@ export const getDispatchDashboardData = async (req, res) => {
       const inferredPreviousClosing = isUngrouped && productGroupStr && inferredPreviousClosingByProductGroup.has(productGroupStr)
         ? inferredPreviousClosingByProductGroup.get(productGroupStr)
         : (productIdStr && inferredPreviousClosingByProductId.has(productIdStr)
-            ? inferredPreviousClosingByProductId.get(productIdStr)
-            : (productGroupStr && inferredPreviousClosingByProductGroup.has(productGroupStr)
-                ? inferredPreviousClosingByProductGroup.get(productGroupStr)
-                : 0));
+          ? inferredPreviousClosingByProductId.get(productIdStr)
+          : (productGroupStr && inferredPreviousClosingByProductGroup.has(productGroupStr)
+            ? inferredPreviousClosingByProductGroup.get(productGroupStr)
+            : 0));
 
       const storedPreviousClosingRaw = Number(entry.previousClosingStockYesterdayBalance);
       const previousClosing = isSingleDayView

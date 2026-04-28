@@ -4,7 +4,7 @@ import ProductDailySummary from '../models/ProductDailySummary.js';
 import * as XLSX from 'xlsx';
 import multer from 'multer';
 import mongoose from 'mongoose';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 import notificationService from '../services/notificationService.js';
 import { initializeProductSummary, updateProductSummary } from '../services/productionSummaryService.js';
 
@@ -42,7 +42,7 @@ const DELIVERY_CHALLAN_ORDER = [
 // Helper function to check inventory permissions
 const checkInventoryPermission = (user, action) => {
   // Super Admin and Unit Head have all permissions
-  if (user.role === 'Super Admin' || user.role === 'Unit Head') {
+  if (user.role === 'Superadmin' || user.role === 'Unit Head') {
     return true;
   }
 

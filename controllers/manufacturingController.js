@@ -1,7 +1,7 @@
 import Manufacturing from '../models/Manufacturing.js';
 import Order from '../models/Order.js';
 import { Inventory } from '../models/Inventory.js';
-import { USER_ROLES } from '../../shared/schema.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 export const getManufacturingJobs = async (req, res) => {
   try {
@@ -166,7 +166,7 @@ export const updateManufacturingJob = async (req, res) => {
       updateData,
       { new: true }
     ).populate('order', 'orderNumber customer')
-     .populate('assignedWorkers', 'fullName');
+      .populate('assignedWorkers', 'fullName');
 
     res.json({
       message: 'Manufacturing job updated successfully',

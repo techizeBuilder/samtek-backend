@@ -3,9 +3,9 @@ import { Company } from '../models/Company.js';
 // Helper function to check company permissions
 const checkCompanyPermission = (user, action) => {
   console.log('Checking company permission for user:', user?.role, 'action:', action);
-  
-  // Super Admin has all permissions
-  if (user?.role === 'Super Admin') {
+
+  // Super Admin has all permissions (support both 'Superadmin' and 'Super Admin' variants)
+  if (user?.role === 'Superadmin' || user?.role === 'Super Admin') {
     return true;
   }
   // Unit Head has all company permissions
@@ -19,27 +19,35 @@ const checkCompanyPermission = (user, action) => {
 export const getCompanies = async (req, res) => {
   try {
     console.log('Get companies request from user:', req.user?.role);
-    
+
     if (!checkCompanyPermission(req.user, 'view')) {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
-    const { 
-      city, 
-      unitName, 
-      name, 
+    const {
+      city,
+      unitName,
+      name,
       state,
       isActive,
       search,
-      page = 1, 
+      page = 1,
       limit = 10,
       sortBy = 'createdAt',
       sortOrder = 'desc'
     } = req.query;
-    
+
     // Build filter object
     const filter = {};
-    
+
+    // Role-based filtering for non-super admins
+    if (req.user.role !== 'Superadmin' && req.user.role !== 'Super Admin' && req.user.role !== 'super_user') {
+      if (req.user.companyId) {
+        filter._id = req.user.companyId;
+        console.log('Restricting companies to assigned company:', req.user.companyId);
+      }
+    }
+
     // Individual field filters
     if (city) filter.city = new RegExp(city, 'i');
     if (unitName) filter.unitName = new RegExp(unitName, 'i');
@@ -98,9 +106,9 @@ export const getCompanies = async (req, res) => {
     });
   } catch (error) {
     console.error('Get companies error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Internal server error' 
+      message: 'Internal server error'
     });
   }
 };
@@ -148,11 +156,11 @@ export const createCompany = async (req, res) => {
     // Validate required fields (name is now optional as it can be auto-generated)
     const requiredFields = ['unitName', 'locationPin', 'city', 'state'];
     const missingFields = requiredFields.filter(field => !companyData[field]);
-    
+
     if (missingFields.length > 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        message: 'Missing required fields', 
+        message: 'Missing required fields',
         missingFields,
         errors: missingFields.reduce((acc, field) => {
           acc[field] = `${field} is required`;
@@ -212,26 +220,26 @@ export const createCompany = async (req, res) => {
     });
   } catch (error) {
     console.error('Create company error:', error);
-    
+
     // Handle validation errors
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         message: 'Validation failed: ' + validationErrors.join(', ')
       });
     }
-    
+
     // Handle duplicate key errors
     if (error.code === 11000) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        message: 'Company with this information already exists' 
+        message: 'Company with this information already exists'
       });
     }
-    
+
     // Generic error
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       message: 'Failed to create company. Please try again later.',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -250,16 +258,16 @@ export const updateCompany = async (req, res) => {
     });
 
     if (!req.user) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         success: false,
-        message: 'Authentication required. Please log in.' 
+        message: 'Authentication required. Please log in.'
       });
     }
 
     if (!checkCompanyPermission(req.user, 'edit')) {
-      return res.status(403).json({ 
+      return res.status(403).json({
         success: false,
-        message: 'Access denied. Insufficient permissions to edit companies.' 
+        message: 'Access denied. Insufficient permissions to edit companies.'
       });
     }
 
@@ -293,9 +301,9 @@ export const updateCompany = async (req, res) => {
     );
 
     if (!company) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        message: 'Company not found with the provided ID' 
+        message: 'Company not found with the provided ID'
       });
     }
 
@@ -308,24 +316,24 @@ export const updateCompany = async (req, res) => {
     });
   } catch (error) {
     console.error('Update company error:', error);
-    
+
     // Handle validation errors
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         message: 'Validation failed: ' + validationErrors.join(', ')
       });
     }
-    
+
     // Handle duplicate key errors
     if (error.code === 11000) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
         message: 'Company with this information already exists'
       });
     }
-    
+
     // Handle cast errors (invalid ObjectId)
     if (error.name === 'CastError') {
       return res.status(400).json({
@@ -333,9 +341,9 @@ export const updateCompany = async (req, res) => {
         message: 'Invalid company ID format'
       });
     }
-    
+
     // Generic error
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       message: 'Failed to update company. Please try again later.',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -358,15 +366,15 @@ export const deleteCompany = async (req, res) => {
       return res.status(404).json({ message: 'Company not found' });
     }
 
-    res.json({ 
+    res.json({
       success: true,
-      message: 'Company deleted successfully' 
+      message: 'Company deleted successfully'
     });
   } catch (error) {
     console.error('Delete company error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Internal server error' 
+      message: 'Internal server error'
     });
   }
 };
@@ -410,9 +418,9 @@ export const getCompanyStats = async (req, res) => {
     });
   } catch (error) {
     console.error('Get company stats error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Internal server error' 
+      message: 'Internal server error'
     });
   }
 };
@@ -425,12 +433,12 @@ export const getCompaniesDropdown = async (req, res) => {
     }
 
     const { city, unitName, search } = req.query;
-    
+
     // Build filter object
     const filter = { isActive: true };
-    
+
     // Role-based filtering
-    if (req.user.role === 'Super Admin') {
+    if (req.user.role === 'Superadmin' || req.user.role === 'Super Admin') {
       // SUPER ADMIN: Show ALL companies (no filtering)
       console.log('Super Admin access - showing all companies');
     } else if (req.user.role === 'Unit Head' && req.user.companyId) {
@@ -442,10 +450,10 @@ export const getCompaniesDropdown = async (req, res) => {
       filter._id = req.user.companyId;
       console.log(`${req.user.role} location filtering - showing only assigned company:`, req.user.companyId);
     }
-    
+
     if (city) filter.city = new RegExp(city, 'i');
     if (unitName) filter.unitName = new RegExp(unitName, 'i');
-    
+
     // Global search
     if (search) {
       filter.$or = [
@@ -477,9 +485,9 @@ export const getCompaniesDropdown = async (req, res) => {
     });
   } catch (error) {
     console.error('Get companies dropdown error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Internal server error' 
+      message: 'Internal server error'
     });
   }
 };
@@ -488,10 +496,10 @@ export const getCompaniesDropdown = async (req, res) => {
 export const getCompaniesSimple = async (req, res) => {
   try {
     const { search, limit = 100 } = req.query;
-    
+
     // Build filter object - only active companies
     const filter = { isActive: true };
-    
+
     // Global search
     if (search) {
       filter.$or = [
@@ -524,9 +532,9 @@ export const getCompaniesSimple = async (req, res) => {
     });
   } catch (error) {
     console.error('Get companies simple error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      message: 'Internal server error' 
+      message: 'Internal server error'
     });
   }
 };

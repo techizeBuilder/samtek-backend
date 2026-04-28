@@ -9,7 +9,7 @@ import { Company } from '../models/Company.js';
 export const getSuperAdminDashboard = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -22,7 +22,7 @@ export const getSuperAdminDashboard = async (req, res) => {
     // Get basic counts with proper error handling
     const [
       totalUsers,
-      totalOrders, 
+      totalOrders,
       totalCustomers,
       totalItems,
       totalRevenue,
@@ -49,7 +49,7 @@ export const getSuperAdminDashboard = async (req, res) => {
         .limit(10)
         .select('orderCode totalAmount status createdAt customer salesPerson companyId')
         .lean(),
-      
+
       // Recent Customers
       Customer.find()
         .populate('companyId', 'name city')
@@ -58,7 +58,7 @@ export const getSuperAdminDashboard = async (req, res) => {
         .limit(10)
         .select('name contactPerson email mobile city active createdAt companyId salesContact')
         .lean(),
-      
+
       // Recent Sales Persons
       User.find({ role: 'Sales' })
         .populate('companyId', 'name city')
@@ -66,7 +66,7 @@ export const getSuperAdminDashboard = async (req, res) => {
         .limit(10)
         .select('fullName username email role companyId createdAt')
         .lean(),
-      
+
       // Companies list
       Company.find()
         .sort({ createdAt: -1 })
@@ -112,7 +112,7 @@ export const getSuperAdminDashboard = async (req, res) => {
 export const getAllUsers = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -178,7 +178,7 @@ export const getAllUsers = async (req, res) => {
 export const updateUserRole = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -265,7 +265,7 @@ export const getSystemModules = async (req, res) => {
     const modules = [
       'Dashboard',
       'Orders',
-      'Purchases', 
+      'Purchases',
       'Manufacturing',
       'Production',
       'Dispatches',
@@ -298,7 +298,7 @@ export const getSystemModules = async (req, res) => {
 export const getSuperAdminOrders = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -408,7 +408,7 @@ export const getSuperAdminOrders = async (req, res) => {
 export const getSuperAdminOrderById = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -450,7 +450,7 @@ export const getSuperAdminOrderById = async (req, res) => {
 export const getSuperAdminSales = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -524,7 +524,7 @@ export const getSuperAdminSales = async (req, res) => {
     salesPersonsWithStats.sort((a, b) => {
       const aValue = sortField.includes('.') ? sortField.split('.').reduce((obj, key) => obj[key], a) : a[sortField];
       const bValue = sortField.includes('.') ? sortField.split('.').reduce((obj, key) => obj[key], b) : b[sortField];
-      
+
       if (sortOrder === 'asc') {
         return (aValue || 0) - (bValue || 0);
       }
@@ -540,8 +540,8 @@ export const getSuperAdminSales = async (req, res) => {
       totalSalesPersons,
       totalSales: salesPersonsWithStats.reduce((sum, person) => sum + person.orderStats.totalOrders, 0),
       totalAmount: salesPersonsWithStats.reduce((sum, person) => sum + person.orderStats.totalAmount, 0),
-      avgSaleValue: salesPersonsWithStats.length > 0 ? 
-        salesPersonsWithStats.reduce((sum, person) => sum + person.orderStats.totalAmount, 0) / 
+      avgSaleValue: salesPersonsWithStats.length > 0 ?
+        salesPersonsWithStats.reduce((sum, person) => sum + person.orderStats.totalAmount, 0) /
         salesPersonsWithStats.reduce((sum, person) => sum + person.orderStats.totalOrders, 0) : 0
     };
 
@@ -573,7 +573,7 @@ export const getSuperAdminSales = async (req, res) => {
 export const getSalesPersonById = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -657,7 +657,7 @@ export const getSalesPersonById = async (req, res) => {
 export const getSuperAdminCustomers = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -779,7 +779,7 @@ export const getSuperAdminCustomers = async (req, res) => {
 export const getSuperAdminCustomerById = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -844,7 +844,7 @@ export const getSuperAdminCustomerById = async (req, res) => {
 export const getSuperAdminDispatches = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
@@ -979,7 +979,7 @@ export const getSuperAdminDispatches = async (req, res) => {
 export const getSuperAdminDispatchById = async (req, res) => {
   try {
     const user = req.user;
-    
+
     if (user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,

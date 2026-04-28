@@ -11,8 +11,8 @@ export const checkPermission = (module, feature, action) => {
         });
       }
 
-      // Super Admin has all permissions
-      if (user.role === 'Super Admin' || user.permissions?.role === 'super_admin') {
+      // Super Admin has all permissions (both variants)
+      if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') {
         return next();
       }
 
@@ -72,6 +72,7 @@ export const checkPermission = (module, feature, action) => {
 // Get user modules based on role
 export const getUserModules = (role) => {
   const moduleMap = {
+    'Superadmin': ['Dashboard', 'Manufacturing', 'Dispatches', 'Sales', 'Accounts', 'Inventory', 'Customers', 'Suppliers', 'Purchases', 'Settings'],
     'Super Admin': ['Dashboard', 'Manufacturing', 'Dispatches', 'Sales', 'Accounts', 'Inventory', 'Customers', 'Suppliers', 'Purchases', 'Settings'],
     'Unit Head': ['Dashboard', 'Manufacturing', 'Dispatches', 'Sales', 'Accounts', 'Inventory', 'Customers', 'userManagement'],
     'Unit Manager': ['Dashboard', 'Sales Approval', 'Manufacturing', 'Dispatches', 'Inventory'],
@@ -96,8 +97,8 @@ export const checkUnitAccess = (req, res, next) => {
     });
   }
 
-  // Super Admin can access all units
-  if (user.role === 'Super Admin' || user.permissions?.canAccessAllUnits) {
+  // Super Admin can access all units (both variants)
+  if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.canAccessAllUnits) {
     return next();
   }
 
@@ -110,8 +111,8 @@ export const checkUnitAccess = (req, res, next) => {
 export const getUserPermissions = (user) => {
   if (!user) return null;
 
-  // Super Admin gets all permissions
-  if (user.role === 'Super Admin') {
+  // Super Admin gets all permissions (both variants)
+  if (user.role === 'Superadmin' || user.role === 'Super Admin') {
     return {
       role: 'super_admin',
       canAccessAllUnits: true,
