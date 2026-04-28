@@ -277,6 +277,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       const salaryStructureRouter = (await import('./routes/salaryStrctureRoute.js')).default;
       const hrPolicyRouter = (await import('./routes/hrPolicy.routes.js')).default;
       const leaveRouter = (await import('./routes/leave.routes.js')).default;
+      const branchRouter = (await import('./routes/branch.routes.js')).default;
+      const departmentRouter = (await import('./routes/department.routes.js')).default;
+      const designationRouter = (await import('./routes/designation.routes.js')).default;
 
       app.use('/api/attendance', attendanceRouter);
       app.use('/api/holidays', holidayRouter);
@@ -287,6 +290,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/salary-structures', salaryStructureRouter);
       app.use('/api/hr-policies', hrPolicyRouter);
       app.use('/api/leaves', leaveRouter);
+      app.use('/api/branches', branchRouter);
+      app.use('/api/departments', departmentRouter);
+      app.use('/api/designations', designationRouter);
       
       const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
       const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;

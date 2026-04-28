@@ -72,6 +72,21 @@ const userSchema = new mongoose.Schema({
     ref: 'Company',
     required: false
   },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    required: false
+  },
+  departmentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Department',
+    required: false
+  },
+  designationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Designation',
+    required: false
+  },
 
   permissions: {
     role: {

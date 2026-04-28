@@ -152,7 +152,11 @@ export const getUserById = async (req, res) => {
     const { id } = req.params;
     const user = await User.findById(id)
       .select('-password')
-      .populate('companyId', 'name unitName city state displayName'); // Populate company info
+      .populate('companyId', 'name unitName city state displayName')
+      .populate('branchId', 'name')
+      .populate('departmentId', 'name')
+      .populate('designationId', 'name')
+      .populate('reportingManager', 'fullName name email profilePicture');
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -275,25 +279,20 @@ export const updateUser = async (req, res) => {
       });
     }
 
-    // Validate required fields
-    if (!email || !role) {
-      return res.status(400).json({
-        message: 'Email and role are required',
-        success: false
+    // Validate fields ONLY if they are provided
+    if (email) {
+      // Check for duplicate email (excluding current user)
+      const existingUser = await User.findOne({
+        _id: { $ne: id },
+        email: email.toLowerCase()
       });
-    }
 
-    // Check for duplicate email (excluding current user)
-    const existingUser = await User.findOne({
-      _id: { $ne: id },
-      email: email.toLowerCase()
-    });
-
-    if (existingUser) {
-      return res.status(400).json({
-        message: 'Email already exists',
-        success: false
-      });
+      if (existingUser) {
+        return res.status(400).json({
+          message: 'Email already exists',
+          success: false
+        });
+      }
     }
 
     const updateData = {};

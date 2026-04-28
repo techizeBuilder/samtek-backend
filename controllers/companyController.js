@@ -5,7 +5,7 @@ const checkCompanyPermission = (user, action) => {
   console.log('Checking company permission for user:', user?.role, 'action:', action);
 
   // Super Admin has all permissions (support both 'Superadmin' and 'Super Admin' variants)
-  if (user?.role === 'Superadmin' || user?.role === 'Super Admin') {
+  if (user?.role === 'Superadmin' || user?.role === 'Super Admin' || user?.role === 'HR-Admin') {
     return true;
   }
   // Unit Head has all company permissions
