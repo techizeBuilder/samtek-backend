@@ -9,7 +9,8 @@ import {
   updateUser,
   deleteUser,
   resetUserPassword,
-  updateUserPassword
+  updateUserPassword,
+  getNextEmployeeId
 } from './controllers/userController.js';
 import {
   getSettings,
@@ -373,6 +374,7 @@ router.patch('/users/:id/profile-picture', verifyToken, profileUpload.single('pr
 router.delete('/users/:id', verifyToken, deleteUser);
 router.post('/users/:id/reset-password', verifyToken, resetUserPassword);
 router.put('/users/:id/password', verifyToken, updateUserPassword);
+router.get('/users/generate-employee-id', verifyToken, getNextEmployeeId);
 
 // Settings Routes (Super Admin Only)
 router.get('/settings', verifyToken, getSettings);

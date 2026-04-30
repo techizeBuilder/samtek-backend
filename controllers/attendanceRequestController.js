@@ -178,7 +178,17 @@ export const updateAttendanceRequestStatus = async (req, res) => {
 /* ================= ADMIN / HR: GET ALL REQUESTS ================= */
 export const getAllAttendanceRequests = async (req, res) => {
   try {
-    const requests = await AttendanceRequest.find()
+    const filter = {};
+
+    // If user is not a global Super Admin, filter by their company
+    if (req.user.role !== 'Super Admin' && req.user.role !== 'Superadmin' && req.user.companyId) {
+      // Find all users in the same company
+      const usersInCompany = await User.find({ companyId: req.user.companyId }, "_id");
+      const userIds = usersInCompany.map(u => u._id);
+      filter.user = { $in: userIds };
+    }
+
+    const requests = await AttendanceRequest.find(filter)
       .populate("user", "name email role")
       .sort({ createdAt: -1 });
 
@@ -186,7 +196,7 @@ export const getAllAttendanceRequests = async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({
-      message: "Failed to fetch all attendance requests",
+      message: "Failed to fetch attendance requests",
     });
   }
 };

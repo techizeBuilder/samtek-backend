@@ -42,6 +42,11 @@ const userSchema = new mongoose.Schema({
   },
 
   // HRMS Fields
+  employeeId: {
+    type: String,
+    unique: true,
+    sparse: true
+  },
   mobile: {
     type: String,
     trim: true
@@ -70,6 +75,21 @@ const userSchema = new mongoose.Schema({
   companyId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Company',
+    required: false
+  },
+  branchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Branch',
+    required: false
+  },
+  departmentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Department',
+    required: false
+  },
+  designationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Designation',
     required: false
   },
 

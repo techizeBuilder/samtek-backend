@@ -328,7 +328,17 @@ export const getAllEmployeesLeaveRequests = async (
   res
 ) => {
   try {
-    const leaves = await Leave.find({})
+    const filter = {};
+    
+    // If user is not a global Super Admin, filter by their company
+    if (req.user.role !== 'Super Admin' && req.user.role !== 'Superadmin' && req.user.companyId) {
+      // Find all users in the same company
+      const usersInCompany = await User.find({ companyId: req.user.companyId }, "_id");
+      const userIds = usersInCompany.map(u => u._id);
+      filter.employee = { $in: userIds };
+    }
+
+    const leaves = await Leave.find(filter)
       .populate("employee", "name email role managerId")
       .sort({ createdAt: -1 });
 
@@ -336,7 +346,7 @@ export const getAllEmployeesLeaveRequests = async (
   } catch (error) {
     console.error(error);
     res.status(500).json({
-      message: "Failed to fetch all leave requests",
+      message: "Failed to fetch leave requests",
     });
   }
 };

@@ -1,7 +1,19 @@
 import User from '../models/User.js';
+import { Company } from '../models/Company.js';
 import { USER_ROLES } from '../shared/schema.js';
-
 import bcrypt from 'bcryptjs';
+import { generateEmployeeId } from '../utils/employeeUtils.js';
+
+export const getNextEmployeeId = async (req, res) => {
+  try {
+    const { companyId } = req.query;
+    const nextId = await generateEmployeeId(companyId);
+    return res.json({ employeeId: nextId });
+  } catch (error) {
+    console.error("Generate Employee ID error:", error);
+    return res.status(500).json({ message: "Failed to generate employee ID" });
+  }
+};
 
 export const getUsers = async (req, res) => {
   try {
@@ -152,7 +164,11 @@ export const getUserById = async (req, res) => {
     const { id } = req.params;
     const user = await User.findById(id)
       .select('-password')
-      .populate('companyId', 'name unitName city state displayName'); // Populate company info
+      .populate('companyId', 'name unitName city state displayName')
+      .populate('branchId', 'name')
+      .populate('departmentId', 'name')
+      .populate('designationId', 'name')
+      .populate('reportingManager', 'fullName name email profilePicture');
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -171,8 +187,8 @@ export const createUser = async (req, res) => {
   try {
     console.log('Create user request body:', req.body);
     const {
-      username, email, password, fullName, role, unit, companyId, permissions, isActive,
-      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType
+      username, email, password, fullName, role, unit, companyId, branchId, departmentId, designationId, permissions, isActive,
+      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId
     } = req.body;
 
     // Validate required fields
@@ -199,19 +215,40 @@ export const createUser = async (req, res) => {
     let finalCompanyId = companyId;
     let finalUnit = unit;
 
-    if (req.user && (req.user.role === 'HR-Admin' || req.user.role === 'Hr Admin')) {
+    if (req.user && (req.user.role === 'HR-Admin' || req.user.role === 'Hr Admin' || req.user.role === 'Company Admin')) {
       finalCompanyId = req.user.companyId || finalCompanyId;
       finalUnit = req.user.unit || finalUnit;
     }
 
+    let parsedPermissions = permissions;
+    if (permissions) {
+      try {
+        if (typeof permissions === 'string') {
+          parsedPermissions = JSON.parse(permissions);
+        }
+        if (typeof parsedPermissions === 'string') {
+          parsedPermissions = JSON.parse(parsedPermissions);
+        }
+      } catch (e) {
+        console.error('Failed to parse permissions:', e);
+        parsedPermissions = { role: role, canAccessAllUnits: false, modules: [] };
+      }
+    }
+
     // Build default permissions object - permissions.role is required by User model
-    const defaultPermissions = permissions || {
+    const defaultPermissions = parsedPermissions || {
       role: role,
       canAccessAllUnits: false,
       modules: []
     };
     if (!defaultPermissions.role) {
       defaultPermissions.role = role;
+    }
+
+    /* ================= EMPLOYEE ID ================= */
+    let finalEmployeeId = employeeId;
+    if (!finalEmployeeId && finalCompanyId) {
+      finalEmployeeId = await generateEmployeeId(finalCompanyId);
     }
 
     const userData = {
@@ -222,13 +259,17 @@ export const createUser = async (req, res) => {
       role,
       unit: finalUnit || '',
       companyId: finalCompanyId || null,
+      branchId: branchId || null,
+      departmentId: departmentId || null,
+      designationId: designationId || null,
       isActive: isActive !== undefined ? isActive : true,
       permissions: defaultPermissions,
       // HRMS fields
+      employeeId: finalEmployeeId,
       mobile: mobile || '',
       gender: gender || '',
       dob: dob || null,
-      joiningDate: joiningDate || null,
+      joiningDate: joiningDate || new Date(), // If joiningDate is missing, set to now (ERP logic)
       reportingManager: reportingManager || managerId || null,
       employeeType: employeeType || employmentType || ''
     };
@@ -262,8 +303,8 @@ export const updateUser = async (req, res) => {
     const { id } = req.params;
     console.log('Update user request:', id, req.body);
     const {
-      username, email, password, fullName, role, unit, companyId, permissions, isActive,
-      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType
+      username, email, password, fullName, role, unit, companyId, branchId, departmentId, designationId, permissions, isActive,
+      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId
     } = req.body;
 
     // Check if user exists
@@ -275,25 +316,20 @@ export const updateUser = async (req, res) => {
       });
     }
 
-    // Validate required fields
-    if (!email || !role) {
-      return res.status(400).json({
-        message: 'Email and role are required',
-        success: false
+    // Validate fields ONLY if they are provided
+    if (email) {
+      // Check for duplicate email (excluding current user)
+      const existingUser = await User.findOne({
+        _id: { $ne: id },
+        email: email.toLowerCase()
       });
-    }
 
-    // Check for duplicate email (excluding current user)
-    const existingUser = await User.findOne({
-      _id: { $ne: id },
-      email: email.toLowerCase()
-    });
-
-    if (existingUser) {
-      return res.status(400).json({
-        message: 'Email already exists',
-        success: false
-      });
+      if (existingUser) {
+        return res.status(400).json({
+          message: 'Email already exists',
+          success: false
+        });
+      }
     }
 
     const updateData = {};
@@ -311,7 +347,24 @@ export const updateUser = async (req, res) => {
     if (role !== undefined) updateData.role = role;
     if (unit !== undefined) updateData.unit = unit;
     if (companyId !== undefined) updateData.companyId = companyId || null;
-    if (permissions !== undefined) updateData.permissions = permissions;
+    if (branchId !== undefined) updateData.branchId = branchId || null;
+    if (departmentId !== undefined) updateData.departmentId = departmentId || null;
+    if (designationId !== undefined) updateData.designationId = designationId || null;
+    if (employeeId !== undefined) updateData.employeeId = employeeId;
+    if (permissions !== undefined) {
+      let parsedPermissions = permissions;
+      try {
+        if (typeof permissions === 'string') {
+          parsedPermissions = JSON.parse(permissions);
+        }
+        if (typeof parsedPermissions === 'string') {
+          parsedPermissions = JSON.parse(parsedPermissions);
+        }
+      } catch (e) {
+        console.error('Failed to parse permissions:', e);
+      }
+      updateData.permissions = parsedPermissions;
+    }
 
     // HRMS fields
     if (mobile !== undefined) updateData.mobile = mobile;
