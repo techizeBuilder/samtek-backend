@@ -8,14 +8,24 @@ export const USER_ROLES = {
   DISPATCH: 'Dispatch',
   ACCOUNTS: 'Accounts',
   SALES: 'Sales',
+  PRODUCTION_HEAD: 'Production Head',
+  PACKING_HEAD: 'Packing Head',
+  DISPATCH_HEAD: 'Dispatch Head',
+  ACCOUNTS_HEAD: 'Accounts Head',
+  SALES_HEAD: 'Sales Head',
   HR_ADMIN: 'HR-Admin',
   // HRMS Employee Roles
   MANAGER: 'Manager',
   EMPLOYEE: 'Employee',
+  SALES_EMPLOYEE: 'Sales Employee',
+  PRODUCTION_EMPLOYEE: 'Production Employee',
+  PACKING_EMPLOYEE: 'Packing Employee',
+  DISPATCH_EMPLOYEE: 'Dispatch Employee',
+  ACCOUNT_EMPLOYEE: 'Account Employee',
   FINANCE_MANAGER: 'Finance Manager',
   AUDITOR: 'Auditor',
   ADMIN: 'Admin',
-  IT_ADMIN: 'IT Admin',
+  COMPANY_ADMIN: 'Company Admin',
 };
 
 export const MODULES = {

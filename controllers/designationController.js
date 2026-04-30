@@ -19,6 +19,14 @@ export const getDesignations = async (req, res) => {
   const { companyId, departmentId } = req.query;
 
   const filter = {};
+
+  // Role-based filtering for Company Admin / Unit Head / etc.
+  if (req.user && req.user.role !== 'Super Admin' && req.user.role !== 'HR-Admin') {
+    if (req.user.companyId) {
+      filter.companyId = req.user.companyId;
+    }
+  }
+
   if (companyId) filter.companyId = companyId;
   if (departmentId) filter.departmentId = departmentId;
 

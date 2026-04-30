@@ -42,6 +42,11 @@ const userSchema = new mongoose.Schema({
   },
 
   // HRMS Fields
+  employeeId: {
+    type: String,
+    unique: true,
+    sparse: true
+  },
   mobile: {
     type: String,
     trim: true

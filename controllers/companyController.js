@@ -1,4 +1,6 @@
 import { Company } from '../models/Company.js';
+import User from '../models/User.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 // Helper function to check company permissions
 const checkCompanyPermission = (user, action) => {
@@ -8,8 +10,8 @@ const checkCompanyPermission = (user, action) => {
   if (user?.role === 'Superadmin' || user?.role === 'Super Admin' || user?.role === 'HR-Admin') {
     return true;
   }
-  // Unit Head has all company permissions
-  if (user?.role === 'Unit Head') {
+  // Unit Head / Company Admin has all company permissions
+  if (user?.role === 'Unit Head' || user?.role === 'Company Admin') {
     return true;
   }
   return user?.permissions?.Company?.[action] === true;
@@ -137,7 +139,13 @@ export const getCompanyById = async (req, res) => {
 // Create new company
 export const createCompany = async (req, res) => {
   try {
-    if (!checkCompanyPermission(req.user, 'create')) {
+    console.log('\n=== CREATE COMPANY REQUEST ===');
+    console.log('Requested by role:', req.user?.role);
+    console.log('createAdmin flag:', req.body.createAdmin, typeof req.body.createAdmin);
+    console.log('adminEmail:', req.body.adminEmail);
+    console.log('adminName:', req.body.adminName);
+
+    if (!checkCompanyPermission(req.user, 'create') || req.user.role === 'Company Admin') {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
@@ -212,6 +220,65 @@ export const createCompany = async (req, res) => {
 
     // Create company
     const company = await Company.create(companyData);
+
+    // Create Company Admin if requested
+    if (companyData.createAdmin === 'true' || companyData.createAdmin === true) {
+      const adminData = {
+        fullName: companyData.adminName,
+        username: companyData.adminEmail,
+        email: companyData.adminEmail,
+        password: companyData.adminPassword,
+        mobile: companyData.adminPhone,
+        role: USER_ROLES.COMPANY_ADMIN,
+        companyId: company._id,
+        unit: company.unitName,
+        permissions: {
+          role: USER_ROLES.COMPANY_ADMIN,
+          canAccessAllUnits: false,
+          modules: [
+            { name: 'hrms', dashboard: true, features: [] }
+          ]
+        }
+      };
+
+      console.log('\n=== ADMIN DATA BEING SAVED ===');
+      console.log(JSON.stringify({
+        fullName: adminData.fullName,
+        username: adminData.username,
+        email: adminData.email,
+        passwordLength: adminData.password?.length,
+        role: adminData.role,
+        companyId: adminData.companyId,
+        unit: adminData.unit,
+      }, null, 2));
+
+      try {
+        const createdAdmin = await User.create(adminData);
+        console.log('✅ Company Admin created:', createdAdmin._id, createdAdmin.email);
+      } catch (adminError) {
+        // Extract detailed validation errors
+        let errorDetail = adminError.message;
+        if (adminError.name === 'ValidationError') {
+          errorDetail = Object.values(adminError.errors).map(e => e.message).join(', ');
+        } else if (adminError.code === 11000) {
+          const dupField = Object.keys(adminError.keyPattern || {})[0];
+          errorDetail = `A user with this ${dupField} already exists.`;
+        }
+
+        console.error('❌ Failed to create company admin:');
+        console.error('  Error name:', adminError.name);
+        console.error('  Error code:', adminError.code);
+        console.error('  Error detail:', errorDetail);
+        console.error('  Full error:', adminError);
+
+        return res.status(201).json({
+          success: true,
+          message: 'Company created, but admin creation failed.',
+          company,
+          adminError: errorDetail
+        });
+      }
+    }
 
     res.status(201).json({
       success: true,
@@ -354,7 +421,7 @@ export const updateCompany = async (req, res) => {
 // Delete company
 export const deleteCompany = async (req, res) => {
   try {
-    if (!checkCompanyPermission(req.user, 'delete')) {
+    if (!checkCompanyPermission(req.user, 'delete') || req.user.role === 'Company Admin') {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
@@ -441,10 +508,10 @@ export const getCompaniesDropdown = async (req, res) => {
     if (req.user.role === 'Superadmin' || req.user.role === 'Super Admin') {
       // SUPER ADMIN: Show ALL companies (no filtering)
       console.log('Super Admin access - showing all companies');
-    } else if (req.user.role === 'Unit Head' && req.user.companyId) {
-      // UNIT HEAD: Only show their assigned company/location
+    } else if ((req.user.role === 'Unit Head' || req.user.role === 'Company Admin') && req.user.companyId) {
+      // UNIT HEAD / COMPANY ADMIN: Only show their assigned company/location
       filter._id = req.user.companyId;
-      console.log('Unit Head location filtering - showing only assigned company:', req.user.companyId);
+      console.log(`${req.user.role} location filtering - showing only assigned company:`, req.user.companyId);
     } else if ((req.user.role === 'Unit Manager' || req.user.role === 'Sales' || req.user.role === 'Production') && req.user.companyId) {
       // OTHER ROLES WITH COMPANY: Only show their assigned company
       filter._id = req.user.companyId;

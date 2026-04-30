@@ -24,9 +24,13 @@ export const createBranch = async (req, res) => {
 /**
  * GET ALL BRANCHES
  */
-export const getAllBranches = async (_req, res) => {
+export const getAllBranches = async (req, res) => {
   try {
-    const branches = await Branch.find()
+    const { companyId } = req.query;
+    const filter = {};
+    if (companyId) filter.companyId = companyId;
+
+    const branches = await Branch.find(filter)
       .populate("companyId", "name")
       .sort({ createdAt: -1 });
 

@@ -16,8 +16,21 @@ export const createDepartment = async (req, res) => {
 };
 
 /* GET ALL */
-export const getDepartments = async (_req, res) => {
-  const departments = await Department.find()
+export const getDepartments = async (req, res) => {
+  const { branchId, companyId } = req.query;
+  const filter = {};
+  
+  // Role-based filtering for Company Admin / Unit Head / etc.
+  if (req.user && req.user.role !== 'Super Admin' && req.user.role !== 'HR-Admin') {
+    if (req.user.companyId) {
+      filter.companyId = req.user.companyId;
+    }
+  }
+
+  if (branchId) filter.branchId = branchId;
+  if (companyId) filter.companyId = companyId;
+
+  const departments = await Department.find(filter)
     .populate("companyId", "name")
     .populate("branchId", "name")
     .populate("headEmployeeId", "name email");
