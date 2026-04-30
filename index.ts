@@ -310,6 +310,12 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/dispatches', dispatchRoutes);
       console.log('Dispatch routes registered at /api/dispatches');
 
+      // Hrms routes
+      const hrmsTaskManagementRoutes = (await import('./routes/hrmsTaskManagementRoutes.js')).default;
+      app.use('/api/hrms/tasks', hrmsTaskManagementRoutes);
+      console.log('HRMS Task Management routes registered at /api/hrms/tasks');
+
+
       // Add direct routes for specific endpoints
       const { authenticateToken } = await import('./middleware/auth.js');
       const { getAllOrders } = await import('./controllers/unitManagerController.js');
