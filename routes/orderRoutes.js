@@ -20,6 +20,7 @@ router.get('/check-existing', checkExistingOrder);
 router.get('/:id', getOrderById);
 router.put('/:id', updateOrder);
 router.patch('/:id/status', updateOrderStatus);
+
 router.delete('/:id', deleteOrder);
 
 export default router;

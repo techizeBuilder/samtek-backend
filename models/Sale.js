@@ -31,8 +31,7 @@ const saleItemSchema = new mongoose.Schema({
 const saleSchema = new mongoose.Schema({
   invoiceNumber: {
     type: String,
-    required: true,
-    unique: true
+    required: true
   },
   order: {
     type: mongoose.Schema.Types.ObjectId,
@@ -117,12 +116,29 @@ const saleSchema = new mongoose.Schema({
   },
   notes: {
     type: String
-  }
+  },
+  invoiceType: {
+    type: String,
+    enum: ['Pakka', 'Kachha'],
+    default: 'Pakka'
+  },
+  gstType: {
+    type: String,
+    enum: ['CGST_SGST', 'IGST'],
+    default: 'CGST_SGST'
+  },
+  // Track dates when reminders were sent (avoid duplicate emails)
+  reminderSentDates: [
+    {
+      sentAt: { type: Date },
+      type: { type: String, enum: ['first', 'second', 'overdue'] }
+    }
+  ]
 }, {
   timestamps: true
 });
 
-saleSchema.pre('save', function (next) {
+saleSchema.pre('save', async function () {
   if (!this.invoiceNumber) {
     this.invoiceNumber = `INV-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
   }
@@ -142,8 +158,6 @@ saleSchema.pre('save', function (next) {
       this.paymentStatus = 'Pending';
     }
   }
-
-  next();
 });
 
 export default mongoose.model('Sale', saleSchema);

@@ -137,7 +137,7 @@ const handleValidationErrors = (req, res, next) => {
 };
 
 export const getCustomers = [
-  validateCustomerQuery,
+  ...validateCustomerQuery,
   handleValidationErrors,
   async (req, res) => {
     try {
@@ -267,7 +267,7 @@ export const getCustomerById = async (req, res) => {
 };
 
 export const createCustomer = [
-  validateCustomer,
+  ...validateCustomer,
   handleValidationErrors,
   async (req, res) => {
     try {
@@ -351,7 +351,7 @@ export const createCustomer = [
 ];
 
 export const updateCustomer = [
-  validateCustomer,
+  ...validateCustomer,
   handleValidationErrors,
   async (req, res) => {
     try {

@@ -22,7 +22,8 @@ import {
   removePriorityProduct,
   updatePriorityProductUsage,
   getSalesCutoffTimeStatus,
-  downloadInvoicePDF
+  downloadInvoicePDF,
+  sendQuotationEmailHandler
 } from '../controllers/salesController.js';
 // Import with different names to avoid conflicts
 import { 
@@ -205,5 +206,6 @@ salesRouter.put('/update-damage/:id', updateSalespersonDamage);
 salesRouter.delete('/delete-damage/:id', deleteSalespersonDamage);
 salesRouter.get('/items', getSalespersonItems);
 salesRouter.get('/invoice/:id/pdf', downloadInvoicePDF);
+salesRouter.post('/send-quotation-email', sendQuotationEmailHandler);
 
 export default salesRouter;

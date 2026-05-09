@@ -4,6 +4,9 @@ import { Item } from '../models/Inventory.js';
 import ProductDailySummary from '../models/ProductDailySummary.js';
 import CutoffTime from '../models/CutoffTime.js';
 import notificationService from '../services/notificationService.js';
+import Sale from '../models/Sale.js';
+import { Transaction, Account } from '../models/Account.js';
+import mongoose from 'mongoose';
 
 // Create new order
 const createOrder = async (req, res) => {
@@ -586,17 +589,27 @@ const updateOrderStatus = async (req, res) => {
       // Allow all status updates
     }
     // Sales can only update to Cancelled if pending
-    else if (userRole === 'Sales') {
+    // Sales can approve their own orders or cancel them if pending
+    else if (userRole === 'Sales' || userRole === 'sales') {
       if (order.salesPerson?.toString() !== req.user._id.toString()) {
         return res.status(403).json({
           success: false,
           message: 'You can only update your own orders'
         });
       }
-      if (status !== 'cancelled' || order.status !== 'pending') {
+      
+      const allowedSalesStatuses = ['cancelled', 'approved'];
+      if (!allowedSalesStatuses.includes(status)) {
         return res.status(403).json({
           success: false,
-          message: 'Sales can only cancel pending orders'
+          message: 'Sales can only approve or cancel orders'
+        });
+      }
+
+      if (order.status !== 'pending') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot change status from ${order.status} to ${status}`
         });
       }
     }
@@ -621,7 +634,19 @@ const updateOrderStatus = async (req, res) => {
     if (status === 'approved') {
       order.approvedBy = req.user._id;
       order.approvedAt = new Date();
-      
+
+      // If approved by Sales, mark as approved (Manual Invoice Generation will happen in Accounts)
+      if (userRole === 'Sales' || userRole === 'sales') {
+        order.status = 'approved';
+        order.statusHistory.push({
+          status: 'approved',
+          updatedBy: req.user._id,
+          updatedAt: new Date(),
+          remarks: 'Order approved by Sales person. Pending invoice generation.'
+        });
+        await order.save();
+        console.log(`✅ Order ${order.orderCode} approved by Sales. Pending manual invoicing.`);
+      }
     } else if (status === 'rejected') {
       order.rejectionReason = remarks;
     } else if (status === 'in_production') {
@@ -708,6 +733,8 @@ const checkExistingOrder = async (req, res) => {
     });
   }
 };
+
+
 
 export {
   createOrder,

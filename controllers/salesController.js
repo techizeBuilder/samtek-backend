@@ -9,7 +9,7 @@ import { Company } from '../models/Company.js';
 import { USER_ROLES } from '../shared/schema.js';
 import PriorityProduct from '../models/PriorityProduct.js';
 import CutoffTime from '../models/CutoffTime.js';
-import { generateStandardizedInvoicePDF } from '../utils/invoicePdf.js';
+import { sendPaymentReminderEmail, sendQuotationEmail } from '../services/emailService.js';
 
 export const getSales = async (req, res) => {
   try {
@@ -2112,3 +2112,36 @@ export const deleteSalespersonDamage = async (req, res) => {
     });
   }
 };
+
+// Handle sending quotation email
+export const sendQuotationEmailHandler = async (req, res) => {
+  console.log('📬 [API] Received request to send quotation email');
+  try {
+    const { to, customerName, leadCode, attachmentBase64 } = req.body;
+    const userCompanyId = req.user.companyId;
+
+    // Fetch company name for branding
+    const company = await Company.findById(userCompanyId);
+    const companyName = company ? company.name : 'Samtek Machinery';
+
+    console.log('📧 Starting email transmission via service...');
+    const result = await sendQuotationEmail({
+      to,
+      customerName,
+      leadCode,
+      companyName,
+      attachmentBase64
+    });
+    console.log('📧 Email service call completed');
+
+    if (result.success) {
+      res.json({ success: true, message: 'Quotation sent successfully' });
+    } else {
+      res.status(500).json({ success: false, message: 'Failed to send quotation', error: result.error });
+    }
+  } catch (error) {
+    console.error('❌ Error in sendQuotationEmailHandler:', error);
+    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+};
+
