@@ -189,6 +189,13 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
     // STEP 2: Register API routes DIRECTLY
     try {
+
+      // Complaint and Service routes
+      const complaintRoutes = (await import('./routes/complaintServiceRoutes.js')).default;
+      app.use('/api/complaints', complaintRoutes);
+      console.log('Complaint and Service routes registered at /api/complaints');
+
+
       const authRoutes = (await import('./auth-routes.js')).default;
       app.use('/api', authRoutes);
 
@@ -295,7 +302,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/branches', branchRouter);
       app.use('/api/departments', departmentRouter);
       app.use('/api/designations', designationRouter);
-      
+
       const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
       const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;
       const expenseRequestRouter = (await import('./routes/expenseRequest.routes.js')).default;
@@ -322,7 +329,6 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       const hrmsTaskManagementRoutes = (await import('./routes/hrmsTaskManagementRoutes.js')).default;
       app.use('/api/hrms/tasks', hrmsTaskManagementRoutes);
       console.log('HRMS Task Management routes registered at /api/hrms/tasks');
-
 
       // Add direct routes for specific endpoints
       const { authenticateToken } = await import('./middleware/auth.js');

@@ -50,6 +50,10 @@ const checkInventoryPermission = (user, action) => {
   if (user.role === 'Sales' && action === 'view') {
     return true;
   }
+  // need finalized role for technican to view items for complaint service module
+  if(user.role === 'Employee' && action === 'view') {
+    return true;
+  }
 
   return user.permissions?.Inventory?.[action] === true;
 };
