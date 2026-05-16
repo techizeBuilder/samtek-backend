@@ -186,12 +186,15 @@ export const getTeamAttendance = async (req, res) => {
       },
     }).populate({
       path: "user",
-      select: "name role managerId",
-      match: { managerId },
-    });
+      select: "fullName username role managerId",
+      match: { reportingManager: managerId },
+    }).lean();
 
     // remove null users (not in manager's team)
-    const filtered = records.filter((r) => r.user);
+    const filtered = records.filter((r) => r.user).map(r => {
+      r.user.name = r.user.fullName || r.user.username || 'Unknown';
+      return r;
+    });
 
     return res.json(filtered);
   } catch (err) {
@@ -223,7 +226,8 @@ export const getAllAttendance = async (req, res) => {
     const searchQuery = search
       ? {
         $or: [
-          { name: { $regex: search, $options: "i" } },
+          { fullName: { $regex: search, $options: "i" } },
+          { username: { $regex: search, $options: "i" } },
           { role: { $regex: search, $options: "i" } },
         ],
       }
@@ -243,26 +247,43 @@ export const getAllAttendance = async (req, res) => {
       userFilter.companyId = req.user.companyId;
     }
 
-    let usersQuery = User.find(userFilter, "name role").lean();
+    // Filter by reportingManager if user is a Manager
+    if (req.user.role === 'Manager') {
+      userFilter.reportingManager = req.user._id;
+    }
+
+    let usersQuery = User.find(userFilter, "fullName username role").lean();
 
     if (isPaginated) {
       usersQuery = usersQuery.skip(skip).limit(limitNum);
     }
 
-    const [users, totalUsers] = await Promise.all([
+    const [fetchedUsers, totalUsers] = await Promise.all([
       usersQuery,
       User.countDocuments(userFilter),
     ]);
 
+    const users = fetchedUsers.map(u => ({
+      ...u,
+      name: u.fullName || u.username || 'Unknown'
+    }));
+
     const userIds = users.map((u) => u._id);
 
     /* 2️⃣ ATTENDANCE */
-    const attendance = await Attendance.find({
+    const attendanceRecords = await Attendance.find({
       user: { $in: userIds },
       date: { $gte: startDateStr, $lte: endDateStr },
     })
-      .populate("user", "name role")
+      .populate("user", "fullName username role")
       .lean();
+
+    const attendance = attendanceRecords.map(a => {
+      if (a.user) {
+        a.user.name = a.user.fullName || a.user.username || 'Unknown';
+      }
+      return a;
+    });
 
     /* 3️⃣ TODAY PRESENT */
     const totalTodayPresent = await Attendance.distinct("user", {

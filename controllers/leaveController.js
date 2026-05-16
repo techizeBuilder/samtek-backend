@@ -35,7 +35,7 @@ export const applyLeave = async (req, res) => {
       return res.status(400).json({ message: "Invalid leave type" });
     }
 
-    const empObjectId = new mongoose.Types.ObjectId(req.user.id);
+    const empObjectId = new mongoose.Types.ObjectId(req.user._id);
 
     // 🔹 calculate used leaves (APPROVED only)
     const usedAgg = await Leave.aggregate([
@@ -84,7 +84,7 @@ export const applyLeave = async (req, res) => {
 
     // 🔹 create leave (NO remainingLeaves saved)
     const leave = await Leave.create({
-      employee: req.user.id,
+      employee: req.user._id,
       leaveType,
       fromDate,
       toDate,
@@ -104,7 +104,7 @@ export const applyLeave = async (req, res) => {
 export const getMyLeaves = async (req, res) => {
   try {
     const leaves = await Leave.find({
-      employee: req.user.id,
+      employee: req.user._id,
     }).sort({ createdAt: -1 });
 
     res.json(leaves);
@@ -120,7 +120,7 @@ export const updateLeave = async (req, res) => {
 
     const leave = await Leave.findOne({
       _id: req.params.id,
-      employee: req.user.id,
+      employee: req.user._id,
     });
 
     if (!leave) {
@@ -140,7 +140,7 @@ export const updateLeave = async (req, res) => {
       return res.status(400).json({ message: "Invalid leave type" });
     }
 
-    const empObjectId = new mongoose.Types.ObjectId(req.user.id);
+    const empObjectId = new mongoose.Types.ObjectId(req.user._id);
 
     const usedAgg = await Leave.aggregate([
       {
@@ -205,7 +205,7 @@ export const deleteLeave = async (req, res) => {
   try {
     const leave = await Leave.findOneAndDelete({
       _id: req.params.id,
-      employee: req.user.id,
+      employee: req.user._id,
       status: "PENDING",
     });
 
@@ -223,7 +223,7 @@ export const deleteLeave = async (req, res) => {
 
 export const getTodayTeamLeaves = async (req, res) => {
   try {
-    const managerId = req.user.id;
+    const managerId = req.user._id;
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -235,13 +235,19 @@ export const getTodayTeamLeaves = async (req, res) => {
     })
       .populate({
         path: "employee",
-        select: "name role email managerId",
-        match: { managerId }, // ✅ sirf is manager ki team
+        select: "fullName role email reportingManager username",
+        match: { reportingManager: managerId }, // ✅ sirf is manager ki team
       })
-      .sort({ fromDate: 1 });
+      .sort({ fromDate: 1 })
+      .lean();
 
     // ❗ populate ke baad null employees hata do
-    const filteredLeaves = leaves.filter((leave) => leave.employee);
+    const filteredLeaves = leaves.filter((leave) => leave.employee).map(l => {
+      if (l.employee) {
+        l.employee.name = l.employee.fullName || l.employee.username || 'Unknown';
+      }
+      return l;
+    });
 
     res.json(filteredLeaves);
   } catch (error) {
@@ -254,19 +260,27 @@ export const getTodayTeamLeaves = async (req, res) => {
 
 export const getAllLeaveRequests = async (req, res) => {
   try {
-    const managerId = req.user.id;
+    const managerId = req.user._id;
 
     // 🔹 Step 1: manager ke under ke employees
-    const teamEmployees = await User.find({ managerId }, "_id");
+    const teamEmployees = await User.find({ reportingManager: managerId }, "_id");
 
     const employeeIds = teamEmployees.map((e) => e._id);
 
     // 🔹 Step 2: un employees ki leave requests
-    const leaves = await Leave.find({
+    const fetchedLeaves = await Leave.find({
       employee: { $in: employeeIds },
     })
-      .populate("employee", "name email role")
-      .sort({ createdAt: -1 });
+      .populate("employee", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const leaves = fetchedLeaves.map(l => {
+      if (l.employee) {
+        l.employee.name = l.employee.fullName || l.employee.username || 'Unknown';
+      }
+      return l;
+    });
 
     res.status(200).json(leaves);
   } catch (error) {
@@ -292,7 +306,7 @@ export const updateLeaveStatus = async (req, res) => {
       id,
       { status, remark },
       { new: true },
-    ).populate("employee", "name email");
+    ).populate("employee", "fullName email");
 
     if (!leave || !leave.employee) {
       return res.status(404).json({ message: "Leave not found" });
@@ -337,10 +351,17 @@ export const getAllEmployeesLeaveRequests = async (
       const userIds = usersInCompany.map(u => u._id);
       filter.employee = { $in: userIds };
     }
+    const fetchedLeaves = await Leave.find(filter)
+      .populate("employee", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
 
-    const leaves = await Leave.find(filter)
-      .populate("employee", "name email role managerId")
-      .sort({ createdAt: -1 });
+    const leaves = fetchedLeaves.map(l => {
+      if (l.employee) {
+        l.employee.name = l.employee.fullName || l.employee.username || 'Unknown';
+      }
+      return l;
+    });
 
     res.status(200).json(leaves);
   } catch (error) {

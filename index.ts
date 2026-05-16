@@ -291,6 +291,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       const branchRouter = (await import('./routes/branch.routes.js')).default;
       const departmentRouter = (await import('./routes/department.routes.js')).default;
       const designationRouter = (await import('./routes/designation.routes.js')).default;
+      const statutoryReportRouter = (await import('./routes/statutoryReport.routes.js')).default;
+      const hrmsDashboardRouter = (await import('./routes/hrmsDashboard.routes.js')).default;
+      const leaveBalanceAdjustmentRouter = (await import('./routes/leaveBalanceAdjustment.routes.js')).default;
+      const performanceRouter = (await import('./routes/performance.routes.js')).default;
 
       app.use('/api/attendance', attendanceRouter);
       app.use('/api/holidays', holidayRouter);
@@ -305,6 +309,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/branches', branchRouter);
       app.use('/api/departments', departmentRouter);
       app.use('/api/designations', designationRouter);
+      app.use('/api/statutory-reports', statutoryReportRouter);
+      app.use('/api/hrms-dashboard', hrmsDashboardRouter);
+      app.use('/api/leave-balance-adjustments', leaveBalanceAdjustmentRouter);
+      app.use('/api/performance', performanceRouter);
       
       const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
       const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;

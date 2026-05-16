@@ -48,7 +48,13 @@ export const addCandidate = async (req, res) => {
 export const getAllCandidates = async (_req, res) => {
   try {
     const candidates = await Candidate.find()
-      .populate("jobId", "jobTitle recruitingManager")
+      .populate({
+        path: "jobId",
+        populate: {
+          path: "recruitingManager",
+          select: "name",
+        },
+      })
       .sort({ createdAt: -1 });
     res.json(candidates);
   } catch (error) {

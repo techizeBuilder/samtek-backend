@@ -144,16 +144,24 @@ export const getTeamProfileUpdateRequests = async (
     const managerId = req.user._id;
 
     // 1️⃣ find employees under this manager
-    const teamMembers = await User.find({ managerId }, "_id name email role");
+    const teamMembers = await User.find({ reportingManager: managerId }, "_id fullName username email role");
 
     const teamIds = teamMembers.map((u) => u._id);
 
     // 2️⃣ fetch profile update requests of those employees
-    const requests = await ProfileUpdate.find({
+    const fetchedRequests = await ProfileUpdate.find({
       employee: { $in: teamIds },
     })
-      .populate("employee", "name email role")
-      .sort({ createdAt: -1 });
+      .populate("employee", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const requests = fetchedRequests.map(r => {
+      if (r.employee) {
+        r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
+      }
+      return r;
+    });
 
     res.json(requests);
   } catch (error) {

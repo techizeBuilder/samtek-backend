@@ -152,17 +152,25 @@ export const getTeamOvertimeRequests = async (
   try {
     const managerId = req.user._id;
 
-    // 1️⃣ find team members (jinka managerId = logged-in manager)
-    const teamMembers = await User.find({ managerId }, "_id name email role");
+    // 1️⃣ find team members (jinka reportingManager = logged-in manager)
+    const teamMembers = await User.find({ reportingManager: managerId }, "_id fullName username email role");
 
     const teamIds = teamMembers.map((u) => u._id);
 
     // 2️⃣ un employees ki overtime requests
-    const requests = await Overtime.find({
+    const fetchedRequests = await Overtime.find({
       employee: { $in: teamIds },
     })
-      .populate("employee", "name email role")
-      .sort({ createdAt: -1 });
+      .populate("employee", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const requests = fetchedRequests.map(r => {
+      if (r.employee) {
+        r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
+      }
+      return r;
+    });
 
     res.json(requests);
   } catch (error) {

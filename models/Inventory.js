@@ -12,6 +12,10 @@ const itemSchema = new mongoose.Schema({
     unique: true,
     trim: true
   },
+  group: {
+    type: String,
+    trim: true
+  },
   category: {
     type: String,
     required: true,
@@ -75,6 +79,14 @@ const itemSchema = new mongoose.Schema({
     max: 100,
     default: 0
   },
+  currency: {
+    type: String,
+    default: 'INR'
+  },
+  unitType: {
+    type: String,
+    default: 'Nos'
+  },
   mrp: {
     type: Number,
     min: 0,
@@ -130,9 +142,49 @@ const itemSchema = new mongoose.Schema({
     trim: true,
     default: ""
   },
+  dealerPrice: {
+    type: Number,
+    min: 0,
+    default: 0
+  },
+  brochureUrl: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  videoUrl: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  uses: {
+    type: String,
+    trim: true
+  },
+  otherInfo: {
+    type: String,
+    trim: true
+  },
+  specifications: [{
+    key: String,
+    value: String
+  }],
+  minOrderQty: {
+    type: Number,
+    min: 0,
+    default: 1
+  },
+  variant: {
+    type: String,
+    trim: true
+  },
   order: {
     type: Number,
     default: 0
+  },
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company'
   }
 }, {
   timestamps: true
@@ -178,6 +230,8 @@ itemSchema.index({ category: 1, subCategory: 1 });
 itemSchema.index({ type: 1 });
 itemSchema.index({ qty: 1, minStock: 1 });
 itemSchema.index({ order: 1 });
+itemSchema.index({ companyId: 1 });
+itemSchema.index({ store: 1 });
 
 export const Item = mongoose.model('Item', itemSchema);
 export const Category = mongoose.model('Category', categorySchema);

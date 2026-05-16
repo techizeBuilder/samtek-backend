@@ -28,6 +28,8 @@ export const USER_ROLES = {
   RESEARCH_DEVELOPMENT_EMPLOYEE: 'Research Development Employee',
   COMPLAINT_MANAGEMENT_HEAD: 'Complaint Management Head',
   COMPLAINT_MANAGEMENT_EMPLOYEE: 'Complaint Management Employee',
+  STORE_HEAD: 'Store Head',
+  STORE_EMPLOYEE: 'Store Employee',
 };
 
 export const MODULES = {
@@ -42,7 +44,8 @@ export const MODULES = {
   SUPPLIERS: 'Suppliers',
   PURCHASES: 'Purchases',
   SETTINGS: 'Settings',
-  HRMS: 'hrms'
+  HRMS: 'hrms',
+  STORE: 'Store'
 };
 
 export const PERMISSIONS = {

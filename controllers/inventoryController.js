@@ -42,7 +42,7 @@ const DELIVERY_CHALLAN_ORDER = [
 // Helper function to check inventory permissions
 const checkInventoryPermission = (user, action) => {
   // Super Admin and Unit Head have all permissions
-  if (user.role === 'Superadmin' || user.role === 'Unit Head') {
+  if (user.role === 'Super Admin' || user.role === 'Unit Head') {
     return true;
   }
 

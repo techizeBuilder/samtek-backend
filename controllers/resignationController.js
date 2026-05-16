@@ -96,9 +96,17 @@ export const deleteResignation = async (req, res) => {
 /* ================= MANAGER / ADMIN: GET ALL ================= */
 export const getAllResignations = async (req, res) => {
   try {
-    const data = await Resignation.find()
-      .populate("employee", "name email role")
-      .sort({ createdAt: -1 });
+    const fetchedData = await Resignation.find()
+      .populate("employee", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    const data = fetchedData.map(r => {
+      if (r.employee) {
+        r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
+      }
+      return r;
+    });
     res.json(data);
   } catch (error) {
     console.error(error);
@@ -110,12 +118,20 @@ export const getAllResignations = async (req, res) => {
 export const getTeamResignations = async (req, res) => {
   try {
     const managerId = req.user._id;
-    const team = await User.find({ managerId }, "_id");
+    const team = await User.find({ reportingManager: managerId }, "_id");
     const teamIds = team.map((u) => u._id);
 
-    const data = await Resignation.find({ employee: { $in: teamIds } })
-      .populate("employee", "name email role")
-      .sort({ createdAt: -1 });
+    const fetchedData = await Resignation.find({ employee: { $in: teamIds } })
+      .populate("employee", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const data = fetchedData.map(r => {
+      if (r.employee) {
+        r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
+      }
+      return r;
+    });
     res.json(data);
   } catch (error) {
     console.error(error);

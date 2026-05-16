@@ -12,10 +12,18 @@ export const getPayrollByMonth = async (req, res) => {
     }
 
     const payroll = await Payroll.find({ month })
-      .populate("employee", "name email role")
+      .populate("employee", "fullName username email role")
       .sort({ createdAt: -1 });
 
-    res.json(payroll);
+    const formattedPayroll = payroll.map(p => {
+      const pObj = p.toObject();
+      if (pObj.employee) {
+        pObj.employee.name = pObj.employee.fullName || pObj.employee.username || 'Unknown';
+      }
+      return pObj;
+    });
+
+    res.json(formattedPayroll);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch payroll" });
   }
@@ -40,7 +48,7 @@ export const savePayroll = async (req, res) => {
             net: p.net,
             payDays: p.payDays || 0,
             lopDays: p.lopDays || 0,
-            status: "Processed",
+            status: "Paid",
           },
         },
         upsert: true,
@@ -61,14 +69,19 @@ export const updatePayrollStatus = async (req, res) => {
   try {
     const { status } = req.body;
 
-    const payroll = await Payroll.findByIdAndUpdate(
+    const payrollDoc = await Payroll.findByIdAndUpdate(
       req.params.id,
       { status },
       { new: true }
-    ).populate("employee", "name email role");
+    ).populate("employee", "fullName username email role");
 
-    if (!payroll) {
+    if (!payrollDoc) {
       return res.status(404).json({ message: "Payroll not found" });
+    }
+
+    const payroll = payrollDoc.toObject();
+    if (payroll.employee) {
+      payroll.employee.name = payroll.employee.fullName || payroll.employee.username || 'Unknown';
     }
 
     res.json(payroll);
@@ -167,7 +180,7 @@ export const recalculatePayroll = async (
     payroll.payDays = req.body.payDays || 0;
     payroll.lopDays = req.body.lopDays || 0;
 
-    payroll.status = "Processed"; // 🔥 reset status
+    payroll.status = "Paid"; // 🔥 reset status directly to paid
     payroll.rejectReason = undefined;
     payroll.rejectedAt = undefined;
 

@@ -47,7 +47,7 @@ const createOrder = async (req, res) => {
             errors[`products[${i}].productId`] = 'Product not found';
           }
         }
-        
+
         if (!product.quantity || product.quantity <= 0) {
           errors[`products[${i}].quantity`] = 'Quantity must be greater than 0';
         }
@@ -66,11 +66,11 @@ const createOrder = async (req, res) => {
     // Check if order creation is allowed based on cutoff time (only for Sales role)
     if (req.user.role === 'Sales' || req.user.role === 'sales') {
       console.log('🕐 Checking cutoff time for Sales user:', req.user.username, 'Company:', req.user.companyId);
-      
+
       if (req.user.companyId) {
         try {
           const orderPermission = await CutoffTime.canPlaceOrder(req.user.companyId);
-          
+
           if (!orderPermission.allowed) {
             console.log('❌ Order blocked by cutoff time:', orderPermission.message);
             return res.status(403).json({
@@ -80,7 +80,7 @@ const createOrder = async (req, res) => {
               isPastCutoff: true
             });
           }
-          
+
           console.log('✅ Order allowed by cutoff time check:', orderPermission.message);
         } catch (cutoffError) {
           console.error('Error checking cutoff time:', cutoffError);
@@ -98,7 +98,7 @@ const createOrder = async (req, res) => {
       const product = await Item.findById(productItem.productId);
       const itemTotal = product.salePrice * productItem.quantity;
       totalAmount += itemTotal;
-      
+
       orderProducts.push({
         product: productItem.productId,
         quantity: productItem.quantity,
@@ -111,11 +111,11 @@ const createOrder = async (req, res) => {
     let orderCode;
     let isUnique = false;
     let attempts = 0;
-    
+
     while (!isUnique && attempts < 10) {
       const orderCount = await Order.countDocuments();
       orderCode = `ORD-${String(orderCount + 1 + attempts).padStart(4, '0')}`;
-      
+
       // Check if this code already exists
       const existingOrder = await Order.findOne({ orderCode });
       if (!existingOrder) {
@@ -124,7 +124,7 @@ const createOrder = async (req, res) => {
         attempts++;
       }
     }
-    
+
     if (!isUnique) {
       // Fallback to timestamp-based code if still not unique
       orderCode = `ORD-${Date.now().toString().slice(-6)}`;
@@ -220,14 +220,14 @@ const getOrders = async (req, res) => {
     if (userRole === 'Unit Manager' && userCompanyId) {
       // Get sales persons from the same company
       const User = (await import('../models/User.js')).default;
-      const companySalesPersons = await User.find({ 
-        companyId: userCompanyId,
+      const companySalesPersons = await User.find({
+        companyId: new mongoose.Types.ObjectId(userCompanyId),
         role: { $in: ['Sales', 'Unit Manager', 'Unit Head'] }
       }).select('_id username fullName role').lean();
-      
+
       const salesPersonIds = companySalesPersons.map(sp => sp._id);
       filter.salesPerson = { $in: salesPersonIds };
-      
+
       console.log('🏢 UNIT MANAGER COMPANY FILTERING');
       console.log('Company ID:', userCompanyId);
       console.log('Company Sales Persons Found:', companySalesPersons.length);
@@ -238,8 +238,8 @@ const getOrders = async (req, res) => {
     }
     // Role-based filtering: Sales users only see their OWN orders
     else if (userRole === 'Sales') {
-      filter.salesPerson = salespersonId;
-      filter.companyId = userCompanyId; // Additional company isolation
+      filter.salesPerson = new mongoose.Types.ObjectId(salespersonId);
+      filter.companyId = new mongoose.Types.ObjectId(userCompanyId); // Additional company isolation
       console.log('👤 SALES PERSON FILTERING - Own orders only from own company');
       console.log('Filter applied:', { salesPerson: salespersonId, companyId: userCompanyId });
     }
@@ -251,14 +251,14 @@ const getOrders = async (req, res) => {
     else {
       if (userCompanyId) {
         const User = (await import('../models/User.js')).default;
-        const companySalesPersons = await User.find({ 
-          companyId: userCompanyId,
+        const companySalesPersons = await User.find({
+          companyId: new mongoose.Types.ObjectId(userCompanyId),
           role: { $in: ['Sales', 'Unit Manager', 'Unit Head'] }
         }).select('_id username fullName role').lean();
-        
+
         const salesPersonIds = companySalesPersons.map(sp => sp._id);
         filter.salesPerson = { $in: salesPersonIds };
-        
+
         console.log(`🏢 ${userRole.toUpperCase()} COMPANY FILTERING`);
         console.log('Company ID:', userCompanyId);
         console.log('Company Sales Persons Found:', companySalesPersons.length);
@@ -311,7 +311,7 @@ const getOrders = async (req, res) => {
     // Build sort query
     const sort = {};
     sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
-    
+
     console.log('Sort query:', sort, 'sortBy:', sortBy, 'sortOrder:', sortOrder);
 
     // Calculate pagination
@@ -337,7 +337,7 @@ const getOrders = async (req, res) => {
     console.log('=== QUERY RESULTS ===');
     console.log('Orders found:', orders.length);
     console.log('Total orders matching filter:', totalOrders);
-    
+
     if (orders.length > 0) {
       console.log('Sample orders:');
       orders.slice(0, 3).forEach(order => {
@@ -418,11 +418,11 @@ const updateOrder = async (req, res) => {
     // Check if order editing is allowed based on cutoff time (only for Sales role)
     if (req.user.role === 'Sales' || req.user.role === 'sales') {
       console.log('🕐 Checking cutoff time for order edit by Sales user:', req.user.username, 'Company:', req.user.companyId);
-      
+
       if (req.user.companyId) {
         try {
           const orderPermission = await CutoffTime.canPlaceOrder(req.user.companyId);
-          
+
           if (!orderPermission.allowed) {
             console.log('❌ Order edit blocked by cutoff time:', orderPermission.message);
             return res.status(403).json({
@@ -432,7 +432,7 @@ const updateOrder = async (req, res) => {
               isPastCutoff: true
             });
           }
-          
+
           console.log('✅ Order edit allowed by cutoff time check:', orderPermission.message);
         } catch (cutoffError) {
           console.error('Error checking cutoff time for order edit:', cutoffError);
@@ -458,18 +458,18 @@ const updateOrder = async (req, res) => {
         console.log('🔍 Processing product:', productItem);
         const product = await Item.findById(productItem.productId);
         console.log('📦 Found product:', product ? { id: product._id, name: product.name, salePrice: product.salePrice } : 'Not found');
-        
+
         if (product) {
           const itemTotal = (product.salePrice || 0) * productItem.quantity;
           totalAmount += itemTotal;
-          
+
           orderProducts.push({
             product: productItem.productId,
             quantity: productItem.quantity,
             price: product.salePrice || 0,
             total: itemTotal
           });
-          
+
           console.log('✅ Added product to order:', {
             productId: productItem.productId,
             quantity: productItem.quantity,
@@ -483,10 +483,10 @@ const updateOrder = async (req, res) => {
 
       console.log('💰 Total amount calculated:', totalAmount);
       console.log('📋 Order products array:', orderProducts);
-      
+
       order.products = orderProducts;
       order.totalAmount = totalAmount;
-      
+
       console.log('🔄 Updated order products count:', order.products.length);
     }
 
@@ -583,7 +583,7 @@ const updateOrderStatus = async (req, res) => {
 
     // Role-based permissions for status updates
     const userRole = req.user.role;
-    
+
     // Unit Manager can update any status
     if (userRole === 'Unit Manager' || userRole === 'Superadmin') {
       // Allow all status updates
@@ -597,7 +597,7 @@ const updateOrderStatus = async (req, res) => {
           message: 'You can only update your own orders'
         });
       }
-      
+
       const allowedSalesStatuses = ['cancelled', 'approved'];
       if (!allowedSalesStatuses.includes(status)) {
         return res.status(403).json({
@@ -630,7 +630,7 @@ const updateOrderStatus = async (req, res) => {
     // Update fields based on status
     const oldStatus = order.status;
     order.status = status;
-    
+
     if (status === 'approved') {
       order.approvedBy = req.user._id;
       order.approvedAt = new Date();
@@ -734,7 +734,265 @@ const checkExistingOrder = async (req, res) => {
   }
 };
 
+// Service Team Verification
+const verifyServiceOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, remarks, callRecordingUrl, isFakeCommitmentChecked } = req.body;
 
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    order.serviceVerification = {
+      status: status || 'verified',
+      verifiedBy: req.user._id,
+      verifiedAt: new Date(),
+      callRecordingUrl,
+      isFakeCommitmentChecked,
+      remarks
+    };
+
+    // Update status history
+    order.statusHistory.push({
+      status: `service_${status || 'verified'}`,
+      updatedBy: req.user._id,
+      updatedAt: new Date(),
+      remarks: `Service Verification: ${remarks || 'No remarks'}`
+    });
+
+    await order.save();
+
+    res.json({
+      success: true,
+      message: 'Service verification updated successfully',
+      order
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Accounts Approval & Payment Confirmation
+const approveAccountOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, remarks, paymentMode, referenceNo, amount } = req.body;
+
+    const order = await Order.findById(id).populate('customer');
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    if (order.serviceVerification.status !== 'verified') {
+      return res.status(400).json({
+        success: false,
+        message: 'Order must be verified by Service Team before Account Approval'
+      });
+    }
+
+    order.accountApproval = {
+      status: status || 'approved',
+      approvedBy: req.user._id,
+      approvedAt: new Date(),
+      remarks
+    };
+
+    if (status === 'approved') {
+      order.paymentStatus = 'Paid';
+      order.status = 'approved'; // Final approval for production
+
+      // Automatically create a CustomerPayment entry
+      const CustomerPayment = (await import('../models/CustomerPayment.js')).default;
+      const payment = new CustomerPayment({
+        customer: order.customer._id,
+        amount: amount || order.totalAmount,
+        paymentMode: paymentMode || 'Bank Transfer',
+        referenceNo: referenceNo || 'DIRECT-ORDER-APPV',
+        unit: order.unit,
+        companyId: order.companyId,
+        createdBy: req.user._id,
+        notes: `Auto-generated from Order Approval: ${order.orderCode}. ${remarks || ''}`
+      });
+      await payment.save();
+    }
+
+    order.statusHistory.push({
+      status: `account_${status || 'approved'}`,
+      updatedBy: req.user._id,
+      updatedAt: new Date(),
+      remarks: `Accounts Approval: ${remarks || 'No remarks'}`
+    });
+
+    await order.save();
+
+    res.json({
+      success: true,
+      message: 'Accounts approval updated successfully',
+      order
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Add Payment Evidence (Slip/Cheque)
+const addPaymentEvidence = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { fileUrl, fileType } = req.body;
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    order.paymentEvidence.push({
+      fileUrl,
+      fileType,
+      uploadedBy: req.user._id,
+      uploadedAt: new Date()
+    });
+
+    await order.save();
+
+    res.json({
+      success: true,
+      message: 'Payment evidence added successfully',
+      order
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Get orders with tracking info (Orders that have invoices)
+const getOrderTracking = async (req, res) => {
+  try {
+    const userCompanyId = req.user.companyId;
+    const userRole = req.user.role;
+
+    let query = {};
+
+    // Only Superadmin/Super Admin sees all companies. 
+    // Other roles are filtered by companyId to ensure data isolation.
+    if (userRole !== 'Superadmin' && userRole !== 'Super Admin' && userRole !== 'Store Head' && userRole !== 'Dispatch Head') {
+      if (!userCompanyId) {
+        return res.status(400).json({ success: false, message: 'User company not configured.' });
+      }
+      query.companyId = userCompanyId;
+    }
+
+    console.log(`🔍 Order Tracking: Fetching for role ${userRole}, Company: ${userCompanyId}`);
+
+    const sales = await Sale.find(query)
+      .populate('order')
+      .populate('customer', 'name mobile outstandingAmount')
+      .lean();
+
+    // Map sales back to a tracking format with robust defaults
+    const trackingData = sales.map(sale => {
+      const order = sale.order || {};
+      return {
+        _id: sale._id,
+        orderId: order._id || null,
+        orderCode: order.orderCode || 'Direct Invoice',
+        orderDate: order.orderDate || sale.saleDate || new Date(),
+        customerName: sale.customer?.name || 'Unknown Customer',
+        customerMobile: sale.customer?.mobile || 'N/A',
+        customerOutstanding: sale.customer?.outstandingAmount || 0,
+        invoiceNumber: sale.invoiceNumber || 'N/A',
+        invoiceType: sale.invoiceType || 'Pakka',
+        totalAmount: sale.totalAmount || 0,
+        paidAmount: sale.paidAmount || 0,
+        balanceAmount: sale.balanceAmount || 0,
+        paymentStatus: sale.paymentStatus || 'Pending',
+        saleDate: sale.saleDate || new Date(),
+        gatePass: sale.gatePass || { status: 'Pending' },
+        productType: sale.productType || null
+      };
+    });
+
+    console.log(`📊 Order Tracking: Found ${trackingData.length} records for company ${userCompanyId}`);
+
+    res.json({
+      success: true,
+      data: trackingData
+    });
+  } catch (error) {
+    console.error('❌ Error in getOrderTracking:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching order tracking data',
+      error: error.message
+    });
+  }
+};
+
+// Generate Gate Pass for a Sale
+const generateGatePass = async (req, res) => {
+  try {
+    const { saleId } = req.params;
+    const { vehicleNumber, driverName, contactNumber } = req.body;
+
+    const sale = await Sale.findById(saleId).populate('order').populate('customer');
+    if (!sale) {
+      return res.status(404).json({ success: false, message: 'Sale record not found' });
+    }
+
+    // Generate Gate Pass Number
+    const count = await Sale.countDocuments({ 'gatePass.status': 'Generated' });
+    const gatePassNumber = `GP-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`;
+
+    sale.gatePass = {
+      gatePassNumber,
+      generatedAt: new Date(),
+      generatedBy: req.user._id,
+      status: 'Generated',
+      vehicleNumber: vehicleNumber || 'N/A',
+      driverName: driverName || 'N/A',
+      contactNumber: contactNumber || 'N/A'
+    };
+
+    await sale.save();
+
+    res.json({
+      success: true,
+      message: 'Gate Pass generated successfully',
+      gatePass: sale.gatePass
+    });
+  } catch (error) {
+    console.error('Error generating gate pass:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Update Product Type for a Sale (Store Head action)
+const updateSaleProductType = async (req, res) => {
+  try {
+    const { saleId } = req.params;
+    const { productType } = req.body;
+
+    const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
+    if (!validTypes.includes(productType)) {
+      return res.status(400).json({ success: false, message: 'Invalid product type' });
+    }
+
+    const sale = await Sale.findById(saleId);
+    if (!sale) {
+      return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+
+    sale.productType = productType;
+    await sale.save();
+
+    res.json({ success: true, message: 'Product type updated successfully', productType: sale.productType });
+  } catch (error) {
+    console.error('Error updating product type:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 export {
   createOrder,
@@ -743,5 +1001,11 @@ export {
   updateOrder,
   updateOrderStatus,
   deleteOrder,
-  checkExistingOrder
+  checkExistingOrder,
+  verifyServiceOrder,
+  approveAccountOrder,
+  addPaymentEvidence,
+  getOrderTracking,
+  generateGatePass,
+  updateSaleProductType
 };

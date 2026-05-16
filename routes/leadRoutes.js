@@ -7,7 +7,8 @@ import {
   updateLead,
   deleteLead,
   checkExistingLead,
-  getAssignableUsers
+  getAssignableUsers,
+  markLeadAsWon
 } from '../controllers/leadController.js';
 
 const router = express.Router();
@@ -20,6 +21,7 @@ router.get('/check', checkExistingLead);
 router.get('/users', getAssignableUsers);
 router.get('/:id', getLeadById);
 router.put('/:id', updateLead);
+router.post('/:id/won', markLeadAsWon);
 router.delete('/:id', deleteLead);
 
 export default router;

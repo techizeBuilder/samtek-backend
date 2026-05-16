@@ -25,6 +25,7 @@ export const getUsers = async (req, res) => {
       unit,
       search,
       status,
+      companyId, // Extract companyId from frontend
       sortBy = 'createdAt',
       sortOrder = 'desc'
     } = req.query;
@@ -34,9 +35,13 @@ export const getUsers = async (req, res) => {
 
     // 1. Enforce Role-Based Data Isolation
     if (currentUser.role !== 'Superadmin' && currentUser.role !== 'Super Admin' && currentUser.role !== 'super_user') {
-      // Non-super admins must be restricted to their own company
+      // Non-super admins MUST be restricted to their own company
       if (currentUser.companyId) {
         query.companyId = currentUser.companyId;
+      } else {
+        // If an HR-Admin somehow lacks a companyId, prevent them from seeing ALL companies!
+        // We set it to a non-existent value so they don't leak other companies' users.
+        query.companyId = null; 
       }
 
       // If role is Manager, only show users reporting to them
@@ -47,6 +52,11 @@ export const getUsers = async (req, res) => {
       // Filter by unit only if the current user has a specific unit assigned in the DB
       if (currentUser.unit && currentUser.unit !== currentUser.company?.unitName) {
         query.unit = currentUser.unit;
+      }
+    } else {
+      // If Super Admin, they can filter by companyId from frontend
+      if (companyId && companyId !== 'all') {
+        query.companyId = companyId;
       }
     }
 

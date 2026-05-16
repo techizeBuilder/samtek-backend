@@ -5,6 +5,8 @@ import * as XLSX from 'xlsx';
 import multer from 'multer';
 import { body, validationResult, query } from 'express-validator';
 import notificationService from '../services/notificationService.js';
+import mongoose from 'mongoose';
+
 
 // Configure multer for file upload
 const upload = multer({
@@ -157,7 +159,7 @@ export const getCustomers = [
       console.log('🔍 getCustomers called by user:', req.user?.username, 'Role:', req.user?.role);
 
       // STRICT company filtering based on user role
-      if (req.user.role === 'Superadmin') {
+      if (req.user.role === 'Superadmin' || req.user.role === 'Super Admin') {
         // Super Admin can see all customers
         console.log('🔐 Super Admin access - no company filtering');
       } else {
@@ -169,7 +171,7 @@ export const getCustomers = [
             message: 'User is not assigned to any company/location. Please contact system administrator.'
           });
         }
-        filter.companyId = req.user.companyId;
+        filter.companyId = new mongoose.Types.ObjectId(req.user.companyId);
         console.log('✅ Company filtering applied for role', req.user.role, ':', req.user.companyId);
       }
 
