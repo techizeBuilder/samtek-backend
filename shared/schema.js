@@ -30,6 +30,9 @@ export const USER_ROLES = {
   COMPLAINT_MANAGEMENT_EMPLOYEE: 'Complaint Management Employee',
   STORE_HEAD: 'Store Head',
   STORE_EMPLOYEE: 'Store Employee',
+  QC_HEAD: 'QC Head',
+  QC_EMPLOYEE: 'QC Employee',
+  MARKETING_HEAD: 'Marketing Head',
 };
 
 export const MODULES = {

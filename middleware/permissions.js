@@ -80,7 +80,10 @@ export const getUserModules = (role) => {
     'Packing': ['Dashboard', 'Manufacturing', 'Dispatches'],
     'Dispatch': ['Dashboard', 'Dispatches'],
     'Accounts': ['Dashboard', 'Accounts', 'Sales'],
-    'Sales': ['Dashboard', 'Sales', 'Customers']
+    'Sales': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
+    'Sales Employee': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
+    'Sales Head': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
+    'Marketing Head': ['Dashboard', 'Marketing', 'Customers']
   };
   
   return moduleMap[role] || ['Dashboard'];
@@ -255,6 +258,62 @@ export const getUserPermissions = (user) => {
         }
       ]
     };
+  }
+
+  // Marketing Head — full access to marketing module; view-only on customers
+  if (user.role === 'Marketing Head') {
+    return {
+      role: 'marketing_head',
+      canAccessAllUnits: false,
+      modules: [
+        {
+          name: 'dashboard',
+          dashboard: true,
+          features: [
+            { key: 'overview', view: true, add: false, edit: false, delete: false, alter: false }
+          ]
+        },
+        {
+          name: 'marketing',
+          dashboard: true,
+          features: [
+            { key: 'library', view: true, add: true, edit: true, delete: true, alter: true },
+            { key: 'upload', view: true, add: true, edit: true, delete: true, alter: true },
+            { key: 'categories', view: true, add: true, edit: true, delete: true, alter: true },
+            { key: 'reports', view: true, add: false, edit: false, delete: false, alter: false },
+            { key: 'auditLogs', view: true, add: false, edit: false, delete: false, alter: false },
+            { key: 'notifications', view: true, add: false, edit: false, delete: false, alter: false }
+          ]
+        },
+        {
+          name: 'customers',
+          dashboard: false,
+          features: [
+            { key: 'addEditView', view: true, add: false, edit: false, delete: false, alter: false }
+          ]
+        }
+      ]
+    };
+  }
+
+  // Sales roles — view/share only on marketing library
+  if (user.role === 'Sales' || user.role === 'Sales Employee' || user.role === 'Sales Head') {
+    const basePermissions = user.permissions || { role: user.role.toLowerCase().replace(/ /g, '_'), canAccessAllUnits: false, modules: [] };
+    const hasMarketingModule = basePermissions.modules?.some(m => m.name === 'marketing');
+    if (!hasMarketingModule) {
+      basePermissions.modules = [
+        ...(basePermissions.modules || []),
+        {
+          name: 'marketing',
+          dashboard: false,
+          features: [
+            { key: 'library', view: true, add: false, edit: false, delete: false, alter: false },
+            { key: 'share', view: true, add: true, edit: false, delete: false, alter: false }
+          ]
+        }
+      ];
+    }
+    return basePermissions;
   }
 
   // Return user's specific permissions for other roles
