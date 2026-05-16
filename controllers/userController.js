@@ -290,10 +290,22 @@ export const createUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Create user error:', error);
+
+    // Mongoose validation error (e.g. role not in enum, required field missing)
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message).join(', ');
+      return res.status(400).json({ message: messages, success: false });
+    }
+
+    // Duplicate key (email or username already exists)
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0] || 'field';
+      return res.status(400).json({ message: `${field} already exists`, success: false });
+    }
+
     res.status(500).json({
-      message: 'Internal server error',
-      success: false,
-      error: error.message
+      message: error.message || 'Internal server error',
+      success: false
     });
   }
 };
