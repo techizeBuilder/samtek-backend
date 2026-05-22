@@ -6,7 +6,31 @@ import CutoffTime from '../models/CutoffTime.js';
 import notificationService from '../services/notificationService.js';
 import Sale from '../models/Sale.js';
 import { Transaction, Account } from '../models/Account.js';
+import QCJob from '../models/QCJob.js';
 import mongoose from 'mongoose';
+
+const today = () => new Date().toISOString().split('T')[0];
+
+async function generateQCJobId() {
+  const year = new Date().getFullYear();
+  // Find the job with the highest sequence number for the current year
+  const lastJob = await QCJob.findOne({
+    qcJobId: new RegExp(`^QC-${year}-`)
+  }).sort({ qcJobId: -1 }).lean();
+
+  let nextNumber = 1;
+  if (lastJob && lastJob.qcJobId) {
+    const parts = lastJob.qcJobId.split('-');
+    if (parts.length === 3) {
+      const lastNumber = parseInt(parts[2]);
+      if (!isNaN(lastNumber)) {
+        nextNumber = lastNumber + 1;
+      }
+    }
+  }
+
+  return `QC-${year}-${String(nextNumber).padStart(4, '0')}`;
+}
 
 // Create new order
 const createOrder = async (req, res) => {
@@ -877,7 +901,7 @@ const getOrderTracking = async (req, res) => {
 
     // Only Superadmin/Super Admin sees all companies. 
     // Other roles are filtered by companyId to ensure data isolation.
-    if (userRole !== 'Superadmin' && userRole !== 'Super Admin' && userRole !== 'Store Head' && userRole !== 'Dispatch Head') {
+    if (userRole !== 'Superadmin' && userRole !== 'Super Admin') {
       if (!userCompanyId) {
         return res.status(400).json({ success: false, message: 'User company not configured.' });
       }
@@ -910,7 +934,9 @@ const getOrderTracking = async (req, res) => {
         paymentStatus: sale.paymentStatus || 'Pending',
         saleDate: sale.saleDate || new Date(),
         gatePass: sale.gatePass || { status: 'Pending' },
-        productType: sale.productType || null
+        productType: sale.productType || null,
+        isAvailableInInventory: sale.isAvailableInInventory || null,
+        orderStatus: order.status || 'pending'
       };
     });
 
@@ -941,11 +967,17 @@ const generateGatePass = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Sale record not found' });
     }
 
+    // Only enforce NOC check for new orders (old orders won't have nocStatus set)
+    if (sale.gatePass?.nocStatus === 'Pending') {
+      return res.status(400).json({ success: false, message: 'NOC must be approved by Accounts before generating a Gate Pass.' });
+    }
+
     // Generate Gate Pass Number
     const count = await Sale.countDocuments({ 'gatePass.status': 'Generated' });
     const gatePassNumber = `GP-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`;
 
     sale.gatePass = {
+      ...sale.gatePass,
       gatePassNumber,
       generatedAt: new Date(),
       generatedBy: req.user._id,
@@ -968,28 +1000,318 @@ const generateGatePass = async (req, res) => {
   }
 };
 
-// Update Product Type for a Sale (Store Head action)
-const updateSaleProductType = async (req, res) => {
+import ProductionOrder from '../models/ProductionOrder.js';
+import PurchaseRequest from '../models/PurchaseRequest.js';
+
+// Update Store Info for a Sale (Product Type & Inventory Availability)
+const updateSaleStoreInfo = async (req, res) => {
   try {
     const { saleId } = req.params;
-    const { productType } = req.body;
+    const { productType, isAvailableInInventory } = req.body;
 
-    const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
-    if (!validTypes.includes(productType)) {
-      return res.status(400).json({ success: false, message: 'Invalid product type' });
-    }
-
-    const sale = await Sale.findById(saleId);
+    const sale = await Sale.findById(saleId).populate('order');
     if (!sale) {
       return res.status(404).json({ success: false, message: 'Sale not found' });
     }
 
-    sale.productType = productType;
+    if (productType !== undefined) {
+      if (productType === '' || productType === null) {
+        sale.productType = null;
+      } else {
+        const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
+        if (!validTypes.includes(productType)) {
+          return res.status(400).json({ success: false, message: 'Invalid product type' });
+        }
+        sale.productType = productType;
+      }
+    }
+
+    if (isAvailableInInventory !== undefined) {
+      if (isAvailableInInventory === '' || isAvailableInInventory === null) {
+        sale.isAvailableInInventory = null;
+      } else {
+        const validAvailability = ['Available', 'Not Available'];
+        if (!validAvailability.includes(isAvailableInInventory)) {
+          return res.status(400).json({ success: false, message: 'Invalid inventory status' });
+        }
+        sale.isAvailableInInventory = isAvailableInInventory;
+      }
+    }
+
+    // --- AUTOMATION LOGIC WITH CLEANUP ---
+
+    // CASE 1: Available -> Create QC Job & Cleanup Pending Production/Purchase
+    if (sale.isAvailableInInventory === 'Available') {
+      try {
+        const orderCode = sale.order?.orderCode || 'N/A';
+        const sourceRefId = sale.invoiceNumber || sale._id.toString();
+
+        // 1. Cleanup existing Pending Production Orders or Purchase Requests
+        await ProductionOrder.deleteMany({
+          company: sale.companyId,
+          notes: new RegExp(sourceRefId),
+          status: 'Pending'
+        });
+        await PurchaseRequest.deleteMany({
+          companyId: sale.companyId,
+          itemId: sourceRefId,
+          status: 'Pending'
+        });
+
+        // 2. Create QC Job
+        const existingQC = await QCJob.findOne({
+          source: 'Store',
+          sourceRefId: sourceRefId,
+          company: sale.companyId
+        });
+
+        if (!existingQC) {
+          const qcJobId = await generateQCJobId();
+          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
+          const itemName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
+
+          await QCJob.create({
+            qcJobId,
+            source: 'Store',
+            sourceRefId: sourceRefId,
+            sourceDepartment: 'Store',
+            sentBy: req.user.fullName || req.user.username || 'Store Dept',
+            itemName: itemName,
+            itemCode: orderCode,
+            category: 'Finished Good',
+            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
+            unit: 'pcs',
+            receivedDate: today(),
+            status: 'Pending',
+            company: sale.companyId,
+            createdBy: req.user._id,
+            notes: `Automatically created from Store Order ${orderCode}`
+          });
+          console.log(`✅ QC Job ${qcJobId} created and Production/Purchase cleaned up for Sale ${saleId}`);
+        }
+      } catch (qcError) {
+        console.error('❌ Error in Available case automation:', qcError);
+      }
+    }
+
+    // CASE 2: Not Available & In-house Manufactured -> Create Production Order & Cleanup Pending QC/Purchase
+    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'In-house Manufactured') {
+      try {
+        const orderCode = sale.order?.orderCode || 'N/A';
+        const sourceRefId = sale.invoiceNumber || sale._id.toString();
+        console.log(`🏭 Triggering Production for ${orderCode} & cleaning up other workflows...`);
+
+        // 1. Cleanup existing Pending QC Jobs or Purchase Requests
+        await QCJob.deleteMany({
+          company: sale.companyId,
+          sourceRefId: sourceRefId,
+          status: 'Pending'
+        });
+        await PurchaseRequest.deleteMany({
+          companyId: sale.companyId,
+          itemId: sourceRefId,
+          status: 'Pending'
+        });
+
+        // 2. Create Production Order
+        const existingProduction = await ProductionOrder.findOne({
+          company: sale.companyId,
+          notes: new RegExp(sourceRefId)
+        });
+
+        if (!existingProduction) {
+          const year = new Date().getFullYear();
+          const timestamp = Date.now().toString().slice(-6);
+          const prodOrderId = `PROD-${year}-${timestamp}`;
+
+          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
+          const machineName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
+
+          await ProductionOrder.create({
+            orderId: prodOrderId,
+            machineCode: orderCode,
+            machineName: machineName,
+            priority: sale.order?.priority || 'Normal',
+            receivedDate: today(),
+            deliveryDate: sale.dueDate ? sale.dueDate.toISOString().split('T')[0] : today(),
+            status: 'Pending',
+            company: sale.companyId,
+            createdBy: req.user._id,
+            notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
+          });
+          console.log(`✅ Production Order ${prodOrderId} created successfully for Sale ${saleId}`);
+        }
+      } catch (prodError) {
+        console.error('❌ Error in In-house case automation:', prodError);
+      }
+    }
+
+    // CASE 3: Not Available & Purchased (Trading Product) -> Create Purchase Request & Cleanup Pending QC/Production
+    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'Purchased (Trading Product)') {
+      try {
+        const orderCode = sale.order?.orderCode || 'N/A';
+        const sourceRefId = sale.invoiceNumber || sale._id.toString();
+        console.log(`🛒 Triggering Purchase Request for ${orderCode} & cleaning up other workflows...`);
+
+        // 1. Cleanup existing Pending QC Jobs or Production Orders
+        await QCJob.deleteMany({
+          company: sale.companyId,
+          sourceRefId: sourceRefId,
+          status: 'Pending'
+        });
+        await ProductionOrder.deleteMany({
+          company: sale.companyId,
+          notes: new RegExp(sourceRefId),
+          status: 'Pending'
+        });
+
+        // 2. Create Purchase Request
+        const existingPurchaseReq = await PurchaseRequest.findOne({
+          companyId: sale.companyId,
+          itemId: sourceRefId
+        });
+
+        if (!existingPurchaseReq) {
+          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
+          const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
+          
+          const count = await PurchaseRequest.countDocuments({});
+          const requestId = `PR${String(count + 1).padStart(3, '0')}`;
+
+          await PurchaseRequest.create({
+            requestId,
+            productName,
+            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
+            requestFromDepartment: 'Store',
+            priority: sale.order?.priority || 'Medium',
+            companyId: sale.companyId,
+            storeOrderId: sale.order?._id || sale._id,
+            itemId: sourceRefId
+          });
+          console.log(`✅ Purchase Request ${requestId} created successfully for Sale ${saleId}`);
+        }
+      } catch (purchaseError) {
+        console.error('❌ Error in Purchased case automation:', purchaseError);
+      }
+    }
+
     await sale.save();
 
-    res.json({ success: true, message: 'Product type updated successfully', productType: sale.productType });
+    res.json({
+      success: true,
+      message: 'Store information updated successfully',
+      productType: sale.productType,
+      isAvailableInInventory: sale.isAvailableInInventory
+    });
   } catch (error) {
-    console.error('Error updating product type:', error);
+    console.error('Error updating store info:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Approve Sale Order from Accounts Sales Tracking
+const approveSaleOrder = async (req, res) => {
+  try {
+    const { saleId } = req.params;
+    const Sale = (await import('../models/Sale.js')).default;
+    const sale = await Sale.findById(saleId).populate('order');
+    
+    if (!sale) {
+      return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+
+    if (sale.order) {
+      const order = await Order.findById(sale.order._id);
+      if (order) {
+        order.status = 'approved';
+        if (order.statusHistory) {
+          order.statusHistory.push({
+            status: 'approved',
+            updatedBy: req.user._id,
+            updatedAt: new Date(),
+            remarks: 'Approved from Sales Tracking'
+          });
+        }
+        await order.save();
+      }
+    }
+
+    res.json({ success: true, message: 'Order approved successfully and sent to Store' });
+  } catch (error) {
+    console.error('Error in approveSaleOrder:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Get NOC Requests
+const getNOCRequests = async (req, res) => {
+  try {
+    const Sale = (await import('../models/Sale.js')).default;
+    const PackagingJob = (await import('../models/PackagingJob.js')).default;
+
+    // Find all sales with populated orders
+    const sales = await Sale.find({ companyId: req.user.companyId })
+      .populate({
+        path: 'order',
+        populate: { path: 'customer' }
+      })
+      .sort({ createdAt: -1 });
+
+    const nocRequests = [];
+
+    // Check if there is a Packed job for the sale's order
+    for (const sale of sales) {
+      if (sale.order && sale.gatePass && sale.gatePass.status === 'Pending') {
+        const job = await PackagingJob.findOne({
+          orderId: sale.order.orderCode,
+          status: 'Packed',
+          company: req.user.companyId
+        });
+
+        if (job) {
+          nocRequests.push({
+            saleId: sale._id,
+            orderId: sale.order._id,
+            orderCode: sale.order.orderCode,
+            customerName: sale.order.customer?.name || 'N/A',
+            customerMobile: sale.order.customer?.mobile || 'N/A',
+            totalAmount: sale.totalAmount,
+            paidAmount: sale.paidAmount,
+            balanceAmount: sale.balanceAmount,
+            paymentStatus: sale.paymentStatus,
+            nocStatus: sale.gatePass?.nocStatus || 'Pending',
+            gatePassStatus: sale.gatePass?.status || 'Pending',
+            machineName: job.machineName,
+            machineCode: job.machineCode,
+            serialNumber: job.serialNumber
+          });
+        }
+      }
+    }
+
+    res.json({ success: true, data: nocRequests });
+  } catch (error) {
+    console.error('Error in getNOCRequests:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Approve NOC
+const approveNOC = async (req, res) => {
+  try {
+    const { saleId } = req.params;
+    const Sale = (await import('../models/Sale.js')).default;
+    const sale = await Sale.findById(saleId);
+    
+    if (!sale) return res.status(404).json({ success: false, message: 'Sale not found' });
+
+    sale.gatePass = sale.gatePass || {};
+    sale.gatePass.nocStatus = 'Approved';
+    await sale.save();
+
+    res.json({ success: true, message: 'NOC Approved successfully' });
+  } catch (error) {
+    console.error('Error in approveNOC:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -1007,5 +1329,8 @@ export {
   addPaymentEvidence,
   getOrderTracking,
   generateGatePass,
-  updateSaleProductType
+  updateSaleStoreInfo,
+  approveSaleOrder,
+  getNOCRequests,
+  approveNOC
 };

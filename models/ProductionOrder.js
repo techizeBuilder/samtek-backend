@@ -51,6 +51,17 @@ const ProductionOrderSchema = new mongoose.Schema({
   machineCode: { type: String, required: true, trim: true },
   machineName: { type: String, required: true, trim: true },
   priority: { type: String, enum: ['Urgent', 'Normal'], default: 'Normal' },
+  source: { 
+    type: String, 
+    enum: ['Store', 'QC_Rejected'], 
+    default: 'Store' 
+  },
+  rejectionDetails: {
+    originalOrderId: { type: String, default: null },
+    rejectionReason: { type: String, default: null },
+    rejectedDate: { type: String, default: null },
+    qcJobId: { type: String, default: null }
+  },
   status: {
     type: String,
     enum: ['Pending', 'BOM Pending', 'In Progress', 'On Hold', 'Completed'],

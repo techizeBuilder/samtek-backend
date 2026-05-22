@@ -119,7 +119,7 @@ const purchaseInvoiceSchema = new mongoose.Schema({
 // Composite unique key for vendor + invoiceNo
 purchaseInvoiceSchema.index({ vendor: 1, invoiceNo: 1 }, { unique: true });
 
-purchaseInvoiceSchema.pre('save', function (next) {
+purchaseInvoiceSchema.pre('save', async function () {
     this.balanceAmount = this.totalAmount - this.paidAmount;
     if (this.balanceAmount <= 0) {
         this.status = 'Paid';
@@ -128,7 +128,6 @@ purchaseInvoiceSchema.pre('save', function (next) {
     } else {
         this.status = 'Unpaid';
     }
-    next();
 });
 
 export default mongoose.model('PurchaseInvoice', purchaseInvoiceSchema);

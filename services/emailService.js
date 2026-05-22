@@ -175,3 +175,82 @@ export const sendQuotationEmail = async ({ to, customerName, leadCode, companyNa
         return { success: false, error: error.message };
     }
 };
+
+/**
+ * Send Purchase Order Email to Vendor
+ */
+export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, grandTotal, companyName }) => {
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+        console.log(`[EMAIL SKIPPED] No SMTP config. Would send PO ${poNumber} to: ${to}`);
+        return { success: true, mocked: true, message: 'No SMTP config, mock success' };
+    }
+
+    const transporter = createTransporter();
+    const subject = `🛒 New Purchase Order ${poNumber} from ${companyName}`;
+
+    const itemsRows = items.map(item => `
+        <tr>
+            <td style="padding: 8px; border: 1px solid #e5e7eb;">${item.itemName}</td>
+            <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: center;">${item.quantity}</td>
+            <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">₹${item.unitPrice.toLocaleString('en-IN')}</td>
+            <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">₹${(item.quantity * item.unitPrice).toLocaleString('en-IN')}</td>
+        </tr>
+    `).join('');
+
+    const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: #1e40af; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">🛒 New Purchase Order</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${companyName}</p>
+      </div>
+
+      <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 16px;">Dear <strong>${vendorName}</strong>,</p>
+        <p style="color: #6b7280;">
+          We are pleased to place the following Purchase Order (PO Number: <strong>${poNumber}</strong>) with you. 
+          Please review the items and prepare the shipment as per our agreement.
+        </p>
+
+        <div style="margin: 24px 0;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+            <thead>
+              <tr style="background: #f3f4f6;">
+                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: left;">Item Name</th>
+                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: center;">Qty</th>
+                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">Unit Price</th>
+                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">Total Price</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${itemsRows}
+              <tr style="font-weight: bold; background: #f9fafb;">
+                <td colSpan="3" style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">Grand Total:</td>
+                <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: right; color: #1e40af; font-size: 16px;">₹${grandTotal.toLocaleString('en-IN')}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">
+          Please confirm receipt of this order and share the expected delivery date.
+        </p>
+        <p style="color: #6b7280; font-size: 13px;">Thank you for your cooperation.</p>
+        <p style="color: #111827; font-weight: bold;">— ${companyName}</p>
+      </div>
+    </div>
+    `;
+
+    try {
+        const result = await transporter.sendMail({
+            from: `"${companyName}" <${process.env.SMTP_USER}>`,
+            to,
+            subject,
+            html
+        });
+        console.log(`✅ PO Email sent to ${to} for PO ${poNumber}`);
+        return { success: true, messageId: result.messageId };
+    } catch (error) {
+        console.error(`❌ PO Email failed to ${to}:`, error.message);
+        return { success: false, error: error.message };
+    }
+};

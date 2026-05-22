@@ -14,27 +14,62 @@ async function generateOrderId(companyId) {
 
 export const getOrders = async (req, res) => {
   try {
-    const orders = await ProductionOrder.find({ company: req.user.companyId })
+    const companyId = req.user.companyId;
+    console.log(`🔍 Fetching Production Orders for Company: ${companyId}`);
+
+    // Find orders for this company, using lean() for faster read and easier debugging
+    const orders = await ProductionOrder.find({
+      company: companyId
+    })
       .populate('processes.assignedTeam', 'name supervisor members')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
+
+    console.log(`✅ Found ${orders.length} orders for company ${companyId}`);
     res.json({ success: true, data: orders });
   } catch (err) {
+    console.error('❌ Error in getOrders:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
 export const createOrder = async (req, res) => {
   try {
-    const { machineCode, machineName, priority, deliveryDate } = req.body;
+    const { machineCode, machineName, priority, deliveryDate, source, rejectionDetails } = req.body;
     if (!machineCode || !machineName || !deliveryDate) {
       return res.status(400).json({ success: false, message: 'machineCode, machineName and deliveryDate are required' });
     }
-    const orderId = await generateOrderId(req.user.companyId);
+
+    // Generate appropriate order ID based on source
+    let orderId;
+    if (source === 'QC_Rejected') {
+      const year = new Date().getFullYear();
+      const lastRejectedOrder = await ProductionOrder.findOne({
+        orderId: new RegExp(`^REJ-${year}-`)
+      }).sort({ orderId: -1 }).lean();
+
+      let nextNumber = 1;
+      if (lastRejectedOrder && lastRejectedOrder.orderId) {
+        const parts = lastRejectedOrder.orderId.split('-');
+        if (parts.length === 3) {
+          const lastNumber = parseInt(parts[2]);
+          if (!isNaN(lastNumber)) {
+            nextNumber = lastNumber + 1;
+          }
+        }
+      }
+      orderId = `REJ-${year}-${String(nextNumber).padStart(4, '0')}`;
+    } else {
+      orderId = await generateOrderId(req.user.companyId);
+    }
+
     const order = await ProductionOrder.create({
       orderId,
       machineCode,
       machineName,
-      priority: priority || 'Normal',
+      priority: priority || (source === 'QC_Rejected' ? 'Urgent' : 'Normal'),
+      source: source || 'Store',
+      rejectionDetails: rejectionDetails || {},
       receivedDate: today(),
       deliveryDate,
       company: req.user.companyId,

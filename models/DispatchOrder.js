@@ -3,7 +3,8 @@ import mongoose from 'mongoose';
 const DispatchOrderSchema = new mongoose.Schema({
   dispatchId: { type: String, unique: true },
   packagingJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'PackagingJob', required: true },
-  productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', required: true },
+  productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', required: false },
+  qcJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'QCJob', required: false },
   orderId: { type: String, required: true },
   machineCode: { type: String, required: true, trim: true },
   machineName: { type: String, required: true, trim: true },

@@ -61,7 +61,16 @@ import {
   getCustomerPaymentStats
 } from '../controllers/customerPaymentController.js';
 
-import { getPurchaseItems } from '../controllers/purchaseController.js';
+import {
+  getPurchaseItems,
+  createPurchase,
+  getPurchases,
+  getPurchaseById,
+  updatePurchase,
+  deletePurchase,
+  receivePurchase,
+  sendPOToVendor
+} from '../controllers/purchaseController.js';
 
 const accountsRouter = express.Router();
 
@@ -210,6 +219,15 @@ accountsRouter.get('/purchases/invoices', authorizeRoles('Accounts', 'Accounts H
 accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createVendorPayment);
 accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getVendorOutstanding);
 accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPaymentStats);
+
+// Purchase Orders
+accountsRouter.post('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createPurchase);
+accountsRouter.get('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPurchases);
+accountsRouter.get('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPurchaseById);
+accountsRouter.put('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), updatePurchase);
+accountsRouter.delete('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), deletePurchase);
+accountsRouter.post('/purchases/orders/:id/receive', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), receivePurchase);
+accountsRouter.post('/purchases/orders/:id/send-email', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), sendPOToVendor);
 
 // Purchase Returns
 accountsRouter.post('/purchases/returns', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createPurchaseReturn);

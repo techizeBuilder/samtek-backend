@@ -1,6 +1,9 @@
 import Purchase from '../models/Purchase.js';
 import Supplier from '../models/Supplier.js';
 import { Item } from '../models/Inventory.js';
+import PurchaseRequest from '../models/PurchaseRequest.js';
+import { Company } from '../models/Company.js';
+import { sendPurchaseOrderEmail } from '../services/emailService.js';
 import { USER_ROLES } from '../shared/schema.js';
 
 export const getPurchases = async (req, res) => {
@@ -88,11 +91,27 @@ export const createPurchase = async (req, res) => {
       taxAmount,
       deliveryAddress,
       terms,
-      notes
+      notes,
+      purchaseRequest
     } = req.body;
 
     if (!supplier || !items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Supplier and items are required' });
+    }
+
+    // Resolve delivery address from company profile if not supplied
+    let finalDeliveryAddress = deliveryAddress;
+    if (!finalDeliveryAddress && req.user?.companyId) {
+      const company = await Company.findById(req.user.companyId);
+      if (company) {
+        finalDeliveryAddress = `${company.address || ''}, ${company.city || ''}, ${company.state || ''} - ${company.locationPin || ''}`
+          .trim()
+          .replace(/^,\s*/, '')
+          .replace(/,\s*,/g, ',');
+      }
+    }
+    if (!finalDeliveryAddress) {
+      finalDeliveryAddress = 'Main Warehouse, Samtek Factory';
     }
 
     // Validate supplier exists
@@ -106,7 +125,7 @@ export const createPurchase = async (req, res) => {
     const purchaseItems = [];
 
     for (const item of items) {
-      const inventoryItem = await Inventory.findById(item.item);
+      const inventoryItem = await Item.findById(item.item);
       if (!inventoryItem) {
         return res.status(400).json({ message: `Inventory item ${item.item} not found` });
       }
@@ -116,7 +135,7 @@ export const createPurchase = async (req, res) => {
 
       purchaseItems.push({
         item: item.item,
-        itemName: inventoryItem.itemName,
+        itemName: inventoryItem.name || inventoryItem.itemName,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         totalPrice: itemTotal,
@@ -137,12 +156,23 @@ export const createPurchase = async (req, res) => {
       expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       unit: req.user.role === USER_ROLES.SUPER_USER ? req.body.unit : req.user.unit,
       createdBy: req.user._id,
-      deliveryAddress,
+      deliveryAddress: finalDeliveryAddress,
       terms,
-      notes
+      notes,
+      purchaseRequest: purchaseRequest || null
     };
 
     const purchase = await Purchase.create(purchaseData);
+    
+    // Link the created PO back to the PurchaseRequest and sync status to Ordered
+    if (purchaseRequest) {
+      await PurchaseRequest.findByIdAndUpdate(purchaseRequest, {
+        purchaseOrder: purchase._id,
+        status: 'Ordered'
+      });
+      console.log(`Linked Purchase Order ${purchase.purchaseOrderNumber} to Purchase Request ${purchaseRequest} — status set to Ordered`);
+    }
+
     await purchase.populate([
       { path: 'supplier', select: 'supplierName contactPerson email phone' },
       { path: 'createdBy', select: 'fullName' }
@@ -169,7 +199,10 @@ export const updatePurchase = async (req, res) => {
       deliveryAddress,
       terms,
       notes,
-      approvedBy
+      approvedBy,
+      supplier,
+      items,
+      taxAmount
     } = req.body;
 
     const purchase = await Purchase.findById(id);
@@ -196,6 +229,41 @@ export const updatePurchase = async (req, res) => {
     if (deliveryAddress) updateData.deliveryAddress = deliveryAddress;
     if (terms) updateData.terms = terms;
     if (notes) updateData.notes = notes;
+
+    if (supplier) {
+      const supplierDoc = await Supplier.findById(supplier);
+      if (supplierDoc) {
+        updateData.supplier = supplier;
+      }
+    }
+
+    if (items && Array.isArray(items)) {
+      let totalAmt = 0;
+      const purchaseItems = [];
+      for (const item of items) {
+        const inventoryItem = await Item.findById(item.item);
+        const itemName = inventoryItem ? (inventoryItem.name || inventoryItem.itemName) : item.itemName;
+        const itemTotal = item.quantity * item.unitPrice;
+        totalAmt += itemTotal;
+        purchaseItems.push({
+          item: item.item,
+          itemName,
+          quantity: item.quantity,
+          unitPrice: item.unitPrice,
+          totalPrice: itemTotal,
+          receivedQuantity: item.receivedQuantity || 0,
+          pendingQuantity: item.quantity - (item.receivedQuantity || 0)
+        });
+      }
+      updateData.items = purchaseItems;
+      updateData.totalAmount = totalAmt;
+      const taxAmt = taxAmount !== undefined ? taxAmount : (purchase.taxAmount || 0);
+      updateData.taxAmount = taxAmt;
+      updateData.grandTotal = totalAmt + taxAmt;
+    } else if (taxAmount !== undefined) {
+      updateData.taxAmount = taxAmount;
+      updateData.grandTotal = (purchase.totalAmount || 0) + taxAmount;
+    }
 
     // Handle approval
     if (approvedBy && !purchase.isApproved) {
@@ -281,26 +349,36 @@ export const receivePurchase = async (req, res) => {
         purchaseItem.pendingQuantity = purchaseItem.quantity - purchaseItem.receivedQuantity;
 
         // Update inventory stock
-        const inventoryItem = await Inventory.findById(purchaseItem.item._id);
+        const inventoryItem = await Item.findById(purchaseItem.item._id);
         if (inventoryItem) {
-          const previousStock = inventoryItem.currentStock;
-          inventoryItem.currentStock += receivedItem.receivedQuantity;
+          const previousStock = inventoryItem.qty || 0;
+          inventoryItem.qty = previousStock + receivedItem.receivedQuantity;
           await inventoryItem.save();
 
-          // Create stock movement record
-          const { StockMovement } = await import('../models/Inventory.js');
-          await StockMovement.create({
-            item: inventoryItem._id,
-            movementType: 'IN',
-            quantity: receivedItem.receivedQuantity,
-            previousStock,
-            newStock: inventoryItem.currentStock,
-            reference: `Purchase Order: ${purchase.purchaseOrderNumber}`,
-            referenceId: purchase._id,
-            unit: purchase.unit,
-            createdBy: req.user._id,
-            notes: `Received from ${purchase.supplier.supplierName}`
-          });
+          console.log(`✅ Stock updated for item ${inventoryItem.name}. Previous: ${previousStock}, New: ${inventoryItem.qty}`);
+
+          // Create stock movement record safely
+          try {
+            const { StockMovement } = await import('../models/Inventory.js');
+            if (StockMovement && typeof StockMovement.create === 'function') {
+              await StockMovement.create({
+                item: inventoryItem._id,
+                movementType: 'IN',
+                quantity: receivedItem.receivedQuantity,
+                previousStock,
+                newStock: inventoryItem.qty,
+                reference: `Purchase Order: ${purchase.purchaseOrderNumber}`,
+                referenceId: purchase._id,
+                unit: purchase.unit,
+                createdBy: req.user._id,
+                notes: `Received from ${purchase.supplier?.supplierName || 'Supplier'}`
+              });
+            } else {
+              console.log('[STOCK MOVEMENT] Model not registered, skipping DB log.');
+            }
+          } catch (e) {
+            console.log('[STOCK MOVEMENT] Skipped creation:', e.message);
+          }
         }
       }
     }
@@ -507,5 +585,55 @@ export const getPurchaseItems = async (req, res) => {
       message: 'Failed to fetch purchase items',
       error: error.message
     });
+  }
+};
+
+export const sendPOToVendor = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const purchase = await Purchase.findById(id).populate('supplier').populate('purchaseRequest');
+    if (!purchase) {
+      return res.status(404).json({ success: false, message: 'Purchase Order not found' });
+    }
+
+    if (!purchase.supplier || !purchase.supplier.email) {
+      return res.status(400).json({ success: false, message: 'Supplier has no valid email address configured.' });
+    }
+
+    const company = await Company.findById(req.user.companyId);
+    const companyName = company?.name || 'Samtek ERP';
+
+    // Send email
+    const emailResult = await sendPurchaseOrderEmail({
+      to: purchase.supplier.email,
+      vendorName: purchase.supplier.supplierName || 'Vendor',
+      poNumber: purchase.purchaseOrderNumber,
+      items: purchase.items,
+      grandTotal: purchase.grandTotal,
+      companyName
+    });
+
+    if (emailResult.success) {
+      // Update PO status to "Sent"
+      purchase.status = 'Sent';
+      await purchase.save();
+
+      // Update originating Purchase Request status to "Ordered"
+      if (purchase.purchaseRequest) {
+        const pr = await PurchaseRequest.findById(purchase.purchaseRequest);
+        if (pr) {
+          pr.status = 'Ordered';
+          await pr.save();
+          console.log(`Auto-updated Purchase Request ${pr.requestId} status to Ordered`);
+        }
+      }
+
+      return res.json({ success: true, message: 'Purchase Order successfully sent to Vendor by email' });
+    } else {
+      return res.status(500).json({ success: false, message: 'Failed to send email to vendor: ' + emailResult.error });
+    }
+  } catch (error) {
+    console.error('Error sending PO to Vendor:', error);
+    res.status(500).json({ success: false, message: 'Internal Server Error', error: error.message });
   }
 };

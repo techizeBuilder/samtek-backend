@@ -10,7 +10,8 @@ const ChecklistSchema = new mongoose.Schema({
 
 const PackagingJobSchema = new mongoose.Schema({
   jobId: { type: String, unique: true },
-  productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', required: true },
+  productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', required: false },
+  qcJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'QCJob', required: false },
   orderId: { type: String, required: true },
   machineCode: { type: String, required: true, trim: true },
   machineName: { type: String, required: true, trim: true },
@@ -35,6 +36,9 @@ const PackagingJobSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 PackagingJobSchema.index({ company: 1, status: 1 });
-PackagingJobSchema.index({ company: 1, productionOrderId: 1 }, { unique: true });
+PackagingJobSchema.index(
+  { company: 1, productionOrderId: 1 },
+  { unique: true, partialFilterExpression: { productionOrderId: { $exists: true, $ne: null } } }
+);
 
 export default mongoose.model('PackagingJob', PackagingJobSchema);

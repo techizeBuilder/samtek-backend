@@ -106,11 +106,10 @@ const supplierSchema = new mongoose.Schema({
   timestamps: true
 });
 
-supplierSchema.pre('validate', function (next) {
+supplierSchema.pre('validate', function () {
   if (!this.supplierCode) {
     this.supplierCode = `SUPP-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
   }
-  next();
 });
 
 export default mongoose.model('Supplier', supplierSchema);

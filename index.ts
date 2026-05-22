@@ -3,7 +3,7 @@ import { createServer } from "http";
 // Import environment configuration
 import { config } from "./config/environment.js";
 // Removed cookieParser - using JWT Bearer tokens only
-// Main entry point - Trigger restart - Force picked up HR-Admin role
+// Main entry point - Trigger restart - Force picked up HR-Admin role - PurchaseInvoice async pre-save fix
 import express from 'express';
 import cors from 'cors';
 import path from "path";
@@ -267,7 +267,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/accounts', accountsRouter);
       app.use('/api/expenses', expenseRouter);
       app.use('/api/finance', financeRouter);
-      
+
       const leadRouter = (await import('./routes/leadRoutes.js')).default;
       app.use('/api/leads', leadRouter);
       console.log('Lead routes registered at /api/leads');
@@ -285,6 +285,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       const returnRoutes = (await import('./routes/returnRoutes.js')).default;
       app.use('/api/returns', returnRoutes);
       console.log('Return routes registered at /api/returns');
+
+      const purchaseRequestRoutes = (await import('./routes/purchaseRequestRoutes.js')).default;
+      app.use('/api/purchase-requests', purchaseRequestRoutes);
+      console.log('Purchase Request routes registered at /api/purchase-requests');
 
       const dashboardRoutes = (await import('./routes/dashboardRoutes.js')).default;
       app.use('/api/dashboard', dashboardRoutes);
@@ -386,7 +390,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/hrms-dashboard', hrmsDashboardRouter);
       app.use('/api/leave-balance-adjustments', leaveBalanceAdjustmentRouter);
       app.use('/api/performance', performanceRouter);
-      
+
       const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
       const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;
       const expenseRequestRouter = (await import('./routes/expenseRequest.routes.js')).default;
