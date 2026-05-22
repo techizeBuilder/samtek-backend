@@ -150,12 +150,9 @@ const orderSchema = new mongoose.Schema({
     remarks: {
       type: String
     }
-<<<<<<< HEAD
-=======
   },
   quotation: {
     type: String  // Stores base64 PDF content
->>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
   }
 }, {
   timestamps: true

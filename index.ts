@@ -278,11 +278,6 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/accounts', accountsRouter);
       app.use('/api/expenses', expenseRouter);
       app.use('/api/finance', financeRouter);
-<<<<<<< HEAD
-      
-=======
-
->>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
       const leadRouter = (await import('./routes/leadRoutes.js')).default;
       app.use('/api/leads', leadRouter);
       console.log('Lead routes registered at /api/leads');
@@ -401,13 +396,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/branches', branchRouter);
       app.use('/api/departments', departmentRouter);
       app.use('/api/designations', designationRouter);
-<<<<<<< HEAD
-=======
       app.use('/api/statutory-reports', statutoryReportRouter);
       app.use('/api/hrms-dashboard', hrmsDashboardRouter);
       app.use('/api/leave-balance-adjustments', leaveBalanceAdjustmentRouter);
       app.use('/api/performance', performanceRouter);
->>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
 
       const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
       const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;
