@@ -59,7 +59,7 @@ const orderSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected'],
+    enum: ['pending', 'approved', 'rejected', 'in_production', 'completed', 'cancelled'],
     default: 'pending'
   },
   priority: {
@@ -133,6 +133,23 @@ const orderSchema = new mongoose.Schema({
   },
   paymentDate: {
     type: Date
+  },
+  accountApproval: {
+    status: {
+      type: String,
+      enum: ['pending', 'approved', 'rejected'],
+      default: 'pending'
+    },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    approvedAt: {
+      type: Date
+    },
+    remarks: {
+      type: String
+    }
   }
 }, {
   timestamps: true
@@ -148,7 +165,7 @@ orderSchema.index({ status: 1 });
 orderSchema.index({ priority: 1 });
 
 // Update status history when status changes
-orderSchema.pre('save', function(next) {
+orderSchema.pre('save', async function () {
   if (this.isModified('status') && !this.isNew) {
     this.statusHistory.push({
       status: this.status,
@@ -157,7 +174,6 @@ orderSchema.pre('save', function(next) {
       remarks: this._statusRemarks || ''
     });
   }
-  next();
 });
 
 export default mongoose.model('Order', orderSchema);

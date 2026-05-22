@@ -227,16 +227,16 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
   // ─── SECTION 3: ITEMS TABLE ─────────────────────────────────────────────────
   const cols = [
     { label: 'No.',                key: 'no',       w: 20,  align: 'center' },
-    { label: 'Item & Description', key: 'desc',     w: 180, align: 'left'   },
-    { label: 'HSN / SAC',          key: 'hsn',      w: 48,  align: 'center' },
-    { label: 'Qty',                key: 'qty',      w: 22,  align: 'right'  },
-    { label: 'Unit',               key: 'unit',     w: 40,  align: 'center' },
-    { label: 'Rate (Rs.)',         key: 'rate',     w: 35,  align: 'right'  },
-    { label: 'Less:\nDiscount\n(Rs.)', key: 'lessDisc', w: 40, align: 'right' },
+    { label: 'Item & Description', key: 'desc',     w: 140, align: 'left'   },
+    { label: 'HSN / SAC',          key: 'hsn',      w: 35,  align: 'center' },
+    { label: 'Qty',                key: 'qty',      w: 25,  align: 'right'  },
+    { label: 'Unit',               key: 'unit',     w: 30,  align: 'center' },
+    { label: 'Rate (Rs.)',         key: 'rate',     w: 55,  align: 'right'  },
+    { label: 'Less:\nDiscount\n(Rs.)', key: 'lessDisc', w: 45, align: 'right' },
     { label: 'Discount',           key: 'disc',     w: 30,  align: 'right'  },
-    { label: 'Taxable (Rs.)',      key: 'taxable',  w: 40,  align: 'right'  },
-    { label: 'MRP (Rs.)',          key: 'mrp',      w: 35,  align: 'right'  },
-    { label: 'Amount (Rs.)',       key: 'amount',   w: 45,  align: 'right'  },
+    { label: 'Taxable (Rs.)',      key: 'taxable',  w: 55,  align: 'right'  },
+    { label: 'MRP (Rs.)',          key: 'mrp',      w: 45,  align: 'right'  },
+    { label: 'Amount (Rs.)',       key: 'amount',   w: 55,  align: 'right'  },
   ];
 
   // Calculate starting x for each column
@@ -253,7 +253,7 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
   let vx = L;
   cols.forEach((c, i) => {
     if (i > 0) drawLine(vx, y, vx, y + tblHeaderH, BORDER);
-    doc.font('Helvetica-Bold').fontSize(7).fillColor(BLACK)
+    doc.font('Helvetica-Bold').fontSize(6.5).fillColor(BLACK)
        .text(c.label, c.x + 2, y + 4, { width: c.w - 4, align: c.align, lineGap: 1 });
     vx += c.w;
   });
@@ -309,8 +309,8 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
     let rvx = L;
     cols.forEach((c, i) => {
       if (i > 0) drawLine(rvx, y, rvx, y + rowH, BORDER);
-      doc.font('Helvetica').fontSize(7.5).fillColor(BLACK)
-         .text(row[c.key], c.x + 3, y + 6, { width: c.w - 6, align: c.align, ellipsis: true });
+      doc.font('Helvetica').fontSize(7).fillColor(BLACK)
+         .text(row[c.key], c.x + 2, y + 6, { width: c.w - 4, align: c.align, ellipsis: true });
       rvx += c.w;
     });
 

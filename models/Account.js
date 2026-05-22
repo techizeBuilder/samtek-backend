@@ -94,7 +94,7 @@ const transactionSchema = new mongoose.Schema({
   },
   relatedDocument: {
     type: String,
-    enum: ['Sale', 'Purchase', 'Order', 'Payment', 'Receipt', 'PurchaseReturn', 'SalesReturn']
+    enum: ['Sale', 'Purchase', 'Order', 'Payment', 'Receipt', 'PurchaseReturn', 'SalesReturn', 'Expense']
   },
   relatedDocumentId: {
     type: mongoose.Schema.Types.ObjectId
@@ -131,11 +131,10 @@ const transactionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-transactionSchema.pre('save', function (next) {
+transactionSchema.pre('save', async function () {
   if (!this.transactionNumber) {
     this.transactionNumber = `TXN-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
   }
-  next();
 });
 
 export const Account = mongoose.model('Account', accountSchema);

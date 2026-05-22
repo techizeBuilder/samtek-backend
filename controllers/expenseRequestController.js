@@ -179,3 +179,78 @@ export const getAllExpenseRequests = async (
     });
   }
 };
+/* ================= ADMIN / FINANCE: PAY EXPENSE REQUEST ================= */
+export const payExpenseRequest = async (req, res) => {
+  try {
+    const { paymentMode, notes } = req.body;
+    const expenseRequestId = req.params.id;
+
+    const expenseRequest = await Expense.findById(expenseRequestId).populate("employee");
+    if (!expenseRequest) {
+      return res.status(404).json({ message: "Expense request not found" });
+    }
+
+    if (expenseRequest.status === "PAID") {
+      return res.status(400).json({ message: "Expense already paid" });
+    }
+
+    const { Transaction, Account } = await import("../models/Account.js");
+    const RealExpense = (await import("../models/Expense.js")).default;
+    const employee = expenseRequest.employee;
+    const unit = req.user.unit || employee.unit;
+    const companyId = req.user.companyId || employee.companyId;
+
+    // 1. Create Real Expense Record
+    const realExpense = await RealExpense.create({
+      companyId,
+      unit,
+      category: 'Operational', // Default for employee requests
+      expenseType: expenseRequest.expenseType,
+      amount: expenseRequest.amount,
+      date: new Date(),
+      paymentMode: paymentMode || 'Cash',
+      notes: notes || expenseRequest.remarks,
+      createdBy: req.user._id
+    });
+
+    // 2. Journal Entry Posting
+    // Debit: Expense Account
+    // Credit: Cash/Bank Account
+    const expenseAccount = await Account.findOne({ accountName: 'Indirect Expenses', unit });
+    const paymentAccount = await Account.findOne({ accountName: paymentMode === 'Bank Transfer' ? 'Bank Account' : 'Cash Account', unit });
+
+    if (expenseAccount && paymentAccount) {
+      const txn = new Transaction({
+        transactionNumber: `TXN-EXP-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
+        description: `Expense Paid: ${expenseRequest.expenseType} for ${employee.name}`,
+        reference: realExpense._id.toString(),
+        totalAmount: expenseRequest.amount,
+        unit,
+        relatedDocument: 'Expense',
+        relatedDocumentId: realExpense._id,
+        createdBy: req.user._id,
+        entries: [
+          { account: expenseAccount._id, debit: expenseRequest.amount, credit: 0 },
+          { account: paymentAccount._id, debit: 0, credit: expenseRequest.amount }
+        ]
+      });
+      await txn.save();
+
+      // Update account balances
+      expenseAccount.balance += expenseRequest.amount;
+      paymentAccount.balance -= expenseRequest.amount;
+
+      await expenseAccount.save();
+      await paymentAccount.save();
+    }
+
+    // 3. Update Request Status
+    expenseRequest.status = "PAID";
+    await expenseRequest.save();
+
+    res.json({ success: true, message: "Expense paid and recorded in ledger", data: realExpense });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to process payment: " + error.message });
+  }
+};

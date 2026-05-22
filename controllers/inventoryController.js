@@ -51,7 +51,7 @@ const checkInventoryPermission = (user, action) => {
     return true;
   }
   // need finalized role for technican to view items for complaint service module
-  if(user.role === 'Employee' && action === 'view') {
+  if(user.role === 'Complaint Management Employee' && action === 'view') {
     return true;
   }
 

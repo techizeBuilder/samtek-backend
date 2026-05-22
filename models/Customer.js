@@ -158,13 +158,12 @@ const customerSchema = new mongoose.Schema({
 });
 
 // Auto-generate customer code before saving
-customerSchema.pre('save', function (next) {
+customerSchema.pre('save', async function () {
   if (!this.customerCode) {
     const timestamp = Date.now().toString().slice(-8);
     const random = Math.random().toString(36).substr(2, 4).toUpperCase();
     this.customerCode = `CUST-${timestamp}-${random}`;
   }
-  next();
 });
 
 // Indexes for better query performance

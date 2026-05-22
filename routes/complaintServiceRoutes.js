@@ -27,31 +27,32 @@ router.post('/verify-response/:token', verifyCustomerResponse);
 
 
 // =========================================================================
-// 🔒 PROTECTED ROUTES (authenticateToken added explicitly to each)
+// 🔒 PROTECTED ROUTES (authenticateToken & authorizeRoles added)
 // =========================================================================
 
-router.get('/tickets/:id/invoice', authenticateToken, generateServiceInvoice);
+// --- 1. SHARED ROUTES (Both Dispatchers and Technicians can access) ---
+// Both roles need to view the specific details of a ticket and download invoices
+router.get('/tickets/:id', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), getTicketDetails);
+router.get('/tickets/:id/invoice', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), generateServiceInvoice);
 
-// Customer history & Technician list
-router.get('/purchase-history/:mobileNumber', authenticateToken, getCustomerHistory);
-router.get('/servicemen', authenticateToken, getServicemen);
+// --- 2. HEAD / DISPATCHER ROUTES (Web Dashboard) ---
+// Only the Head can create, assign, view the global list, cancel, and verify tickets
+router.get('/purchase-history/:mobileNumber', authenticateToken, authorizeRoles('Complaint Management Head'), getCustomerHistory);
+router.get('/servicemen', authenticateToken, authorizeRoles('Complaint Management Head'), getServicemen);
+router.post('/create-ticket', authenticateToken, authorizeRoles('Complaint Management Head'), createSupportTicket);
+router.get('/tickets', authenticateToken, authorizeRoles('Complaint Management Head'), getSupportTickets);
+router.put('/tickets/:id/assign', authenticateToken, authorizeRoles('Complaint Management Head'), assignTicket);
+router.put('/tickets/:id/cancel', authenticateToken, authorizeRoles('Complaint Management Head'), cancelTicket);
+router.post('/tickets/:id/send-verification', authenticateToken, authorizeRoles('Complaint Management Head'), sendVerificationEmail);
 
-// Ticket creation and complaint registration route
-router.post('/create-ticket', authenticateToken, authorizeRoles("HR-Admin"), createSupportTicket);
-router.get('/tickets', authenticateToken, getSupportTickets);
-router.get('/tickets/:id', authenticateToken, getTicketDetails);
-router.put('/tickets/:id/assign', authenticateToken, assignTicket);
-router.put('/tickets/:id/cancel', authenticateToken, cancelTicket);
-
-// Dispatcher triggers the verification email
-router.post('/tickets/:id/send-verification', authenticateToken, sendVerificationEmail);
-
-// Technician routes
-router.get('/technician/tickets', authenticateToken, getMyTickets);
-router.put('/technician/start-visit/:id', authenticateToken, startVisit);
+// --- 3. EMPLOYEE / TECHNICIAN ROUTES (Mobile App) ---
+// Only the Employee can view their specific task list and execute visits
+router.get('/technician/tickets', authenticateToken, authorizeRoles('Complaint Management Employee'), getMyTickets);
+router.put('/technician/start-visit/:id', authenticateToken, authorizeRoles('Complaint Management Employee'), startVisit);
 router.put(
     '/technician/complete-visit/:id', 
-    authenticateToken, // Protected
+    authenticateToken, 
+    authorizeRoles('Complaint Management Employee'), // Protected by role
     serviceUpload.array('media', 5), 
     completeVisit
 );

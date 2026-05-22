@@ -135,12 +135,12 @@ export const getServicemen = async (req, res) => {
             return res.status(401).json({ success: false, message: 'Unauthorized: Missing Company ID' });
         }
 
+
         // 2. Fetch real technicians from the database for this specific company
         const users = await User.find({
             companyId: req.user.companyId,
             isActive: true,
-            // Assuming these are the roles that act as technicians in your system
-            role: { $in: ['Employee', 'Technician'] }
+            role: 'Complaint Management Employee' // 🔥 UPDATED ROLE
         });
 
         // 3. Map the User documents to match the exact structure the frontend expects
@@ -440,7 +440,7 @@ export const assignTicket = async (req, res) => {
         const technician = await User.findOne({
             _id: technicianId,
             companyId: req.user.companyId,
-            // role: 'Technician' // Uncomment once role is confirmed
+            role: 'Complaint Management Employee' //  UPDATED ROLE
         });
 
         if (!technician) {
@@ -547,13 +547,12 @@ export const getTicketDetails = async (req, res) => {
             .populate('visitHistory.technicianId', 'username fullName mobile')
             .populate('visitHistory.partsUsed.item', 'name code salePrice gst hsn');
 
-        // 4. Role-Based Payload Optimization
-        //put the actual role when roles are fanalized
-        if (req.user.role === 'Employee' || req.user.role === 'Technician') {
-            // Technicians do not need the audit log. Strip it from the DB fetch to save bandwidth.
+       // 4. Role-Based Payload Optimization
+        if (req.user.role === 'Complaint Management Employee') { //  UPDATED ROLE
+            // Employees do not need the audit log on mobile. Strip it to save bandwidth.
             query = query.select('-auditLog');
         } else {
-            // Dispatchers and Admins get the deep populated audit log
+            // Heads and Admins get the deep populated audit log
             query = query.populate('auditLog.performedBy.userId', 'username fullName role');
         }
 
@@ -566,7 +565,7 @@ export const getTicketDetails = async (req, res) => {
         }
 
         // 6. Strict Security: Ensure a technician can only view their OWN assigned tickets
-        if (req.user.role === 'Technician') {
+       if (req.user.role === 'Complaint Management Employee'){
             const assignedTechId = ticket.assignment?.technicianId?._id?.toString();
             const loggedInUserId = req.user._id.toString();
 
@@ -919,8 +918,7 @@ export const getMyTickets = async (req, res) => {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
 
-        // Add page and limit defaults for mobile pagination
-        const { view = 'active', status, page = 1, limit = 10 } = req.query;
+        const { view = 'active', status, page = 1, limit = 10, search, startDate, endDate } = req.query;
 
         const query = {
             companyId: req.user.companyId,
@@ -935,13 +933,29 @@ export const getMyTickets = async (req, res) => {
             query.status = { $in: ['Resolved', 'Cancelled', 'Closed'] };
         }
 
-        // Pagination Math
+        if (startDate || endDate) {
+            query.createdAt = {};
+            if (startDate) {
+                query.createdAt.$gte = new Date(new Date(startDate).setHours(0, 0, 0, 0));
+            }
+            if (endDate) {
+                query.createdAt.$lte = new Date(new Date(endDate).setHours(23, 59, 59, 999));
+            }
+        }
+
+        if (search) {
+            query.$or = [
+                { tokenId: { $regex: search, $options: 'i' } },
+                { 'customer.mobileNumber': { $regex: search, $options: 'i' } },
+                { 'customer.name': { $regex: search, $options: 'i' } },
+                { 'machine.serialNumber': { $regex: search, $options: 'i' } },
+                { 'issue.issueType': { $regex: search, $options: 'i' } }
+            ];
+        }
+
         const skip = (parseInt(page) - 1) * parseInt(limit);
         const parsedLimit = parseInt(limit);
 
-        // SMART SORTING LOGIC
-        // Active tickets -> Sort by when they are scheduled to visit (morning to afternoon)
-        // History tickets -> Sort by most recently completed first (updatedAt)
         const sortLogic = view === 'history'
             ? { updatedAt: -1 }
             : { 'assignment.visitScheduledAt': 1 };
@@ -953,7 +967,6 @@ export const getMyTickets = async (req, res) => {
             .limit(parsedLimit)
             .populate('createdBy', 'fullName mobile');
 
-        // Get total count so the mobile app knows when to stop showing the "loading..." spinner at the bottom
         const totalTickets = await ServiceTicket.countDocuments(query);
 
         res.status(200).json({
@@ -962,7 +975,7 @@ export const getMyTickets = async (req, res) => {
                 currentPage: parseInt(page),
                 totalPages: Math.ceil(totalTickets / parsedLimit),
                 totalTickets,
-                hasMore: (skip + tickets.length) < totalTickets // Super helpful boolean for mobile devs!
+                hasMore: (skip + tickets.length) < totalTickets 
             },
             data: tickets
         });

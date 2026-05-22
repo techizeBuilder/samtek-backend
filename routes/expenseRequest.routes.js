@@ -7,7 +7,8 @@ import {
   updateExpenseStatus,
   deleteExpense,
   getTeamExpenseRequests,
-  getAllExpenseRequests
+  getAllExpenseRequests,
+  payExpenseRequest
 } from "../controllers/expenseRequestController.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { expenseUpload } from "../utils/uploadExpense.js";
@@ -32,6 +33,7 @@ ExpenseRequestRouter.delete("/:id", authMiddleware, deleteExpense);
 
 ExpenseRequestRouter.get("/manager", authMiddleware, getTeamExpenseRequests);
 ExpenseRequestRouter.get("/all", authMiddleware, getAllExpenseRequests);
+ExpenseRequestRouter.post("/:id/pay", authMiddleware, payExpenseRequest);
 
 
 export default ExpenseRequestRouter;

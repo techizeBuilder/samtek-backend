@@ -57,8 +57,8 @@ app.use((req, res, next) => {
 });
 
 // Add body parsing and static file serving
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Serve static files from uploads directory (for company logos and other uploads)
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
@@ -76,6 +76,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
     const Order = (await import('./models/Order.js')).default;
     const Customer = (await import('./models/Customer.js')).default;
     const Sale = (await import('./models/Sale.js')).default;
+    const Lead = (await import('./models/Lead.js')).default;
 
     console.log('✅ Models registered:', {
       User: !!User,
@@ -83,7 +84,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       ProductionGroup: !!ProductionGroup,
       Order: !!Order,
       Customer: !!Customer,
-      Sale: !!Sale
+      Sale: !!Sale,
+      Lead: !!Lead
     });
 
     // Create seed users after database connection
@@ -103,7 +105,6 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       origin: config.CORS_ORIGINS,
       credentials: true
     }));
-    app.use(express.json());
 
     // Serve test file for debugging
     app.get('/test-profile', (req, res) => {
@@ -195,6 +196,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/complaints', complaintRoutes);
       console.log('Complaint and Service routes registered at /api/complaints');
 
+      // training management routes
+      const trainingRoutes = (await import('./routes/trainingManagementRoutes.js')).default;
+      app.use('/api/training', trainingRoutes);
+      console.log('Training Management routes registered at /api/training');
 
       const authRoutes = (await import('./auth-routes.js')).default;
       app.use('/api', authRoutes);
@@ -225,6 +230,15 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/accounts', accountsRouter);
       app.use('/api/expenses', expenseRouter);
       app.use('/api/finance', financeRouter);
+      
+      const leadRouter = (await import('./routes/leadRoutes.js')).default;
+      app.use('/api/leads', leadRouter);
+      console.log('Lead routes registered at /api/leads');
+
+      // Payment Reminder routes
+      const paymentReminderRouter = (await import('./routes/paymentReminder.routes.js')).default;
+      app.use('/api/accounts/payment-reminders', paymentReminderRouter);
+      console.log('Payment Reminder routes registered at /api/accounts/payment-reminders');
       console.log('Order routes registered at /api/orders');
       console.log('Sales routes registered at /api/sales');
       console.log('Accounts routes registered at /api/accounts');
@@ -440,6 +454,21 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       });
 
       log("API routes registered successfully");
+
+      // ─── Daily Cron Job — Payment Reminders & Overdue Detection ──────────────
+      try {
+        const cron = (await import('node-cron')).default;
+        const { runDailyReminderCron } = await import('./controllers/paymentReminderController.js');
+
+        // Runs every day at 9:00 AM
+        cron.schedule('0 9 * * *', async () => {
+          console.log('⏰ [CRON] Starting daily payment reminder job...');
+          await runDailyReminderCron();
+        });
+        console.log('✅ Payment reminder cron job scheduled (daily at 9 AM)');
+      } catch (cronError: any) {
+        console.warn('⚠️  Cron job setup warning:', cronError.message);
+      }
     } catch (error: any) {
       log(`Error importing routes: ${error.message}`);
       throw error;

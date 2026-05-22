@@ -40,6 +40,11 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: false
   },
+// New field to identify trainees for LMS module
+  isTrainee: {
+    type: Boolean,
+    default: false
+  },
 
   // HRMS Fields
   employeeId: {

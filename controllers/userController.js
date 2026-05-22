@@ -185,36 +185,23 @@ export const getUserById = async (req, res) => {
 
 export const createUser = async (req, res) => {
   try {
-    console.log('Create user request body:', req.body);
     const {
       username, email, password, fullName, role, unit, companyId, branchId, departmentId, designationId, permissions, isActive,
-      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId
+      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId,
+      isTrainee // 🔥 Explicit Boolean
     } = req.body;
 
-    // Validate required fields
     if (!email || !password || !role) {
-      console.log('Validation failed - missing required fields');
-      return res.status(400).json({
-        message: 'Email, password, and role are required',
-        success: false
-      });
+      return res.status(400).json({ message: 'Email, password, and role are required', success: false });
     }
 
-    // Check if email already exists
     const existingUser = await User.findOne({ email: email.toLowerCase() });
-
     if (existingUser) {
-      console.log('User already exists with email:', email);
-      return res.status(400).json({
-        message: 'Email already exists',
-        success: false
-      });
+      return res.status(400).json({ message: 'Email already exists', success: false });
     }
 
-    // Auto-inherit company and unit for HR-Admin
     let finalCompanyId = companyId;
     let finalUnit = unit;
-
     if (req.user && (req.user.role === 'HR-Admin' || req.user.role === 'Hr Admin' || req.user.role === 'Company Admin')) {
       finalCompanyId = req.user.companyId || finalCompanyId;
       finalUnit = req.user.unit || finalUnit;
@@ -223,32 +210,49 @@ export const createUser = async (req, res) => {
     let parsedPermissions = permissions;
     if (permissions) {
       try {
-        if (typeof permissions === 'string') {
-          parsedPermissions = JSON.parse(permissions);
-        }
-        if (typeof parsedPermissions === 'string') {
-          parsedPermissions = JSON.parse(parsedPermissions);
-        }
+        if (typeof permissions === 'string') parsedPermissions = JSON.parse(permissions);
+        if (typeof parsedPermissions === 'string') parsedPermissions = JSON.parse(parsedPermissions);
       } catch (e) {
-        console.error('Failed to parse permissions:', e);
         parsedPermissions = { role: role, canAccessAllUnits: false, modules: [] };
       }
     }
 
-    // Build default permissions object - permissions.role is required by User model
-    const defaultPermissions = parsedPermissions || {
-      role: role,
-      canAccessAllUnits: false,
-      modules: []
-    };
-    if (!defaultPermissions.role) {
-      defaultPermissions.role = role;
+    const defaultPermissions = parsedPermissions || { role: role, canAccessAllUnits: false, modules: [] };
+    if (!defaultPermissions.role) defaultPermissions.role = role;
+
+    // 🔥 AUTOMATIC LMS FEATURE INJECTION (FRONTEND FIX)
+    // Instead of creating a new 'lms' module, we append the feature into the primary department module
+    const finalIsTrainee = isTrainee === true || isTrainee === 'true';
+    if (finalIsTrainee) {
+        if (defaultPermissions.modules && defaultPermissions.modules.length > 0) {
+            // Target the main department module (e.g., 'sales' or 'production')
+            const primaryModule = defaultPermissions.modules[0];
+            
+            if (!primaryModule.features) {
+                primaryModule.features = [];
+            }
+            
+            // Check if it already has the trainee feature to prevent duplicates
+            const hasLmsFeature = primaryModule.features.some(f => f.key === 'traineeDashboard');
+            
+            if (!hasLmsFeature) {
+                // 👇 Pushing as a FEATURE, not a module
+                primaryModule.features.push({
+                    key: "traineeDashboard",
+                    view: true,
+                    add: false,
+                    edit: false,
+                    delete: false,
+                    alter: false
+                });
+            }
+        }
     }
 
-    /* ================= EMPLOYEE ID ================= */
     let finalEmployeeId = employeeId;
     if (!finalEmployeeId && finalCompanyId) {
-      finalEmployeeId = await generateEmployeeId(finalCompanyId);
+        // Ensure generateEmployeeId is imported
+        finalEmployeeId = await generateEmployeeId(finalCompanyId); 
     }
 
     const userData = {
@@ -256,45 +260,31 @@ export const createUser = async (req, res) => {
       email: email.toLowerCase(),
       password,
       fullName: fullName || '',
-      role,
+      role, 
       unit: finalUnit || '',
       companyId: finalCompanyId || null,
       branchId: branchId || null,
       departmentId: departmentId || null,
       designationId: designationId || null,
       isActive: isActive !== undefined ? isActive : true,
-      permissions: defaultPermissions,
-      // HRMS fields
+      isTrainee: finalIsTrainee, 
+      permissions: defaultPermissions, 
       employeeId: finalEmployeeId,
       mobile: mobile || '',
       gender: gender || '',
       dob: dob || null,
-      joiningDate: joiningDate || new Date(), // If joiningDate is missing, set to now (ERP logic)
+      joiningDate: joiningDate || new Date(), 
       reportingManager: reportingManager || managerId || null,
       employeeType: employeeType || employmentType || ''
     };
 
-    console.log('Creating user with data:', userData);
-
     const user = new User(userData);
     await user.save();
-
     const { password: _, ...userWithoutPassword } = user.toObject();
 
-    console.log('User created successfully:', userWithoutPassword);
-
-    res.status(201).json({
-      message: 'User created successfully',
-      success: true,
-      user: userWithoutPassword
-    });
+    res.status(201).json({ message: 'User created successfully', success: true, user: userWithoutPassword });
   } catch (error) {
-    console.error('Create user error:', error);
-    res.status(500).json({
-      message: 'Internal server error',
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ message: 'Internal server error', success: false, error: error.message });
   }
 };
 
