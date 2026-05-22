@@ -53,9 +53,17 @@ export const getMyTravelRequests = async (req, res) => {
 /* ================= GET ALL (HR / ADMIN) ================= */
 export const getAllTravelRequests = async (req, res) => {
   try {
-    const requests = await TravelRequest.find()
-      .populate("employee", "name email")
-      .sort({ createdAt: -1 });
+    const fetchedRequests = await TravelRequest.find()
+      .populate("employee", "fullName username email")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const requests = fetchedRequests.map(r => {
+      if (r.employee) {
+        r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
+      }
+      return r;
+    });
 
     res.json(requests);
   } catch (error) {
@@ -131,14 +139,22 @@ export const getManagerTravelRequests = async (
   try {
     const managerId = req.user._id;
 
-    const team = await User.find({ managerId }, "_id");
+    const team = await User.find({ reportingManager: managerId }, "_id");
     const employeeIds = team.map((u) => u._id);
 
-    const requests = await TravelRequest.find({
+    const fetchedRequests = await TravelRequest.find({
       employee: { $in: employeeIds },
     })
-      .populate("employee", "name email")
-      .sort({ createdAt: -1 });
+      .populate("employee", "fullName username email")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const requests = fetchedRequests.map(r => {
+      if (r.employee) {
+        r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
+      }
+      return r;
+    });
 
     res.json(requests);
   } catch (error) {

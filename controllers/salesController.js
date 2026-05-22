@@ -137,6 +137,7 @@ export const createSale = async (req, res) => {
       paymentMethod,
       dueDate: dueDate ? new Date(dueDate) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       unit: req.user.role === USER_ROLES.SUPER_USER ? req.body.unit : req.user.unit,
+      companyId: req.user.companyId,
       dispatch,
       notes
     };
@@ -1186,6 +1187,105 @@ export const getSalespersonItems = async (req, res) => {
   }
 };
 
+export const createSalespersonItem = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userCompanyId = req.user.companyId;
+
+    const {
+      name,
+      code,
+      group,
+      category,
+      subCategory,
+      unit,
+      salePrice,
+      dealerPrice,
+      hsn,
+      gst,
+      currency,
+      unitType,
+      description,
+      uses,
+      otherInfo,
+      specifications,
+      minOrderQty,
+      variant // Optional field
+    } = req.body;
+
+    if (!name || !code || !category || !unit) {
+      return res.status(400).json({
+        success: false,
+        message: 'Required fields are missing'
+      });
+    }
+
+    // Check if item code already exists
+    const existingItem = await Item.findOne({ code });
+    if (existingItem) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product code already exists'
+      });
+    }
+
+    // Handle file uploads
+    let imagePath = null;
+    let brochurePath = null;
+
+    if (req.files) {
+      if (req.files['image'] && req.files['image'][0]) {
+        imagePath = `/uploads/items/images/${req.files['image'][0].filename}`;
+      }
+      if (req.files['brochure'] && req.files['brochure'][0]) {
+        brochurePath = `/uploads/items/brochures/${req.files['brochure'][0].filename}`;
+      }
+    }
+
+    const newItem = new Item({
+      name,
+      code,
+      group,
+      category,
+      subCategory,
+      unit,
+      salePrice,
+      dealerPrice,
+      hsn,
+      gst,
+      currency,
+      unitType,
+      description,
+      uses,
+      otherInfo,
+      specifications: Array.isArray(specifications) ? specifications : [],
+      minOrderQty,
+      variant,
+      type: "Product", // Default for sales module
+      store: userCompanyId, // Store under the user's company
+      qty: 0, // Initial qty is 0
+      image: imagePath,
+      brochureUrl: brochurePath
+    });
+
+    await newItem.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Product added successfully',
+      item: newItem
+    });
+
+  } catch (error) {
+    console.error('Create salesperson item error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+};
+
 // Sales-specific order functions moved from orderController
 export const getSalesSummary = async (req, res) => {
   try {
@@ -2135,6 +2235,30 @@ export const sendQuotationEmailHandler = async (req, res) => {
     console.log('📧 Email service call completed');
 
     if (result.success) {
+      // Save the quotation to the Lead if leadCode is provided
+      if (leadCode) {
+        try {
+          const Lead = (await import('../models/Lead.js')).default;
+          await Lead.findOneAndUpdate(
+            { leadCode, companyId: userCompanyId },
+            {
+              quotation: attachmentBase64,
+              $push: {
+                history: {
+                  action: 'Quotation Sent',
+                  notes: `Quotation sent to ${to}`,
+                  performedBy: req.user._id,
+                  timestamp: new Date()
+                }
+              }
+            }
+          );
+          console.log(`💾 Saved quotation for lead ${leadCode}`);
+        } catch (saveError) {
+          console.error('❌ Error saving quotation to lead:', saveError);
+          // Don't fail the whole request if only saving to DB fails
+        }
+      }
       res.json({ success: true, message: 'Quotation sent successfully' });
     } else {
       res.status(500).json({ success: false, message: 'Failed to send quotation', error: result.error });

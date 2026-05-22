@@ -127,6 +127,29 @@ const saleSchema = new mongoose.Schema({
     enum: ['CGST_SGST', 'IGST'],
     default: 'CGST_SGST'
   },
+  // Gate Pass & NOC Information
+  gatePass: {
+    nocStatus: { type: String, enum: ['Pending', 'Approved'], default: 'Pending' },
+    gatePassNumber: { type: String },
+    generatedAt: { type: Date },
+    generatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    status: { type: String, enum: ['Pending', 'Generated'], default: 'Pending' },
+    vehicleNumber: { type: String },
+    driverName: { type: String },
+    contactNumber: { type: String }
+  },
+  // Product Type (defined by Store Head)
+  productType: {
+    type: String,
+    enum: ['In-house Manufactured', 'Purchased (Trading Product)'],
+    default: null
+  },
+  // Inventory Availability (defined by Store Head)
+  isAvailableInInventory: {
+    type: String,
+    enum: ['Available', 'Not Available'],
+    default: null
+  },
   // Track dates when reminders were sent (avoid duplicate emails)
   reminderSentDates: [
     {

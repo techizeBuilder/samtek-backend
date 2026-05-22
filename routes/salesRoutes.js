@@ -1,5 +1,6 @@
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
+import { itemUpload } from '../middleware/itemUpload.js';
 import {
   getSalespersonCustomers,
   getSalespersonDeliveries,
@@ -14,6 +15,7 @@ import {
   updateSalespersonDamage,
   deleteSalespersonDamage,
   getSalespersonItems,
+  createSalespersonItem,
   getSalesSummary,
   getSalesRecentOrders,
   getSalesOrders,
@@ -205,6 +207,7 @@ salesRouter.post('/create-damage', createSalespersonDamage);
 salesRouter.put('/update-damage/:id', updateSalespersonDamage);
 salesRouter.delete('/delete-damage/:id', deleteSalespersonDamage);
 salesRouter.get('/items', getSalespersonItems);
+salesRouter.post('/create-item', itemUpload.fields([{ name: 'image', maxCount: 1 }, { name: 'brochure', maxCount: 1 }]), createSalespersonItem);
 salesRouter.get('/invoice/:id/pdf', downloadInvoicePDF);
 salesRouter.post('/send-quotation-email', sendQuotationEmailHandler);
 

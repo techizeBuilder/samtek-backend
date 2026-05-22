@@ -57,16 +57,24 @@ export const getTeamExpenseRequests = async (
     const managerId = req.user._id;
 
     // 🔹 manager ke under employees
-    const teamEmployees = await User.find({ managerId }, "_id name email");
+    const teamEmployees = await User.find({ reportingManager: managerId }, "_id fullName username email");
 
     const employeeIds = teamEmployees.map((e) => e._id);
 
     // 🔹 unhi employees ke expenses
-    const expenses = await Expense.find({
+    const fetchedExpenses = await Expense.find({
       employee: { $in: employeeIds },
     })
-      .populate("employee", "name email")
-      .sort({ createdAt: -1 });
+      .populate("employee", "fullName username email")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const expenses = fetchedExpenses.map(e => {
+      if (e.employee) {
+        e.employee.name = e.employee.fullName || e.employee.username || 'Unknown';
+      }
+      return e;
+    });
 
     res.status(200).json(expenses);
   } catch (error) {
@@ -167,9 +175,17 @@ export const getAllExpenseRequests = async (
   res
 ) => {
   try {
-    const expenses = await Expense.find()
-      .populate("employee", "name email employeeId")
-      .sort({ createdAt: -1 });
+    const fetchedExpenses = await Expense.find()
+      .populate("employee", "fullName username email employeeId")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const expenses = fetchedExpenses.map(e => {
+      if (e.employee) {
+        e.employee.name = e.employee.fullName || e.employee.username || 'Unknown';
+      }
+      return e;
+    });
 
     res.status(200).json(expenses);
   } catch (error) {

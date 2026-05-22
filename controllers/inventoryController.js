@@ -42,12 +42,12 @@ const DELIVERY_CHALLAN_ORDER = [
 // Helper function to check inventory permissions
 const checkInventoryPermission = (user, action) => {
   // Super Admin and Unit Head have all permissions
-  if (user.role === 'Superadmin' || user.role === 'Unit Head') {
+  if (user.role === 'Super Admin' || user.role === 'Unit Head') {
     return true;
   }
 
-  // Allow Sales users to view items for order creation
-  if (user.role === 'Sales' && action === 'view') {
+  // Allow Sales and Store users to view items
+  if ((user.role === 'Sales' || user.role === 'Store Head' || user.role === 'Store Employee') && action === 'view') {
     return true;
   }
   // need finalized role for technican to view items for complaint service module
@@ -216,6 +216,18 @@ export const getItems = async (req, res) => {
       console.log('🏢 Unit Head filtering applied: company =', req.user.companyId, ', type = Product');
     }
 
+    // Add company filtering for Store Head / Store Employee
+    if ((req.user.role === 'Store Head' || req.user.role === 'Store Employee') && req.user.companyId) {
+      const storeCompanyIdStr = req.user.companyId.toString();
+      query.$or = [
+        { store: storeCompanyIdStr },          // items stored with string store field
+        { store: req.user.companyId },          // items stored with ObjectId store field
+        { companyId: storeCompanyIdStr },       // items stored with string companyId
+        { companyId: req.user.companyId }       // items stored with ObjectId companyId
+      ];
+      console.log('🏢 Store user filtering applied: company =', storeCompanyIdStr);
+    }
+
     // Search filter with improved partial matching
     if (search) {
       try {
@@ -223,45 +235,53 @@ export const getItems = async (req, res) => {
         const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
         console.log('🔍 Search words:', searchWords);
 
+        let searchOr;
         if (searchWords.length === 1) {
-          // Single word search - use simple regex
           const escapedSearch = searchWords[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          query.$or = [
+          searchOr = [
             { name: { $regex: escapedSearch, $options: 'i' } },
             { code: { $regex: escapedSearch, $options: 'i' } },
             { description: { $regex: escapedSearch, $options: 'i' } }
           ];
         } else {
-          // Multi-word search - each word should be found somewhere in the name
           const wordRegexes = searchWords.map(word => ({
             name: { $regex: word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' }
           }));
-
-          // Also try exact phrase matching
           const exactPhrase = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-          query.$or = [
-            // All words must be found in name
+          searchOr = [
             { $and: wordRegexes },
-            // Or exact phrase in name
             { name: { $regex: exactPhrase, $options: 'i' } },
-            // Or exact phrase in code
             { code: { $regex: exactPhrase, $options: 'i' } },
-            // Or exact phrase in description
             { description: { $regex: exactPhrase, $options: 'i' } }
           ];
         }
 
-        console.log('🔍 Search query applied:', JSON.stringify(query.$or, null, 2));
+        // If company $or already exists, combine using $and so both filters apply
+        if (query.$or) {
+          query.$and = [
+            { $or: query.$or },
+            { $or: searchOr }
+          ];
+          delete query.$or;
+        } else {
+          query.$or = searchOr;
+        }
+
+        console.log('🔍 Search query applied');
       } catch (error) {
         console.error('❌ Search regex error:', error);
-        // Fallback to simple text matching if regex fails
         const simpleSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        query.$or = [
+        const searchOrFallback = [
           { name: { $regex: simpleSearch, $options: 'i' } },
           { code: { $regex: simpleSearch, $options: 'i' } },
           { description: { $regex: simpleSearch, $options: 'i' } }
         ];
+        if (query.$or) {
+          query.$and = [{ $or: query.$or }, { $or: searchOrFallback }];
+          delete query.$or;
+        } else {
+          query.$or = searchOrFallback;
+        }
       }
     }
 
@@ -439,6 +459,7 @@ export const getItems = async (req, res) => {
 
     // Calculate inventory statistics
     const stats = await Item.aggregate([
+      { $match: query },
       {
         $group: {
           _id: null,
@@ -454,6 +475,7 @@ export const getItems = async (req, res) => {
     ]);
 
     const typeStats = await Item.aggregate([
+      { $match: query },
       {
         $group: {
           _id: '$type',
@@ -507,10 +529,18 @@ export const getItemById = async (req, res) => {
       return exportItemsToExcel(req, res);
     }
 
-    // Build query with company filtering for Unit Head
+    // Build query with company filtering for Unit Head and Store roles
     let query = { _id: id };
     if (req.user.role === 'Unit Head' && req.user.companyId) {
       query.store = req.user.companyId;
+    } else if ((req.user.role === 'Store Head' || req.user.role === 'Store Employee') && req.user.companyId) {
+      const storeCompanyIdStr = req.user.companyId.toString();
+      query.$or = [
+        { store: storeCompanyIdStr },
+        { store: req.user.companyId },
+        { companyId: storeCompanyIdStr },
+        { companyId: req.user.companyId }
+      ];
     }
 
     const item = await Item.findOne(query);

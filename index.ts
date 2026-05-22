@@ -3,7 +3,7 @@ import { createServer } from "http";
 // Import environment configuration
 import { config } from "./config/environment.js";
 // Removed cookieParser - using JWT Bearer tokens only
-// Main entry point - Trigger restart - Force picked up HR-Admin role
+// Main entry point - Trigger restart - Force picked up HR-Admin role - PurchaseInvoice async pre-save fix
 import express from 'express';
 import cors from 'cors';
 import path from "path";
@@ -73,6 +73,21 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
     const User = (await import('./models/User.js')).default;
     const { Item } = await import('./models/Inventory.js');
     const ProductionGroup = (await import('./models/ProductionGroup.js')).default;
+    const ProductionOrder = (await import('./models/ProductionOrder.js')).default;
+    const ProductionTeam = (await import('./models/ProductionTeam.js')).default;
+    const RDMachine = (await import('./models/RDMachine.js')).default;
+    const RDBOM = (await import('./models/RDBOM.js')).default;
+    const RDPrototype = (await import('./models/RDPrototype.js')).default;
+    const RDChangeRequest = (await import('./models/RDChangeRequest.js')).default;
+    const RDToolProcess = (await import('./models/RDToolProcess.js')).default;
+    const RDQualityParam = (await import('./models/RDQualityParam.js')).default;
+    const RDDocument = (await import('./models/RDDocument.js')).default;
+    const PackagingJob = (await import('./models/PackagingJob.js')).default;
+    const DispatchOrder = (await import('./models/DispatchOrder.js')).default;
+    const QCJob = (await import('./models/QCJob.js')).default;
+    const MarketingAsset = (await import('./models/MarketingAsset.js')).default;
+    const MarketingCategory = (await import('./models/MarketingCategory.js')).default;
+    const MarketingShareLog = (await import('./models/MarketingShareLog.js')).default;
     const Order = (await import('./models/Order.js')).default;
     const Customer = (await import('./models/Customer.js')).default;
     const Sale = (await import('./models/Sale.js')).default;
@@ -204,6 +219,39 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       const authRoutes = (await import('./auth-routes.js')).default;
       app.use('/api', authRoutes);
 
+      // Seed routes MUST be registered before profileRoutes (which has global auth middleware)
+      app.post('/api/seed-rd-production', async (req, res) => {
+        try {
+          const { seedRDProduction } = await import('./seed/seedRDProduction.js');
+          const result = await seedRDProduction();
+          res.json(result);
+        } catch (error: any) {
+          console.error('Error seeding RD/Production data:', error);
+          res.status(500).json({ success: false, message: 'Error seeding data', error: error.message });
+        }
+      });
+
+      app.post('/api/seed-qc-user', async (req, res) => {
+        try {
+          const { seedQCUser } = await import('./seed/seedQCUser.js');
+          const result = await seedQCUser();
+          res.json(result);
+        } catch (error: any) {
+          res.status(500).json({ success: false, message: error.message });
+        }
+      });
+
+      app.post('/api/seed-packaging-dispatch', async (req, res) => {
+        try {
+          const { seedPackagingDispatch } = await import('./seed/seedPackagingDispatch.js');
+          const result = await seedPackagingDispatch();
+          res.json(result);
+        } catch (error: any) {
+          console.error('Error seeding Packaging/Dispatch data:', error);
+          res.status(500).json({ success: false, message: 'Error seeding data', error: error.message });
+        }
+      });
+
       const profileRoutes = (await import('./routes/profileRoutes.js')).default;
       app.use('/api', profileRoutes);
 
@@ -230,7 +278,11 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/accounts', accountsRouter);
       app.use('/api/expenses', expenseRouter);
       app.use('/api/finance', financeRouter);
+<<<<<<< HEAD
       
+=======
+
+>>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
       const leadRouter = (await import('./routes/leadRoutes.js')).default;
       app.use('/api/leads', leadRouter);
       console.log('Lead routes registered at /api/leads');
@@ -248,6 +300,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       const returnRoutes = (await import('./routes/returnRoutes.js')).default;
       app.use('/api/returns', returnRoutes);
       console.log('Return routes registered at /api/returns');
+
+      const purchaseRequestRoutes = (await import('./routes/purchaseRequestRoutes.js')).default;
+      app.use('/api/purchase-requests', purchaseRequestRoutes);
+      console.log('Purchase Request routes registered at /api/purchase-requests');
 
       const dashboardRoutes = (await import('./routes/dashboardRoutes.js')).default;
       app.use('/api/dashboard', dashboardRoutes);
@@ -278,10 +334,35 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/admin', adminRoutes);
       console.log('Admin routes registered at /api/admin');
 
-      // Production routes
+      // Production routes (batch/shift - existing)
       const productionRoutes = (await import('./routes/productionRoutes.js')).default;
       app.use('/api/production', productionRoutes);
       console.log('Production routes registered at /api/production');
+
+      // Production Manufacturing routes (machine mfg orders, teams, job cards)
+      const productionMfgRoutes = (await import('./routes/productionMfgRoutes.js')).default;
+      app.use('/api/production-mfg', productionMfgRoutes);
+      console.log('Production Mfg routes registered at /api/production-mfg');
+
+      // R&D routes
+      const rdRoutes = (await import('./routes/rdRoutes.js')).default;
+      app.use('/api/rd', rdRoutes);
+      console.log('R&D routes registered at /api/rd');
+
+      // Packaging & Dispatch routes
+      const packagingDispatchRoutes = (await import('./routes/packagingDispatchRoutes.js')).default;
+      app.use('/api/packaging-dispatch', packagingDispatchRoutes);
+      console.log('Packaging & Dispatch routes registered at /api/packaging-dispatch');
+
+      // Quality Control routes
+      const qcRoutes = (await import('./routes/qcRoutes.js')).default;
+      app.use('/api/qc', qcRoutes);
+      console.log('Quality Control routes registered at /api/qc');
+
+      // Marketing routes
+      const marketingRoutes = (await import('./routes/marketingRoutes.js')).default;
+      app.use('/api/marketing', marketingRoutes);
+      console.log('Marketing routes registered at /api/marketing');
 
       // Packing routes
       const packingRoutes = (await import('./routes/packingRoutes.js')).default;
@@ -302,6 +383,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       const branchRouter = (await import('./routes/branch.routes.js')).default;
       const departmentRouter = (await import('./routes/department.routes.js')).default;
       const designationRouter = (await import('./routes/designation.routes.js')).default;
+      const statutoryReportRouter = (await import('./routes/statutoryReport.routes.js')).default;
+      const hrmsDashboardRouter = (await import('./routes/hrmsDashboard.routes.js')).default;
+      const leaveBalanceAdjustmentRouter = (await import('./routes/leaveBalanceAdjustment.routes.js')).default;
+      const performanceRouter = (await import('./routes/performance.routes.js')).default;
 
       app.use('/api/attendance', attendanceRouter);
       app.use('/api/holidays', holidayRouter);
@@ -316,6 +401,13 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/branches', branchRouter);
       app.use('/api/departments', departmentRouter);
       app.use('/api/designations', designationRouter);
+<<<<<<< HEAD
+=======
+      app.use('/api/statutory-reports', statutoryReportRouter);
+      app.use('/api/hrms-dashboard', hrmsDashboardRouter);
+      app.use('/api/leave-balance-adjustments', leaveBalanceAdjustmentRouter);
+      app.use('/api/performance', performanceRouter);
+>>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
 
       const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
       const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;

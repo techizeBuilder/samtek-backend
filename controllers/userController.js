@@ -25,6 +25,7 @@ export const getUsers = async (req, res) => {
       unit,
       search,
       status,
+      companyId, // Extract companyId from frontend
       sortBy = 'createdAt',
       sortOrder = 'desc'
     } = req.query;
@@ -34,9 +35,13 @@ export const getUsers = async (req, res) => {
 
     // 1. Enforce Role-Based Data Isolation
     if (currentUser.role !== 'Superadmin' && currentUser.role !== 'Super Admin' && currentUser.role !== 'super_user') {
-      // Non-super admins must be restricted to their own company
+      // Non-super admins MUST be restricted to their own company
       if (currentUser.companyId) {
         query.companyId = currentUser.companyId;
+      } else {
+        // If an HR-Admin somehow lacks a companyId, prevent them from seeing ALL companies!
+        // We set it to a non-existent value so they don't leak other companies' users.
+        query.companyId = null;
       }
 
       // If role is Manager, only show users reporting to them
@@ -47,6 +52,11 @@ export const getUsers = async (req, res) => {
       // Filter by unit only if the current user has a specific unit assigned in the DB
       if (currentUser.unit && currentUser.unit !== currentUser.company?.unitName) {
         query.unit = currentUser.unit;
+      }
+    } else {
+      // If Super Admin, they can filter by companyId from frontend
+      if (companyId && companyId !== 'all') {
+        query.companyId = companyId;
       }
     }
 
@@ -224,35 +234,35 @@ export const createUser = async (req, res) => {
     // Instead of creating a new 'lms' module, we append the feature into the primary department module
     const finalIsTrainee = isTrainee === true || isTrainee === 'true';
     if (finalIsTrainee) {
-        if (defaultPermissions.modules && defaultPermissions.modules.length > 0) {
-            // Target the main department module (e.g., 'sales' or 'production')
-            const primaryModule = defaultPermissions.modules[0];
-            
-            if (!primaryModule.features) {
-                primaryModule.features = [];
-            }
-            
-            // Check if it already has the trainee feature to prevent duplicates
-            const hasLmsFeature = primaryModule.features.some(f => f.key === 'traineeDashboard');
-            
-            if (!hasLmsFeature) {
-                // 👇 Pushing as a FEATURE, not a module
-                primaryModule.features.push({
-                    key: "traineeDashboard",
-                    view: true,
-                    add: false,
-                    edit: false,
-                    delete: false,
-                    alter: false
-                });
-            }
+      if (defaultPermissions.modules && defaultPermissions.modules.length > 0) {
+        // Target the main department module (e.g., 'sales' or 'production')
+        const primaryModule = defaultPermissions.modules[0];
+
+        if (!primaryModule.features) {
+          primaryModule.features = [];
         }
+
+        // Check if it already has the trainee feature to prevent duplicates
+        const hasLmsFeature = primaryModule.features.some(f => f.key === 'traineeDashboard');
+
+        if (!hasLmsFeature) {
+          // 👇 Pushing as a FEATURE, not a module
+          primaryModule.features.push({
+            key: "traineeDashboard",
+            view: true,
+            add: false,
+            edit: false,
+            delete: false,
+            alter: false
+          });
+        }
+      }
     }
 
     let finalEmployeeId = employeeId;
     if (!finalEmployeeId && finalCompanyId) {
-        // Ensure generateEmployeeId is imported
-        finalEmployeeId = await generateEmployeeId(finalCompanyId); 
+      // Ensure generateEmployeeId is imported
+      finalEmployeeId = await generateEmployeeId(finalCompanyId);
     }
 
     const userData = {
@@ -260,20 +270,20 @@ export const createUser = async (req, res) => {
       email: email.toLowerCase(),
       password,
       fullName: fullName || '',
-      role, 
+      role,
       unit: finalUnit || '',
       companyId: finalCompanyId || null,
       branchId: branchId || null,
       departmentId: departmentId || null,
       designationId: designationId || null,
       isActive: isActive !== undefined ? isActive : true,
-      isTrainee: finalIsTrainee, 
-      permissions: defaultPermissions, 
+      isTrainee: finalIsTrainee,
+      permissions: defaultPermissions,
       employeeId: finalEmployeeId,
       mobile: mobile || '',
       gender: gender || '',
       dob: dob || null,
-      joiningDate: joiningDate || new Date(), 
+      joiningDate: joiningDate || new Date(),
       reportingManager: reportingManager || managerId || null,
       employeeType: employeeType || employmentType || ''
     };
@@ -284,7 +294,24 @@ export const createUser = async (req, res) => {
 
     res.status(201).json({ message: 'User created successfully', success: true, user: userWithoutPassword });
   } catch (error) {
-    res.status(500).json({ message: 'Internal server error', success: false, error: error.message });
+    console.error('Create user error:', error);
+
+    // Mongoose validation error (e.g. role not in enum, required field missing)
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message).join(', ');
+      return res.status(400).json({ message: messages, success: false });
+    }
+
+    // Duplicate key (email or username already exists)
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0] || 'field';
+      return res.status(400).json({ message: `${field} already exists`, success: false });
+    }
+
+    res.status(500).json({
+      message: error.message || 'Internal server error',
+      success: false
+    });
   }
 };
 

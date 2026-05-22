@@ -108,15 +108,23 @@ export const getTeamAttendanceRequests = async (req, res) => {
     const managerId = req.user._id;
 
     // 1️⃣ Get team members
-    const teamMembers = await User.find({ managerId }, "_id name email role");
+    const teamMembers = await User.find({ reportingManager: managerId }, "_id fullName username email role");
     const teamIds = teamMembers.map((u) => u._id);
 
     // 2️⃣ Get attendance requests for those members
-    const requests = await AttendanceRequest.find({
+    const fetchedRequests = await AttendanceRequest.find({
       user: { $in: teamIds },
     })
-      .populate("user", "name email role")
-      .sort({ createdAt: -1 });
+      .populate("user", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const requests = fetchedRequests.map(r => {
+      if (r.user) {
+        r.user.name = r.user.fullName || r.user.username || 'Unknown';
+      }
+      return r;
+    });
 
     res.json(requests);
   } catch (error) {
@@ -188,9 +196,17 @@ export const getAllAttendanceRequests = async (req, res) => {
       filter.user = { $in: userIds };
     }
 
-    const requests = await AttendanceRequest.find(filter)
-      .populate("user", "name email role")
-      .sort({ createdAt: -1 });
+    const fetchedRequests = await AttendanceRequest.find(filter)
+      .populate("user", "fullName username email role")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const requests = fetchedRequests.map(r => {
+      if (r.user) {
+        r.user.name = r.user.fullName || r.user.username || 'Unknown';
+      }
+      return r;
+    });
 
     res.json(requests);
   } catch (error) {

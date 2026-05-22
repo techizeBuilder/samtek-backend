@@ -18,7 +18,7 @@ export const generatePayslipsFromPayroll = async (
     const payrolls = await Payroll.find({
       month,
       status: "Paid",
-    }).populate("employee", "name email");
+    }).populate("employee", "fullName username email");
 
     if (!payrolls.length) {
       return res.status(404).json({
@@ -108,7 +108,7 @@ export const generatePayslipsFromPayroll = async (
         await sendCommonEmail({
           type: CommonEmailType.PAYSLIP_GENERATED,
           to: employee.email,
-          name: employee.name,
+          name: employee.fullName || employee.username || 'Employee',
           data: {
             month,
             downloadUrl: `${process.env.FRONTEND_URL}/payslip/${payslip._id}`,
@@ -136,11 +136,19 @@ export const generatePayslipsFromPayroll = async (
 export const getAllPayslips = async (_req, res) => {
   try {
     const payslips = await Payslip.find()
-      .populate("user", "name email role")
+      .populate("user", "fullName username email role")
       .populate("payroll") // ❌ koi match / filter nahi
       .sort({ createdAt: -1 });
 
-    res.json(payslips);
+    const formattedPayslips = payslips.map(p => {
+      const pObj = p.toObject();
+      if (pObj.user) {
+        pObj.user.name = pObj.user.fullName || pObj.user.username || 'Unknown';
+      }
+      return pObj;
+    });
+
+    res.json(formattedPayslips);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -160,7 +168,7 @@ export const downloadPayslipPDF = async (req, res) => {
           { path: "branchId", select: "name" },
           { path: "companyId", select: "name address logo" }
         ],
-        select: "name email employeeId joiningDate pan pfNumber uan bankName bankAccountNumber ifscCode elBalance slBalance"
+        select: "fullName username email employeeId joiningDate pan pfNumber uan bankName bankAccountNumber ifscCode elBalance slBalance"
       })
       .populate("payroll");
 
@@ -183,7 +191,7 @@ export const sendPayslipToEmployee = async (req, res) => {
   try {
     const payslip = await Payslip.findById(req.params.id).populate(
       "user",
-      "email name"
+      "email fullName username"
     );
 
     if (!payslip) {
@@ -208,7 +216,7 @@ export const sendPayslipToEmployee = async (req, res) => {
 /* ================= EMPLOYEE: MY PAYSLIPS ================= */
 export const getMyPayslips = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user._id || req.user.userId || req.user.id;
 
     const payslips = await Payslip.find({ user: userId })
       .populate("payroll")

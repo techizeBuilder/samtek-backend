@@ -10,8 +10,6 @@ import mongoose from 'mongoose';
  * Create a new Purchase Invoice and auto-post to ledger
  */
 export const createPurchaseInvoice = async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
     try {
         const {
             vendorId, invoiceNo, invoiceDate, dueDate, items,
@@ -25,13 +23,13 @@ export const createPurchaseInvoice = async (req, res) => {
         }
 
         // 1. Check for duplicate invoice
-        const existing = await PurchaseInvoice.findOne({ vendor: vendorId, invoiceNo }).session(session);
+        const existing = await PurchaseInvoice.findOne({ vendor: vendorId, invoiceNo });
         if (existing) {
             throw new Error(`Duplicate invoice number "${invoiceNo}" already exists for this vendor.`);
         }
 
         // 2. Check if vendor is active
-        const vendor = await Supplier.findById(vendorId).session(session);
+        const vendor = await Supplier.findById(vendorId);
         if (!vendor || vendor.status === 'inactive') {
             throw new Error('Vendor is inactive or not found');
         }
@@ -54,19 +52,13 @@ export const createPurchaseInvoice = async (req, res) => {
             createdBy: req.user._id,
             notes
         });
-        await invoice.save({ session });
+        await invoice.save();
 
         // 4. Auto Journal Posting
-        // Debit Purchase Expense (subtotal)
-        // Debit Input GST (gstAmount)
-        // Credit Accounts Payable (totalAmount)
-
-        // Find or create relevant accounts (simplified for now)
-        // In a real ERP, these would be linked in settings
-        const purchaseAccount = await Account.findOne({ accountName: 'Purchase Account', unit }).session(session);
-        const gstAccount = await Account.findOne({ accountName: 'Input GST', unit }).session(session);
-        const payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit }).session(session);
-        const tdsPayableAccount = await Account.findOne({ accountName: 'TDS Payable', unit }).session(session);
+        const purchaseAccount = await Account.findOne({ accountName: 'Purchase Account', unit });
+        const gstAccount = await Account.findOne({ accountName: 'Input GST', unit });
+        const payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
+        const tdsPayableAccount = await Account.findOne({ accountName: 'TDS Payable', unit });
 
         if (purchaseAccount && gstAccount && payableAccount) {
             const entries = [
@@ -75,7 +67,6 @@ export const createPurchaseInvoice = async (req, res) => {
                 { account: payableAccount._id, debit: 0, credit: totalAmount }
             ];
 
-            // Add TDS Payable entry if applicable
             if (tdsAmount > 0 && tdsPayableAccount) {
                 entries.push({ account: tdsPayableAccount._id, debit: 0, credit: tdsAmount });
             }
@@ -91,29 +82,27 @@ export const createPurchaseInvoice = async (req, res) => {
                 createdBy: req.user._id,
                 entries
             });
-            await txn.save({ session });
+            await txn.save();
 
             // Update account balances
             purchaseAccount.balance += subtotal;
             gstAccount.balance += gstAmount;
             payableAccount.balance += totalAmount;
+            
             if (tdsAmount > 0 && tdsPayableAccount) {
-                tdsPayableAccount.balance += tdsAmount; // Credit increases liability
-                await tdsPayableAccount.save({ session });
+                tdsPayableAccount.balance += tdsAmount;
+                await tdsPayableAccount.save();
             }
 
-            await purchaseAccount.save({ session });
-            await gstAccount.save({ session });
-            await payableAccount.save({ session });
+            await purchaseAccount.save();
+            await gstAccount.save();
+            await payableAccount.save();
         }
 
-        await session.commitTransaction();
         res.status(201).json({ success: true, data: invoice });
     } catch (error) {
-        await session.abortTransaction();
+        console.error('❌ Error in createPurchaseInvoice:', error);
         res.status(400).json({ success: false, message: error.message });
-    } finally {
-        session.endSession();
     }
 };
 
@@ -156,8 +145,6 @@ export const getPurchaseInvoices = async (req, res) => {
  * Record Vendor Payment
  */
 export const createVendorPayment = async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
     try {
         const { vendorId, paymentDate, amount, paymentMode, referenceNo, notes } = req.body;
         const companyId = req.user.companyId;
@@ -175,14 +162,14 @@ export const createVendorPayment = async (req, res) => {
             createdBy: req.user._id,
             notes
         });
-        await payment.save({ session });
+        await payment.save();
 
-        // 2. Update Invoices (FIFO logic or specific allocation - using FIFO here for simplicity)
+        // 2. Update Invoices (FIFO logic)
         let remainingAmount = amount;
         const unpaidInvoices = await PurchaseInvoice.find({
             vendor: vendorId,
             status: { $ne: 'Paid' }
-        }).sort({ invoiceDate: 1 }).session(session);
+        }).sort({ invoiceDate: 1 });
 
         for (const inv of unpaidInvoices) {
             if (remainingAmount <= 0) break;
@@ -190,13 +177,11 @@ export const createVendorPayment = async (req, res) => {
             inv.paidAmount += payToThis;
             inv.balanceAmount -= payToThis;
             remainingAmount -= payToThis;
-            await inv.save({ session });
+            await inv.save();
         }
 
         // 3. Ledger Posting
-        // Debit Accounts Payable
-        // Credit Bank/Cash
-        let payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit }).session(session);
+        let payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
         if (!payableAccount) {
             payableAccount = new Account({
                 accountNumber: `AP-${unit.replace(/\s+/g, '-')}-${Date.now()}`,
@@ -207,18 +192,17 @@ export const createVendorPayment = async (req, res) => {
                 companyId,
                 description: 'Auto-generated account for vendor payables'
             });
-            await payableAccount.save({ session });
+            await payableAccount.save();
         }
 
         const bankAccount = req.body.accountId
-            ? await Account.findById(req.body.accountId).session(session)
-            : await Account.findOne({ isBankOrCash: true, unit }).session(session);
+            ? await Account.findById(req.body.accountId)
+            : await Account.findOne({ isBankOrCash: true, unit });
 
         if (!bankAccount) {
             throw new Error('Bank or Cash account not found for payment. Please create one in Bank & Cash module.');
         }
 
-        // Negative Balance Control
         if (bankAccount.balance < amount) {
             throw new Error(`Insufficient funds in ${bankAccount.accountName}. Available: ₹${bankAccount.balance}`);
         }
@@ -238,22 +222,19 @@ export const createVendorPayment = async (req, res) => {
                     { account: bankAccount._id, debit: 0, credit: amount }
                 ]
             });
-            await txn.save({ session });
+            await txn.save();
 
             payableAccount.balance -= amount;
             bankAccount.balance -= amount;
 
-            await payableAccount.save({ session });
-            await bankAccount.save({ session });
+            await payableAccount.save();
+            await bankAccount.save();
         }
 
-        await session.commitTransaction();
         res.json({ success: true, data: payment });
     } catch (error) {
-        await session.abortTransaction();
+        console.error('❌ Error in createVendorPayment:', error);
         res.status(400).json({ success: false, message: error.message });
-    } finally {
-        session.endSession();
     }
 };
 
@@ -325,8 +306,6 @@ export const getVendorOutstanding = async (req, res) => {
  * Create Purchase Return
  */
 export const createPurchaseReturn = async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
     try {
         const { vendorId, invoiceId, returnDate, items, totalAmount, reason, bankAccountId } = req.body;
         const companyId = req.user.companyId;
@@ -344,33 +323,31 @@ export const createPurchaseReturn = async (req, res) => {
             createdBy: req.user._id,
             reason
         });
-        await pReturn.save({ session });
+        await pReturn.save();
 
-        // 2. Update Inventory (Subtract returned quantity)
+        // 2. Update Inventory
         for (const item of items) {
             if (item.item) {
                 await Item.findByIdAndUpdate(item.item, {
                     $inc: { qty: -item.quantity }
-                }).session(session);
+                });
             }
         }
 
-        // 3. Update Invoice Balance (if linked)
+        // 3. Update Invoice Balance
         if (invoiceId) {
-            const invoice = await PurchaseInvoice.findById(invoiceId).session(session);
+            const invoice = await PurchaseInvoice.findById(invoiceId);
             if (invoice) {
                 invoice.balanceAmount -= totalAmount;
-                await invoice.save({ session });
+                await invoice.save();
             }
         }
 
-        // 4. Ledger Posting & Bank Integration - AUTO-CREATE ACCOUNTS IF MISSING
-        let payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit }).session(session);
-        let purchaseReturnAccount = await Account.findOne({ accountName: 'Purchase Return', unit }).session(session);
+        // 4. Ledger Posting
+        let payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
+        let purchaseReturnAccount = await Account.findOne({ accountName: 'Purchase Return', unit });
 
-        // Fallback: If not found, try to create them or find in another unit
         if (!payableAccount) {
-            console.log(`⚠️ Accounts Payable not found for unit ${unit}. Creating...`);
             payableAccount = new Account({
                 accountName: 'Accounts Payable',
                 accountNumber: `PAY-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`,
@@ -378,25 +355,21 @@ export const createPurchaseReturn = async (req, res) => {
                 unit,
                 balance: 0
             });
-            await payableAccount.save({ session });
+            await payableAccount.save();
         }
 
         if (!purchaseReturnAccount) {
-            console.log(`⚠️ Purchase Return account not found for unit ${unit}. Creating...`);
             purchaseReturnAccount = new Account({
                 accountName: 'Purchase Return',
                 accountNumber: `PRT-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`,
-                accountType: 'Revenue', // Or Contra-Expense
+                accountType: 'Revenue',
                 unit,
                 balance: 0
             });
-            await purchaseReturnAccount.save({ session });
+            await purchaseReturnAccount.save();
         }
 
         if (payableAccount && purchaseReturnAccount) {
-            console.log(`✅ Accounts ready: Payable(${payableAccount._id}), Return(${purchaseReturnAccount._id})`);
-
-            // A. Standard Return Transaction: Debit Payable, Credit Purchase Return
             const txn = new Transaction({
                 transactionNumber: `TXN-PRT-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
                 description: `Purchase Return - Reason: ${reason}. Ref: ${invoiceId || 'Direct Return'}`,
@@ -411,15 +384,10 @@ export const createPurchaseReturn = async (req, res) => {
                     { account: purchaseReturnAccount._id, debit: 0, credit: totalAmount }
                 ]
             });
-            await txn.save({ session });
+            await txn.save();
 
-            // B. Optional Bank Refund Transaction: Debit Bank, Credit Payable
             if (bankAccountId && bankAccountId !== 'none') {
-                console.log(`🏦 Processing Bank Refund for account: ${bankAccountId}`);
-                const bankAccount = await Account.findOne({
-                    _id: bankAccountId
-                }).session(session);
-
+                const bankAccount = await Account.findById(bankAccountId);
                 if (bankAccount) {
                     const refundTxn = new Transaction({
                         transactionNumber: `TXN-REF-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
@@ -435,37 +403,24 @@ export const createPurchaseReturn = async (req, res) => {
                             { account: payableAccount._id, debit: 0, credit: totalAmount }
                         ]
                     });
-                    await refundTxn.save({ session });
-
-                    // Update balances
+                    await refundTxn.save();
                     bankAccount.balance += totalAmount;
-                    payableAccount.balance += totalAmount; // Re-add to payable to offset the return's debit
-                    await bankAccount.save({ session });
-                    console.log(`💰 Bank balance updated. New balance for ${bankAccount.accountName}: ${bankAccount.balance}`);
-                } else {
-                    console.log(`❌ Bank Account ${bankAccountId} not found!`);
+                    payableAccount.balance += totalAmount;
+                    await bankAccount.save();
                 }
             }
 
-            // Update main accounts from standard return
             payableAccount.balance -= totalAmount;
             purchaseReturnAccount.balance += totalAmount;
 
-            await payableAccount.save({ session });
-            await purchaseReturnAccount.save({ session });
-            console.log(`✅ Ledger balances updated successfully`);
-        } else {
-            console.log(`❌ Could not resolve required accounts for ledger posting`);
+            await payableAccount.save();
+            await purchaseReturnAccount.save();
         }
 
-        await session.commitTransaction();
-        console.log(`🚀 Transaction committed. Return saved.`);
         res.status(201).json({ success: true, data: pReturn });
     } catch (error) {
-        await session.abortTransaction();
+        console.error('❌ Error in createPurchaseReturn:', error);
         res.status(400).json({ success: false, message: error.message });
-    } finally {
-        session.endSession();
     }
 };
 
@@ -760,3 +715,357 @@ export const getSuppliersForAccounts = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+/**
+ * Auto-creates a Purchase Return when a purchased product fails QC inspection.
+ */
+export const createQCRejectedPurchaseReturn = async (qcJob, user) => {
+    try {
+        const companyId = qcJob.company;
+        const unit = user.unit || 'Main';
+
+        // 1. Find Supplier/Vendor
+        const Purchase = mongoose.model('Purchase');
+        const PurchaseRequest = mongoose.model('PurchaseRequest');
+        
+        let supplierId = null;
+        let po = null;
+        
+        // Search by sourceRefId in Purchase
+        if (qcJob.sourceRefId) {
+            po = await Purchase.findOne({ purchaseOrderNumber: qcJob.sourceRefId }).populate('supplier');
+        }
+        
+        // If not found, search by itemCode/requestId in PurchaseRequest
+        if (!po) {
+            const pr = await PurchaseRequest.findOne({
+                $or: [
+                    { requestId: qcJob.sourceRefId },
+                    { requestId: qcJob.itemCode }
+                ]
+            }).populate({
+                path: 'purchaseOrder',
+                populate: { path: 'supplier' }
+            });
+            if (pr && pr.purchaseOrder) {
+                po = pr.purchaseOrder;
+            }
+        }
+        
+        if (po && po.supplier) {
+            supplierId = po.supplier._id || po.supplier;
+        } else {
+            // Fallback: get the first active supplier for the unit
+            const Supplier = mongoose.model('Supplier');
+            const fallbackSupplier = await Supplier.findOne({ status: 'active' });
+            if (fallbackSupplier) {
+                supplierId = fallbackSupplier._id;
+            }
+        }
+
+        if (!supplierId) {
+            console.error('❌ [QC Rejection Return] Could not find vendor/supplier for return.');
+            return null;
+        }
+
+        // 2. Find Item from inventory
+        let inventoryItem = null;
+        // Attempt 1: Search by ObjectId
+        if (qcJob.itemCode && /^[0-9a-fA-F]{24}$/.test(qcJob.itemCode)) {
+            inventoryItem = await Item.findById(qcJob.itemCode);
+        }
+        
+        // Attempt 2: Search by Code
+        if (!inventoryItem && qcJob.itemCode) {
+            inventoryItem = await Item.findOne({
+                code: qcJob.itemCode,
+                companyId: companyId
+            });
+        }
+        
+        // Attempt 3: Search by Name
+        if (!inventoryItem && qcJob.itemName) {
+            inventoryItem = await Item.findOne({
+                name: qcJob.itemName,
+                companyId: companyId
+            });
+        }
+
+        // 3. Price calculation
+        let unitPrice = 0;
+        if (po && po.items) {
+            const poItem = po.items.find(i => 
+                i.itemName.toLowerCase() === qcJob.itemName.toLowerCase() || 
+                (inventoryItem && String(i.item) === String(inventoryItem._id))
+            );
+            if (poItem) {
+                unitPrice = poItem.unitPrice;
+            }
+        }
+        
+        if (unitPrice === 0 && inventoryItem) {
+            unitPrice = inventoryItem.purchaseCost || inventoryItem.stdCost || 100;
+        } else if (unitPrice === 0) {
+            unitPrice = 100;
+        }
+
+        const totalPrice = unitPrice * (qcJob.quantity || 1);
+
+        // 4. Find linked PurchaseInvoice if exists
+        let invoiceId = undefined;
+        const PurchaseInvoiceModel = mongoose.model('PurchaseInvoice');
+        if (supplierId) {
+            const invoice = await PurchaseInvoiceModel.findOne({
+                vendor: supplierId,
+                companyId: companyId,
+                $or: [
+                    { invoiceNo: qcJob.sourceRefId },
+                    { notes: new RegExp(qcJob.sourceRefId, 'i') }
+                ]
+            });
+            if (invoice) {
+                invoiceId = invoice._id;
+                invoice.balanceAmount = Math.max(0, invoice.balanceAmount - totalPrice);
+                await invoice.save();
+            }
+        }
+
+        // 5. Create Return record
+        const items = [{
+            item: inventoryItem ? inventoryItem._id : new mongoose.Types.ObjectId(),
+            itemName: qcJob.itemName,
+            quantity: qcJob.quantity || 1,
+            unitPrice: unitPrice,
+            gstPercent: 18,
+            gstAmount: Math.round(totalPrice * 0.18),
+            totalPrice: totalPrice
+        }];
+
+        const pReturn = new PurchaseReturn({
+            vendor: supplierId,
+            purchaseInvoice: invoiceId,
+            returnDate: new Date(),
+            items,
+            subtotal: totalPrice,
+            gstAmount: Math.round(totalPrice * 0.18),
+            totalAmount: totalPrice,
+            unit: qcJob.unit || 'pcs',
+            companyId,
+            createdBy: user._id,
+            reason: qcJob.failReason || `QC Rejected: Fail QC Inspection Job ${qcJob.qcJobId}`
+        });
+
+        await pReturn.save();
+        console.log(`✅ [QC Rejection Return] Recorded Purchase Return successfully for ${qcJob.itemName}`);
+
+        // 6. Ledger Posting
+        let payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
+        let purchaseReturnAccount = await Account.findOne({ accountName: 'Purchase Return', unit });
+
+        if (!payableAccount) {
+            payableAccount = new Account({
+                accountName: 'Accounts Payable',
+                accountNumber: `PAY-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`,
+                accountType: 'Liability',
+                unit,
+                companyId,
+                balance: 0
+            });
+            await payableAccount.save();
+        }
+
+        if (!purchaseReturnAccount) {
+            purchaseReturnAccount = new Account({
+                accountName: 'Purchase Return',
+                accountNumber: `PRT-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`,
+                accountType: 'Revenue',
+                unit,
+                companyId,
+                balance: 0
+            });
+            await purchaseReturnAccount.save();
+        }
+
+        if (payableAccount && purchaseReturnAccount) {
+            const txn = new Transaction({
+                transactionNumber: `TXN-PRT-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
+                description: `QC Auto Return - Reason: ${pReturn.reason}`,
+                totalAmount: totalPrice,
+                unit,
+                relatedDocument: 'PurchaseReturn',
+                relatedDocumentId: pReturn._id,
+                createdBy: user._id,
+                companyId,
+                entries: [
+                    { account: payableAccount._id, debit: totalPrice, credit: 0 },
+                    { account: purchaseReturnAccount._id, debit: 0, credit: totalPrice }
+                ]
+            });
+            await txn.save();
+
+            payableAccount.balance -= totalPrice;
+            purchaseReturnAccount.balance += totalPrice;
+
+            await payableAccount.save();
+            await purchaseReturnAccount.save();
+            console.log(`✅ [QC Rejection Return] Posted transaction to ledger successfully`);
+        }
+
+        return pReturn;
+    } catch (error) {
+        console.error('❌ Error creating QC-rejected purchase return:', error);
+        throw error;
+    }
+};
+
+/**
+ * Auto-creates a Purchase Invoice when a purchase request is received.
+ */
+export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
+    try {
+        const companyId = purchaseRequest.companyId;
+        const unit = user.unit || 'Main';
+
+        // 1. Populate purchase order if not populated
+        const PurchaseRequestModel = mongoose.model('PurchaseRequest');
+        let request = purchaseRequest;
+        
+        request = await PurchaseRequestModel.findById(purchaseRequest._id).populate({
+            path: 'purchaseOrder',
+            populate: { path: 'supplier' }
+        });
+
+        if (!request) {
+            console.error('❌ [Auto Invoice] Purchase Request not found.');
+            return null;
+        }
+
+        // 2. Determine vendor/supplier
+        let vendorId = null;
+        if (request.purchaseOrder && request.purchaseOrder.supplier) {
+            vendorId = request.purchaseOrder.supplier._id || request.purchaseOrder.supplier;
+        } else {
+            // Fallback: search for active supplier
+            const Supplier = mongoose.model('Supplier');
+            const fallbackSupplier = await Supplier.findOne({ status: 'active' });
+            if (fallbackSupplier) {
+                vendorId = fallbackSupplier._id;
+            }
+        }
+
+        if (!vendorId) {
+            console.error('❌ [Auto Invoice] Could not identify vendor/supplier for invoice.');
+            return null;
+        }
+
+        // 3. Generate invoice number
+        const poNumber = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
+        const invoiceNo = `INV-PO-${poNumber}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+
+        // 4. Duplicate invoice check
+        const existing = await PurchaseInvoice.findOne({ vendor: vendorId, invoiceNo });
+        if (existing) {
+            console.log(`⚠️ [Auto Invoice] Invoice ${invoiceNo} already exists.`);
+            return existing;
+        }
+
+        // 5. Gather items
+        let items = [];
+        let subtotal = 0;
+
+        if (request.purchaseOrder && request.purchaseOrder.items && request.purchaseOrder.items.length > 0) {
+            // Copy items from Purchase Order
+            items = request.purchaseOrder.items.map(item => {
+                const itemTotal = (item.quantity || 1) * (item.unitPrice || 100);
+                subtotal += itemTotal;
+                return {
+                    item: item.item,
+                    itemName: item.itemName,
+                    quantity: item.quantity || 1,
+                    unitPrice: item.unitPrice || 100,
+                    totalPrice: itemTotal
+                };
+            });
+        } else {
+            // Build single item from request
+            const itemTotal = (request.quantity || 1) * 100;
+            subtotal += itemTotal;
+            items = [{
+                item: request.itemId && /^[0-9a-fA-F]{24}$/.test(request.itemId) 
+                    ? new mongoose.Types.ObjectId(request.itemId) 
+                    : new mongoose.Types.ObjectId(),
+                itemName: request.productName,
+                quantity: request.quantity || 1,
+                unitPrice: 100,
+                totalPrice: itemTotal
+            }];
+        }
+
+        const gstAmount = Math.round(subtotal * 0.18);
+        const totalAmount = subtotal + gstAmount;
+
+        // 6. Create Invoice
+        const invoice = new PurchaseInvoice({
+            vendor: vendorId,
+            invoiceNo,
+            invoiceDate: new Date(),
+            dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // Net 30 default
+            items,
+            subtotal,
+            gstAmount,
+            totalAmount,
+            balanceAmount: totalAmount,
+            unit,
+            companyId,
+            createdBy: user._id,
+            notes: `Automatically generated on receipt of Store Purchase Requisition: ${request.requestId}`
+        });
+
+        await invoice.save();
+        console.log(`✅ [Auto Invoice] Purchase Invoice ${invoiceNo} recorded successfully.`);
+
+        // 7. Auto Journal Posting to General Ledger
+        const purchaseAccount = await Account.findOne({ accountName: 'Purchase Account', unit });
+        const gstAccount = await Account.findOne({ accountName: 'Input GST', unit });
+        const payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
+
+        if (purchaseAccount && gstAccount && payableAccount) {
+            const entries = [
+                { account: purchaseAccount._id, debit: subtotal, credit: 0 },
+                { account: gstAccount._id, debit: gstAmount, credit: 0 },
+                { account: payableAccount._id, debit: 0, credit: totalAmount }
+            ];
+
+            const txn = new Transaction({
+                transactionNumber: `TXN-PUR-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
+                description: `Auto Invoice: ${invoiceNo} for Purchase Request ${request.requestId}`,
+                reference: invoiceNo,
+                totalAmount: subtotal + gstAmount,
+                unit,
+                relatedDocument: 'Purchase',
+                relatedDocumentId: invoice._id,
+                createdBy: user._id,
+                companyId,
+                entries
+            });
+            await txn.save();
+
+            // Update account balances
+            purchaseAccount.balance += subtotal;
+            gstAccount.balance += gstAmount;
+            payableAccount.balance += totalAmount;
+
+            await purchaseAccount.save();
+            await gstAccount.save();
+            await payableAccount.save();
+            console.log(`✅ [Auto Invoice] Posted transaction to ledger successfully`);
+        }
+
+        return invoice;
+    } catch (error) {
+        console.error('❌ Error creating auto purchase invoice:', error);
+        throw error;
+    }
+};
+
+

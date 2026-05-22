@@ -100,11 +100,7 @@ const purchaseSchema = new mongoose.Schema({
     ref: 'User'
   },
   deliveryAddress: {
-    street: String,
-    city: String,
-    state: String,
-    zipCode: String,
-    country: String
+    type: String
   },
   terms: {
     type: String
@@ -115,22 +111,26 @@ const purchaseSchema = new mongoose.Schema({
   isApproved: {
     type: Boolean,
     default: false
+  },
+  purchaseRequest: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PurchaseRequest'
   }
 }, {
   timestamps: true
 });
 
-purchaseSchema.pre('save', function (next) {
+purchaseSchema.pre('validate', function () {
   if (!this.purchaseOrderNumber) {
     this.purchaseOrderNumber = `PO-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
   }
 
   // Calculate pending quantities
-  this.items.forEach(item => {
-    item.pendingQuantity = item.quantity - item.receivedQuantity;
-  });
-
-  next();
+  if (this.items && Array.isArray(this.items)) {
+    this.items.forEach(item => {
+      item.pendingQuantity = (item.quantity || 0) - (item.receivedQuantity || 0);
+    });
+  }
 });
 
 export default mongoose.model('Purchase', purchaseSchema);
