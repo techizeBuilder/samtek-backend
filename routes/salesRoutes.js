@@ -140,7 +140,7 @@ salesRouter.get('/product-summary', (req, res) => {
 });
 
 // Alias: /products-summary (plural) — used by Unit Head Indent Summary page
-salesRouter.get('/products-summary', authorizeRoles('Sales', 'Unit Manager', 'Superadmin', 'Unit Head'), (req, res) => {
+salesRouter.get('/products-summary', authorizeRoles('Sales', 'Sales Head', 'Sales Employee', 'Unit Manager', 'Superadmin', 'Unit Head'), (req, res) => {
   console.log('🔍 GET /products-summary (Unit Head alias) called');
   console.log('User:', req.user ? { id: req.user.id, role: req.user.role } : 'No user');
   console.log('Query params:', req.query);
@@ -153,7 +153,7 @@ salesRouter.get('/products-summary', authorizeRoles('Sales', 'Unit Manager', 'Su
 });
 
 // Apply role-based authorization for other sales routes only
-salesRouter.use(authorizeRoles('Sales', 'Unit Manager', 'Superadmin'));
+salesRouter.use(authorizeRoles('Sales', 'Sales Head', 'Sales Employee', 'Unit Manager', 'Superadmin'));
 
 // MOVED: Only Unit Managers and Super Admins can update product summary
 salesRouter.post('/update-product-summary', authorizeRoles('Unit Manager', 'Superadmin'), (req, res) => {

@@ -204,7 +204,7 @@ router.get('/salespersons', async (req, res) => {
 
     // Get all sales persons for dropdown - using multiple role variations
     const salesPersons = await User.find({
-      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson'] }
+      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson', 'Sales Head', 'Sales Employee'] }
     }, 'fullName email username').sort({ fullName: 1 }).lean();
 
     res.json({ success: true, data: salesPersons });

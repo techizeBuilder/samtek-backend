@@ -376,8 +376,8 @@ export const getSalespersonCustomers = async (req, res) => {
       query.companyId = userCompanyId;
     }
 
-    // If user is Sales role, only show customers assigned to them
-    if (userRole === 'Sales') {
+    // If user is Sales or Sales Employee role, only show customers assigned to them
+    if (userRole === 'Sales' || userRole === 'Sales Employee') {
       query.$and = [
         { companyId: userCompanyId }, // Company isolation
         { salesContact: salespersonId } // Assigned customers only
@@ -488,7 +488,7 @@ export const getSalespersonDeliveries = async (req, res) => {
     };
 
     // Role-based filtering
-    if (userRole === 'Sales' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Unit Head')) {
+    if (userRole === 'Sales' || userRole === 'Sales Employee' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Unit Head' && userRole !== 'Sales Head')) {
       matchQuery.salesPerson = salespersonId;
     }
 
@@ -589,7 +589,7 @@ export const getSalespersonInvoices = async (req, res) => {
 
     // 1. Fetch Orders for the salesperson (company isolation included)
     let orderQuery = { companyId: userCompanyId };
-    if (userRole === 'Sales' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager')) {
+    if (userRole === 'Sales' || userRole === 'Sales Employee' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Sales Head')) {
       orderQuery.salesPerson = salespersonId;
     }
 
@@ -604,7 +604,7 @@ export const getSalespersonInvoices = async (req, res) => {
       dcno: { $exists: true, $ne: null }
     };
 
-    if (userRole === 'Sales' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager')) {
+    if (userRole === 'Sales' || userRole === 'Sales Employee' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Sales Head')) {
       dispatchMatch.salesPerson = salespersonId;
     }
 
@@ -865,13 +865,13 @@ export const getSalespersonRefundReturns = async (req, res) => {
       orderQuery.companyId = userCompanyId;
     }
 
-    // If user is Sales role, only show their returns
-    if (userRole === 'Sales') {
+    // If user is Sales or Sales Employee role, only show their returns
+    if (userRole === 'Sales' || userRole === 'Sales Employee') {
       orderQuery.salesPerson = salespersonId;
     }
-    // Unit Manager can see all returns from their company
+    // Unit Manager and Sales Head can see all returns from their company
     // Super Admin can see all returns
-    else if (userRole !== 'Superadmin' && userRole !== 'Unit Manager') {
+    else if (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Sales Head') {
       orderQuery.salesPerson = salespersonId;
     }
 
@@ -1066,7 +1066,7 @@ export const getSalespersonItems = async (req, res) => {
     let query = {};
 
     // Company location filtering - only show items from same company
-    if (userRole === 'Sales' || userRole === 'Unit Manager' || userRole === 'Unit Head') {
+    if (userRole === 'Sales' || userRole === 'Sales Employee' || userRole === 'Sales Head' || userRole === 'Unit Manager' || userRole === 'Unit Head') {
       if (userCompanyId) {
         query.store = userCompanyId;
       } else {
@@ -1298,11 +1298,13 @@ export const getSalesSummary = async (req, res) => {
       companyId: userCompanyId
     });
 
-    // Always filter by salesperson for sales users
+    // Filter by salesperson only for salesperson roles
     const filter = {
-      salesPerson: salespersonId,
       companyId: userCompanyId
     };
+    if (req.user.role === 'Sales' || req.user.role === 'Sales Employee') {
+      filter.salesPerson = salespersonId;
+    }
 
     const [totalOrders, pendingOrders, completedOrders, approvedOrders, inProgressOrders] = await Promise.all([
       Order.countDocuments(filter),
@@ -1361,9 +1363,11 @@ export const getSalesRecentOrders = async (req, res) => {
     });
 
     const filter = {
-      salesPerson: salespersonId,
       companyId: userCompanyId
     };
+    if (req.user.role === 'Sales' || req.user.role === 'Sales Employee') {
+      filter.salesPerson = salespersonId;
+    }
 
     const recentOrders = await Order.find(filter)
       .populate('customer', 'name contactPerson email mobile')
@@ -1454,11 +1458,13 @@ export const getSalesOrders = async (req, res) => {
       params: { page, limit, search, status, startDate, endDate }
     });
 
-    // Always filter by individual salesperson for sales API
+    // Filter by salesperson only for salesperson roles
     const filter = {
-      salesPerson: salespersonId,
       companyId: userCompanyId
     };
+    if (req.user.role === 'Sales' || req.user.role === 'Sales Employee') {
+      filter.salesPerson = salespersonId;
+    }
 
     if (search) {
       filter.$or = [
@@ -1578,7 +1584,7 @@ export const getPriorityProducts = async (req, res) => {
     console.log('🚀 Getting priority products for user:', req.user._id, req.user.role);
 
     // Only allow Sales users or Super Users
-    if (!['Sales', 'sales', 'SALES', 'Super User'].includes(req.user.role)) {
+    if (!['Sales', 'sales', 'SALES', 'Sales Head', 'Sales Employee', 'Super User'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Access denied - Sales role required'
@@ -1661,7 +1667,7 @@ export const addPriorityProduct = async (req, res) => {
     console.log('Request body:', req.body);
 
     // Only allow Sales users or Super Users
-    if (!['Sales', 'sales', 'SALES', 'Super User'].includes(req.user.role)) {
+    if (!['Sales', 'sales', 'SALES', 'Sales Head', 'Sales Employee', 'Super User'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Access denied - Sales role required'
@@ -1755,7 +1761,7 @@ export const removePriorityProduct = async (req, res) => {
     console.log('🚀 Removing priority product:', req.params.id, 'for user:', req.user._id);
 
     // Only allow Sales users or Super Users
-    if (!['Sales', 'sales', 'SALES', 'Super User'].includes(req.user.role)) {
+    if (!['Sales', 'sales', 'SALES', 'Sales Head', 'Sales Employee', 'Super User'].includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Access denied - Sales role required'
@@ -1968,8 +1974,8 @@ export const updateSalespersonReturn = async (req, res) => {
       ];
     }
 
-    // Additional role-based filtering only for Sales role
-    if (userRole === 'Sales') {
+    // Additional role-based filtering only for Sales and Sales Employee roles
+    if (userRole === 'Sales' || userRole === 'Sales Employee') {
       // For sales users, also allow returns they created or are assigned to
       findQuery.$and = findQuery.$and || [];
       findQuery.$and.push({
@@ -2095,7 +2101,7 @@ export const updateSalespersonDamage = async (req, res) => {
     }
 
     // Role-based filtering
-    if (userRole === 'Sales') {
+    if (userRole === 'Sales' || userRole === 'Sales Employee') {
       findQuery.salesPerson = salespersonId;
     }
 

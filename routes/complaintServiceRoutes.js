@@ -17,6 +17,13 @@ import {
     updateTechnicianProfile
 } from "../controllers/ComplaintServiceController.js";
 
+import { 
+    getDispatchedOrders, 
+    updateCustomerConfirmation, 
+    updateInstallationSchedule, 
+    updateFeedbackAndRatings 
+} from "../controllers/ServiceDispatchController.js";
+
 import { serviceUpload } from '../middleware/complaintServiceUpload.js';
 
 const router = express.Router();
@@ -58,5 +65,11 @@ router.put(
     serviceUpload.array('media', 5),
     completeVisit
 );
+
+// --- 4. DISPATCH ORDERS FOR SERVICE ---
+router.get('/dispatched-orders', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), getDispatchedOrders);
+router.put('/dispatched-orders/:id/customer-confirmation', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateCustomerConfirmation);
+router.put('/dispatched-orders/:id/installation-schedule', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateInstallationSchedule);
+router.put('/dispatched-orders/:id/feedback', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateFeedbackAndRatings);
 
 export default router;

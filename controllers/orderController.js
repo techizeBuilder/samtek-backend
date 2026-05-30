@@ -8,7 +8,8 @@ import Sale from '../models/Sale.js';
 import { Transaction, Account } from '../models/Account.js';
 import mongoose from 'mongoose';
 import QCJob from '../models/QCJob.js';
-import mongoose from 'mongoose';
+import ProductionOrder from '../models/ProductionOrder.js';
+import PurchaseRequest from '../models/PurchaseRequest.js';
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -241,59 +242,26 @@ const getOrders = async (req, res) => {
     // Build filter query with role-based filtering
     const filter = {};
 
-    // Company-based filtering for Unit Managers
-    if (userRole === 'Unit Manager' && userCompanyId) {
-      // Get sales persons from the same company
-      const User = (await import('../models/User.js')).default;
-      const companySalesPersons = await User.find({
-        companyId: new mongoose.Types.ObjectId(userCompanyId),
-        role: { $in: ['Sales', 'Unit Manager', 'Unit Head'] }
-      }).select('_id username fullName role').lean();
-
-      const salesPersonIds = companySalesPersons.map(sp => sp._id);
-      filter.salesPerson = { $in: salesPersonIds };
-
-      console.log('🏢 UNIT MANAGER COMPANY FILTERING');
-      console.log('Company ID:', userCompanyId);
-      console.log('Company Sales Persons Found:', companySalesPersons.length);
-      companySalesPersons.forEach(sp => {
-        console.log(`  - ${sp.username} (${sp.fullName || 'No name'}) - ${sp.role}`);
-      });
-      console.log('Sales Person IDs for filtering:', salesPersonIds);
+    // 1. Super Admin role sees all orders (no company or sales person restriction)
+    if (userRole === 'Superadmin' || userRole === 'Super Admin') {
+      console.log('👑 SUPER ADMIN FILTERING - Showing all orders');
     }
-    // Role-based filtering: Sales users only see their OWN orders
-    else if (userRole === 'Sales') {
+    // 2. Sales roles see only their own orders
+    else if (userRole === 'Sales' || userRole === 'Sales Employee' || userRole === 'Sales Head') {
       filter.salesPerson = new mongoose.Types.ObjectId(salespersonId);
-      filter.companyId = new mongoose.Types.ObjectId(userCompanyId); // Additional company isolation
-      console.log('👤 SALES PERSON FILTERING - Own orders only from own company');
-      console.log('Filter applied:', { salesPerson: salespersonId, companyId: userCompanyId });
+      if (userCompanyId) {
+        filter.companyId = new mongoose.Types.ObjectId(userCompanyId);
+      }
+      console.log('👤 SALES ROLE FILTERING - Showing own orders only');
     }
-    // Super Admin can see all orders
-    else if (userRole === 'Superadmin') {
-      console.log('👑 SUPER ADMIN - No filtering applied (all orders)');
-    }
-    // For other roles, also filter by company if available  
+    // 3. Other company-scoped roles (Managers, Heads, Employees of Service/Accounts/Store/QC) see all orders in their company
     else {
       if (userCompanyId) {
-        const User = (await import('../models/User.js')).default;
-        const companySalesPersons = await User.find({
-          companyId: new mongoose.Types.ObjectId(userCompanyId),
-          role: { $in: ['Sales', 'Unit Manager', 'Unit Head'] }
-        }).select('_id username fullName role').lean();
-
-        const salesPersonIds = companySalesPersons.map(sp => sp._id);
-        filter.salesPerson = { $in: salesPersonIds };
-
-        console.log(`🏢 ${userRole.toUpperCase()} COMPANY FILTERING`);
-        console.log('Company ID:', userCompanyId);
-        console.log('Company Sales Persons Found:', companySalesPersons.length);
-        companySalesPersons.forEach(sp => {
-          console.log(`  - ${sp.username} (${sp.fullName || 'No name'}) - ${sp.role}`);
-        });
-        console.log('Sales Person IDs for filtering:', salesPersonIds);
+        filter.companyId = new mongoose.Types.ObjectId(userCompanyId);
+        console.log(`🏢 COMPANY SCOPED FILTERING FOR ROLE '${userRole}' - Showing all orders for company: ${userCompanyId}`);
       } else {
-        filter.salesPerson = salespersonId;
-        console.log(`👤 ${userRole.toUpperCase()} - No company, filtering own orders only`);
+        // Fallback: If no company assigned, show all orders since they are not a Sales role and don't create orders
+        console.log(`🏢 UNRESTRICTED ROLE '${userRole}' WITH NO COMPANY - Showing all orders`);
       }
     }
 
@@ -609,8 +577,8 @@ const updateOrderStatus = async (req, res) => {
     // Role-based permissions for status updates
     const userRole = req.user.role;
 
-    // Unit Manager can update any status
-    if (userRole === 'Unit Manager' || userRole === 'Superadmin') {
+    // Unit Manager and Superadmin can update any status
+    if (userRole === 'Unit Manager' || userRole === 'Superadmin' || userRole === 'Super Admin' || userRole === 'Sale Head' || userRole === 'Sales Employee') {
       // Allow all status updates
     }
     // Sales can only update to Cancelled if pending
@@ -758,17 +726,20 @@ const checkExistingOrder = async (req, res) => {
   }
 };
 
-// Service Team Verification
+// 🔄 NEW: Service Team Verification for Lead-to-Order Flow
 const verifyServiceOrder = async (req, res) => {
   try {
     const { id } = req.params;
     const { status, remarks, callRecordingUrl, isFakeCommitmentChecked } = req.body;
 
-    const order = await Order.findById(id);
+    console.log(`🔍 Service Verification - Order: ${id}, Status: ${status}`);
+
+    const order = await Order.findById(id).populate('customer').populate('leadId');
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
+    // Update service verification
     order.serviceVerification = {
       status: status || 'verified',
       verifiedBy: req.user._id,
@@ -786,14 +757,45 @@ const verifyServiceOrder = async (req, res) => {
       remarks: `Service Verification: ${remarks || 'No remarks'}`
     });
 
+    if (status === 'verified' || status === 'Confirm') {
+      // ✅ VERIFIED: Move to Store for product type selection
+      order.status = 'pending'; // Now visible to Store
+      console.log(`✅ Order ${order.orderCode} verified by Service - Moving to Store`);
+    } else {
+      // ❌ REJECTED: Mark as rejected by service
+      order.status = 'rejected_by_service';
+      console.log(`❌ Order ${order.orderCode} rejected by Service`);
+    }
+
     await order.save();
+
+    // 📋 Update Lead status if this order came from a lead
+    if (order.leadId) {
+      const Lead = (await import('../models/Lead.js')).default;
+      const lead = await Lead.findById(order.leadId);
+      if (lead) {
+        if (status === 'verified' || status === 'Confirm') {
+          lead.status = 'Service Verified';
+        } else {
+          lead.status = 'Service Rejected';
+        }
+        lead.history.push({
+          action: 'Service Verification',
+          notes: `Order ${order.orderCode} ${status === 'verified' ? 'verified' : 'rejected'} by Service Team. ${remarks || ''}`,
+          performedBy: req.user._id
+        });
+        await lead.save();
+        console.log(`📋 Lead ${lead.leadCode} status updated to: ${lead.status}`);
+      }
+    }
 
     res.json({
       success: true,
-      message: 'Service verification updated successfully',
+      message: `Order ${status === 'verified' ? 'verified' : 'rejected'} successfully`,
       order
     });
   } catch (error) {
+    console.error('❌ Service verification error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -900,7 +902,6 @@ const getOrderTracking = async (req, res) => {
     let query = {};
 
     // Only Superadmin/Super Admin sees all companies.
-    // Other roles are filtered by companyId to ensure data isolation.
     if (userRole !== 'Superadmin' && userRole !== 'Super Admin') {
       if (!userCompanyId) {
         return res.status(400).json({ success: false, message: 'User company not configured.' });
@@ -910,13 +911,17 @@ const getOrderTracking = async (req, res) => {
 
     console.log(`🔍 Order Tracking: Fetching for role ${userRole}, Company: ${userCompanyId}`);
 
+    // 1. Fetch Sale-based records (approved/invoiced orders)
     const sales = await Sale.find(query)
       .populate('order')
       .populate('customer', 'name mobile outstandingAmount')
       .lean();
 
-    // Map sales back to a tracking format with robust defaults
-    const trackingData = sales.map(sale => {
+    const saleOrderIds = new Set(
+      sales.map(s => s.order?._id?.toString()).filter(Boolean)
+    );
+
+    const saleTrackingData = sales.map(sale => {
       const order = sale.order || {};
       return {
         _id: sale._id,
@@ -936,11 +941,60 @@ const getOrderTracking = async (req, res) => {
         gatePass: sale.gatePass || { status: 'Pending' },
         productType: sale.productType || null,
         isAvailableInInventory: sale.isAvailableInInventory || null,
-        orderStatus: order.status || 'pending'
+        orderStatus: order.status || 'pending',
+        source: 'sale'
       };
     });
 
-    console.log(`📊 Order Tracking: Found ${trackingData.length} records for company ${userCompanyId}`);
+    // 🔄 NEW: Also fetch Orders with status='pending_service_approval' (from Lead-to-Order flow)
+    // and 'pending' (service verified) that have NO Sale yet
+    const orderQuery = { 
+      ...query, 
+      status: { $in: ['pending_service_approval', 'pending'] }
+    };
+    const pendingOrders = await Order.find(orderQuery)
+      .populate('customer', 'name mobile outstandingAmount')
+      .populate('leadId', 'leadCode dealValue') // 📋 NEW: Include lead reference
+      .lean();
+
+    const pendingOrderTrackingData = [];
+    
+    for (const order of pendingOrders.filter(order => !saleOrderIds.has(order._id.toString()))) {
+      // Check if this order has a Sale record (could be auto-created)
+      const orderSale = await Sale.findOne({ order: order._id }).lean();
+      
+      const trackingItem = {
+        _id: order._id,
+        orderId: order._id,
+        orderCode: order.orderCode || 'N/A',
+        orderDate: order.orderDate || order.createdAt || new Date(),
+        customerName: order.customer?.name || 'Unknown Customer',
+        customerMobile: order.customer?.mobile || 'N/A',
+        customerOutstanding: order.customer?.outstandingAmount || 0,
+        invoiceNumber: orderSale?.invoiceNumber || 'Pending',
+        invoiceType: orderSale?.invoiceType || 'N/A',
+        totalAmount: order.totalAmount || 0,
+        paidAmount: 0,
+        balanceAmount: order.totalAmount || 0,
+        paymentStatus: order.paymentStatus || 'Pending',
+        saleDate: order.createdAt || new Date(),
+        gatePass: { status: 'Pending' },
+        productType: orderSale?.productType || null,
+        isAvailableInInventory: orderSale?.isAvailableInInventory || null,
+        orderStatus: order.status, // 🔄 NEW: Include actual status (pending_service_approval/pending)
+        serviceVerification: order.serviceVerification || { status: 'pending' }, // 🔄 NEW: Service verification info
+        leadId: order.leadId?._id || null, // 📋 NEW: Lead reference
+        leadCode: order.leadId?.leadCode || null, // 📋 NEW: Lead code
+        dealValue: order.leadId?.dealValue || order.totalAmount, // 📋 NEW: Deal value from lead
+        source: 'order'
+      };
+      
+      pendingOrderTrackingData.push(trackingItem);
+    }
+
+    const trackingData = [...saleTrackingData, ...pendingOrderTrackingData];
+
+    console.log(`📊 Order Tracking: Found ${trackingData.length} records (${saleTrackingData.length} from Sales, ${pendingOrderTrackingData.length} pending orders) for company ${userCompanyId}`);
 
     res.json({
       success: true,
@@ -1000,10 +1054,270 @@ const generateGatePass = async (req, res) => {
   }
 };
 
-import ProductionOrder from '../models/ProductionOrder.js';
-import PurchaseRequest from '../models/PurchaseRequest.js';
+// Update Store Info for an Order (when no Sale exists yet)
+const updateOrderStoreInfo = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { productType, isAvailableInInventory } = req.body;
 
-// Update Store Info for a Sale (Product Type & Inventory Availability)
+    console.log(`🏪 Store Info Update - Order ID: ${orderId}, ProductType: ${productType}, Available: ${isAvailableInInventory}`);
+
+    const order = await Order.findById(orderId).populate('customer').populate('products.product');
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    // 🔄 NEW UNIFIED FLOW: Check if Sale exists, if not create temp Sale for consistency
+    let sale = await Sale.findOne({ order: orderId });
+    let isNewSale = false;
+    
+    if (!sale) {
+      // Create a temporary Sale record to maintain workflow consistency
+      const invoiceNumber = `TEMP-${order.orderCode}-${Date.now()}`;
+      
+      // Convert order products to sale items format
+      const saleItems = order.products.map(product => ({
+        productName: product.product?.name || 'Unknown Product',
+        quantity: product.quantity,
+        unitPrice: product.price,
+        totalPrice: product.total,
+        tax: 0
+      }));
+
+      sale = new Sale({
+        invoiceNumber,
+        order: order._id,
+        customer: order.customer._id,
+        items: saleItems,
+        subtotal: order.totalAmount,
+        taxAmount: 0,
+        totalAmount: order.totalAmount,
+        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+        unit: order.unit,
+        companyId: order.companyId || req.user.companyId, // Ensure company ID is set
+        createdBy: req.user._id,
+        notes: `Auto-created from Order ${order.orderCode} for store management`,
+        invoiceType: 'Kachha', // Temporary invoice
+        paymentStatus: 'Pending' // Will be updated when accounts approve
+      });
+
+      await sale.save();
+      isNewSale = true;
+      console.log(`📋 Created temporary Sale record ${sale._id} for Order ${orderId}`);
+    } else {
+      console.log(`📋 Using existing Sale record ${sale._id} for Order ${orderId}`);
+      // Check if we need to fix "Unknown Product" in existing sale items
+      const hasUnknown = sale.items && sale.items.some(item => item.productName === 'Unknown Product');
+      if (hasUnknown && order.products && order.products.length > 0) {
+        console.log(`🛠️ Fixing "Unknown Product" in existing Sale items for Order ${orderId}`);
+        sale.items = order.products.map(product => ({
+          productName: product.product?.name || 'Unknown Product',
+          quantity: product.quantity,
+          unitPrice: product.price,
+          totalPrice: product.total,
+          tax: 0
+        }));
+        await sale.save();
+      }
+    }
+
+    // 🔄 UPDATE STORE INFO: Same validation as existing flow
+    if (productType !== undefined) {
+      if (productType === '' || productType === null) {
+        sale.productType = null;
+      } else {
+        const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
+        if (!validTypes.includes(productType)) {
+          return res.status(400).json({ success: false, message: 'Invalid product type' });
+        }
+        sale.productType = productType;
+      }
+    }
+
+    if (isAvailableInInventory !== undefined) {
+      if (isAvailableInInventory === '' || isAvailableInInventory === null) {
+        sale.isAvailableInInventory = null;
+      } else {
+        const validAvailability = ['Available', 'Not Available'];
+        if (!validAvailability.includes(isAvailableInInventory)) {
+          return res.status(400).json({ success: false, message: 'Invalid inventory status' });
+        }
+        sale.isAvailableInInventory = isAvailableInInventory;
+      }
+    }
+
+    // 🚀 UNIFIED AUTOMATION: Same logic as existing updateSaleStoreInfo function
+    const orderCode = order.orderCode;
+    const sourceRefId = sale.invoiceNumber || sale._id.toString();
+    
+    console.log(`🔄 Applying automation for ${orderCode} - ProductType: ${sale.productType}, Available: ${sale.isAvailableInInventory}`);
+
+    // CASE 1: Available -> Create QC Job & Cleanup Pending Production/Purchase
+    if (sale.isAvailableInInventory === 'Available') {
+      try {
+        await ProductionOrder.deleteMany({
+          company: sale.companyId,
+          notes: new RegExp(sourceRefId),
+          status: 'Pending'
+        });
+        await PurchaseRequest.deleteMany({
+          companyId: sale.companyId,
+          itemId: sourceRefId,
+          status: 'Pending'
+        });
+
+        const existingQC = await QCJob.findOne({
+          source: 'Store',
+          sourceRefId: sourceRefId,
+          company: sale.companyId
+        });
+
+        if (!existingQC) {
+          const qcJobId = await generateQCJobId();
+          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
+          const itemName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
+
+          await QCJob.create({
+            qcJobId,
+            source: 'Store',
+            sourceRefId: sourceRefId,
+            sourceDepartment: 'Store',
+            sentBy: req.user.fullName || req.user.username || 'Store Dept',
+            itemName: itemName,
+            itemCode: orderCode,
+            category: 'Finished Good',
+            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
+            unit: 'pcs',
+            receivedDate: today(),
+            status: 'Pending',
+            company: sale.companyId,
+            createdBy: req.user._id,
+            notes: `Automatically created from Store Order ${orderCode}`
+          });
+          console.log(`✅ QC Job ${qcJobId} created for Order ${orderId}`);
+        }
+      } catch (qcError) {
+        console.error('❌ Error in Available case automation:', qcError);
+      }
+    }
+
+    // CASE 2: Not Available & In-house Manufactured -> Create Production Order
+    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'In-house Manufactured') {
+      try {
+        await QCJob.deleteMany({
+          company: sale.companyId,
+          sourceRefId: sourceRefId,
+          status: 'Pending'
+        });
+        await PurchaseRequest.deleteMany({
+          companyId: sale.companyId,
+          itemId: sourceRefId,
+          status: 'Pending'
+        });
+
+        const existingProduction = await ProductionOrder.findOne({
+          company: sale.companyId,
+          notes: new RegExp(sourceRefId)
+        });
+
+        if (!existingProduction) {
+          const year = new Date().getFullYear();
+          const timestamp = Date.now().toString().slice(-6);
+          const prodOrderId = `PROD-${year}-${timestamp}`;
+
+          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
+          const machineName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
+
+          await ProductionOrder.create({
+            orderId: prodOrderId,
+            machineCode: orderCode,
+            machineName: machineName,
+            priority: order.priority === 'High' ? 'Urgent' : 'Normal',
+            receivedDate: today(),
+            deliveryDate: today(),
+            status: 'Pending',
+            company: sale.companyId,
+            createdBy: req.user._id,
+            notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
+          });
+          console.log(`✅ Production Order ${prodOrderId} created for Order ${orderId}`);
+        }
+      } catch (prodError) {
+        console.error('❌ Error in In-house case automation:', prodError);
+      }
+    }
+
+    // CASE 3: Not Available & Purchased (Trading Product) -> Create Purchase Request
+    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'Purchased (Trading Product)') {
+      try {
+        await QCJob.deleteMany({
+          company: sale.companyId,
+          sourceRefId: sourceRefId,
+          status: 'Pending'
+        });
+        await ProductionOrder.deleteMany({
+          company: sale.companyId,
+          notes: new RegExp(sourceRefId),
+          status: 'Pending'
+        });
+
+        const existingPurchaseReq = await PurchaseRequest.findOne({
+          companyId: sale.companyId,
+          itemId: sourceRefId
+        });
+
+        if (!existingPurchaseReq) {
+          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
+          const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
+
+          const count = await PurchaseRequest.countDocuments({});
+          const requestId = `PR${String(count + 1).padStart(3, '0')}`;
+
+          await PurchaseRequest.create({
+            requestId,
+            productName,
+            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
+            requestFromDepartment: 'Store',
+            priority: order.priority || 'Medium',
+            companyId: sale.companyId,
+            storeOrderId: order._id,
+            itemId: sourceRefId
+          });
+          console.log(`✅ Purchase Request ${requestId} created for Order ${orderId}`);
+        }
+      } catch (purchaseError) {
+        console.error('❌ Error in Purchased case automation:', purchaseError);
+      }
+    }
+
+    await sale.save();
+
+    // 📊 RESPONSE: Include flow information for frontend
+    const response = {
+      success: true,
+      message: 'Store information updated successfully',
+      data: {
+        orderId: order._id,
+        orderCode: order.orderCode,
+        saleId: sale._id,
+        invoiceNumber: sale.invoiceNumber,
+        productType: sale.productType,
+        isAvailableInInventory: sale.isAvailableInInventory,
+        isNewSale: isNewSale,
+        flowStatus: 'store_completed'
+      }
+    };
+
+    console.log(`✅ Store Info Updated - Order: ${orderCode}, Sale: ${sale.invoiceNumber}, Flow: ${isNewSale ? 'New' : 'Existing'}`);
+    
+    res.json(response);
+  } catch (error) {
+    console.error('Error updating order store info:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Update Store Info for a Sale (Product Type & Inventory Availability) - Legacy function
 const updateSaleStoreInfo = async (req, res) => {
   try {
     const { saleId } = req.params;
@@ -1131,7 +1445,7 @@ const updateSaleStoreInfo = async (req, res) => {
             orderId: prodOrderId,
             machineCode: orderCode,
             machineName: machineName,
-            priority: sale.order?.priority || 'Normal',
+            priority: sale.order?.priority === 'High' ? 'Urgent' : 'Normal',
             receivedDate: today(),
             deliveryDate: sale.dueDate ? sale.dueDate.toISOString().split('T')[0] : today(),
             status: 'Pending',
@@ -1209,11 +1523,11 @@ const updateSaleStoreInfo = async (req, res) => {
   }
 };
 
+
 // Approve Sale Order from Accounts Sales Tracking
 const approveSaleOrder = async (req, res) => {
   try {
     const { saleId } = req.params;
-    const Sale = (await import('../models/Sale.js')).default;
     const sale = await Sale.findById(saleId).populate('order');
 
     if (!sale) {
@@ -1324,12 +1638,13 @@ export {
   updateOrderStatus,
   deleteOrder,
   checkExistingOrder,
-  verifyServiceOrder,
+  verifyServiceOrder, // 🔄 NEW: Added service verification
   approveAccountOrder,
   addPaymentEvidence,
   getOrderTracking,
   generateGatePass,
   updateSaleStoreInfo,
+  updateOrderStoreInfo,
   approveSaleOrder,
   getNOCRequests,
   approveNOC

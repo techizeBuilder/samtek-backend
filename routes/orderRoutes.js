@@ -14,6 +14,7 @@ import {
   getOrderTracking,
   generateGatePass,
   updateSaleStoreInfo,
+  updateOrderStoreInfo,
   approveSaleOrder,
   getNOCRequests,
   approveNOC
@@ -39,7 +40,9 @@ router.patch('/:id/account-approve', approveAccountOrder);
 router.post('/gate-pass/:saleId', generateGatePass);
 router.post('/approve-sale/:saleId', approveSaleOrder);
 router.post('/:id/payment-evidence', addPaymentEvidence);
+router.patch('/:orderId/store-info', updateOrderStoreInfo);
 router.patch('/sale/:saleId/store-info', updateSaleStoreInfo);
+router.patch('/order/:orderId/store-info', updateOrderStoreInfo);
 
 router.delete('/:id', deleteOrder);
 

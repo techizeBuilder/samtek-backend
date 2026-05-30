@@ -75,6 +75,7 @@ const ProductionOrderSchema = new mongoose.Schema({
   materialIssued: { type: Boolean, default: false },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  notes: { type: String, default: '' },
   processes: { type: [ProcessStepSchema], default: () => PROCESS_STEPS.map(step => ({
     step,
     type: PROCESS_TYPE_MAP[step],

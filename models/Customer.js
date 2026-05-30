@@ -141,6 +141,11 @@ const customerSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  advancePayment: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   entityType: {
     type: String,
     enum: ['Individual', 'HUF', 'Company', 'Firm', 'Others'],
