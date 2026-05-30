@@ -40,11 +40,27 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: false
   },
-// New field to identify trainees for LMS module
+  // New field to identify trainees for LMS module
   isTrainee: {
     type: Boolean,
     default: false
   },
+
+  // --- 🔥 NEW: TECHNICIAN / SERVICE FIELDS ---
+  technicianSkills: [{
+    type: String,
+    enum: ['Breakdown', 'Performance Issue', 'Installation', 'Training']
+  }],
+  serviceZone: {
+    type: String,
+    trim: true
+  },
+  currentStatus: {
+    type: String,
+    enum: ['Available', 'On Job', 'Off Duty'],
+    default: 'Available'
+  },
+  // -------------------------------------------
 
   // HRMS Fields
   employeeId: {

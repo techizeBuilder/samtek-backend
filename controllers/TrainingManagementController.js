@@ -1,149 +1,160 @@
 import bcrypt from 'bcryptjs';
-import { TrainingProfile, Module, Question, Progress, TestAttempt} from '../models/TrainingmanagementModel.js'; 
+import { TrainingProfile, Module, Question, Progress, TestAttempt } from '../models/TrainingmanagementModel.js';
 import { sendTrainingEmail, TrainingEmailType } from '../utils/trainingEmail.js';
 import User from '../models/User.js';
 import fs from 'fs';
 import path from 'path';
 
 // --- ROLE HIERARCHY HELPERS ---
-const TOP_LEVEL_ADMINS = ['HR-Admin']; 
+const TOP_LEVEL_ADMINS = ['HR-Admin', 'Super Admin', 'Admin', 'Company Admin'];
 const DEPT_HEADS = [
-  'Production Head', 'Packing Head', 'Dispatch Head', 
-  'Accounts Head', 'Sales Head', 'Manager', 'Finance Manager',
-  'Unit Head', 'Unit Manager'
+    'Production Head', 'Packing Head', 'Dispatch Head',
+    'Accounts Head', 'Sales Head', 'Manager', 'Finance Manager',
+    'Unit Head', 'Unit Manager',
+    // New Departments
+    'Research & Development Head', 'Store Head', 'QC Head'
 ];
 
+// Resolves module creation departments
 const getDepartmentFromRole = (role) => {
     if (!role) return "General";
-    if (role.includes('Production')) return 'Production';
-    if (role.includes('Packing')) return 'Packing';
-    if (role.includes('Dispatch')) return 'Dispatch';
-    if (role.includes('Account') || role.includes('Finance')) return 'Accounts';
-    if (role.includes('Sales')) return 'Sales';
-    return role.replace(/(Head|Manager|Employee)/gi, '').trim() || "General"; 
+    const lower = role.toLowerCase();
+    if (lower.includes('production')) return 'Production';
+    if (lower.includes('packing')) return 'Packing';
+    if (lower.includes('dispatch')) return 'Dispatch';
+    if (lower.includes('account') || lower.includes('finance')) return 'Accounts';
+    if (lower.includes('sales')) return 'Sales';
+    if (lower.includes('research') || lower.includes('r&d')) return 'Research & Development';
+    if (lower.includes('store')) return 'Store';
+    if (lower.includes('qc') || lower.includes('quality')) return 'QC';
+
+    return role.replace(/(Head|Manager|Employee)/gi, '').trim() || "General";
+};
+
+// 🔥 THE FIX: Normalizes the search prefix to prevent mismatches (e.g., "Research & Development" vs "Research Development")
+const getNormalizedDeptPrefix = (role) => {
+    let deptPrefix = role.replace(/(Head|Manager)/gi, '').trim();
+    const lower = deptPrefix.toLowerCase();
+
+    if (lower === 'accounts' || lower === 'finance') return 'Account';
+    if (lower.includes('research') || lower === 'r&d') return 'Research';
+    if (lower.includes('quality') || lower === 'qc') return 'QC';
+    if (lower.includes('store')) return 'Store';
+
+    return deptPrefix;
 };
 
 // --- CONTROLLER: GET AVAILABLE TRAINEES ---
 export const getAvailableTrainees = async (req, res) => {
-  try {
-    const { companyId, role: managerRole } = req.user;
+    try {
+        const { companyId, role: managerRole } = req.user;
 
-    // 🔥 THE FIX: Always filter by the boolean flag
-    let query = { 
-      companyId, 
-      isActive: true,
-      isTrainee: true 
-    };
+        let query = {
+            companyId,
+            isActive: true,
+            isTrainee: true
+        };
 
-    const TOP_LEVEL_ADMINS = ['HR-Admin', 'Super Admin', 'Admin', 'Company Admin'];
-    
-    // 2. Department Filtering Logic
-    if (!TOP_LEVEL_ADMINS.includes(managerRole)) {
-      // Extract the core department word
-      let deptPrefix = managerRole.replace(/(Head|Manager)/gi, '').trim();
-      
-      // Normalize 'Accounts' to 'Account'
-      if (deptPrefix.toLowerCase() === 'accounts') deptPrefix = 'Account';
-      
-      if (deptPrefix) {
-        // 🔥 THE FIX: Match roles like "Account Employee", "Sales Employee"
-        query.role = { $regex: new RegExp(`^${deptPrefix}`, 'i') };
-      }
+        // Department Filtering Logic
+        if (!TOP_LEVEL_ADMINS.includes(managerRole)) {
+            // Use the new normalizer to fetch the core department word
+            const deptPrefix = getNormalizedDeptPrefix(managerRole);
+
+            if (deptPrefix) {
+                // Will match "^Research" against "Research Development Employee"
+                query.role = { $regex: new RegExp(`^${deptPrefix}`, 'i') };
+            }
+        }
+
+        const potentialTrainees = await User.find(query).select('fullName email role username employeeId isTrainee');
+
+        const existingProfiles = await TrainingProfile.find({ companyId }).select('user');
+        const existingUserIds = existingProfiles.map(profile => profile.user.toString());
+
+        const availableToStage = potentialTrainees.filter(
+            trainee => !existingUserIds.includes(trainee._id.toString())
+        );
+
+        res.status(200).json({
+            success: true,
+            count: availableToStage.length,
+            data: availableToStage
+        });
+
+    } catch (error) {
+        console.error("Error fetching available trainees:", error);
+        res.status(500).json({ success: false, message: "Server error", error: error.message });
     }
-
-    // Select the new isTrainee flag as well
-    const potentialTrainees = await User.find(query).select('fullName email role username employeeId isTrainee');
-
-    const existingProfiles = await TrainingProfile.find({ companyId }).select('user');
-    const existingUserIds = existingProfiles.map(profile => profile.user.toString());
-
-    const availableToStage = potentialTrainees.filter(
-      trainee => !existingUserIds.includes(trainee._id.toString())
-    );
-
-    res.status(200).json({
-      success: true,
-      count: availableToStage.length,
-      data: availableToStage
-    });
-
-  } catch (error) {
-    console.error("Error fetching available trainees:", error);
-    res.status(500).json({ success: false, message: "Server error", error: error.message });
-  }
 };
 
 // --- CONTROLLER: CREATE TRAINEE ---
 export const stageCandidate = async (req, res) => {
-  try {
-    const { _id: managerId, companyId } = req.user; 
-    const { userId, assignedModules } = req.body;
+    try {
+        const { _id: managerId, companyId } = req.user;
+        const { userId, assignedModules } = req.body;
 
-    if (!userId || !Array.isArray(assignedModules) || assignedModules.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "User ID and at least one Assigned Module are required." 
-      });
+        if (!userId || !Array.isArray(assignedModules) || assignedModules.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "User ID and at least one Assigned Module are required."
+            });
+        }
+
+        const traineeUser = await User.findOne({
+            _id: userId,
+            companyId,
+            isActive: true
+        });
+
+        if (!traineeUser || !traineeUser.isTrainee) {
+            return res.status(404).json({
+                success: false,
+                message: "Valid Trainee account not found."
+            });
+        }
+
+        const existingProfile = await TrainingProfile.findOne({ user: userId });
+        if (existingProfile) {
+            return res.status(400).json({
+                success: false,
+                message: "This candidate has already been staged for training."
+            });
+        }
+
+        const extractedDepartment = traineeUser.role.replace(/(Employee|Head|Manager)/gi, '').trim();
+
+        const newProfile = await TrainingProfile.create({
+            companyId,
+            user: userId,
+            assignedDepartment: extractedDepartment || 'General',
+            assignedModules: assignedModules,
+            status: 'In-Training',
+            isEligible: true,
+            stagedBy: managerId
+        });
+
+        sendTrainingEmail(traineeUser.email, TrainingEmailType.CANDIDATE_STAGED, {
+            fullName: traineeUser.fullName,
+            department: extractedDepartment || 'General'
+        });
+
+        res.status(201).json({
+            success: true,
+            message: `${traineeUser.fullName} has been successfully staged for training.`,
+            data: newProfile
+        });
+
+    } catch (error) {
+        console.error("Error staging candidate:", error);
+        res.status(500).json({ success: false, message: "Server error", error: error.message });
     }
-
-    const traineeUser = await User.findOne({ 
-        _id: userId, 
-        companyId, 
-        isActive: true 
-    });
-
-    // 🔥 THE FIX: Validate using the boolean flag
-    if (!traineeUser || !traineeUser.isTrainee) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "Valid Trainee account not found." 
-      });
-    }
-
-    const existingProfile = await TrainingProfile.findOne({ user: userId });
-    if (existingProfile) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "This candidate has already been staged for training." 
-      });
-    }
-
-    // 🔥 THE FIX: Extract department by removing "Employee" (since role is e.g. "Sales Employee")
-    const extractedDepartment = traineeUser.role.replace(/(Employee|Head|Manager)/gi, '').trim();
-
-    const newProfile = await TrainingProfile.create({
-      companyId,
-      user: userId,
-      assignedDepartment: extractedDepartment || 'General',
-      assignedModules: assignedModules,
-      status: 'In-Training',
-      isEligible: true,
-      stagedBy: managerId
-    });
-
-    // 🔥 NEW: Trigger Assignment Email asynchronously
-    sendTrainingEmail(traineeUser.email, TrainingEmailType.CANDIDATE_STAGED, {
-      fullName: traineeUser.fullName,
-      department: extractedDepartment || 'General'
-    });
-
-    res.status(201).json({
-      success: true,
-      message: `${traineeUser.fullName} has been successfully staged for training.`,
-      data: newProfile
-    });
-
-  } catch (error) {
-    console.error("Error staging candidate:", error);
-    res.status(500).json({ success: false, message: "Server error", error: error.message });
-  }
 };
 
 // --- CONTROLLER: UPDATE TRAINEE MODULES ---
 export const updateTraineeModules = async (req, res) => {
     try {
-        const { id } = req.params; 
-        const { assignedModules } = req.body; 
+        const { id } = req.params;
+        const { assignedModules } = req.body;
         const { companyId, role } = req.user;
 
         if (!TOP_LEVEL_ADMINS.includes(role) && !DEPT_HEADS.includes(role)) {
@@ -173,68 +184,65 @@ export const updateTraineeModules = async (req, res) => {
 
 // --- CONTROLLER: GET ACTIVE TRAINEES ---
 export const getActiveTrainees = async (req, res) => {
-  try {
-    const { companyId, role: managerRole } = req.user;
-    
-    let query = { companyId };
-    const TOP_LEVEL_ADMINS = ['HR-Admin', 'Super Admin', 'Admin', 'Company Admin'];
-    
-    if (TOP_LEVEL_ADMINS.includes(managerRole)) {
-        if (req.query.department) {
-            query.assignedDepartment = req.query.department;
+    try {
+        const { companyId, role: managerRole } = req.user;
+
+        let query = { companyId };
+
+        if (TOP_LEVEL_ADMINS.includes(managerRole)) {
+            if (req.query.department) {
+                query.assignedDepartment = req.query.department;
+            }
+        } else {
+            // Use normalizer to fetch candidates
+            const deptPrefix = getNormalizedDeptPrefix(managerRole);
+            if (deptPrefix) {
+                query.assignedDepartment = new RegExp(deptPrefix, 'i');
+            }
         }
-    } else {
-        let deptPrefix = managerRole.replace(/(Head|Manager)/gi, '').trim();
-        if (deptPrefix.toLowerCase() === 'accounts' || deptPrefix.toLowerCase() === 'finance') {
-            deptPrefix = 'Account';
+
+        if (req.query.status) query.status = req.query.status;
+        if (req.query.isEligible !== undefined) query.isEligible = req.query.isEligible === 'true';
+
+        if (req.query.search) {
+            const searchRegex = new RegExp(req.query.search, 'i');
+            const matchingUsers = await User.find({
+                companyId,
+                $or: [
+                    { fullName: searchRegex },
+                    { email: searchRegex }
+                ]
+            }).select('_id');
+            const matchingUserIds = matchingUsers.map(user => user._id);
+            query.user = { $in: matchingUserIds };
         }
-        if (deptPrefix) {
-            query.assignedDepartment = new RegExp(deptPrefix, 'i'); 
-        }
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const skip = (page - 1) * limit;
+
+        const profiles = await TrainingProfile.find(query)
+            .populate('user', 'fullName email role employeeId')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean();
+
+        const totalDocuments = await TrainingProfile.countDocuments(query);
+
+        res.status(200).json({
+            success: true,
+            count: profiles.length,
+            total: totalDocuments,
+            currentPage: page,
+            totalPages: Math.ceil(totalDocuments / limit),
+            data: profiles
+        });
+
+    } catch (error) {
+        console.error("Error fetching active trainees:", error);
+        res.status(500).json({ success: false, message: "Server error" });
     }
-
-    if (req.query.status) query.status = req.query.status;
-    if (req.query.isEligible !== undefined) query.isEligible = req.query.isEligible === 'true';
-
-    if (req.query.search) {
-      const searchRegex = new RegExp(req.query.search, 'i');
-      const matchingUsers = await User.find({
-        companyId,
-        $or: [
-          { fullName: searchRegex },
-          { email: searchRegex }
-        ]
-      }).select('_id'); 
-      const matchingUserIds = matchingUsers.map(user => user._id);
-      query.user = { $in: matchingUserIds };
-    }
-
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
-
-    const profiles = await TrainingProfile.find(query)
-      .populate('user', 'fullName email role employeeId') 
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(); 
-
-    const totalDocuments = await TrainingProfile.countDocuments(query);
-
-    res.status(200).json({
-      success: true,
-      count: profiles.length,
-      total: totalDocuments,
-      currentPage: page,
-      totalPages: Math.ceil(totalDocuments / limit),
-      data: profiles
-    });
-
-  } catch (error) {
-    console.error("Error fetching active trainees:", error);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
 };
 
 import PDFDocument from 'pdfkit';
@@ -242,7 +250,7 @@ import PDFDocument from 'pdfkit';
 // --- CONTROLLER: GENERATE & DOWNLOAD CERTIFICATE ---
 export const downloadCertificate = async (req, res) => {
     try {
-        const { id } = req.params; 
+        const { id } = req.params;
         const { companyId } = req.user;
 
         const profile = await TrainingProfile.findOne({ _id: id, companyId }).populate('user', 'fullName').lean();
@@ -258,10 +266,10 @@ export const downloadCertificate = async (req, res) => {
         doc.pipe(res);
 
         // A. Draw Border
-        doc.rect(30, 30, doc.page.width - 60, doc.page.height - 60).lineWidth(3).stroke('#1e3a8a'); 
+        doc.rect(30, 30, doc.page.width - 60, doc.page.height - 60).lineWidth(3).stroke('#1e3a8a');
 
         // B. Add Samtek Logo
-        const logoPath = path.resolve(process.cwd(), 'assets', 'logo Semtek.png'); 
+        const logoPath = path.resolve(process.cwd(), 'assets', 'logo Semtek.png');
         if (fs.existsSync(logoPath)) {
             doc.image(logoPath, (doc.page.width - 250) / 2, 60, { width: 250 });
         } else {
@@ -269,7 +277,7 @@ export const downloadCertificate = async (req, res) => {
         }
 
         // C. Certificate Title
-        doc.y = 145; 
+        doc.y = 145;
         doc.font('Helvetica-Bold').fontSize(36).fillColor('#f97316').text('CERTIFICATE OF COMPLETION', { align: 'center' });
 
         // D. Subtitle
@@ -304,137 +312,124 @@ export const downloadCertificate = async (req, res) => {
 
 // --- CONTROLLER: GET TRAINEE DETAILS ---
 export const getTraineeDetails = async (req, res) => {
-  try {
-    const { id } = req.params; 
-    const { companyId } = req.user;
+    try {
+        const { id } = req.params;
+        const { companyId } = req.user;
 
-    // 1. Fetch the Profile and deeply populate the assigned modules
-    const profile = await TrainingProfile.findOne({ _id: id, companyId })
-      .populate('user', 'fullName email role employeeId mobile')
-      .populate({
-        path: 'assignedModules',
-        select: 'title category sequenceOrder contents',
-      })
-      .lean();
+        const profile = await TrainingProfile.findOne({ _id: id, companyId })
+            .populate('user', 'fullName email role employeeId mobile')
+            .populate({
+                path: 'assignedModules',
+                select: 'title category sequenceOrder contents',
+            })
+            .lean();
 
-    if (!profile) {
-      return res.status(404).json({ success: false, message: "Profile not found" });
-    }
+        if (!profile) {
+            return res.status(404).json({ success: false, message: "Profile not found" });
+        }
 
-    // 2. Fetch all Progress tracking
-    const userProgress = await Progress.find({ user: profile.user._id }).lean();
-    
-    // 3. Fetch all Test Attempts AND populate the exact questions they were asked
-    const testAttempts = await TestAttempt.find({ user: profile.user._id })
-      .populate('randomizedQuestionSet', 'questionText options correctOption') // 🔥 NEW: Get question details
-      .sort({ createdAt: -1 })
-      .lean();
+        const userProgress = await Progress.find({ user: profile.user._id }).lean();
 
-    // 4. Map the progress and tests to their respective modules
-    let completedCount = 0;
-    const detailedModules = profile.assignedModules.map(module => {
-      
-      const modProgress = userProgress.find(p => p.module.toString() === module._id.toString());
-      
-      // 🔥 THE FIX: Enrich the test attempts with detailed stats and the Review Object
-      const modTests = testAttempts
-        .filter(t => t.module.toString() === module._id.toString())
-        .map(t => {
-            // A. Calculate Time Taken
-            let timeTakenFormatted = "N/A";
-            if (t.startedAt && t.finishedAt) {
-                const diffMs = new Date(t.finishedAt).getTime() - new Date(t.startedAt).getTime();
-                const mins = Math.floor(diffMs / 60000);
-                const secs = Math.floor((diffMs % 60000) / 1000);
-                timeTakenFormatted = `${mins}m ${secs}s`;
-            }
+        const testAttempts = await TestAttempt.find({ user: profile.user._id })
+            .populate('randomizedQuestionSet', 'questionText options correctOption')
+            .sort({ createdAt: -1 })
+            .lean();
 
-            // B. Calculate Correct/Wrong Counts
-            const totalQuestions = t.randomizedQuestionSet ? t.randomizedQuestionSet.length : 0;
-            const correctAnswers = t.submittedAnswers ? t.submittedAnswers.filter(a => a.isCorrect).length : 0;
-            const wrongAnswers = totalQuestions - correctAnswers;
+        let completedCount = 0;
+        const detailedModules = profile.assignedModules.map(module => {
 
-            // C. Generate Detailed Review Data Array
-            const reviewData = t.randomizedQuestionSet ? t.randomizedQuestionSet.map(q => {
-                // Find what the user answered for this specific question
-                const userAns = t.submittedAnswers?.find(a => a.questionId.toString() === q._id.toString());
-                
-                // Extract the text of the option they selected
-                let selectedAnswerText = 'Skipped / No Answer';
-                if (userAns && userAns.selectedOptionId) {
-                    const selectedOpt = q.options.find(o => o._id.toString() === userAns.selectedOptionId.toString());
-                    if (selectedOpt) selectedAnswerText = selectedOpt.text;
-                }
+            const modProgress = userProgress.find(p => p.module.toString() === module._id.toString());
 
-                // Extract the text of the actual correct option
-                const correctOpt = q.options.find(o => {
-                    const correctVal = q.correctOption.toString().trim().toLowerCase();
-                    const optId = o._id.toString().trim().toLowerCase();
-                    const optLabel = (o.label || "").toString().trim().toLowerCase();
-                    return correctVal === optId || correctVal === optLabel;
+            const modTests = testAttempts
+                .filter(t => t.module.toString() === module._id.toString())
+                .map(t => {
+                    let timeTakenFormatted = "N/A";
+                    if (t.startedAt && t.finishedAt) {
+                        const diffMs = new Date(t.finishedAt).getTime() - new Date(t.startedAt).getTime();
+                        const mins = Math.floor(diffMs / 60000);
+                        const secs = Math.floor((diffMs % 60000) / 1000);
+                        timeTakenFormatted = `${mins}m ${secs}s`;
+                    }
+
+                    const totalQuestions = t.randomizedQuestionSet ? t.randomizedQuestionSet.length : 0;
+                    const correctAnswers = t.submittedAnswers ? t.submittedAnswers.filter(a => a.isCorrect).length : 0;
+                    const wrongAnswers = totalQuestions - correctAnswers;
+
+                    const reviewData = t.randomizedQuestionSet ? t.randomizedQuestionSet.map(q => {
+                        const userAns = t.submittedAnswers?.find(a => a.questionId.toString() === q._id.toString());
+
+                        let selectedAnswerText = 'Skipped / No Answer';
+                        if (userAns && userAns.selectedOptionId) {
+                            const selectedOpt = q.options.find(o => o._id.toString() === userAns.selectedOptionId.toString());
+                            if (selectedOpt) selectedAnswerText = selectedOpt.text;
+                        }
+
+                        const correctOpt = q.options.find(o => {
+                            const correctVal = q.correctOption.toString().trim().toLowerCase();
+                            const optId = o._id.toString().trim().toLowerCase();
+                            const optLabel = (o.label || "").toString().trim().toLowerCase();
+                            return correctVal === optId || correctVal === optLabel;
+                        });
+
+                        return {
+                            questionId: q._id,
+                            questionText: q.questionText,
+                            options: q.options,
+                            selectedAnswerText,
+                            correctAnswerText: correctOpt ? correctOpt.text : 'Unknown',
+                            isCorrect: userAns ? userAns.isCorrect : false
+                        };
+                    }) : [];
+
+                    return {
+                        ...t,
+                        timeTakenFormatted,
+                        totalQuestions,
+                        correctAnswers,
+                        wrongAnswers,
+                        reviewData
+                    };
                 });
 
-                return {
-                    questionId: q._id,
-                    questionText: q.questionText,
-                    options: q.options,
-                    selectedAnswerText,
-                    correctAnswerText: correctOpt ? correctOpt.text : 'Unknown',
-                    isCorrect: userAns ? userAns.isCorrect : false
-                };
-            }) : [];
+            const status = modProgress ? modProgress.status : 'Pending';
+            if (status === 'Completed') completedCount++;
 
             return {
-                ...t,
-                timeTakenFormatted,
-                totalQuestions,
-                correctAnswers,
-                wrongAnswers,
-                reviewData // 🔥 Now the frontend has everything it needs to build the review UI!
+                ...module,
+                progressStatus: status,
+                isTestUnlocked: modProgress ? modProgress.isTestUnlocked : false,
+                testAttempts: modTests
             };
         });
 
-      const status = modProgress ? modProgress.status : 'Pending';
-      if (status === 'Completed') completedCount++;
+        const totalAssigned = profile.assignedModules.length;
+        const progressPercentage = totalAssigned === 0 ? 0 : Math.round((completedCount / totalAssigned) * 100);
 
-      return {
-        ...module,
-        progressStatus: status,
-        isTestUnlocked: modProgress ? modProgress.isTestUnlocked : false,
-        testAttempts: modTests
-      };
-    });
+        res.status(200).json({
+            success: true,
+            data: {
+                ...profile,
+                assignedModules: detailedModules,
+                analytics: {
+                    totalAssigned,
+                    completedCount,
+                    progressPercentage
+                }
+            }
+        });
 
-    // 5. Calculate overall percentage
-    const totalAssigned = profile.assignedModules.length;
-    const progressPercentage = totalAssigned === 0 ? 0 : Math.round((completedCount / totalAssigned) * 100);
-
-    // 6. Return the fully assembled heavy payload
-    res.status(200).json({
-      success: true,
-      data: {
-        ...profile,
-        assignedModules: detailedModules, 
-        analytics: {
-          totalAssigned,
-          completedCount,
-          progressPercentage
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error("Error fetching trainee details:", error);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
+    } catch (error) {
+        console.error("Error fetching trainee details:", error);
+        res.status(500).json({ success: false, message: "Server error" });
+    }
 };
 
 
 // --- CONTROLLER: FINALIZE TRAINEE (Hire or Reject) ---
 export const finalizeTrainee = async (req, res) => {
     try {
-        const { id } = req.params; 
-        const { action } = req.body; 
+        const { id } = req.params;
+        const { action } = req.body;
 
         const profile = await TrainingProfile.findById(id).populate('user');
         if (!profile || !profile.user) {
@@ -442,44 +437,40 @@ export const finalizeTrainee = async (req, res) => {
         }
 
         if (action === 'hire') {
-            // 🔥 THE FIX: They already h
-            // ave the Employee role! We just flip the boolean flag.
-            await User.findByIdAndUpdate(profile.user._id, { 
-                isTrainee: false, 
-                isActive: true 
+            await User.findByIdAndUpdate(profile.user._id, {
+                isTrainee: false,
+                isActive: true
             });
-            
+
             profile.status = 'Completed_Onboarding';
             await profile.save();
 
-            // 🔥 NEW: Trigger Passed/Welcome Email asynchronously
             sendTrainingEmail(profile.user.email, TrainingEmailType.TRAINING_PASSED, {
                 fullName: profile.user.fullName,
                 department: profile.assignedDepartment,
-                role: profile.user.role // e.g., "Sales Employee"
+                role: profile.user.role
             });
 
-            return res.status(200).json({ 
-                success: true, 
-                message: `${profile.user.fullName} has successfully completed onboarding and is now active!` 
+            return res.status(200).json({
+                success: true,
+                message: `${profile.user.fullName} has successfully completed onboarding and is now active!`
             });
 
         } else if (action === 'reject') {
             await User.findByIdAndUpdate(profile.user._id, { isActive: false });
-            
+
             profile.status = 'Rejected';
             profile.isEligible = false;
             await profile.save();
 
-            // 🔥 NEW: Trigger Rejection Email asynchronously
             sendTrainingEmail(profile.user.email, TrainingEmailType.TRAINING_REJECTED, {
                 fullName: profile.user.fullName,
                 department: profile.assignedDepartment
             });
 
-            return res.status(200).json({ 
-                success: true, 
-                message: `${profile.user.fullName}'s training has been terminated and access revoked.` 
+            return res.status(200).json({
+                success: true,
+                message: `${profile.user.fullName}'s training has been terminated and access revoked.`
             });
 
         } else {
@@ -496,19 +487,19 @@ export const getDashboardAnalytics = async (req, res) => {
     try {
         const { companyId, role } = req.user;
 
-        const TOP_LEVEL_ADMINS = ['HR-Admin', 'Super Admin', 'Admin', 'Company Admin'];
         const isTopAdmin = TOP_LEVEL_ADMINS.includes(role);
-        
+
         let profileQuery = { companyId };
         if (!isTopAdmin) {
-            const deptPrefix = role.replace(/(Head|Manager)/gi, '').trim();
+            // Use normalizer
+            const deptPrefix = getNormalizedDeptPrefix(role);
             if (deptPrefix) {
                 profileQuery.assignedDepartment = new RegExp(`^${deptPrefix}`, 'i');
             }
         }
 
         const profiles = await TrainingProfile.find(profileQuery).populate('user', 'fullName').lean();
-        
+
         const totalTrainees = profiles.length;
         const passedCount = profiles.filter(p => p.status === 'Passed' || p.status === 'Completed_Onboarding').length;
         const failedCount = profiles.filter(p => p.status === 'Failed' || p.status === 'Rejected').length;
@@ -516,21 +507,21 @@ export const getDashboardAnalytics = async (req, res) => {
         const pendingDecisionCount = profiles.filter(p => p.status === 'Passed' || p.status === 'Failed').length;
 
         const departmentStats = {};
-        const userDeptMap = {}; 
-        
+        const userDeptMap = {};
+
         profiles.forEach(p => {
             const dept = p.assignedDepartment;
             if (!departmentStats[dept]) departmentStats[dept] = { total: 0, passed: 0 };
             departmentStats[dept].total += 1;
             if (p.status === 'Passed' || p.status === 'Completed_Onboarding') departmentStats[dept].passed += 1;
-            
+
             if (p.user) userDeptMap[p.user._id.toString()] = dept;
         });
 
         const validUserIds = profiles.map(p => p.user?._id).filter(Boolean);
         const attempts = await TestAttempt.find({ companyId, user: { $in: validUserIds } })
             .populate('user', 'fullName')
-            .populate('module', 'title department') 
+            .populate('module', 'title department')
             .lean();
 
         const userScores = {};
@@ -538,11 +529,11 @@ export const getDashboardAnalytics = async (req, res) => {
             if (!attempt.user) return;
             const uid = attempt.user._id.toString();
             if (!userScores[uid]) {
-                userScores[uid] = { 
-                    name: attempt.user.fullName, 
-                    department: userDeptMap[uid] || 'Unknown', 
-                    totalScore: 0, 
-                    testsTaken: 0 
+                userScores[uid] = {
+                    name: attempt.user.fullName,
+                    department: userDeptMap[uid] || 'Unknown',
+                    totalScore: 0,
+                    testsTaken: 0
                 };
             }
             userScores[uid].totalScore += attempt.scorePercentage || 0;
@@ -565,10 +556,10 @@ export const getDashboardAnalytics = async (req, res) => {
                     if (ans.isCorrect === false) {
                         const qId = ans.questionId.toString();
                         if (!failedQuestionsTracker[qId]) {
-                            failedQuestionsTracker[qId] = { 
-                                count: 0, 
+                            failedQuestionsTracker[qId] = {
+                                count: 0,
                                 module: attempt.module?.title || 'Unknown',
-                                department: attempt.module?.department || 'Unknown' 
+                                department: attempt.module?.department || 'Unknown'
                             };
                         }
                         failedQuestionsTracker[qId].count += 1;
@@ -582,11 +573,11 @@ export const getDashboardAnalytics = async (req, res) => {
             .slice(0, 5);
 
         const failedQuestionsData = await Question.find({ _id: { $in: topFailedIds } }).select('questionText').lean();
-        
+
         const failAnalysis = failedQuestionsData.map(q => ({
             questionText: q.questionText,
             moduleTitle: failedQuestionsTracker[q._id.toString()].module,
-            department: failedQuestionsTracker[q._id.toString()].department, 
+            department: failedQuestionsTracker[q._id.toString()].department,
             failCount: failedQuestionsTracker[q._id.toString()].count
         })).sort((a, b) => b.failCount - a.failCount);
 
@@ -609,30 +600,30 @@ export const getDashboardAnalytics = async (req, res) => {
 
 // --- CONTROLLER: DELETE TRAINEE (Permanent Data Wipe) ---
 export const deleteTraineeRecord = async (req, res) => {
-  try {
-    const { id } = req.params; 
+    try {
+        const { id } = req.params;
 
-    const profile = await TrainingProfile.findById(id);
-    if (!profile) {
-      return res.status(404).json({ success: false, message: "Profile not found." });
+        const profile = await TrainingProfile.findById(id);
+        if (!profile) {
+            return res.status(404).json({ success: false, message: "Profile not found." });
+        }
+
+        const userId = profile.user;
+
+        await Progress.deleteMany({ user: userId });
+        await TestAttempt.deleteMany({ user: userId });
+        await TrainingProfile.findByIdAndDelete(id);
+        await User.findByIdAndDelete(userId);
+
+        res.status(200).json({
+            success: true,
+            message: "Candidate and all associated training records have been permanently deleted."
+        });
+
+    } catch (error) {
+        console.error("Error deleting trainee:", error);
+        res.status(500).json({ success: false, message: "Server error" });
     }
-
-    const userId = profile.user;
-
-    await Progress.deleteMany({ user: userId });
-    await TestAttempt.deleteMany({ user: userId });
-    await TrainingProfile.findByIdAndDelete(id);
-    await User.findByIdAndDelete(userId);
-
-    res.status(200).json({ 
-      success: true, 
-      message: "Candidate and all associated training records have been permanently deleted." 
-    });
-
-  } catch (error) {
-    console.error("Error deleting trainee:", error);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
 };
 
 // --- CONTROLLER: CREATE TRAINING MODULE ---
@@ -643,7 +634,7 @@ export const createTrainingModule = async (req, res) => {
 
         const isTopAdmin = TOP_LEVEL_ADMINS.includes(role);
         const isDeptHead = DEPT_HEADS.includes(role);
-        
+
         if (!isTopAdmin && !isDeptHead) {
             return res.status(403).json({ success: false, message: "Unauthorized to create modules." });
         }
@@ -675,7 +666,7 @@ export const createTrainingModule = async (req, res) => {
                 const normalizedPath = file.path.replace(/\\/g, "/");
                 contents.push({
                     contentType: contentType,
-                    mediaUrl: normalizedPath, 
+                    mediaUrl: normalizedPath,
                     minWatchTime: watchTimes[index] || 0
                 });
             });
@@ -692,10 +683,10 @@ export const createTrainingModule = async (req, res) => {
             createdBy: authorityId
         });
 
-        res.status(201).json({ 
-            success: true, 
-            message: "Training module created successfully.", 
-            data: newModule 
+        res.status(201).json({
+            success: true,
+            message: "Training module created successfully.",
+            data: newModule
         });
 
     } catch (error) {
@@ -708,7 +699,7 @@ export const getModules = async (req, res) => {
     try {
         const { role, companyId } = req.user;
         const isTopAdmin = TOP_LEVEL_ADMINS.includes(role);
-        
+
         let query = { companyId };
 
         if (!isTopAdmin) {
@@ -774,7 +765,7 @@ export const updateTrainingModule = async (req, res) => {
 
 export const addMediaToModule = async (req, res) => {
     try {
-        const { id } = req.params; 
+        const { id } = req.params;
         const { companyId, role } = req.user;
 
         if (!TOP_LEVEL_ADMINS.includes(role) && !DEPT_HEADS.includes(role)) {
@@ -816,10 +807,10 @@ export const addMediaToModule = async (req, res) => {
         module.contents.push(...newContents);
         await module.save();
 
-        res.status(200).json({ 
-            success: true, 
-            message: "Media added successfully.", 
-            data: module 
+        res.status(200).json({
+            success: true,
+            message: "Media added successfully.",
+            data: module
         });
 
     } catch (error) {
@@ -848,7 +839,7 @@ export const removeMediaFromModule = async (req, res) => {
         }
 
         try {
-            const filePath = path.resolve(mediaItem.mediaUrl); 
+            const filePath = path.resolve(mediaItem.mediaUrl);
             if (fs.existsSync(filePath)) {
                 fs.unlinkSync(filePath);
             }
@@ -859,10 +850,10 @@ export const removeMediaFromModule = async (req, res) => {
         module.contents.pull(contentId);
         await module.save();
 
-        res.status(200).json({ 
-            success: true, 
-            message: "Media removed successfully.", 
-            data: module 
+        res.status(200).json({
+            success: true,
+            message: "Media removed successfully.",
+            data: module
         });
 
     } catch (error) {
@@ -891,15 +882,15 @@ export const addQuestionToModule = async (req, res) => {
             companyId,
             module: moduleId,
             questionText,
-            options, 
+            options,
             correctOption,
             createdBy: authorityId
         });
 
-        res.status(201).json({ 
-            success: true, 
-            message: "Question added to bank successfully.", 
-            data: newQuestion 
+        res.status(201).json({
+            success: true,
+            message: "Question added to bank successfully.",
+            data: newQuestion
         });
 
     } catch (error) {
@@ -918,13 +909,13 @@ export const getQuestions = async (req, res) => {
         const skip = (page - 1) * limit;
 
         const query = { module: moduleId, companyId };
-        
+
         const questions = await Question.find(query).skip(skip).limit(limit);
         const totalDocuments = await Question.countDocuments(query);
 
-        res.status(200).json({ 
+        res.status(200).json({
             success: true, count: questions.length, total: totalDocuments, currentPage: page,
-            totalPages: Math.ceil(totalDocuments / limit), data: questions 
+            totalPages: Math.ceil(totalDocuments / limit), data: questions
         });
     } catch (error) {
         res.status(500).json({ success: false, message: "Server error", error: error.message });

@@ -3,26 +3,26 @@ import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { lmsUpload } from '../middleware/lmsUpload.js';
 
 // Import all controllers
-import { 
-    getAvailableTrainees,
-    stageCandidate,
-    getActiveTrainees,
-    getTraineeDetails,
-    updateTraineeModules,
-    finalizeTrainee,
-    deleteTraineeRecord,
-    createTrainingModule,
-    getModules,
-    updateTrainingModule,
-    deactivateModule,
-    addMediaToModule,
-    removeMediaFromModule,
-    addQuestionToModule,
-    getQuestions,
-    updateQuestion,
-    deleteQuestion,
-    getDashboardAnalytics,
-    downloadCertificate
+import {
+  getAvailableTrainees,
+  stageCandidate,
+  getActiveTrainees,
+  getTraineeDetails,
+  updateTraineeModules,
+  finalizeTrainee,
+  deleteTraineeRecord,
+  createTrainingModule,
+  getModules,
+  updateTrainingModule,
+  deactivateModule,
+  addMediaToModule,
+  removeMediaFromModule,
+  addQuestionToModule,
+  getQuestions,
+  updateQuestion,
+  deleteQuestion,
+  getDashboardAnalytics,
+  downloadCertificate
 } from '../controllers/TrainingManagementController.js';
 import { getModuleLearningView, getMyDashboard, markContentCompleted, startTest, submitTest } from '../controllers/TraineeLearningController.js';
 
@@ -31,22 +31,22 @@ const router = express.Router();
 // --- 1. Define Role Groups ---
 const TOP_ADMINS = ['HR-Admin', 'MIS Admin', 'Company Admin', 'Super Admin', 'Admin'];
 const DEPT_HEADS = [
-  'Production Head', 'Packing Head', 'Dispatch Head', 
+  'Production Head', 'Packing Head', 'Dispatch Head',
   'Accounts Head', 'Sales Head', 'Manager', 'Finance Manager',
-  'Unit Head', 'Unit Manager'
+  'Unit Head', 'Unit Manager', 'Research & Development Head', 'Store Head', 'QC Head'
 ];
 
 const ALL_MANAGEMENT = [...TOP_ADMINS, ...DEPT_HEADS];
 // --- 2. Analytics Dashboard Route (Admin/Manager) ---
 
-router.get('/admin/dashboard',authenticateToken,authorizeRoles(...ALL_MANAGEMENT), getDashboardAnalytics);
+router.get('/admin/dashboard', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), getDashboardAnalytics);
 
 
 // ==========================================
 // A. TRAINEE MANAGEMENT ROUTES (Admin/Manager)
 // ==========================================
 
-router.get('/certificate/download/:id',authenticateToken, downloadCertificate);
+router.get('/certificate/download/:id', authenticateToken, downloadCertificate);
 
 // Get fresh hires ready to be staged
 router.get('/available-trainees', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), getAvailableTrainees);

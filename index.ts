@@ -22,6 +22,7 @@ function log(message: string, type: "log" | "error" = "log") {
 import connectDB from "./config/database.js";
 import createSeedUsers from "./seed/seedUsers.js";
 import { seedInventoryData } from "./seed/seedInventory.js";
+import ProfileUpdateRouter from "./routes/profileUpdate.routes.js";
 
 const app = express();
 // Basic middleware - JSON parsing will be handled by API router
@@ -278,11 +279,6 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/accounts', accountsRouter);
       app.use('/api/expenses', expenseRouter);
       app.use('/api/finance', financeRouter);
-<<<<<<< HEAD
-      
-=======
-
->>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
       const leadRouter = (await import('./routes/leadRoutes.js')).default;
       app.use('/api/leads', leadRouter);
       console.log('Lead routes registered at /api/leads');
@@ -401,18 +397,14 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/branches', branchRouter);
       app.use('/api/departments', departmentRouter);
       app.use('/api/designations', designationRouter);
-<<<<<<< HEAD
-=======
+
       app.use('/api/statutory-reports', statutoryReportRouter);
       app.use('/api/hrms-dashboard', hrmsDashboardRouter);
       app.use('/api/leave-balance-adjustments', leaveBalanceAdjustmentRouter);
-      app.use('/api/performance', performanceRouter);
->>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
 
       const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
       const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;
       const expenseRequestRouter = (await import('./routes/expenseRequest.routes.js')).default;
-      const profileUpdateRouter = (await import('./routes/profileUpdate.routes.js')).default;
       const overtimeRouter = (await import('./routes/overtime.routes.js')).default;
       const resignationRouter = (await import('./routes/resignation.routes.js')).default;
       const documentRouter = (await import('./routes/document.routes.js')).default;
@@ -420,7 +412,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/travel-requests', travelRequestRouter);
       app.use('/api/attendance-requests', attendanceRequestRouter);
       app.use('/api/expense-requests', expenseRequestRouter);
-      app.use('/api/profile-updates', profileUpdateRouter);
+      app.use('/api/profile-updates', ProfileUpdateRouter);
       app.use('/api/overtime', overtimeRouter);
       app.use('/api/resignation', resignationRouter);
       app.use('/api/documents', documentRouter);
@@ -560,6 +552,13 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
         console.log('✅ Payment reminder cron job scheduled (daily at 9 AM)');
       } catch (cronError: any) {
         console.warn('⚠️  Cron job setup warning:', cronError.message);
+      }
+      try {
+        const { startSLAMonitor } = await import('./utils/serviceSlaMonitor');
+        startSLAMonitor();
+        console.log('✅ SLA monitor cron job scheduled (runs every hour)');
+      } catch (cronError: any) {
+        console.warn('⚠️ SLA Monitor cron job setup warning:', cronError.message);
       }
     } catch (error: any) {
       log(`Error importing routes: ${error.message}`);

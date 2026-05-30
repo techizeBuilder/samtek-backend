@@ -365,6 +365,7 @@ const verifyToken = authenticateToken;
 
 // User Management Routes (Super User Only) - These come AFTER profile routes
 router.get('/users', verifyToken, getUsers);
+router.get('/users/generate-employee-id', verifyToken, getNextEmployeeId);
 router.get('/users/:id', verifyToken, getUserById);
 // profileUpload.single() parses multipart/form-data so req.body is populated
 router.post('/users', verifyToken, profileUpload.single('profilePicture'), createUser);
@@ -374,7 +375,7 @@ router.patch('/users/:id/profile-picture', verifyToken, profileUpload.single('pr
 router.delete('/users/:id', verifyToken, deleteUser);
 router.post('/users/:id/reset-password', verifyToken, resetUserPassword);
 router.put('/users/:id/password', verifyToken, updateUserPassword);
-router.get('/users/generate-employee-id', verifyToken, getNextEmployeeId);
+
 
 // Settings Routes (Super Admin Only)
 router.get('/settings', verifyToken, getSettings);

@@ -20,7 +20,19 @@ const orderProductSchema = new mongoose.Schema({
     type: Number,
     required: true,
     min: 0
-  }
+  },
+  machineDetails: [{
+    serialNumber: { type: String, trim: true },
+
+    // Warranty tracks the free period after purchase
+    warrantyExpiryDate: { type: Date },
+
+    // AMC tracks the paid contract period after warranty expires
+    amcExpiryDate: { type: Date },
+
+    // The physical PDF agreement mentioned in Point 12
+    amcDocumentUrl: { type: String }
+  }]
 });
 
 const orderSchema = new mongoose.Schema({
@@ -150,12 +162,9 @@ const orderSchema = new mongoose.Schema({
     remarks: {
       type: String
     }
-<<<<<<< HEAD
-=======
   },
   quotation: {
     type: String  // Stores base64 PDF content
->>>>>>> b0c23b68a353a665a098ecaec84c35e6f08bf756
   }
 }, {
   timestamps: true

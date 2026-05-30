@@ -1,19 +1,20 @@
 import express from "express";
 import { authenticateToken, authorizeRoles } from "../middleware/auth.js";
-import { 
-    assignTicket, 
-    cancelTicket, 
-    completeVisit, 
-    createSupportTicket, 
-    getCustomerHistory, 
-    getMyTickets, 
-    getServicemen, 
-    getSupportTickets, 
-    getTicketDetails, 
+import {
+    assignTicket,
+    cancelTicket,
+    completeVisit,
+    createSupportTicket,
+    getCustomerHistory,
+    getMyTickets,
+    getServicemen,
+    getSupportTickets,
+    getTicketDetails,
     startVisit,
-    sendVerificationEmail,      
-    verifyCustomerResponse,      
-    generateServiceInvoice
+    sendVerificationEmail,
+    verifyCustomerResponse,
+    generateServiceInvoice,
+    updateTechnicianProfile
 } from "../controllers/ComplaintServiceController.js";
 
 import { serviceUpload } from '../middleware/complaintServiceUpload.js';
@@ -44,16 +45,17 @@ router.get('/tickets', authenticateToken, authorizeRoles('Complaint Management H
 router.put('/tickets/:id/assign', authenticateToken, authorizeRoles('Complaint Management Head'), assignTicket);
 router.put('/tickets/:id/cancel', authenticateToken, authorizeRoles('Complaint Management Head'), cancelTicket);
 router.post('/tickets/:id/send-verification', authenticateToken, authorizeRoles('Complaint Management Head'), sendVerificationEmail);
+router.put('/servicemen/:id', authenticateToken, authorizeRoles('Complaint Management Head'), updateTechnicianProfile);
 
 // --- 3. EMPLOYEE / TECHNICIAN ROUTES (Mobile App) ---
 // Only the Employee can view their specific task list and execute visits
 router.get('/technician/tickets', authenticateToken, authorizeRoles('Complaint Management Employee'), getMyTickets);
 router.put('/technician/start-visit/:id', authenticateToken, authorizeRoles('Complaint Management Employee'), startVisit);
 router.put(
-    '/technician/complete-visit/:id', 
-    authenticateToken, 
+    '/technician/complete-visit/:id',
+    authenticateToken,
     authorizeRoles('Complaint Management Employee'), // Protected by role
-    serviceUpload.array('media', 5), 
+    serviceUpload.array('media', 5),
     completeVisit
 );
 

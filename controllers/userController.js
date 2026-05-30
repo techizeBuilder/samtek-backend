@@ -198,7 +198,8 @@ export const createUser = async (req, res) => {
     const {
       username, email, password, fullName, role, unit, companyId, branchId, departmentId, designationId, permissions, isActive,
       mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId,
-      isTrainee // 🔥 Explicit Boolean
+      isTrainee,
+      technicianSkills, serviceZone // 🔥 NEW: Added Technician Fields
     } = req.body;
 
     if (!email || !password || !role) {
@@ -231,22 +232,18 @@ export const createUser = async (req, res) => {
     if (!defaultPermissions.role) defaultPermissions.role = role;
 
     // 🔥 AUTOMATIC LMS FEATURE INJECTION (FRONTEND FIX)
-    // Instead of creating a new 'lms' module, we append the feature into the primary department module
     const finalIsTrainee = isTrainee === true || isTrainee === 'true';
     if (finalIsTrainee) {
       if (defaultPermissions.modules && defaultPermissions.modules.length > 0) {
-        // Target the main department module (e.g., 'sales' or 'production')
         const primaryModule = defaultPermissions.modules[0];
 
         if (!primaryModule.features) {
           primaryModule.features = [];
         }
 
-        // Check if it already has the trainee feature to prevent duplicates
         const hasLmsFeature = primaryModule.features.some(f => f.key === 'traineeDashboard');
 
         if (!hasLmsFeature) {
-          // 👇 Pushing as a FEATURE, not a module
           primaryModule.features.push({
             key: "traineeDashboard",
             view: true,
@@ -263,6 +260,21 @@ export const createUser = async (req, res) => {
     if (!finalEmployeeId && finalCompanyId) {
       // Ensure generateEmployeeId is imported
       finalEmployeeId = await generateEmployeeId(finalCompanyId);
+    }
+
+    // 🔥 PARSE TECHNICIAN SKILLS
+    // Safely handles arrays, JSON strings, or comma-separated strings from the frontend
+    let finalSkills = [];
+    if (technicianSkills) {
+      if (Array.isArray(technicianSkills)) {
+        finalSkills = technicianSkills;
+      } else if (typeof technicianSkills === 'string') {
+        try {
+          finalSkills = JSON.parse(technicianSkills);
+        } catch (e) {
+          finalSkills = technicianSkills.split(',').map(s => s.trim());
+        }
+      }
     }
 
     const userData = {
@@ -285,7 +297,12 @@ export const createUser = async (req, res) => {
       dob: dob || null,
       joiningDate: joiningDate || new Date(),
       reportingManager: reportingManager || managerId || null,
-      employeeType: employeeType || employmentType || ''
+      employeeType: employeeType || employmentType || '',
+
+      // 🔥 INJECT TECHNICIAN FIELDS
+      // Only attach these if the user is actually a Complaint Management Employee
+      technicianSkills: role === 'Complaint Management Employee' ? finalSkills : [],
+      serviceZone: role === 'Complaint Management Employee' ? (serviceZone || finalUnit || '') : ''
     };
 
     const user = new User(userData);

@@ -2,161 +2,157 @@ import ServiceTicket from '../models/ComplaintServiceModel.js';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import User from '../models/User.js';
-import { Item } from '../models/Inventory.js'; // Adjust path if necessary
-import { sendCommonEmail } from '../utils/email.js'; // Mock email sender
-
-// --- DUMMY DATA ---
-const dummyPurchaseHistory = [
-    {
-        customerName: "TechCorp Industries",
-        mobileNumber: "9876543210",
-        address: "123 Silicon Valley Road, Sector 4",
-        email: "techcorp@example.com",
-        pastPurchases: [
-            {
-                machineType: "Industrial CNC Router",
-                model: "CNC-Pro 5000",
-                serialNumber: "SN-1002938",
-                purchaseDate: "2024-01-15",
-                warrantyStatus: "Active",
-                amcStatus: "Valid until Jan 2027"
-            },
-            {
-                machineType: "Laser Cutter",
-                model: "LC-200X",
-                serialNumber: "SN-8847291",
-                purchaseDate: "2021-05-20",
-                warrantyStatus: "Expired",
-                amcStatus: "Not Subscribed"
-            }
-        ]
-    },
-    {
-        customerName: "Global Print Works",
-        mobileNumber: "9988776655",
-        address: "45 Industrial Estate, North Zone",
-        email: "globalprint@example.com",
-        pastPurchases: [
-            {
-                machineType: "Commercial Printer",
-                model: "PrintMaster V8",
-                serialNumber: "SN-5566778",
-                purchaseDate: "2025-11-10",
-                warrantyStatus: "Active",
-                amcStatus: "Valid until Nov 2028"
-            }
-        ]
-    }
-];
-
-const dummyTechnicians = [
-    {
-        _id: "69eeea9e9df214b658e38edf",
-        name: "Rahul Sharma",
-        role: "Technician",
-        contact: "9123456780",
-        skills: ["Breakdown", "Installation"],
-        serviceZone: "North Zone",
-        currentStatus: "Available",
-        companyId: "69ea063b78220d106638b0ef"
-    },
-    {
-        _id: "60d5ecb8b392d7001f222222",
-        name: "Anita Desai",
-        role: "Technician",
-        contact: "9123456781",
-        skills: ["Performance Issue", "Training"],
-        serviceZone: "Sector 4",
-        currentStatus: "On Job",
-        companyId: "69ea063b78220d106638b0ef"
-    },
-    {
-        _id: "60d5ecb8b392d7001f333333",
-        name: "Vikram Singh",
-        role: "Technician",
-        contact: "9123456782",
-        skills: ["Breakdown", "Performance Issue", "Installation", "Training"],
-        serviceZone: "All",
-        currentStatus: "Available",
-        companyId: "69ea063b78220d106638b0ef"
-    }
-];
+import { Item } from '../models/Inventory.js';
+import { sendSupportEmail } from '../utils/serviceEmail.js';
+import { generateServiceInvoicePDF } from '../utils/servicePdfGenerator.js';
+import Customer from '../models/Customer.js'; // Adjust path if necessary
+import Order from '../models/Order.js';       // Adjust path if necessary
 
 // --- CONTROLLERS ---
 
-// 1. Get Customer History
+// 1. Get Customer History (Dynamic & Genuine)
 export const getCustomerHistory = async (req, res) => {
     try {
         const { mobileNumber } = req.params;
 
-        // 1. Fetch Real Previous Complaints from the database
+        // 1. Find the real Customer
+        const customer = await Customer.findOne({
+            mobile: mobileNumber,
+            companyId: req.user.companyId
+        });
+
+        // 2. Fetch Previous Complaints (Tickets)
         const previousTickets = await ServiceTicket.find({
             "customer.mobileNumber": mobileNumber,
             companyId: req.user.companyId
         })
             .select('tokenId status createdAt issue.issueType')
             .sort({ createdAt: -1 })
-            .limit(5); // Just show the last 5 for quick reference
+            .limit(5);
 
-        // 2. Fetch Dummy Purchase/Warranty/AMC data[cite: 1, 2]
-        const purchaseData = dummyPurchaseHistory.find(
-            (customer) => customer.mobileNumber === mobileNumber
-        );
-
-        if (!purchaseData && previousTickets.length === 0) {
+        // 3. If neither customer nor history exists, return 404
+        if (!customer && previousTickets.length === 0) {
             return res.status(404).json({
                 success: false,
                 message: 'No history found for this number.'
             });
         }
 
+        let pastPurchases = [];
+
+        // 4. If Customer exists, pull their actual machines from their Orders
+        if (customer) {
+            // Find all orders that aren't cancelled or rejected
+            const orders = await Order.find({
+                customer: customer._id,
+                companyId: req.user.companyId,
+                status: { $nin: ['cancelled', 'rejected'] }
+            }).populate('products.product', 'name category code'); // Pull item details
+
+            // Loop through all orders, and all products in those orders
+            orders.forEach(order => {
+                order.products.forEach(lineItem => {
+
+                    // Read from the new machineDetails array!
+                    if (lineItem.machineDetails && lineItem.machineDetails.length > 0) {
+                        lineItem.machineDetails.forEach(machine => {
+                            // 1. Calculate Warranty specifically for THIS serial number
+                            let wStatus = 'Unknown';
+                            if (machine.warrantyExpiryDate) {
+                                wStatus = new Date(machine.warrantyExpiryDate) > new Date() ? 'Active' : 'Expired';
+                            }
+
+                            // 2. Calculate AMC specifically for THIS serial number
+                            let aStatus = 'Not Subscribed';
+                            if (machine.amcExpiryDate) {
+                                const expiry = new Date(machine.amcExpiryDate);
+                                if (expiry > new Date()) {
+                                    aStatus = `Valid until ${expiry.toLocaleDateString('en-GB')}`;
+                                } else {
+                                    aStatus = 'Expired';
+                                }
+                            }
+
+                            // 3. Push the specific machine to the frontend list
+                            pastPurchases.push({
+                                machineType: lineItem.product ? lineItem.product.category : "Unknown",
+                                model: lineItem.product ? lineItem.product.name : "Unknown",
+                                serialNumber: machine.serialNumber,
+                                purchaseDate: order.orderDate ? new Date(order.orderDate).toISOString().split('T')[0] : "Unknown",
+                                warrantyStatus: wStatus,
+                                amcStatus: aStatus,
+                                amcDocumentUrl: machine.amcDocumentUrl || null
+                            });
+                        });
+                    }
+                });
+            });
+        }
+
+        // 5. Send Dynamic Response exactly how the frontend expects it
         res.status(200).json({
             success: true,
             data: {
-                ...purchaseData, // Name, Address, Purchases
-                previousComplaints: previousTickets // Real DB data
+                customerName: customer ? customer.name : "Unknown Customer",
+                mobileNumber: mobileNumber,
+                address: customer ? (customer.address1 || "") : "",
+                email: customer ? (customer.email || "") : "",
+                pastPurchases: pastPurchases,
+                previousComplaints: previousTickets
             }
         });
 
     } catch (error) {
+        console.error("Error fetching customer history:", error);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
 
-import User from '../models/User.js'; // Ensure this is imported at the top of ComplaintServiceController.js
-
 // 2. Get Servicemen list (Real Database Fetch)
 export const getServicemen = async (req, res) => {
     try {
-        const { status } = req.query;
+        const { status, zone } = req.query; // Added 'zone' filter capability
 
         // 1. Security Check
         if (!req.user || !req.user.companyId) {
             return res.status(401).json({ success: false, message: 'Unauthorized: Missing Company ID' });
         }
 
-
-        // 2. Fetch real technicians from the database for this specific company
-        const users = await User.find({
+        // Base filter
+        let filter = {
             companyId: req.user.companyId,
             isActive: true,
-            role: 'Complaint Management Employee' // 🔥 UPDATED ROLE
-        });
+            role: 'Complaint Management Employee'
+        };
 
-        // 3. Map the User documents to match the exact structure the frontend expects
+        // If the dispatcher wants to filter by a specific zone from the frontend
+        if (zone) {
+            filter.serviceZone = zone;
+        }
+
+        // 2. Fetch real technicians from the database
+        const users = await User.find(filter);
+
+        // 3. Map the User documents to match the exact structure the frontend expects, now 100% dynamic
         let technicians = users.map(user => ({
             _id: user._id,
             name: user.fullName || user.username,
             role: user.role,
             contact: user.mobile || 'N/A',
-            // Defaulting skills and zone since they might not be in your base User schema yet
-            skills: ["Breakdown", "Installation", "Performance Issue", "Training"],
-            serviceZone: user.unit || "All",
-            currentStatus: "Available", // Hardcoded to available for now
+
+            // Read real skills, default to 'General Support' if HR left it blank
+            skills: user.technicianSkills && user.technicianSkills.length > 0
+                ? user.technicianSkills
+                : ["General Support"],
+
+            // Read real zone, fallback to their unit or 'All'
+            serviceZone: user.serviceZone || user.unit || "All",
+
+            currentStatus: user.currentStatus || "Available",
             companyId: user.companyId
         }));
 
-        // 4. Apply status filter if the frontend requested it
+        // 4. Apply status filter if requested
         if (status) {
             technicians = technicians.filter(
                 (tech) => tech.currentStatus === status
@@ -186,20 +182,12 @@ export const createSupportTicket = async (req, res) => {
             });
         }
 
-        // 2. Extract payload from frontend form
         const {
-            source,        // String: 'Call', 'WhatsApp', 'Website', 'Sales Team'
-
+            source,
             customer,
-            // Expected shape: { name: String, mobileNumber: String, email: String, address: String }
-
             machine,
-            // Expected shape: { machineType: String, model: String, serialNumber: String }
-
             issue,
-            // Expected shape: { issueType: String (Breakdown, Performance Issue, etc.), description: String }
-
-            priorityLevel  // String: 'Low', 'Medium', 'High'
+            priorityLevel
         } = req.body;
 
         if (!customer?.name || !customer?.mobileNumber || !customer?.address) {
@@ -216,13 +204,12 @@ export const createSupportTicket = async (req, res) => {
         if (!machine?.machineType) {
             return res.status(400).json({ success: false, message: 'Missing machine type.' });
         }
-        if(!machine.serialNumber || !machine.model || !machine.warrantyStatus || !machine.amcStatus) {
+        if (!machine.serialNumber || !machine.model || !machine.warrantyStatus || !machine.amcStatus) {
             return res.status(400).json({ success: false, message: 'Missing required machine details.' });
         }
         if (!issue?.issueType) {
             return res.status(400).json({ success: false, message: 'Missing issue type.' });
         }
-
 
         const timePart = Date.now().toString(36).toUpperCase();
         const randomPart = crypto.randomBytes(2).toString('hex').toUpperCase();
@@ -236,7 +223,6 @@ export const createSupportTicket = async (req, res) => {
         } else if (priorityLevel === 'Medium') {
             resolutionDeadline = new Date(now.getTime() + (48 * 60 * 60 * 1000));
         } else {
-            // Default 72 hours for Low Priority
             resolutionDeadline = new Date(now.getTime() + (72 * 60 * 60 * 1000));
         }
 
@@ -278,6 +264,18 @@ export const createSupportTicket = async (req, res) => {
             { path: 'auditLog.performedBy.userId', select: 'username fullName' }
         ]);
 
+        // --- SEND EMAIL ALERTS ---
+        sendSupportEmail({
+            type: 'CREATED',
+            to: newTicket.customer.email,
+            name: newTicket.customer.name,
+            data: {
+                ticketId: newTicket.tokenId,
+                machineType: newTicket.machine.machineType,
+                issueType: newTicket.issue.issueType
+            }
+        });
+
         res.status(201).json({
             success: true,
             message: 'Ticket created successfully',
@@ -301,8 +299,6 @@ export const getSupportTickets = async (req, res) => {
         }
 
         const query = { companyId: req.user.companyId };
-
-        // FUTURE: if (req.user.role === 'Technician') query['assignment.technicianId'] = req.user._id;
 
         const {
             page = 1,
@@ -354,19 +350,15 @@ export const getSupportTickets = async (req, res) => {
         const parsedLimit = parseInt(limit);
 
         const tickets = await ServiceTicket.find(query)
-            .select('-auditLog -visitHistory') // Optmized payload
-
-            //THE FIX: Breached tickets at the very top, then sort the rest by NEWEST first
+            .select('-auditLog -visitHistory')
             .sort({ 'sla.isBreached': -1, createdAt: -1 })
-
             .skip(skip)
             .limit(parsedLimit)
             .populate('createdBy', 'username fullName role email')
-            .populate('assignment.technicianId', 'username fullName mobile');
+            .populate('assignment.technicianId', 'username fullName mobile serviceZone technicianSkills');
 
         const totalTickets = await ServiceTicket.countDocuments(query);
 
-        // Calculate Average Resolution Time
         const metricQuery = { ...query, status: 'Resolved' };
         const resolutionStats = await ServiceTicket.aggregate([
             { $match: metricQuery },
@@ -377,13 +369,11 @@ export const getSupportTickets = async (req, res) => {
             ? Math.round(resolutionStats[0].averageMinutes)
             : 0;
 
-        // NEW: Calculate Issue Type Breakdown across ALL matched tickets (ignoring pagination)
         const issueTypeStats = await ServiceTicket.aggregate([
-            { $match: query }, // Match current filters (companyId, dates, etc.)
+            { $match: query },
             { $group: { _id: "$issue.issueType", count: { $sum: 1 } } }
         ]);
 
-        // Format it nicely for the frontend pie chart
         const formattedIssueStats = issueTypeStats.map(stat => ({
             name: stat._id || 'Other',
             value: stat.count
@@ -440,7 +430,7 @@ export const assignTicket = async (req, res) => {
         const technician = await User.findOne({
             _id: technicianId,
             companyId: req.user.companyId,
-            role: 'Complaint Management Employee' //  UPDATED ROLE
+            role: 'Complaint Management Employee'
         });
 
         if (!technician) {
@@ -469,6 +459,11 @@ export const assignTicket = async (req, res) => {
         const previousStatus = ticket.status;
         const isReassignment = !!ticket.assignment?.technicianId;
 
+        // 🔥 NEW: If reassigned to a DIFFERENT technician, free up the PREVIOUS technician
+        if (isReassignment && ticket.assignment.technicianId.toString() !== technicianId.toString()) {
+            await User.findByIdAndUpdate(ticket.assignment.technicianId, { currentStatus: 'Available' });
+        }
+
         if (!ticket.assignment) ticket.assignment = {};
         ticket.assignment.technicianId = technicianId;
         ticket.assignment.assignedAt = new Date();
@@ -477,6 +472,10 @@ export const assignTicket = async (req, res) => {
         if (ticket.status === 'Unassigned') {
             ticket.status = 'Pending';
         }
+
+        // 🔥 NEW: Mark the NEW technician as 'On Job'
+        technician.currentStatus = 'On Job';
+        await technician.save();
 
         const techName = technician.fullName || technician.username;
         const actionText = isReassignment
@@ -493,23 +492,41 @@ export const assignTicket = async (req, res) => {
             newStatus: ticket.status
         });
 
-        // Save to Database
         await ticket.save();
 
-        //  Populate response 
-        // (We removed the auditLog population to save database resources!)
         await ticket.populate([
             { path: 'createdBy', select: 'username fullName role email' },
-            { path: 'assignment.technicianId', select: 'username fullName mobile' }
+            { path: 'assignment.technicianId', select: 'username fullName mobile serviceZone technicianSkills' }
         ]);
 
-        //  Strip the heavy arrays before sending to the frontend
-        // We convert the Mongoose document to a plain JS object so we can delete keys
         const responseData = ticket.toObject();
         delete responseData.auditLog;
         delete responseData.visitHistory;
 
-        //  Send Success Response
+        // --- SEND EMAIL ALERTS ---
+        sendSupportEmail({
+            type: 'ASSIGNED_CUSTOMER',
+            to: ticket.customer.email,
+            name: ticket.customer.name,
+            data: {
+                ticketId: ticket.tokenId,
+                techName: techName,
+                techContact: technician.mobile || 'N/A'
+            }
+        });
+
+        sendSupportEmail({
+            type: 'ASSIGNED_TECH',
+            to: technician.email || technician.username,
+            name: techName,
+            data: {
+                ticketId: ticket.tokenId,
+                customerName: ticket.customer.name,
+                address: ticket.customer.address,
+                deadline: ticket.sla.resolutionDeadline
+            }
+        });
+
         res.status(200).json({
             success: true,
             message: actionText,
@@ -522,50 +539,41 @@ export const assignTicket = async (req, res) => {
     }
 };
 
-// get ticket details
+// 6. Get ticket details
 export const getTicketDetails = async (req, res) => {
     try {
-        // 1. Tenant Isolation (Security First)
         if (!req.user || !req.user.companyId) {
             return res.status(401).json({ success: false, message: 'Unauthorized: Missing Company ID' });
         }
 
         const { id } = req.params;
 
-        // 2. Validate MongoDB ID format
         if (!mongoose.Types.ObjectId.isValid(id)) {
             return res.status(400).json({ success: false, message: 'Invalid Ticket ID format.' });
         }
 
-        // 3. Start building the query with the base populates
         let query = ServiceTicket.findOne({
             _id: id,
             companyId: req.user.companyId
         })
             .populate('createdBy', 'username fullName role email')
-            .populate('assignment.technicianId', 'username fullName mobile')
+            .populate('assignment.technicianId', 'username fullName mobile serviceZone technicianSkills')
             .populate('visitHistory.technicianId', 'username fullName mobile')
             .populate('visitHistory.partsUsed.item', 'name code salePrice gst hsn');
 
-       // 4. Role-Based Payload Optimization
-        if (req.user.role === 'Complaint Management Employee') { //  UPDATED ROLE
-            // Employees do not need the audit log on mobile. Strip it to save bandwidth.
+        if (req.user.role === 'Complaint Management Employee') {
             query = query.select('-auditLog');
         } else {
-            // Heads and Admins get the deep populated audit log
             query = query.populate('auditLog.performedBy.userId', 'username fullName role');
         }
 
-        // Execute the query
         const ticket = await query;
 
-        // 5. Handle edge case where ticket doesn't exist
         if (!ticket) {
             return res.status(404).json({ success: false, message: 'Ticket not found.' });
         }
 
-        // 6. Strict Security: Ensure a technician can only view their OWN assigned tickets
-       if (req.user.role === 'Complaint Management Employee'){
+        if (req.user.role === 'Complaint Management Employee') {
             const assignedTechId = ticket.assignment?.technicianId?._id?.toString();
             const loggedInUserId = req.user._id.toString();
 
@@ -577,7 +585,6 @@ export const getTicketDetails = async (req, res) => {
             }
         }
 
-        // 7. Send the tailored payload
         res.status(200).json({
             success: true,
             data: ticket
@@ -589,23 +596,20 @@ export const getTicketDetails = async (req, res) => {
     }
 };
 
-// cancel ticket
+// 7. Cancel ticket
 export const cancelTicket = async (req, res) => {
     try {
-        // 1. Tenant Isolation
         if (!req.user || !req.user.companyId) {
             return res.status(401).json({ success: false, message: 'Unauthorized: Missing Company ID' });
         }
 
         const { id } = req.params;
-        const { reason } = req.body; // The frontend can optionally send a reason string
+        const { reason } = req.body;
 
-        // 2. Validate MongoDB ID format
         if (!mongoose.Types.ObjectId.isValid(id)) {
             return res.status(400).json({ success: false, message: 'Invalid Ticket ID format.' });
         }
 
-        // 3. Find the Ticket securely
         const ticket = await ServiceTicket.findOne({
             _id: id,
             companyId: req.user.companyId
@@ -615,7 +619,6 @@ export const cancelTicket = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Ticket not found.' });
         }
 
-        // 4. Prevent cancelling a ticket that is already closed
         if (['Resolved', 'Cancelled', 'Closed'].includes(ticket.status)) {
             return res.status(400).json({
                 success: false,
@@ -625,12 +628,9 @@ export const cancelTicket = async (req, res) => {
 
         const previousStatus = ticket.status;
 
-        // 5. Update Status and Stop SLA Timers
         ticket.status = 'Cancelled';
-        ticket.sla.resolutionDeadline = null; // Crucial: prevents the cron job from flagging it
+        ticket.sla.resolutionDeadline = null;
 
-        // 6. Update Audit Trail
-        // If the dispatcher provided a reason, we append it to the log
         const actionText = reason ? `Ticket Cancelled: ${reason}` : 'Ticket Cancelled';
 
         ticket.auditLog.push({
@@ -643,21 +643,33 @@ export const cancelTicket = async (req, res) => {
             newStatus: 'Cancelled'
         });
 
-        // 7. Save to Database
+        // 🔥 NEW: Free up the technician if one was currently assigned to this cancelled ticket
+        if (ticket.assignment?.technicianId) {
+            await User.findByIdAndUpdate(ticket.assignment.technicianId, { currentStatus: 'Available' });
+        }
+
         await ticket.save();
 
-        // 8. Populate basic fields for the frontend response
         await ticket.populate([
             { path: 'createdBy', select: 'username fullName role email' },
             { path: 'assignment.technicianId', select: 'username fullName mobile' }
         ]);
 
-        // 9. Optimize payload (strip heavy arrays before sending over the network)
         const responseData = ticket.toObject();
         delete responseData.auditLog;
         delete responseData.visitHistory;
 
-        // 10. Send Success Response
+        // --- SEND EMAIL ALERTS ---
+        sendSupportEmail({
+            type: 'CANCELLED',
+            to: ticket.customer.email,
+            name: ticket.customer.name,
+            data: {
+                ticketId: ticket.tokenId,
+                reason: reason || 'Administrative Cancellation'
+            }
+        });
+
         res.status(200).json({
             success: true,
             message: 'Ticket successfully cancelled.',
@@ -670,6 +682,7 @@ export const cancelTicket = async (req, res) => {
     }
 };
 
+// 8. Send Verification Email
 export const sendVerificationEmail = async (req, res) => {
     try {
         if (!req.user || !req.user.companyId) {
@@ -689,9 +702,8 @@ export const sendVerificationEmail = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Customer does not have an email address.' });
         }
 
-        // Generate a secure 32-character token
         const token = crypto.randomBytes(16).toString('hex');
-        const tokenExpires = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48 hours
+        const tokenExpires = new Date(Date.now() + 48 * 60 * 60 * 1000);
 
         const previousStatus = ticket.status;
         ticket.status = 'Pending Approval';
@@ -710,16 +722,19 @@ export const sendVerificationEmail = async (req, res) => {
 
         await ticket.save();
 
-        // --- CALL YOUR MOCK EMAIL FUNCTION ---
+        // --- SEND REAL HTML VERIFICATION EMAIL ---
         const verificationLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-ticket/${token}`;
 
-        await sendCommonEmail({
-            type: "TICKET_VERIFICATION",
+        await sendSupportEmail({
+            type: 'VERIFICATION',
             to: ticket.customer.email,
             name: ticket.customer.name,
-            data: { ticketId: ticket.tokenId, link: verificationLink }
+            data: {
+                ticketId: ticket.tokenId,
+                link: verificationLink
+            }
         });
-        // -------------------------------------
+        // -----------------------------------------
 
         res.status(200).json({
             success: true,
@@ -733,33 +748,28 @@ export const sendVerificationEmail = async (req, res) => {
     }
 };
 
-// =========================================================================
-// CUSTOMER ACTION: Public Endpoint to Verify Response (from their email link)
-// =========================================================================
+// 9. Verify Customer Response (Public)
 export const verifyCustomerResponse = async (req, res) => {
     try {
         const { token } = req.params;
-        const { action, comments } = req.body; // action must be 'approve' (Satisfied) or 'reject' (Unsatisfied)
+        const { action, comments } = req.body;
 
         if (!['approve', 'reject'].includes(action)) {
             return res.status(400).json({ success: false, message: 'Invalid action. Must be approve or reject.' });
         }
 
-        // Find ticket by token (this is a public endpoint, no req.user!)
         const ticket = await ServiceTicket.findOne({ 'closure.customerToken': token });
 
         if (!ticket) {
             return res.status(404).json({ success: false, message: 'Invalid or expired verification link.' });
         }
 
-        // Check if token expired
         if (new Date() > ticket.closure.tokenExpiresAt) {
             return res.status(400).json({ success: false, message: 'This verification link has expired.' });
         }
 
         const previousStatus = ticket.status;
 
-        // --- SCENARIO 1: Customer clicks "Satisfied" ---
         if (action === 'approve') {
             ticket.status = 'Closed';
             ticket.closure.isSatisfied = true;
@@ -768,17 +778,23 @@ export const verifyCustomerResponse = async (req, res) => {
 
             ticket.auditLog.push({
                 action: `Customer verified resolution. Status: Satisfied.`,
-                performedBy: { role: 'Customer' }, // No userId, because it's a public link
+                performedBy: { role: 'Customer' },
                 previousStatus: previousStatus,
                 newStatus: 'Closed'
             });
 
-        }
-        // --- SCENARIO 2: Customer clicks "Unsatisfied" ---
-        else if (action === 'reject') {
+            // --- SEND EMAIL ALERT ---
+            sendSupportEmail({
+                type: 'CLOSED',
+                to: ticket.customer.email,
+                name: ticket.customer.name,
+                data: { ticketId: ticket.tokenId }
+            });
+
+        } else if (action === 'reject') {
             ticket.status = 'Reopened';
             ticket.closure.isSatisfied = false;
-            ticket.closure.resolutionTimeMinutes = null; // Restart SLA clock
+            ticket.closure.resolutionTimeMinutes = null;
 
             ticket.auditLog.push({
                 action: `Customer Rejected Resolution. Reason: ${comments || 'No reason provided'}`,
@@ -787,14 +803,12 @@ export const verifyCustomerResponse = async (req, res) => {
                 newStatus: 'Reopened'
             });
 
-            // Mark the last visit as Customer Rejected
             const lastVisit = ticket.visitHistory[ticket.visitHistory.length - 1];
             if (lastVisit) {
                 lastVisit.visitStatus = 'Customer Rejected';
             }
         }
 
-        // Invalidate token so the link cannot be used twice
         ticket.closure.customerToken = null;
         ticket.closure.tokenExpiresAt = null;
 
@@ -813,56 +827,45 @@ export const verifyCustomerResponse = async (req, res) => {
     }
 };
 
-// service invoice
-
-import { generateServiceInvoicePDF } from '../utils/servicePdfGenerator.js';
-
-// =========================================================================
-// GENERATE SERVICE INVOICE PDF (Strictly Parts-Based)
-// =========================================================================
+// 10. Generate Service Invoice
 export const generateServiceInvoice = async (req, res) => {
     try {
         const { id } = req.params;
 
-        // 1. Fetch Ticket & deeply populate Company and Item details
         const ticket = await ServiceTicket.findOne({
             _id: id,
             companyId: req.user.companyId
         })
-        .populate('companyId')
-        .populate({
-            path: 'visitHistory.partsUsed.item',
-            select: 'name hsn salePrice gst unit mrp code' // Pulling all pricing & tax data from Item schema
-        });
+            .populate('companyId')
+            .populate({
+                path: 'visitHistory.partsUsed.item',
+                select: 'name hsn salePrice gst unit mrp code'
+            });
 
         if (!ticket) {
             return res.status(404).json({ success: false, message: 'Ticket not found' });
         }
 
-        // 2. Aggregate Parts from ALL valid visits
         const partsMap = {};
 
         ticket.visitHistory.forEach(visit => {
-            // 🔥 FIX: Include 'Customer Rejected' visits because parts were still consumed!
             if (['Completed', 'Customer Rejected'].includes(visit.visitStatus) && visit.partsUsed && visit.partsUsed.length > 0) {
                 visit.partsUsed.forEach(part => {
                     if (part.item) {
                         const itemId = part.item._id.toString();
-                        
-                        // If we used this same part in a previous visit, just increase the quantity
+
                         if (partsMap[itemId]) {
                             partsMap[itemId].quantity += part.quantity;
                         } else {
-                            // Add it as a new line item, using the exact Item schema pricing
                             partsMap[itemId] = {
                                 name: `${part.item.name} (${part.item.code || ''})`,
-                                hsn: part.item.hsn || '', 
+                                hsn: part.item.hsn || '',
                                 quantity: part.quantity,
                                 unit: part.item.unit || 'nos',
-                                rate: part.item.salePrice || 0, // Using standard salePrice
+                                rate: part.item.salePrice || 0,
                                 mrp: part.item.mrp || part.item.salePrice || 0,
-                                gst: part.item.gst || 0, // Pass GST in case the PDF utility needs it
-                                discountPct: 0 // Default to 0 discount for service items
+                                gst: part.item.gst || 0,
+                                discountPct: 0
                             };
                         }
                     }
@@ -870,10 +873,8 @@ export const generateServiceInvoice = async (req, res) => {
             }
         });
 
-        // Convert the map back into a flat array for the PDF generator
         const allParts = Object.values(partsMap);
 
-        // 3. Format data exactly as your generateServiceInvoicePDF expects
         const invoiceData = {
             company: ticket.companyId,
             customer: {
@@ -882,7 +883,6 @@ export const generateServiceInvoice = async (req, res) => {
                 contact: ticket.customer.mobileNumber,
                 email: ticket.customer.email || 'N/A'
             },
-            // Trigger the "Machine Details" box on the right side
             machineDetails: {
                 machineType: ticket.machine.machineType,
                 model: ticket.machine.model || 'N/A',
@@ -895,10 +895,9 @@ export const generateServiceInvoice = async (req, res) => {
             date: new Date(ticket.updatedAt || new Date()).toLocaleDateString('en-GB'),
             ref: ticket.tokenId,
             notes: "This is a computer-generated service invoice. E. & O. E.",
-            items: allParts // Only the actual parts used are billed!
+            items: allParts
         };
 
-        // 4. Pass it to your existing PDF utility
         await generateServiceInvoicePDF(res, invoiceData);
 
     } catch (error) {
@@ -909,9 +908,7 @@ export const generateServiceInvoice = async (req, res) => {
     }
 };
 
-
-/////////////// api for technicians ///////////////
-
+// 11. Get My Tickets (Technician App)
 export const getMyTickets = async (req, res) => {
     try {
         if (!req.user || !req.user.companyId) {
@@ -975,7 +972,7 @@ export const getMyTickets = async (req, res) => {
                 currentPage: parseInt(page),
                 totalPages: Math.ceil(totalTickets / parsedLimit),
                 totalTickets,
-                hasMore: (skip + tickets.length) < totalTickets 
+                hasMore: (skip + tickets.length) < totalTickets
             },
             data: tickets
         });
@@ -986,7 +983,7 @@ export const getMyTickets = async (req, res) => {
     }
 };
 
-// visit start
+// 12. Start Visit
 export const startVisit = async (req, res) => {
     try {
         if (!req.user || !req.user.companyId) {
@@ -995,7 +992,6 @@ export const startVisit = async (req, res) => {
 
         const { id } = req.params;
 
-        // Find ticket and ENSURE this technician actually owns it
         const ticket = await ServiceTicket.findOne({
             _id: id,
             companyId: req.user.companyId,
@@ -1016,22 +1012,18 @@ export const startVisit = async (req, res) => {
             });
         }
 
-        // 1. Create the new Visit Object
         const newVisit = {
             technicianId: req.user._id,
             technicianName: req.user.fullName || req.user.username,
             visitStart: new Date(),
-            visitStatus: 'Incomplete' // Defaults to incomplete until they finish
+            visitStatus: 'Incomplete'
         };
 
-        // 2. Push it into the history array
         ticket.visitHistory.push(newVisit);
 
-        // 3. Update the ticket status
         const previousStatus = ticket.status;
         ticket.status = 'In Progress';
 
-        // 4. Log the action
         ticket.auditLog.push({
             action: `Technician ${newVisit.technicianName} arrived on site and started work.`,
             performedBy: {
@@ -1047,7 +1039,7 @@ export const startVisit = async (req, res) => {
         res.status(200).json({
             success: true,
             message: 'Visit started successfully.',
-            data: ticket.visitHistory[ticket.visitHistory.length - 1] // Return just the new visit object
+            data: ticket.visitHistory[ticket.visitHistory.length - 1]
         });
 
     } catch (error) {
@@ -1056,8 +1048,7 @@ export const startVisit = async (req, res) => {
     }
 };
 
-// visit complete
-
+// 13. Complete Visit
 export const completeVisit = async (req, res) => {
     try {
         if (!req.user || !req.user.companyId) {
@@ -1067,10 +1058,8 @@ export const completeVisit = async (req, res) => {
         const { id } = req.params;
         let { workDoneDetails, partsUsed } = req.body;
 
-        // 1. Parse partsUsed if it comes as a stringified JSON from FormData
         if (typeof partsUsed === 'string') {
             try {
-                // Frontend should send: '[{"item": "60d5e...", "quantity": 2}]'
                 partsUsed = JSON.parse(partsUsed);
             } catch (e) {
                 console.error("Failed to parse partsUsed JSON:", e);
@@ -1078,17 +1067,15 @@ export const completeVisit = async (req, res) => {
             }
         }
 
-        // Format and validate the parts array
         const formattedParts = Array.isArray(partsUsed) ? partsUsed.map(part => ({
-            item: part.item || part._id, // Support different frontend payload structures
+            item: part.item || part._id,
             quantity: Number(part.quantity) || 1
-        })).filter(part => part.item) : []; // Filter out any invalid items
+        })).filter(part => part.item) : [];
 
         if (!workDoneDetails) {
             return res.status(400).json({ success: false, message: 'Work done details are required.' });
         }
 
-        // 2. Find ticket securely
         const ticket = await ServiceTicket.findOne({
             _id: id,
             companyId: req.user.companyId,
@@ -1106,7 +1093,6 @@ export const completeVisit = async (req, res) => {
             });
         }
 
-        // 3. Find the active visit
         const currentVisit = ticket.visitHistory[ticket.visitHistory.length - 1];
 
         if (!currentVisit || currentVisit.visitStatus !== 'Incomplete') {
@@ -1116,41 +1102,35 @@ export const completeVisit = async (req, res) => {
             });
         }
 
-        // 4. Process Uploaded Media
         const mediaUrls = [];
         if (req.files && req.files.length > 0) {
             req.files.forEach(file => {
                 mediaUrls.push({
-                    url: file.path.replace(/\\/g, '/'), // Normalize path for Windows/Linux
+                    url: file.path.replace(/\\/g, '/'),
                     type: file.mimetype.startsWith('video/') ? 'video' : 'image'
                 });
             });
         }
 
-        // 5. Update the visit object
         currentVisit.visitEnd = new Date();
         currentVisit.workDoneDetails = workDoneDetails;
-        currentVisit.partsUsed = formattedParts
-        currentVisit.media = mediaUrls; // Attach the processed files
+        currentVisit.partsUsed = formattedParts;
+        currentVisit.media = mediaUrls;
         currentVisit.visitStatus = 'Completed';
 
-        // 6. Auto-calculate Resolution Time (For the SLA Dashboard)
         if (!ticket.closure) ticket.closure = {};
         const totalMinutes = Math.round((new Date() - ticket.createdAt) / (1000 * 60));
         ticket.closure.resolutionTimeMinutes = totalMinutes;
 
-        // 7. Update overall ticket status to Resolved (WAITING FOR FEEDBACK)
         const previousStatus = ticket.status;
         ticket.status = 'Resolved';
 
-        // --- NEW: Deduct the used parts from the physical Inventory ---
         if (formattedParts.length > 0) {
             try {
-                // We use bulkWrite to update multiple inventory items efficiently in one go
                 const bulkOperations = formattedParts.map(part => ({
                     updateOne: {
                         filter: { _id: part.item },
-                        update: { $inc: { qty: -Math.abs(part.quantity) } } // $inc with a negative number reduces the qty
+                        update: { $inc: { qty: -Math.abs(part.quantity) } }
                     }
                 }));
 
@@ -1158,13 +1138,9 @@ export const completeVisit = async (req, res) => {
                 console.log(`Successfully deducted ${formattedParts.length} items from inventory.`);
             } catch (inventoryError) {
                 console.error("Failed to deduct inventory:", inventoryError);
-                // Note: We log the error but don't stop the ticket closure. 
-                // You might want to handle this differently depending on strictness.
             }
         }
-        // --------------------------------------------------------------
 
-        // 8. Update Audit Log
         ticket.auditLog.push({
             action: `Technician finished work. Parts used: ${currentVisit.partsUsed.length}. Media attached: ${mediaUrls.length}.`,
             performedBy: {
@@ -1174,6 +1150,9 @@ export const completeVisit = async (req, res) => {
             previousStatus: previousStatus,
             newStatus: 'Resolved'
         });
+
+        // 🔥 NEW: Free up the technician so they appear 'Available' to the dispatcher
+        await User.findByIdAndUpdate(req.user._id, { currentStatus: 'Available' });
 
         await ticket.save();
 
@@ -1186,5 +1165,63 @@ export const completeVisit = async (req, res) => {
     } catch (error) {
         console.error('Error completing visit:', error);
         res.status(500).json({ success: false, message: 'Server error while completing visit.' });
+    }
+};
+
+// 14. Update Technician Profile (For Complaint Head)
+export const updateTechnicianProfile = async (req, res) => {
+    try {
+        if (!req.user || !req.user.companyId) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        const { id } = req.params;
+        const { serviceZone, technicianSkills } = req.body;
+
+        // Find the technician
+        const technician = await User.findOne({
+            _id: id,
+            companyId: req.user.companyId,
+            role: 'Complaint Management Employee'
+        });
+
+        if (!technician) {
+            return res.status(404).json({ success: false, message: 'Technician not found.' });
+        }
+
+        // Parse skills securely
+        let finalSkills = technician.technicianSkills;
+        if (technicianSkills !== undefined) {
+            if (Array.isArray(technicianSkills)) {
+                finalSkills = technicianSkills;
+            } else if (typeof technicianSkills === 'string') {
+                try {
+                    finalSkills = JSON.parse(technicianSkills);
+                } catch (e) {
+                    finalSkills = technicianSkills.split(',').map(s => s.trim());
+                }
+            }
+        }
+
+        // Update fields
+        if (serviceZone !== undefined) technician.serviceZone = serviceZone;
+        technician.technicianSkills = finalSkills;
+
+        await technician.save();
+
+        res.status(200).json({
+            success: true,
+            message: 'Technician profile updated successfully.',
+            data: {
+                _id: technician._id,
+                name: technician.fullName || technician.username,
+                serviceZone: technician.serviceZone,
+                technicianSkills: technician.technicianSkills
+            }
+        });
+
+    } catch (error) {
+        console.error('Error updating technician:', error);
+        res.status(500).json({ success: false, message: 'Server error while updating technician.' });
     }
 };
