@@ -50,10 +50,62 @@ export const getLeads = async (req, res) => {
       enquiryDateFrom,
       enquiryDateTo,
       nextFollowUpDateFrom,
-      nextFollowUpDateTo
+      nextFollowUpDateTo,
+      paymentCheckRequested
     } = req.query;
 
     const query = { companyId: req.user.companyId };
+    const andConditions = [];
+
+    if (paymentCheckRequested === 'true') {
+      query.paymentCheckStatus = { $in: ['Pending', 'Paid', 'Partially Paid', 'Rejected'] };
+    }
+
+    // 🎯 NEW ROLE-BASED ACCESS CONTROL
+    const currentUser = await User.findById(req.user._id).populate('designationId');
+    
+    // Check if user is Cruncher (can see ALL leads + assign)
+    const isCruncher = currentUser?.designationId?.name === 'Cruncher' || 
+                      currentUser?.designation?.name === 'Cruncher' ||
+                      (currentUser?.role === 'Sales Employee' && currentUser?.designation === 'Cruncher');
+    
+    // Check if user is Sales Head (can see ALL leads + assign)
+    const isSalesHead = ['Sales Head', 'Manager', 'Super Admin', 'Superadmin'].includes(req.user.role);
+    
+    // Check if user is Accounts (for payment verification)
+    const isAccounts = ['Accounts', 'Accounts Head', 'Account Employee', 'Finance Manager'].includes(req.user.role);
+    
+    // Check if user is regular Sales Employee (can see ONLY assigned leads)
+    const isSalesEmployee = ['Sales', 'Sales Employee'].includes(req.user.role) && !isCruncher;
+
+    console.log(`🔍 Lead Access Control - User: ${req.user.username}, Role: ${req.user.role}, Designation: ${currentUser?.designationId?.name || currentUser?.designation}, isCruncher: ${isCruncher}, isSalesHead: ${isSalesHead}, isSalesEmployee: ${isSalesEmployee}`);
+
+    // 🚫 VISIBILITY RULES:
+    // - Cruncher: Can see ALL leads
+    // - Sales Head: Can see ALL leads  
+    // - Sales Employee (Non-Cruncher): Can see ONLY assigned leads
+    // - Accounts: Can see leads sent to account
+    
+    if (isSalesEmployee && !isCruncher) {
+      // Sales Employee (Non-Cruncher) - Only assigned leads
+      andConditions.push({ 
+        $or: [
+          { assignedTo: req.user._id }, 
+          { observer: req.user._id }
+        ] 
+      });
+      console.log(`🔒 Restricted access for Sales Employee: ${req.user.username} - Only assigned leads`);
+    } else if (isAccounts && !isSalesHead) {
+      // Accounts can see leads sent to account or payment check requested
+      andConditions.push({
+        $or: [
+          { sentToAccount: true },
+          { paymentCheckStatus: { $in: ['Pending', 'Paid', 'Partially Paid', 'Rejected'] } }
+        ]
+      });
+      console.log(`💰 Accounts access for: ${req.user.username} - Payment related leads only`);
+    }
+    // Cruncher and Sales Head get full access (no additional conditions)
 
     // Basic filters
     if (status && status !== 'all' && status !== 'All Active Leads') {
@@ -86,7 +138,13 @@ export const getLeads = async (req, res) => {
     }
 
     if (stage && stage !== 'all') query.stage = stage;
-    if (assignedTo) query.assignedTo = assignedTo;
+    if (assignedTo && assignedTo !== 'all') {
+      if (assignedTo.toLowerCase() === 'unassigned') {
+        query.assignedTo = { $in: [null, undefined] };
+      } else {
+        query.assignedTo = assignedTo;
+      }
+    }
 
     // Advanced filters
     if (state) query.state = { $regex: state, $options: 'i' };
@@ -108,14 +166,20 @@ export const getLeads = async (req, res) => {
     }
 
     if (search) {
-      query.$or = [
-        { companyName: { $regex: search, $options: 'i' } },
-        { contactPerson: { $regex: search, $options: 'i' } },
-        { mobile: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
-        { leadCode: { $regex: search, $options: 'i' } },
-        { productRequired: { $regex: search, $options: 'i' } }
-      ];
+      andConditions.push({
+        $or: [
+          { companyName: { $regex: search, $options: 'i' } },
+          { contactPerson: { $regex: search, $options: 'i' } },
+          { mobile: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } },
+          { leadCode: { $regex: search, $options: 'i' } },
+          { productRequired: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (andConditions.length > 0) {
+      query.$and = andConditions;
     }
 
     // Sorting
@@ -131,6 +195,7 @@ export const getLeads = async (req, res) => {
     const leads = await Lead.find(query)
       .populate('assignedTo', 'fullName username')
       .populate('observer', 'fullName username')
+      .populate('history.performedBy', 'fullName username')
       .sort(sortOptions)
       .limit(parseInt(limit));
 
@@ -165,11 +230,30 @@ export const updateLead = async (req, res) => {
 
     const updates = req.body;
 
-    // Log history if status or stage changed
+    // Log history if status changed
     if (updates.status && updates.status !== lead.status) {
       lead.history.push({
-        action: 'Status Updated',
-        notes: `Status changed from ${lead.status} to ${updates.status}`,
+        action: 'Lead Status Updated',
+        notes: `Lead status changed from '${lead.status || 'N/A'}' to '${updates.status}'`,
+        performedBy: req.user._id
+      });
+    }
+
+    // Log history if stage changed
+    if (updates.stage && updates.stage !== lead.stage) {
+      lead.history.push({
+        action: 'Lead Stage Updated',
+        notes: `Lead stage changed from '${lead.stage || 'N/A'}' to '${updates.stage}'`,
+        performedBy: req.user._id
+      });
+    }
+
+    // Log history if notes are added
+    if (updates.notes && Array.isArray(updates.notes) && updates.notes.length > (lead.notes || []).length) {
+      const newNote = updates.notes[updates.notes.length - 1];
+      lead.history.push({
+        action: 'Note Added',
+        notes: `Added note: "${newNote.content}"`,
         performedBy: req.user._id
       });
     }
@@ -223,9 +307,17 @@ export const checkExistingLead = async (req, res) => {
 // Get users assignable to leads
 export const getAssignableUsers = async (req, res) => {
   try {
+    const currentUser = await User.findById(req.user._id).populate('designationId');
+    const isCruncher = currentUser?.designationId?.name === 'Cruncher' || currentUser?.designation?.name === 'Cruncher';
+
+    let rolesAllowed = ['Sales', 'Sales Employee', 'Sales Head', 'Manager', 'HR-Admin'];
+    if (isCruncher) {
+      rolesAllowed = ['Sales Employee'];
+    }
+
     const users = await User.find({
       companyId: req.user.companyId,
-      role: { $in: ['Sales', 'Sales Employee', 'Sales Head', 'Manager', 'HR-Admin'] },
+      role: { $in: rolesAllowed },
       isActive: true
     }).select('fullName username role employeeId');
 
@@ -247,6 +339,10 @@ export const markLeadAsWon = async (req, res) => {
 
     if (lead.status === 'Won') {
       return res.status(400).json({ success: false, message: 'Lead already marked as won' });
+    }
+
+    if (lead.paymentCheckStatus !== 'Paid' && lead.paymentCheckStatus !== 'Partially Paid') {
+      return res.status(400).json({ success: false, message: 'Deal cannot be won until payment is verified by Accounts.' });
     }
 
     // Ensure we have ObjectId strings, not objects (in case they were populated)
@@ -281,11 +377,18 @@ export const markLeadAsWon = async (req, res) => {
         category: lead.customerType === 'Dealer' ? 'Distributor' : 'End User',
         companyId: companyId,
         salesContact: salesPersonId,
-        active: 'Yes'
+        active: 'Yes',
+        advancePayment: lead.advancedPaymentAmount || 0 // Transfer advanced payment
       });
       await customer.save();
-      console.log(`[Deal Won] Customer created: ${customer._id}`);
+      console.log(`[Deal Won] Customer created: ${customer._id} with advance payment: ₹${lead.advancedPaymentAmount || 0}`);
     } else {
+      // Update existing customer with advanced payment
+      if (lead.advancedPaymentAmount > 0) {
+        customer.advancePayment = (customer.advancePayment || 0) + lead.advancedPaymentAmount;
+        await customer.save();
+        console.log(`[Deal Won] Updated existing customer ${customer._id} with advance payment: ₹${lead.advancedPaymentAmount}`);
+      }
       console.log(`[Deal Won] Existing customer found: ${customer._id}`);
     }
 
@@ -378,8 +481,13 @@ export const markLeadAsWon = async (req, res) => {
       orderDate: new Date(),
       products: orderProducts,
       totalAmount: totalAmount,
-      status: 'pending',
-      notes: `Order generated from Lead ${lead.leadCode}`,
+      status: 'pending_service_approval', // 🔄 NEW: Requires service verification
+      leadId: lead._id, // 📋 NEW: Track Lead-to-Order conversion
+      serviceVerification: {
+        status: 'pending',
+        remarks: 'Awaiting service team verification for deal won from lead'
+      },
+      notes: `Order generated from Lead ${lead.leadCode}. Deal Value: ₹${lead.dealValue || 0}`,
       quotation: lead.quotation // Transfer quotation from lead to order
     });
 
@@ -390,22 +498,109 @@ export const markLeadAsWon = async (req, res) => {
     lead.status = 'Won';
     lead.history.push({
       action: 'Deal Won',
-      notes: `Lead converted to customer and order created (${orderCode})`,
+      notes: `Lead converted to customer and order created (${orderCode}). Advanced payment: ₹${lead.advancedPaymentAmount || 0}`,
       performedBy: req.user._id
     });
 
     await lead.save();
     console.log(`[Deal Won] Lead status updated to Won`);
 
+    // 4. Transfer advanced payment to customer master (handled above in customer creation/update)
+
     res.json({
       success: true,
       message: 'Lead successfully converted to customer and order created',
       customer,
-      order: newOrder
+      order: newOrder,
+      advancedPaymentTransferred: lead.advancedPaymentAmount || 0
     });
 
   } catch (error) {
     console.error('[Deal Won] Error marking lead as won:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// Request Payment Check
+export const requestPaymentCheck = async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+    if (!lead.quotation) return res.status(400).json({ success: false, message: 'Please send Quotation first.' });
+
+    // Import LeadPayment model to check for advanced payments
+    const LeadPayment = (await import('../models/LeadPayment.js')).default;
+    
+    // Get verified advanced payments for this lead
+    const verifiedPayments = await LeadPayment.find({
+      leadId: req.params.id,
+      status: 'Verified'
+    });
+
+    const totalAdvancedPayment = verifiedPayments.reduce((sum, p) => sum + p.amount, 0);
+
+    lead.paymentCheckStatus = 'Pending';
+    lead.advancedPaymentAmount = totalAdvancedPayment; // Update lead with current advanced payment
+    lead.history.push({
+      action: 'Payment Check Requested',
+      notes: `Sales requested account verification for payment. Advanced payment: ₹${totalAdvancedPayment}`,
+      performedBy: req.user._id
+    });
+    await lead.save();
+    
+    res.json({ 
+      success: true, 
+      message: 'Payment check requested', 
+      lead,
+      advancedPayment: totalAdvancedPayment
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// Update Payment Check Status (By Accounts)
+export const updatePaymentCheckStatus = async (req, res) => {
+  try {
+    const { status, remarks } = req.body;
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+    
+    lead.paymentCheckStatus = status;
+    lead.history.push({
+      action: 'Payment Check Updated',
+      notes: `Account updated payment status to ${status}. Remarks: ${remarks || ''}`,
+      performedBy: req.user._id
+    });
+    
+    await lead.save();
+    res.json({ success: true, message: 'Payment status updated', lead });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// Send Lead to Account for Advanced Payment
+export const sendLeadToAccount = async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+    
+    if (lead.sentToAccount) {
+      return res.status(400).json({ success: false, message: 'Lead already sent to account' });
+    }
+
+    lead.sentToAccount = true;
+    lead.sentToAccountDate = new Date();
+    lead.history.push({
+      action: 'Sent to Account',
+      notes: 'Lead sent to Account for advanced payment processing',
+      performedBy: req.user._id
+    });
+    
+    await lead.save();
+    res.json({ success: true, message: 'Lead sent to Account successfully', lead });
+  } catch (error) {
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };

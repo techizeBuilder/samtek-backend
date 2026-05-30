@@ -50,15 +50,27 @@ const leadSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
+  paymentCheckStatus: {
+    type: String,
+    enum: ['Not Requested', 'Pending', 'Paid', 'Partially Paid', 'Rejected'],
+    default: 'Not Requested'
+  },
+  sentToAccount: {
+    type: Boolean,
+    default: false
+  },
+  sentToAccountDate: Date,
+  advancedPaymentAmount: {
+    type: Number,
+    default: 0
+  },
   status: {
     type: String,
-    enum: ['New', 'Contacted', 'Product Qualified', 'Negotiation', 'Won', 'Lost'],
     default: 'New'
   },
   stage: {
     type: String,
-    enum: ['Cold', 'Warm', 'Hot'],
-    default: 'Cold'
+    default: 'N/A'
   },
   nextFollowUpDate: Date,
   
@@ -138,6 +150,13 @@ const leadSchema = new mongoose.Schema({
     gstNumber: String,
     dob: Date,
     anniversary: Date,
+    createdAt: { type: Date, default: Date.now }
+  }],
+  
+  notes: [{
+    content: { type: String, required: true },
+    userName: String,
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     createdAt: { type: Date, default: Date.now }
   }],
   

@@ -92,6 +92,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
     const Customer = (await import('./models/Customer.js')).default;
     const Sale = (await import('./models/Sale.js')).default;
     const Lead = (await import('./models/Lead.js')).default;
+    const LeadPayment = (await import('./models/LeadPayment.js')).default;
+    const BankAccount = (await import('./models/BankAccount.js')).default;
+    const LedgerEntry = (await import('./models/LedgerEntry.js')).default;
 
     console.log('✅ Models registered:', {
       User: !!User,
@@ -282,6 +285,11 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
       app.use('/api/leads', leadRouter);
       console.log('Lead routes registered at /api/leads');
 
+      // Lead Payment routes
+      const leadPaymentRouter = (await import('./routes/leadPaymentRoutes.js')).default;
+      app.use('/api/lead-payments', leadPaymentRouter);
+      console.log('Lead Payment routes registered at /api/lead-payments');
+
       // Payment Reminder routes
       const paymentReminderRouter = (await import('./routes/paymentReminder.routes.js')).default;
       app.use('/api/accounts/payment-reminders', paymentReminderRouter);
@@ -469,6 +477,92 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
           res.status(500).json({
             success: false,
             message: 'Error seeding customers',
+            error: error.message
+          });
+        }
+      });
+
+      // Seed bank accounts endpoint (development only)
+      app.post('/api/seed-bank-accounts', async (req, res) => {
+        try {
+          const BankAccount = (await import('./models/BankAccount.js')).default;
+          const User = (await import('./models/User.js')).default;
+          
+          // Get first admin user for createdBy field
+          const adminUser = await User.findOne({ role: { $in: ['Super Admin', 'Accounts', 'Manager'] } });
+          if (!adminUser) {
+            return res.status(400).json({ success: false, message: 'No admin user found' });
+          }
+
+          // Clear existing bank accounts
+          await BankAccount.deleteMany({});
+          console.log('Cleared existing bank accounts');
+
+          // Sample bank accounts
+          const sampleBankAccounts = [
+            {
+              accountName: 'Samtek Business Current Account',
+              accountNumber: '1234567890123456',
+              bankName: 'State Bank of India',
+              branchName: 'Commercial Street Branch',
+              ifscCode: 'SBIN0001234',
+              accountType: 'Current',
+              openingBalance: 500000,
+              currentBalance: 750000,
+              companyId: adminUser.companyId,
+              createdBy: adminUser._id
+            },
+            {
+              accountName: 'Samtek Savings Account',
+              accountNumber: '9876543210987654',
+              bankName: 'HDFC Bank',
+              branchName: 'Business Park Branch',
+              ifscCode: 'HDFC0001234',
+              accountType: 'Savings',
+              openingBalance: 200000,
+              currentBalance: 350000,
+              companyId: adminUser.companyId,
+              createdBy: adminUser._id
+            },
+            {
+              accountName: 'Cash in Hand',
+              accountNumber: 'CASH001',
+              bankName: 'Cash Account',
+              branchName: 'Office',
+              ifscCode: 'CASH001',
+              accountType: 'Cash',
+              openingBalance: 50000,
+              currentBalance: 75000,
+              companyId: adminUser.companyId,
+              createdBy: adminUser._id
+            },
+            {
+              accountName: 'ICICI Business Account',
+              accountNumber: '5555666677778888',
+              bankName: 'ICICI Bank',
+              branchName: 'Industrial Area Branch',
+              ifscCode: 'ICIC0001234',
+              accountType: 'Current',
+              openingBalance: 300000,
+              currentBalance: 450000,
+              companyId: adminUser.companyId,
+              createdBy: adminUser._id
+            }
+          ];
+
+          const insertedAccounts = await BankAccount.insertMany(sampleBankAccounts);
+          console.log(`Successfully seeded ${insertedAccounts.length} bank accounts`);
+
+          res.json({
+            success: true,
+            message: `Successfully seeded ${insertedAccounts.length} bank accounts`,
+            accounts: insertedAccounts
+          });
+        } catch (error: any) {
+          console.error('Error seeding bank accounts:', error);
+          res.status(500).json({
+            success: false,
+            message: 'Error seeding bank accounts',
             error: error.message
           });
         }

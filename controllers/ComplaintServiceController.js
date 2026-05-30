@@ -216,7 +216,7 @@ export const createSupportTicket = async (req, res) => {
         if (!machine?.machineType) {
             return res.status(400).json({ success: false, message: 'Missing machine type.' });
         }
-        if(!machine.serialNumber || !machine.model || !machine.warrantyStatus || !machine.amcStatus) {
+        if (!machine.serialNumber || !machine.model || !machine.warrantyStatus || !machine.amcStatus) {
             return res.status(400).json({ success: false, message: 'Missing required machine details.' });
         }
         if (!issue?.issueType) {
@@ -547,7 +547,7 @@ export const getTicketDetails = async (req, res) => {
             .populate('visitHistory.technicianId', 'username fullName mobile')
             .populate('visitHistory.partsUsed.item', 'name code salePrice gst hsn');
 
-       // 4. Role-Based Payload Optimization
+        // 4. Role-Based Payload Optimization
         if (req.user.role === 'Complaint Management Employee') { //  UPDATED ROLE
             // Employees do not need the audit log on mobile. Strip it to save bandwidth.
             query = query.select('-auditLog');
@@ -565,7 +565,7 @@ export const getTicketDetails = async (req, res) => {
         }
 
         // 6. Strict Security: Ensure a technician can only view their OWN assigned tickets
-       if (req.user.role === 'Complaint Management Employee'){
+        if (req.user.role === 'Complaint Management Employee') {
             const assignedTechId = ticket.assignment?.technicianId?._id?.toString();
             const loggedInUserId = req.user._id.toString();
 
@@ -829,11 +829,11 @@ export const generateServiceInvoice = async (req, res) => {
             _id: id,
             companyId: req.user.companyId
         })
-        .populate('companyId')
-        .populate({
-            path: 'visitHistory.partsUsed.item',
-            select: 'name hsn salePrice gst unit mrp code' // Pulling all pricing & tax data from Item schema
-        });
+            .populate('companyId')
+            .populate({
+                path: 'visitHistory.partsUsed.item',
+                select: 'name hsn salePrice gst unit mrp code' // Pulling all pricing & tax data from Item schema
+            });
 
         if (!ticket) {
             return res.status(404).json({ success: false, message: 'Ticket not found' });
@@ -848,7 +848,7 @@ export const generateServiceInvoice = async (req, res) => {
                 visit.partsUsed.forEach(part => {
                     if (part.item) {
                         const itemId = part.item._id.toString();
-                        
+
                         // If we used this same part in a previous visit, just increase the quantity
                         if (partsMap[itemId]) {
                             partsMap[itemId].quantity += part.quantity;
@@ -856,7 +856,7 @@ export const generateServiceInvoice = async (req, res) => {
                             // Add it as a new line item, using the exact Item schema pricing
                             partsMap[itemId] = {
                                 name: `${part.item.name} (${part.item.code || ''})`,
-                                hsn: part.item.hsn || '', 
+                                hsn: part.item.hsn || '',
                                 quantity: part.quantity,
                                 unit: part.item.unit || 'nos',
                                 rate: part.item.salePrice || 0, // Using standard salePrice
@@ -975,7 +975,7 @@ export const getMyTickets = async (req, res) => {
                 currentPage: parseInt(page),
                 totalPages: Math.ceil(totalTickets / parsedLimit),
                 totalTickets,
-                hasMore: (skip + tickets.length) < totalTickets 
+                hasMore: (skip + tickets.length) < totalTickets
             },
             data: tickets
         });

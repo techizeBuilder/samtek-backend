@@ -19,7 +19,18 @@ const itemSchema = new mongoose.Schema({
   category: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    enum: [
+      'Purchase Machine',
+      'Manufacturing Machine', 
+      'Raw Material',
+      'Tool',
+      'Asset',
+      'Sheet Metal Material (Job Work)',
+      'Machining Material (Job Work)',
+      'Child Part Material (Sub-Assembly Parts)',
+      'Assembly Material (Bought-Out Fitting Items)'
+    ]
   },
   subCategory: {
     type: String,
@@ -185,6 +196,54 @@ const itemSchema = new mongoose.Schema({
   companyId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Company'
+  },
+  // NEW: Product variants for quotation price list
+  variants: [{
+    name: {
+      type: String,
+      trim: true
+    },
+    capacity: {
+      type: String,
+      trim: true
+    },
+    motorPower: {
+      type: String,
+      trim: true
+    },
+    price: {
+      type: Number,
+      min: 0
+    },
+    code: {
+      type: String,
+      trim: true
+    },
+    specifications: {
+      type: Map,
+      of: String
+    }
+  }],
+  // NEW: Product applications (for flour mill, etc.)
+  applications: [{
+    type: String,
+    trim: true
+  }],
+  // NEW: Warranty information
+  warranty: {
+    period: {
+      type: Number,
+      default: 12 // months
+    },
+    type: {
+      type: String,
+      enum: ['Parts Only', 'Labor Only', 'Comprehensive'],
+      default: 'Comprehensive'
+    },
+    terms: {
+      type: String,
+      trim: true
+    }
   }
 }, {
   timestamps: true

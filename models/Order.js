@@ -59,7 +59,7 @@ const orderSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected', 'in_production', 'completed', 'cancelled'],
+    enum: ['pending', 'pending_service_approval', 'rejected_by_service', 'approved', 'rejected', 'in_production', 'completed', 'cancelled'],
     default: 'pending'
   },
   priority: {
@@ -150,6 +150,36 @@ const orderSchema = new mongoose.Schema({
     remarks: {
       type: String
     }
+  },
+  // 🔄 SERVICE VERIFICATION (New Flow Addition)
+  serviceVerification: {
+    status: {
+      type: String,
+      enum: ['pending', 'verified', 'rejected'],
+      default: 'pending'
+    },
+    verifiedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    verifiedAt: {
+      type: Date
+    },
+    callRecordingUrl: {
+      type: String
+    },
+    isFakeCommitmentChecked: {
+      type: Boolean,
+      default: false
+    },
+    remarks: {
+      type: String
+    }
+  },
+  // 📋 LEAD REFERENCE (For tracking Lead-to-Order conversion)
+  leadId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Lead'
   },
   quotation: {
     type: String  // Stores base64 PDF content

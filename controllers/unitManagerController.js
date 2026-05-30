@@ -3336,7 +3336,7 @@ export const getUnitManagerSalesPersons = async (req, res) => {
 
     const salesPersons = await User.find({
       companyId: unitManager.companyId,
-      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson'] },
+      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson', 'Sales Head', 'Sales Employee'] },
       isActive: { $ne: false }
     }).select('_id username fullName email').sort({ username: 1 });
 
@@ -3456,7 +3456,7 @@ export const createUnitManagerReturn = async (req, res) => {
     const salesPerson = await User.findOne({
       _id: salesPersonId,
       companyId: unitManager.companyId,
-      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson'] }
+      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson', 'Sales Head', 'Sales Employee'] }
     });
 
     if (!salesPerson) {
@@ -3851,7 +3851,7 @@ export const createUnitManagerDamage = async (req, res) => {
     const salesPerson = await User.findOne({
       _id: salesPersonId,
       companyId: unitManager.companyId,
-      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson'] }
+      role: { $in: ['Sales', 'sales', 'SALES', 'Sales Person', 'SalesPerson', 'Sales Head', 'Sales Employee'] }
     });
 
     if (!salesPerson) {
