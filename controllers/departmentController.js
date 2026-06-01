@@ -1,6 +1,6 @@
 /** @format */
 
-import Department from "../models/Department";
+import Department from "../models/Department.js";
 
 /* CREATE */
 export const createDepartment = async (req, res) => {

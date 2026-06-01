@@ -569,7 +569,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
                 console.warn('⚠️  Cron job setup warning:', cronError.message);
             }
             try {
-                const { startSLAMonitor } = await import('./utils/serviceSlaMonitor');
+                const { startSLAMonitor } = await import('./utils/serviceSlaMonitor.ts');
                 startSLAMonitor();
                 console.log('✅ SLA monitor cron job scheduled (runs every hour)');
             }

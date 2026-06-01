@@ -1,6 +1,6 @@
 /** @format */
 
-import Branch from "../models/Branch";
+import Branch from "../models/Branch.js";
 
 /**
  * CREATE BRANCH
