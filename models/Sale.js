@@ -191,3 +191,4 @@ saleSchema.pre('save', async function () {
 });
 
 export default mongoose.model('Sale', saleSchema);
+//sales check
