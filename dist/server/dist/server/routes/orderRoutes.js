@@ -1,0 +1,30 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const auth_js_1 = require("../middleware/auth.js");
+const orderController_js_1 = require("../controllers/orderController.js");
+const router = express_1.default.Router();
+router.use(auth_js_1.authenticateToken);
+router.post('/', orderController_js_1.createOrder);
+router.get('/', orderController_js_1.getOrders);
+// NOC Request & Gate Pass Generation Flow
+router.get('/noc-requests', orderController_js_1.getNOCRequests);
+router.post('/approve-noc/:saleId', orderController_js_1.approveNOC);
+router.get('/get-tracking', orderController_js_1.getOrderTracking);
+router.get('/check-existing', orderController_js_1.checkExistingOrder);
+router.get('/:id', orderController_js_1.getOrderById);
+router.put('/:id', orderController_js_1.updateOrder);
+router.patch('/:id/status', orderController_js_1.updateOrderStatus);
+router.patch('/:id/service-verify', orderController_js_1.verifyServiceOrder);
+router.patch('/:id/account-approve', orderController_js_1.approveAccountOrder);
+router.post('/gate-pass/:saleId', orderController_js_1.generateGatePass);
+router.post('/approve-sale/:saleId', orderController_js_1.approveSaleOrder);
+router.post('/:id/payment-evidence', orderController_js_1.addPaymentEvidence);
+router.patch('/:orderId/store-info', orderController_js_1.updateOrderStoreInfo);
+router.patch('/sale/:saleId/store-info', orderController_js_1.updateSaleStoreInfo);
+router.patch('/order/:orderId/store-info', orderController_js_1.updateOrderStoreInfo);
+router.delete('/:id', orderController_js_1.deleteOrder);
+exports.default = router;

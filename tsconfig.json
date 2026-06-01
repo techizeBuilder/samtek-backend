@@ -11,6 +11,8 @@
     "strict": false
   },
   "exclude": [
+    "dist",
+    "node_modules",
     "db.ts",
     "storage.ts",
     "storage.js",

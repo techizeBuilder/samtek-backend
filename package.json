@@ -4,7 +4,7 @@
   "description": "",
   "main": "auth-routes.js",
   "scripts": {
-    "dev": "nodemon --exec ts-node index.ts",
+    "dev": "nodemon --exec ts-node index.js",
     "start": "node dist/server/index.js"
   },
   "keywords": [],

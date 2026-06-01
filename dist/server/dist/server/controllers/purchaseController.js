@@ -1,0 +1,623 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function (o, m, k, k2) {
+    if (k2 === undefined)
+        k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+        desc = { enumerable: true, get: function () { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function (o, m, k, k2) {
+    if (k2 === undefined)
+        k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function (o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function (o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function (o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o)
+                if (Object.prototype.hasOwnProperty.call(o, k))
+                    ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule)
+            return mod;
+        var result = {};
+        if (mod != null)
+            for (var k = ownKeys(mod), i = 0; i < k.length; i++)
+                if (k[i] !== "default")
+                    __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try {
+            step(generator.next(value));
+        }
+        catch (e) {
+            reject(e);
+        } }
+        function rejected(value) { try {
+            step(generator["throw"](value));
+        }
+        catch (e) {
+            reject(e);
+        } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.sendPOToVendor = exports.getPurchaseItems = exports.getPurchaseStats = exports.receivePurchase = exports.deletePurchase = exports.updatePurchase = exports.createPurchase = exports.getPurchaseById = exports.getPurchases = void 0;
+const Purchase_js_1 = __importDefault(require("../models/Purchase.js"));
+const Supplier_js_1 = __importDefault(require("../models/Supplier.js"));
+const Inventory_js_1 = require("../models/Inventory.js");
+const PurchaseRequest_js_1 = __importDefault(require("../models/PurchaseRequest.js"));
+const Company_js_1 = require("../models/Company.js");
+const emailService_js_1 = require("../services/emailService.js");
+const schema_js_1 = require("../shared/schema.js");
+const getPurchases = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { page = 1, limit = 10, status, paymentStatus, unit, search } = req.query;
+        const skip = (page - 1) * limit;
+        let query = {};
+        if (req.user.role !== schema_js_1.USER_ROLES.SUPER_USER) {
+            query.unit = req.user.unit;
+        }
+        else if (unit) {
+            query.unit = unit;
+        }
+        if (status) {
+            query.status = status;
+        }
+        if (paymentStatus) {
+            query.paymentStatus = paymentStatus;
+        }
+        if (search) {
+            query.$or = [
+                { purchaseOrderNumber: { $regex: search, $options: 'i' } }
+            ];
+        }
+        const purchases = yield Purchase_js_1.default.find(query)
+            .populate('supplier', 'supplierName contactPerson email phone')
+            .populate('createdBy', 'fullName')
+            .populate('approvedBy', 'fullName')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(parseInt(limit));
+        const total = yield Purchase_js_1.default.countDocuments(query);
+        res.json({
+            purchases,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total,
+                pages: Math.ceil(total / limit)
+            }
+        });
+    }
+    catch (error) {
+        console.error('Get purchases error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+exports.getPurchases = getPurchases;
+const getPurchaseById = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { id } = req.params;
+        const purchase = yield Purchase_js_1.default.findById(id)
+            .populate('supplier')
+            .populate('items.item', 'itemName itemCode')
+            .populate('createdBy', 'fullName')
+            .populate('approvedBy', 'fullName');
+        if (!purchase) {
+            return res.status(404).json({ message: 'Purchase not found' });
+        }
+        if (req.user.role !== schema_js_1.USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+            return res.status(403).json({ message: 'Access denied' });
+        }
+        res.json({ purchase });
+    }
+    catch (error) {
+        console.error('Get purchase by ID error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+exports.getPurchaseById = getPurchaseById;
+const createPurchase = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
+    try {
+        const { supplier, items, expectedDeliveryDate, taxAmount, deliveryAddress, terms, notes, purchaseRequest } = req.body;
+        if (!supplier || !items || !Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ message: 'Supplier and items are required' });
+        }
+        // Resolve delivery address from company profile if not supplied
+        let finalDeliveryAddress = deliveryAddress;
+        if (!finalDeliveryAddress && ((_a = req.user) === null || _a === void 0 ? void 0 : _a.companyId)) {
+            const company = yield Company_js_1.Company.findById(req.user.companyId);
+            if (company) {
+                finalDeliveryAddress = `${company.address || ''}, ${company.city || ''}, ${company.state || ''} - ${company.locationPin || ''}`
+                    .trim()
+                    .replace(/^,\s*/, '')
+                    .replace(/,\s*,/g, ',');
+            }
+        }
+        if (!finalDeliveryAddress) {
+            finalDeliveryAddress = 'Main Warehouse, Samtek Factory';
+        }
+        // Validate supplier exists
+        const supplierDoc = yield Supplier_js_1.default.findById(supplier);
+        if (!supplierDoc) {
+            return res.status(400).json({ message: 'Supplier not found' });
+        }
+        // Validate items and calculate totals
+        let totalAmount = 0;
+        const purchaseItems = [];
+        for (const item of items) {
+            const inventoryItem = yield Inventory_js_1.Item.findById(item.item);
+            if (!inventoryItem) {
+                return res.status(400).json({ message: `Inventory item ${item.item} not found` });
+            }
+            const itemTotal = item.quantity * item.unitPrice;
+            totalAmount += itemTotal;
+            purchaseItems.push({
+                item: item.item,
+                itemName: inventoryItem.name || inventoryItem.itemName,
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+                totalPrice: itemTotal,
+                receivedQuantity: 0,
+                pendingQuantity: item.quantity
+            });
+        }
+        const taxAmt = taxAmount || 0;
+        const grandTotal = totalAmount + taxAmt;
+        const purchaseData = {
+            supplier,
+            items: purchaseItems,
+            totalAmount,
+            taxAmount: taxAmt,
+            grandTotal,
+            expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            unit: req.user.role === schema_js_1.USER_ROLES.SUPER_USER ? req.body.unit : req.user.unit,
+            createdBy: req.user._id,
+            deliveryAddress: finalDeliveryAddress,
+            terms,
+            notes,
+            purchaseRequest: purchaseRequest || null
+        };
+        const purchase = yield Purchase_js_1.default.create(purchaseData);
+        // Link the created PO back to the PurchaseRequest and sync status to Ordered
+        if (purchaseRequest) {
+            yield PurchaseRequest_js_1.default.findByIdAndUpdate(purchaseRequest, {
+                purchaseOrder: purchase._id,
+                status: 'Ordered'
+            });
+            console.log(`Linked Purchase Order ${purchase.purchaseOrderNumber} to Purchase Request ${purchaseRequest} — status set to Ordered`);
+        }
+        yield purchase.populate([
+            { path: 'supplier', select: 'supplierName contactPerson email phone' },
+            { path: 'createdBy', select: 'fullName' }
+        ]);
+        res.status(201).json({
+            message: 'Purchase order created successfully',
+            purchase
+        });
+    }
+    catch (error) {
+        console.error('Create purchase error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+exports.createPurchase = createPurchase;
+const updatePurchase = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { id } = req.params;
+        const { status, paymentStatus, expectedDeliveryDate, actualDeliveryDate, deliveryAddress, terms, notes, approvedBy, supplier, items, taxAmount } = req.body;
+        const purchase = yield Purchase_js_1.default.findById(id);
+        if (!purchase) {
+            return res.status(404).json({ message: 'Purchase not found' });
+        }
+        if (req.user.role !== schema_js_1.USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+            return res.status(403).json({ message: 'Access denied' });
+        }
+        const updateData = {};
+        if (status) {
+            updateData.status = status;
+            if (status === 'Received') {
+                updateData.actualDeliveryDate = actualDeliveryDate ? new Date(actualDeliveryDate) : new Date();
+            }
+        }
+        if (paymentStatus)
+            updateData.paymentStatus = paymentStatus;
+        if (expectedDeliveryDate)
+            updateData.expectedDeliveryDate = new Date(expectedDeliveryDate);
+        if (deliveryAddress)
+            updateData.deliveryAddress = deliveryAddress;
+        if (terms)
+            updateData.terms = terms;
+        if (notes)
+            updateData.notes = notes;
+        if (supplier) {
+            const supplierDoc = yield Supplier_js_1.default.findById(supplier);
+            if (supplierDoc) {
+                updateData.supplier = supplier;
+            }
+        }
+        if (items && Array.isArray(items)) {
+            let totalAmt = 0;
+            const purchaseItems = [];
+            for (const item of items) {
+                const inventoryItem = yield Inventory_js_1.Item.findById(item.item);
+                const itemName = inventoryItem ? (inventoryItem.name || inventoryItem.itemName) : item.itemName;
+                const itemTotal = item.quantity * item.unitPrice;
+                totalAmt += itemTotal;
+                purchaseItems.push({
+                    item: item.item,
+                    itemName,
+                    quantity: item.quantity,
+                    unitPrice: item.unitPrice,
+                    totalPrice: itemTotal,
+                    receivedQuantity: item.receivedQuantity || 0,
+                    pendingQuantity: item.quantity - (item.receivedQuantity || 0)
+                });
+            }
+            updateData.items = purchaseItems;
+            updateData.totalAmount = totalAmt;
+            const taxAmt = taxAmount !== undefined ? taxAmount : (purchase.taxAmount || 0);
+            updateData.taxAmount = taxAmt;
+            updateData.grandTotal = totalAmt + taxAmt;
+        }
+        else if (taxAmount !== undefined) {
+            updateData.taxAmount = taxAmount;
+            updateData.grandTotal = (purchase.totalAmount || 0) + taxAmount;
+        }
+        // Handle approval
+        if (approvedBy && !purchase.isApproved) {
+            updateData.isApproved = true;
+            updateData.approvedBy = req.user._id;
+            updateData.status = 'Sent';
+        }
+        const updatedPurchase = yield Purchase_js_1.default.findByIdAndUpdate(id, updateData, { new: true }).populate([
+            { path: 'supplier', select: 'supplierName contactPerson email phone' },
+            { path: 'createdBy', select: 'fullName' },
+            { path: 'approvedBy', select: 'fullName' }
+        ]);
+        res.json({
+            message: 'Purchase order updated successfully',
+            purchase: updatedPurchase
+        });
+    }
+    catch (error) {
+        console.error('Update purchase error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+exports.updatePurchase = updatePurchase;
+const deletePurchase = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { id } = req.params;
+        const purchase = yield Purchase_js_1.default.findById(id);
+        if (!purchase) {
+            return res.status(404).json({ message: 'Purchase not found' });
+        }
+        if (req.user.role !== schema_js_1.USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+            return res.status(403).json({ message: 'Access denied' });
+        }
+        if (['Sent', 'Acknowledged', 'Partially Received', 'Received'].includes(purchase.status)) {
+            return res.status(400).json({ message: 'Cannot delete purchase order that has been sent or received' });
+        }
+        yield Purchase_js_1.default.findByIdAndDelete(id);
+        res.json({ message: 'Purchase order deleted successfully' });
+    }
+    catch (error) {
+        console.error('Delete purchase error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+exports.deletePurchase = deletePurchase;
+const receivePurchase = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
+    try {
+        const { id } = req.params;
+        const { receivedItems } = req.body;
+        if (!receivedItems || !Array.isArray(receivedItems)) {
+            return res.status(400).json({ message: 'Received items data is required' });
+        }
+        const purchase = yield Purchase_js_1.default.findById(id).populate('items.item');
+        if (!purchase) {
+            return res.status(404).json({ message: 'Purchase not found' });
+        }
+        if (req.user.role !== schema_js_1.USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+            return res.status(403).json({ message: 'Access denied' });
+        }
+        // Update received quantities and inventory
+        for (const receivedItem of receivedItems) {
+            const purchaseItem = purchase.items.find(item => item.item._id.toString() === receivedItem.itemId);
+            if (purchaseItem && receivedItem.receivedQuantity > 0) {
+                purchaseItem.receivedQuantity += receivedItem.receivedQuantity;
+                purchaseItem.pendingQuantity = purchaseItem.quantity - purchaseItem.receivedQuantity;
+                // Update inventory stock
+                const inventoryItem = yield Inventory_js_1.Item.findById(purchaseItem.item._id);
+                if (inventoryItem) {
+                    const previousStock = inventoryItem.qty || 0;
+                    inventoryItem.qty = previousStock + receivedItem.receivedQuantity;
+                    yield inventoryItem.save();
+                    console.log(`✅ Stock updated for item ${inventoryItem.name}. Previous: ${previousStock}, New: ${inventoryItem.qty}`);
+                    // Create stock movement record safely
+                    try {
+                        const { StockMovement } = yield Promise.resolve().then(() => __importStar(require('../models/Inventory.js')));
+                        if (StockMovement && typeof StockMovement.create === 'function') {
+                            yield StockMovement.create({
+                                item: inventoryItem._id,
+                                movementType: 'IN',
+                                quantity: receivedItem.receivedQuantity,
+                                previousStock,
+                                newStock: inventoryItem.qty,
+                                reference: `Purchase Order: ${purchase.purchaseOrderNumber}`,
+                                referenceId: purchase._id,
+                                unit: purchase.unit,
+                                createdBy: req.user._id,
+                                notes: `Received from ${((_a = purchase.supplier) === null || _a === void 0 ? void 0 : _a.supplierName) || 'Supplier'}`
+                            });
+                        }
+                        else {
+                            console.log('[STOCK MOVEMENT] Model not registered, skipping DB log.');
+                        }
+                    }
+                    catch (e) {
+                        console.log('[STOCK MOVEMENT] Skipped creation:', e.message);
+                    }
+                }
+            }
+        }
+        // Update purchase status
+        const allReceived = purchase.items.every(item => item.pendingQuantity === 0);
+        const partiallyReceived = purchase.items.some(item => item.receivedQuantity > 0);
+        if (allReceived) {
+            purchase.status = 'Received';
+            purchase.actualDeliveryDate = new Date();
+        }
+        else if (partiallyReceived) {
+            purchase.status = 'Partially Received';
+        }
+        yield purchase.save();
+        yield purchase.populate([
+            { path: 'supplier', select: 'supplierName contactPerson' },
+            { path: 'items.item', select: 'itemName itemCode' }
+        ]);
+        res.json({
+            message: 'Purchase received successfully',
+            purchase
+        });
+    }
+    catch (error) {
+        console.error('Receive purchase error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+exports.receivePurchase = receivePurchase;
+const getPurchaseStats = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { unit, period = 'month' } = req.query;
+        let query = {};
+        if (req.user.role !== schema_js_1.USER_ROLES.SUPER_USER) {
+            query.unit = req.user.unit;
+        }
+        else if (unit) {
+            query.unit = unit;
+        }
+        const now = new Date();
+        let startDate;
+        switch (period) {
+            case 'week':
+                startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+                break;
+            case 'month':
+                startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+                break;
+            case 'quarter':
+                const quarterStart = Math.floor(now.getMonth() / 3) * 3;
+                startDate = new Date(now.getFullYear(), quarterStart, 1);
+                break;
+            case 'year':
+                startDate = new Date(now.getFullYear(), 0, 1);
+                break;
+            default:
+                startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        }
+        const periodQuery = Object.assign(Object.assign({}, query), { createdAt: { $gte: startDate } });
+        const [statusStats, totalAmount, pendingAmount] = yield Promise.all([
+            Purchase_js_1.default.aggregate([
+                { $match: periodQuery },
+                {
+                    $group: {
+                        _id: '$status',
+                        count: { $sum: 1 },
+                        totalAmount: { $sum: '$grandTotal' }
+                    }
+                }
+            ]),
+            Purchase_js_1.default.aggregate([
+                { $match: periodQuery },
+                { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+            ]),
+            Purchase_js_1.default.aggregate([
+                { $match: Object.assign(Object.assign({}, periodQuery), { paymentStatus: 'Pending' }) },
+                { $group: { _id: null, total: { $sum: '$grandTotal' } } }
+            ])
+        ]);
+        res.json({
+            period,
+            statusStats,
+            totalAmount: totalAmount.length > 0 ? totalAmount[0].total : 0,
+            pendingAmount: pendingAmount.length > 0 ? pendingAmount[0].total : 0
+        });
+    }
+    catch (error) {
+        console.error('Get purchase stats error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+exports.getPurchaseStats = getPurchaseStats;
+// Get inventory items for purchase (excluding Product type, only Material, Spares, Assemblies)
+const getPurchaseItems = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { search = '', type = '', skip = 0, limit = 20 } = req.query;
+        // Get user's company ID from request - it's the company/store filter
+        const userCompanyId = req.user.companyId;
+        const userCompanyIdString = userCompanyId ? userCompanyId.toString() : null;
+        console.log('🔍 User company ID:', userCompanyId);
+        console.log('🔍 User company ID (string):', userCompanyIdString);
+        console.log('📊 Search:', search, 'Type:', type);
+        // Build filter query:
+        // 1. Company filter (store matches user's companyId)
+        // 2. Type filter (Material, Spares, Assemblies) OR purchase: true (Trading Goods)
+        let filter = {
+            store: userCompanyIdString,
+            $or: [
+                { type: { $in: ['Material', 'Spares', 'Assemblies'] } },
+                { purchase: true }
+            ]
+        };
+        // Add search filter if provided
+        if (search) {
+            filter.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { code: { $regex: search, $options: 'i' } },
+                { category: { $regex: search, $options: 'i' } }
+            ];
+        }
+        // Debug: count before and after filters - get breakdown by type
+        const typeBreakdown = yield Inventory_js_1.Item.aggregate([
+            {
+                $match: {
+                    $or: [
+                        { store: userCompanyIdString },
+                        { store: userCompanyId }
+                    ]
+                }
+            },
+            {
+                $group: {
+                    _id: '$type',
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
+        console.log(`📊 Items breakdown by type:`, typeBreakdown);
+        const allCompanyItems = yield Inventory_js_1.Item.countDocuments({
+            $or: [
+                { store: userCompanyIdString },
+                { store: userCompanyId }
+            ]
+        });
+        console.log(`📈 Total items in company: ${allCompanyItems}`);
+        // Get items with pagination
+        const [items, total] = yield Promise.all([
+            Inventory_js_1.Item.find(filter)
+                .select('_id name code category type qty unit purchaseCost stdCost gst minStock store')
+                .skip(parseInt(skip))
+                .limit(parseInt(limit))
+                .sort({ name: 1 })
+                .lean(),
+            Inventory_js_1.Item.countDocuments(filter)
+        ]);
+        console.log(`✅ Returning ${items.length} items (Total matching: ${total})`);
+        res.json({
+            success: true,
+            data: {
+                items: items.map(item => ({
+                    _id: item._id,
+                    name: item.name,
+                    code: item.code,
+                    category: item.category,
+                    type: item.type,
+                    currentQty: item.qty,
+                    unit: item.unit,
+                    purchaseCost: item.purchaseCost,
+                    stdCost: item.stdCost,
+                    gst: item.gst,
+                    minStock: item.minStock,
+                    store: item.store
+                })),
+                pagination: {
+                    skip: parseInt(skip),
+                    limit: parseInt(limit),
+                    total,
+                    hasMore: parseInt(skip) + parseInt(limit) < total
+                }
+            }
+        });
+    }
+    catch (error) {
+        console.error('❌ Get purchase items error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch purchase items',
+            error: error.message
+        });
+    }
+});
+exports.getPurchaseItems = getPurchaseItems;
+const sendPOToVendor = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { id } = req.params;
+        const purchase = yield Purchase_js_1.default.findById(id).populate('supplier').populate('purchaseRequest');
+        if (!purchase) {
+            return res.status(404).json({ success: false, message: 'Purchase Order not found' });
+        }
+        if (!purchase.supplier || !purchase.supplier.email) {
+            return res.status(400).json({ success: false, message: 'Supplier has no valid email address configured.' });
+        }
+        const company = yield Company_js_1.Company.findById(req.user.companyId);
+        const companyName = (company === null || company === void 0 ? void 0 : company.name) || 'Samtek ERP';
+        // Send email
+        const emailResult = yield (0, emailService_js_1.sendPurchaseOrderEmail)({
+            to: purchase.supplier.email,
+            vendorName: purchase.supplier.supplierName || 'Vendor',
+            poNumber: purchase.purchaseOrderNumber,
+            items: purchase.items,
+            grandTotal: purchase.grandTotal,
+            companyName
+        });
+        if (emailResult.success) {
+            // Update PO status to "Sent"
+            purchase.status = 'Sent';
+            yield purchase.save();
+            // Update originating Purchase Request status to "Ordered"
+            if (purchase.purchaseRequest) {
+                const pr = yield PurchaseRequest_js_1.default.findById(purchase.purchaseRequest);
+                if (pr) {
+                    pr.status = 'Ordered';
+                    yield pr.save();
+                    console.log(`Auto-updated Purchase Request ${pr.requestId} status to Ordered`);
+                }
+            }
+            return res.json({ success: true, message: 'Purchase Order successfully sent to Vendor by email' });
+        }
+        else {
+            return res.status(500).json({ success: false, message: 'Failed to send email to vendor: ' + emailResult.error });
+        }
+    }
+    catch (error) {
+        console.error('Error sending PO to Vendor:', error);
+        res.status(500).json({ success: false, message: 'Internal Server Error', error: error.message });
+    }
+});
+exports.sendPOToVendor = sendPOToVendor;
