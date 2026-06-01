@@ -241,10 +241,8 @@ export const createPackagingJob = async (req, res) => {
     const jobId = await generateJobId(req.user.companyId);
     const serialNumber = await generateSerialNumber(req.user.companyId);
 
-    const job = await PackagingJob.create({
+    const jobData = {
       jobId,
-      productionOrderId: actualProdOrderId || undefined,
-      qcJobId: actualQcJobId || undefined,
       orderId,
       machineCode,
       machineName,
@@ -253,7 +251,14 @@ export const createPackagingJob = async (req, res) => {
       notes: notes || '',
       company: req.user.companyId,
       createdBy: req.user._id,
-    });
+    };
+
+    // Only set these fields if they have actual values — never set to null/undefined
+    // to avoid triggering the unique partial index on productionOrderId
+    if (actualProdOrderId) jobData.productionOrderId = actualProdOrderId;
+    if (actualQcJobId) jobData.qcJobId = actualQcJobId;
+
+    const job = await PackagingJob.create(jobData);
     res.status(201).json({ success: true, data: job });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

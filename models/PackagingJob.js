@@ -38,7 +38,7 @@ const PackagingJobSchema = new mongoose.Schema({
 PackagingJobSchema.index({ company: 1, status: 1 });
 PackagingJobSchema.index(
   { company: 1, productionOrderId: 1 },
-  { unique: true, partialFilterExpression: { productionOrderId: { $exists: true, $ne: null } } }
+  { unique: true, partialFilterExpression: { productionOrderId: { $exists: true, $type: 'objectId' } } }
 );
 
 export default mongoose.model('PackagingJob', PackagingJobSchema);

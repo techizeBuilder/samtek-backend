@@ -59,6 +59,25 @@ export const createSalesInvoice = async (req, res) => {
         const finalTaxAmount = isKachha ? 0 : taxAmount;
         const finalTotalAmount = isKachha ? subtotal : totalAmount;
 
+        // 3a. Fetch advanced payment for linked lead (if order has leadId)
+        let advancedPaymentAmount = 0;
+        if (orderId) {
+            const Order = (await import('../models/Order.js')).default;
+            const LeadPayment = (await import('../models/LeadPayment.js')).default;
+            const linkedOrder = await Order.findById(orderId).select('leadId').lean();
+            if (linkedOrder?.leadId) {
+                const leadPayments = await LeadPayment.find({
+                    leadId: linkedOrder.leadId,
+                    status: 'Verified',
+                    companyId
+                }).select('amount').lean();
+                advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+            }
+        }
+
+        // Net payable after deducting advanced payment
+        const netPayable = Math.max(0, finalTotalAmount - advancedPaymentAmount);
+
         // 3. Create Sale Record
         const sale = new Sale({
             invoiceNumber: finalInvoiceNo, // If null, pre-save hook will generate
@@ -80,8 +99,9 @@ export const createSalesInvoice = async (req, res) => {
             tdsPercent: tdsPercent || 0,
             gstType: gstType || 'CGST_SGST',
             invoiceType: invoiceType || 'Pakka',
-            paidAmount: 0,
-            balanceAmount: finalTotalAmount,
+            advancedPaymentAmount,
+            paidAmount: advancedPaymentAmount, // advanced already paid
+            balanceAmount: netPayable,
             unit,
             companyId,
             createdBy: req.user._id,
@@ -163,9 +183,13 @@ export const createSalesInvoice = async (req, res) => {
             }
         }
 
-        // 6. Update Customer Outstanding Amount
+        // 6. Update Customer Outstanding Amount (net of advanced payment)
         await Customer.findByIdAndUpdate(customerId, {
-            $inc: { outstandingAmount: finalTotalAmount }
+            $inc: {
+                outstandingAmount: netPayable,
+                // Deduct from advancePayment balance if advanced was used
+                advancePayment: -advancedPaymentAmount
+            }
         });
 
         res.status(201).json({ success: true, data: sale });
@@ -233,6 +257,8 @@ export const getPendingAccountOrders = async (req, res) => {
     try {
         const Order = (await import('../models/Order.js')).default;
         const Sale = (await import('../models/Sale.js')).default;
+        const LeadPayment = (await import('../models/LeadPayment.js')).default;
+
         const query = {
             companyId: req.user.companyId,
             status: { $in: ['approved', 'completed'] }
@@ -244,12 +270,29 @@ export const getPendingAccountOrders = async (req, res) => {
             .sort({ orderDate: -1 })
             .lean();
 
-        // Enrich with invoicing status
+        // Enrich with invoicing status + advanced payment from linked lead
         const ordersWithInvoices = await Promise.all(orders.map(async (order) => {
             const invoices = await Sale.find({ order: order._id }).select('invoiceType');
+
+            // Fetch verified advanced payments for the linked lead (if any)
+            let advancedPaymentAmount = 0;
+            let advancedPayments = [];
+            if (order.leadId) {
+                const leadPayments = await LeadPayment.find({
+                    leadId: order.leadId,
+                    status: 'Verified',
+                    companyId: req.user.companyId
+                }).select('amount paymentDate paymentMethod transactionId leadCode').lean();
+
+                advancedPayments = leadPayments;
+                advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+            }
+
             return {
                 ...order,
-                generatedInvoices: invoices.map(inv => inv.invoiceType)
+                generatedInvoices: invoices.map(inv => inv.invoiceType),
+                advancedPaymentAmount,
+                advancedPayments
             };
         }));
 
@@ -578,6 +621,7 @@ export const downloadInvoicePDF = async (req, res) => {
             invoiceNo: invoice.invoiceNumber,
             date: new Date(invoice.saleDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
             notes: invoice.notes,
+            advancedPaymentAmount: invoice.advancedPaymentAmount || 0,
             items: invoice.items.map(item => ({
                 productName: item.productName,
                 quantity: item.quantity,

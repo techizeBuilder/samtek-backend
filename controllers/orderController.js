@@ -1562,6 +1562,7 @@ const getNOCRequests = async (req, res) => {
   try {
     const Sale = (await import('../models/Sale.js')).default;
     const PackagingJob = (await import('../models/PackagingJob.js')).default;
+    const LeadPayment = (await import('../models/LeadPayment.js')).default;
 
     // Find all sales with populated orders
     const sales = await Sale.find({ companyId: req.user.companyId })
@@ -1583,6 +1584,26 @@ const getNOCRequests = async (req, res) => {
         });
 
         if (job) {
+          // Fetch advanced payment from linked lead (if any)
+          let advancedPaymentAmount = sale.advancedPaymentAmount || 0;
+          if (!advancedPaymentAmount && sale.order.leadId) {
+            const leadPayments = await LeadPayment.find({
+              leadId: sale.order.leadId,
+              status: 'Verified',
+              companyId: req.user.companyId
+            }).select('amount').lean();
+            advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+          }
+
+          const effectivePaidAmount = (sale.paidAmount || 0) + advancedPaymentAmount;
+          const effectiveBalance = Math.max(0, sale.totalAmount - effectivePaidAmount);
+          let effectivePaymentStatus = sale.paymentStatus;
+          if (advancedPaymentAmount > 0 && effectiveBalance <= 0) {
+            effectivePaymentStatus = 'Paid';
+          } else if (advancedPaymentAmount > 0 && effectivePaidAmount > 0) {
+            effectivePaymentStatus = 'Partially Paid';
+          }
+
           nocRequests.push({
             saleId: sale._id,
             orderId: sale.order._id,
@@ -1590,9 +1611,10 @@ const getNOCRequests = async (req, res) => {
             customerName: sale.order.customer?.name || 'N/A',
             customerMobile: sale.order.customer?.mobile || 'N/A',
             totalAmount: sale.totalAmount,
-            paidAmount: sale.paidAmount,
-            balanceAmount: sale.balanceAmount,
-            paymentStatus: sale.paymentStatus,
+            paidAmount: effectivePaidAmount,
+            advancedPaymentAmount,
+            balanceAmount: effectiveBalance,
+            paymentStatus: effectivePaymentStatus,
             nocStatus: sale.gatePass?.nocStatus || 'Pending',
             gatePassStatus: sale.gatePass?.status || 'Pending',
             machineName: job.machineName,

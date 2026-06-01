@@ -61,7 +61,8 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
     ref = '',
     notes = '',
     items = [],
-    isInterState = false
+    isInterState = false,
+    advancedPaymentAmount = 0
   } = invoiceData;
 
   const L = 30;   // left margin
@@ -347,20 +348,27 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
   y += totRowH + 5;
 
   // ─── SECTION 4: AMOUNT IN WORDS + GRAND TOTAL BOX ──────────────────────────
-  const footerH = 38;
+  const advPaid = parseFloat(advancedPaymentAmount || 0);
+  const netPayable = Math.max(0, Math.round(grandAmount) - advPaid);
+
+  const footerH = advPaid > 0 ? 56 : 38;
   drawRect(L, y, W, footerH, null, BORDER);
   drawLine(L + W * 0.53, y, L + W * 0.53, y + footerH, BORDER);
 
   const roundOff = parseFloat((Math.round(grandAmount) - grandAmount).toFixed(2));
   const grandTotal = Math.round(grandAmount);
 
+  // Amount in words uses net payable if advanced exists, else grand total
+  const amountForWords = advPaid > 0 ? netPayable : grandTotal;
+
   doc.font('Helvetica-Bold').fontSize(8).fillColor(BLACK)
      .text('Total Invoice Amount in Words :', L + 5, y + 5);
   doc.font('Helvetica').fontSize(8).fillColor(BLACK)
-     .text(convertNumberToWords(grandTotal), L + 5, y + 17, { width: W * 0.53 - 10 });
+     .text(convertNumberToWords(amountForWords), L + 5, y + 17, { width: W * 0.53 - 10 });
 
   const rtX = L + W * 0.53 + 5;
   const rtW = W * 0.47 - 10;
+
   doc.font('Helvetica').fontSize(8.5).fillColor(BLACK)
      .text('Round Off (Rs.)', rtX, y + 5, { width: rtW - 50, align: 'left', continued: false });
   doc.font('Helvetica-Bold').fontSize(8.5)
@@ -372,6 +380,22 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
      .text('Grand Total (Rs.)', rtX, y + 23, { width: rtW - 60, align: 'left' });
   doc.fontSize(9)
      .text(grandTotal.toFixed(2), rtX + rtW - 60, y + 23, { width: 60, align: 'right' });
+
+  if (advPaid > 0) {
+    drawLine(L + W * 0.53, y + 38, R, y + 38, BORDER);
+
+    doc.font('Helvetica').fontSize(8.5).fillColor('#c0392b')
+       .text('Less: Advanced Paid (Rs.)', rtX, y + 41, { width: rtW - 60, align: 'left' });
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#c0392b')
+       .text(`(${advPaid.toFixed(2)})`, rtX + rtW - 60, y + 41, { width: 60, align: 'right' });
+
+    drawLine(L + W * 0.53, y + 54, R, y + 54, BORDER);
+
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#1a5276')
+       .text('Net Payable (Rs.)', rtX, y + 57, { width: rtW - 60, align: 'left' });
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#1a5276')
+       .text(netPayable.toFixed(2), rtX + rtW - 60, y + 57, { width: 60, align: 'right' });
+  }
 
   y += footerH + 5;
 

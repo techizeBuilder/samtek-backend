@@ -97,6 +97,12 @@ const saleSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // Advanced payment already received from Lead (before invoice)
+  advancedPaymentAmount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   unit: {
     type: String,
     required: true
@@ -166,12 +172,13 @@ saleSchema.pre('save', async function () {
     this.invoiceNumber = `INV-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
   }
 
-  // Calculate balance and update payment status
-  this.balanceAmount = this.totalAmount - this.paidAmount;
+  // Calculate balance: totalAmount - advancedPayment - any other paidAmount
+  const totalPaid = (this.advancedPaymentAmount || 0) + (this.paidAmount || 0);
+  this.balanceAmount = this.totalAmount - totalPaid;
 
   if (this.balanceAmount <= 0) {
     this.paymentStatus = 'Paid';
-  } else if (this.paidAmount > 0) {
+  } else if (totalPaid > 0) {
     this.paymentStatus = 'Partially Paid';
   } else {
     // Check for overdue (simplified: if dueDate is in the past)
