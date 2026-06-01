@@ -1,1 +1,21 @@
+node_modules/
+.env
 uploads/
+tsc_output.txt
+tsc_output_utf8.txt
+scratch/
+dist/
+build/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
