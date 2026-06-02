@@ -9,6 +9,7 @@ import CustomerPayment from '../models/CustomerPayment.js';
 import VendorPayment from '../models/VendorPayment.js';
 import Supplier from '../models/Supplier.js';
 import SalesmanDailySettlement from '../models/SalesmanDailySettlement.js';
+import LeadPayment from '../models/LeadPayment.js';
 import { USER_ROLES } from '../shared/schema.js';
 
 /**
@@ -1901,9 +1902,18 @@ export const getLedgerRecords = async (req, res) => {
           if (entityType === 'Salesman') {
             // continue
           } else if (txn.relatedDocument === 'Receipt') {
-            entityType = 'Customer';
-            const cp = await CustomerPayment.findById(txn.relatedDocumentId).populate('customer', 'name');
-            if (cp && cp.customer) entityName = cp.customer.name;
+            // Check if this is a Lead Payment transaction
+            if (txn.transactionNumber && txn.transactionNumber.startsWith('TXN-LDP-')) {
+              const lp = await LeadPayment.findById(txn.relatedDocumentId).select('companyName contactPerson');
+              if (lp) {
+                entityType = 'Customer';
+                entityName = lp.companyName || lp.contactPerson || '';
+              }
+            } else {
+              entityType = 'Customer';
+              const cp = await CustomerPayment.findById(txn.relatedDocumentId).populate('customer', 'name');
+              if (cp && cp.customer) entityName = cp.customer.name;
+            }
           } else if (txn.relatedDocument === 'Payment') {
             entityType = 'Vendor';
             const vp = await VendorPayment.findById(txn.relatedDocumentId).populate('vendor', 'supplierName name');

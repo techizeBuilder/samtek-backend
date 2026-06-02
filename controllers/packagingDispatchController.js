@@ -345,7 +345,43 @@ export const getDispatchOrders = async (req, res) => {
     const filter = { company: req.user.companyId };
     if (status) filter.status = status;
     const orders = await DispatchOrder.find(filter).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, data: orders });
+
+    // Enrich each order with gate pass data from Sale model (if gate pass was generated)
+    const Sale = (await import('../models/Sale.js')).default;
+    const Order = (await import('../models/Order.js')).default;
+
+    const enriched = await Promise.all(orders.map(async (order) => {
+      if (!order.orderId) return order;
+      try {
+        // Find the Order document by orderCode
+        const matchedOrder = await Order.findOne({
+          orderCode: order.orderId,
+          companyId: req.user.companyId
+        }).select('_id').lean();
+        if (!matchedOrder) return order;
+
+        // Find the Sale linked to this order that has a Generated gate pass
+        const matchedSale = await Sale.findOne({
+          order: matchedOrder._id,
+          companyId: req.user.companyId,
+          'gatePass.status': 'Generated'
+        }).select('gatePass').lean();
+        if (!matchedSale?.gatePass) return order;
+
+        return {
+          ...order,
+          gatePassVehicleNumber: matchedSale.gatePass.vehicleNumber || '',
+          gatePassDriverName: matchedSale.gatePass.driverName || '',
+          gatePassContactNumber: matchedSale.gatePass.contactNumber || '',
+          gatePassNumber: matchedSale.gatePass.gatePassNumber || '',
+          gatePassGenerated: true
+        };
+      } catch (e) {
+        return order;
+      }
+    }));
+
+    res.json({ success: true, data: enriched });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

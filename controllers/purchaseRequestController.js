@@ -3,6 +3,20 @@ import Sale from '../models/Sale.js';
 import Order from '../models/Order.js'; // Essential to register Order schema for population
 import QCJob from '../models/QCJob.js';
 
+// Generate a unique requestId safely (avoids E11000 duplicate key errors)
+async function generateUniqueRequestId() {
+  let attempts = 0;
+  while (attempts < 20) {
+    const count = await PurchaseRequest.countDocuments({});
+    const candidate = `PR${String(count + 1 + attempts).padStart(3, '0')}`;
+    const exists = await PurchaseRequest.findOne({ requestId: candidate }).lean();
+    if (!exists) return candidate;
+    attempts++;
+  }
+  // Fallback: timestamp-based ID
+  return `PR-${Date.now().toString().slice(-6)}`;
+}
+
 // Get all purchase requests for a company
 export const getPurchaseRequests = async (req, res) => {
   try {
@@ -31,9 +45,7 @@ export const getPurchaseRequests = async (req, res) => {
           const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
           const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
           
-          // Count GLOBALLY to avoid E11000 duplicate key error on requestId index
-          const count = await PurchaseRequest.countDocuments({});
-          const requestId = `PR${String(count + 1).padStart(3, '0')}`;
+          const requestId = await generateUniqueRequestId();
 
           await PurchaseRequest.create({
             requestId,
@@ -105,8 +117,7 @@ export const createPurchaseRequest = async (req, res) => {
     }
 
     // Generate Request ID globally to prevent unique index duplicates across companies
-    const count = await PurchaseRequest.countDocuments({});
-    const requestId = `PR${String(count + 1).padStart(3, '0')}`;
+    const requestId = await generateUniqueRequestId();
 
     const newRequest = await PurchaseRequest.create({
       requestId,
