@@ -1,13 +1,12 @@
 import LeadPayment from '../models/LeadPayment.js';
 import Lead from '../models/Lead.js';
-import Customer from '../models/Customer.js';
+import { Account, Transaction } from '../models/Account.js';
 
 // Get all leads sent to account for payment processing
 export const getLeadsForPayment = async (req, res) => {
   try {
     const companyId = req.user.companyId;
     
-    // Get leads that are sent to account but not yet won
     const leads = await Lead.find({
       companyId,
       sentToAccount: true,
@@ -37,18 +36,24 @@ export const addLeadPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Lead not sent to account yet' });
     }
 
-    // Import required models
-    const { Account } = await import('../models/Account.js');
-    const LedgerEntry = (await import('../models/LedgerEntry.js')).default;
-
-    // Validate bank account if provided
+    // Validate and fetch bank account if provided
+    // Bank accounts live in the Account model (same as Bank & Cash page)
     let selectedBankAccount = null;
     if (bankAccount) {
-      selectedBankAccount = await Account.findById(bankAccount);
+      selectedBankAccount = await Account.findOne({
+        _id: bankAccount,
+        unit: req.user.unit,
+        isBankOrCash: true
+      });
       if (!selectedBankAccount) {
         return res.status(400).json({ success: false, message: 'Invalid bank account selected' });
       }
     }
+
+    // Build bank account label for display
+    const bankAccountName = selectedBankAccount
+      ? `${selectedBankAccount.bankDetails?.bankName ? selectedBankAccount.bankDetails.bankName + ' - ' : ''}${selectedBankAccount.accountName}`
+      : null;
 
     // Create lead payment record
     const leadPayment = new LeadPayment({
@@ -58,10 +63,11 @@ export const addLeadPayment = async (req, res) => {
       contactPerson: lead.contactPerson,
       mobile: lead.mobile,
       email: lead.email,
-      amount,
+      amount: parseFloat(amount),
       paymentDate,
       paymentMethod,
-      bankAccount: bankAccount || null,
+      bankAccount: selectedBankAccount ? selectedBankAccount._id : null,
+      bankAccountName,
       transactionId,
       remarks,
       status: 'Verified',
@@ -73,324 +79,166 @@ export const addLeadPayment = async (req, res) => {
 
     await leadPayment.save();
 
-    // 🔧 IMPROVED: Try to create accounting entries with better error handling
+    // Create accounting entries in the Transaction/Account (Ledger) system
+    // This also updates the Account balance so Bank & Cash page reflects correctly
     try {
-      await createAccountingEntries(leadPayment, selectedBankAccount, req.user);
-    } catch (accountingError) {
-      console.error('❌ Accounting entries failed:', accountingError);
-      
-      // If it's a duplicate key error, try to find existing accounts and use them
-      if (accountingError.code === 11000) {
-        console.log('🔄 Retrying with existing accounts...');
-        try {
-          await createAccountingEntriesWithExistingAccounts(leadPayment, selectedBankAccount, req.user);
-        } catch (retryError) {
-          console.error('❌ Retry also failed:', retryError);
-          // Don't fail the payment creation, just log the error
-          console.log('⚠️ Payment created but accounting entries failed. Manual intervention may be required.');
-        }
-      } else {
-        // For other errors, don't fail the payment creation
-        console.log('⚠️ Payment created but accounting entries failed. Manual intervention may be required.');
-      }
+      await createLedgerTransaction(leadPayment, selectedBankAccount, req.user);
+    } catch (ledgerError) {
+      console.error('⚠️ Ledger transaction creation failed (payment still saved):', ledgerError.message);
     }
 
     // Update lead's advanced payment amount
-    lead.advancedPaymentAmount = (lead.advancedPaymentAmount || 0) + amount;
+    lead.advancedPaymentAmount = (lead.advancedPaymentAmount || 0) + parseFloat(amount);
     
-    // Auto-update lead's payment check status if it was Pending or Rejected
+    // Auto-update payment check status
     if (lead.paymentCheckStatus === 'Pending' || lead.paymentCheckStatus === 'Rejected') {
       lead.paymentCheckStatus = lead.advancedPaymentAmount >= (lead.dealValue || 0) ? 'Paid' : 'Partially Paid';
       lead.history.push({
         action: 'Payment Check Updated',
-        notes: `Payment check status auto-updated to '${lead.paymentCheckStatus}' by system after adding advanced payment of ₹${amount}.`,
+        notes: `Payment check status auto-updated to '${lead.paymentCheckStatus}' after adding ₹${amount}.`,
         performedBy: req.user._id
       });
     }
 
     lead.history.push({
       action: 'Advanced Payment Added',
-      notes: `Advanced payment of ₹${amount} added by ${req.user.fullName || req.user.username}. ${selectedBankAccount ? `Bank: ${selectedBankAccount.accountName}` : ''}`,
+      notes: `Advanced payment of ₹${amount} added by ${req.user.fullName || req.user.username}. ${bankAccountName ? `Bank: ${bankAccountName}` : 'Cash payment.'}`,
       performedBy: req.user._id
     });
     await lead.save();
 
-    res.json({ success: true, message: 'Advanced payment added and verified successfully', payment: leadPayment });
+    res.json({ 
+      success: true, 
+      message: 'Advanced payment added and verified successfully', 
+      payment: leadPayment 
+    });
   } catch (error) {
     console.error('Error adding lead payment:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };
 
-// 🔧 FALLBACK: Create accounting entries using only existing accounts
-const createAccountingEntriesWithExistingAccounts = async (leadPayment, bankAccount, user) => {
-  try {
-    const LedgerEntry = (await import('../models/LedgerEntry.js')).default;
-    const { Account, Transaction } = await import('../models/Account.js');
+/**
+ * Create a Transaction entry in the double-entry ledger system.
+ * bankAccount here is an Account model object (isBankOrCash: true).
+ */
+const createLedgerTransaction = async (leadPayment, bankAccount, user) => {
+  const LedgerEntry = (await import('../models/LedgerEntry.js')).default;
 
-    // Find existing accounts only - don't create new ones
-    let advanceAccount = await Account.findOne({ 
-      accountName: 'Advance from Customers', 
-      companyId: leadPayment.companyId 
-    });
-    
-    let mainAccount = null;
-    if (bankAccount) {
-      mainAccount = await Account.findOne({
-        accountName: bankAccount.accountName,
-        companyId: leadPayment.companyId
-      });
-    } else {
-      mainAccount = await Account.findOne({ 
-        accountName: 'Cash in Hand', 
-        companyId: leadPayment.companyId 
-      });
-    }
-
-    // If we can't find the required accounts, skip accounting entries
-    if (!advanceAccount || !mainAccount) {
-      console.log('⚠️ Required accounts not found, skipping accounting entries');
-      return null;
-    }
-
-    // Create simplified ledger entry
-    const ledgerEntry = new LedgerEntry({
-      entryType: 'Receipt',
-      referenceType: 'Lead Payment',
-      referenceId: leadPayment._id,
-      referenceNumber: leadPayment.leadCode,
-      description: `Advanced payment received from ${leadPayment.companyName} for Lead ${leadPayment.leadCode}`,
-      totalAmount: leadPayment.amount,
-      lineItems: [
-        {
-          accountType: bankAccount ? 'Bank' : 'Cash',
-          accountId: mainAccount._id,
-          accountName: mainAccount.accountName,
-          debitAmount: leadPayment.amount,
-          creditAmount: 0,
-          description: `Advanced payment received from ${leadPayment.companyName}`
-        },
-        {
-          accountType: 'Liability',
-          accountId: advanceAccount._id,
-          accountName: `Advance from ${leadPayment.companyName}`,
-          debitAmount: 0,
-          creditAmount: leadPayment.amount,
-          description: `Advanced payment for Lead ${leadPayment.leadCode}`
-        }
-      ],
-      companyId: leadPayment.companyId,
-      createdBy: user._id,
-      approvedBy: user._id,
-      approvedDate: new Date()
-    });
-    await ledgerEntry.save();
-
-    // Update balances
-    mainAccount.balance = (mainAccount.balance || 0) + leadPayment.amount;
-    await mainAccount.save();
-
-    advanceAccount.balance = (advanceAccount.balance || 0) + leadPayment.amount;
-    await advanceAccount.save();
-
-    console.log(`✅ Simplified accounting entries created for Lead Payment: ${leadPayment._id}`);
-    return ledgerEntry;
-  } catch (error) {
-    console.error('Error creating simplified accounting entries:', error);
-    throw error;
+  const unit = user.unit;
+  if (!unit) {
+    console.log('⚠️ User has no unit — skipping ledger entry');
+    return;
   }
-};
 
-// Create accounting entries for lead payment
-const createAccountingEntries = async (leadPayment, bankAccount, user) => {
-  try {
-    const LedgerEntry = (await import('../models/LedgerEntry.js')).default;
-    const { Account, Transaction } = await import('../models/Account.js');
-    const mongoose = (await import('mongoose')).default;
+  // ------- 1. Resolve the main Bank/Cash Account -------
+  let mainAccount = null;
 
-    // 🔧 IMPROVED: Generate unique account number with retry mechanism
-    const generateUniqueAccountNumber = async (prefix) => {
-      let attempts = 0;
-      const maxAttempts = 5;
-      
-      while (attempts < maxAttempts) {
-        const timestamp = Date.now();
-        const randomStr = Math.random().toString(36).substr(2, 9).toUpperCase();
-        const accountNumber = `${prefix}-${timestamp}-${randomStr}`;
-        
-        // Check if this account number already exists
-        const existing = await Account.findOne({ accountNumber });
-        if (!existing) {
-          return accountNumber;
-        }
-        
-        attempts++;
-        // Wait a bit before retry to ensure different timestamp
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      
-      // Fallback: use UUID-like approach
-      const uuid = require('crypto').randomUUID().replace(/-/g, '').toUpperCase();
-      return `${prefix}-${uuid.substr(0, 12)}`;
-    };
+  if (bankAccount) {
+    // bankAccount is already an Account model object — use it directly
+    mainAccount = bankAccount;
+  } else {
+    // Cash — find or create
+    mainAccount = await Account.findOne({ unit, isBankOrCash: true, accountName: /cash/i });
 
-    // Find or create Liability Account for Advance
-    let advanceAccount = await Account.findOne({ 
-      accountName: 'Advance from Customers', 
-      companyId: leadPayment.companyId 
-    });
-    
-    if (!advanceAccount) {
-      const uniqueAccountNumber = await generateUniqueAccountNumber('ADV');
-      advanceAccount = new Account({
-        accountNumber: uniqueAccountNumber,
-        accountName: 'Advance from Customers',
-        accountType: 'Liability',
+    if (!mainAccount) {
+    const accountNumber = `CASH-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      mainAccount = new Account({
+        accountNumber,
+        accountName: 'Cash in Hand',
+        accountType: 'Asset',
+        isBankOrCash: true,
         balance: 0,
-        unit: user.unit || 'Default',
-        companyId: leadPayment.companyId
+        unit
       });
-      await advanceAccount.save();
-      console.log(`✅ Created Advance Account: ${uniqueAccountNumber}`);
+      await mainAccount.save();
+      console.log(`✅ Created Cash Account in ledger`);
     }
-
-    // Find or create corresponding Main Account for BankAccount
-    let mainAccount = null;
-    if (bankAccount) {
-      // First try to find by bank account reference
-      mainAccount = await Account.findOne({ 
-        'bankDetails.accountNumber': bankAccount.accountNumber,
-        companyId: leadPayment.companyId 
-      });
-      
-      if (!mainAccount) {
-        // Try to find by account name
-        mainAccount = await Account.findOne({
-          accountName: bankAccount.accountName,
-          companyId: leadPayment.companyId
-        });
-      }
-      
-      if (!mainAccount) {
-        const uniqueAccountNumber = await generateUniqueAccountNumber('BANK');
-        mainAccount = new Account({
-          accountName: bankAccount.accountName,
-          accountNumber: uniqueAccountNumber,
-          accountType: 'Asset',
-          isBankOrCash: true,
-          bankDetails: {
-            bankName: bankAccount.bankName,
-            accountNumber: bankAccount.accountNumber,
-            ifsc: bankAccount.ifscCode,
-            branch: bankAccount.branchName
-          },
-          balance: 0,
-          unit: user.unit || 'Default',
-          companyId: leadPayment.companyId
-        });
-        await mainAccount.save();
-        console.log(`✅ Created Bank Account: ${uniqueAccountNumber}`);
-      }
-    } else {
-      // Cash account
-      mainAccount = await Account.findOne({ 
-        accountName: 'Cash in Hand', 
-        companyId: leadPayment.companyId 
-      });
-      
-      if (!mainAccount) {
-        const uniqueAccountNumber = await generateUniqueAccountNumber('CASH');
-        mainAccount = new Account({
-          accountNumber: uniqueAccountNumber,
-          accountName: 'Cash in Hand',
-          accountType: 'Asset',
-          isBankOrCash: true,
-          balance: 0,
-          unit: user.unit || 'Default',
-          companyId: leadPayment.companyId
-        });
-        await mainAccount.save();
-        console.log(`✅ Created Cash Account: ${uniqueAccountNumber}`);
-      }
-    }
-
-    const mainAccountId = mainAccount._id;
-    const mainAccountName = mainAccount.accountName;
-
-    // Prepare line items for LedgerEntry (new system)
-    const lineItems = [];
-    lineItems.push({
-      accountType: bankAccount ? 'Bank' : 'Cash',
-      accountId: mainAccountId,
-      accountName: mainAccountName,
-      debitAmount: leadPayment.amount,
-      creditAmount: 0,
-      description: `Advanced payment received from ${leadPayment.companyName}`
-    });
-
-    lineItems.push({
-      accountType: 'Liability',
-      accountId: advanceAccount._id,
-      accountName: `Advance from ${leadPayment.companyName}`,
-      debitAmount: 0,
-      creditAmount: leadPayment.amount,
-      description: `Advanced payment for Lead ${leadPayment.leadCode}`
-    });
-
-    // Create LedgerEntry
-    const ledgerEntry = new LedgerEntry({
-      entryType: 'Receipt',
-      referenceType: 'Lead Payment',
-      referenceId: leadPayment._id,
-      referenceNumber: leadPayment.leadCode,
-      description: `Advanced payment received from ${leadPayment.companyName} for Lead ${leadPayment.leadCode}`,
-      totalAmount: leadPayment.amount,
-      lineItems,
-      companyId: leadPayment.companyId,
-      createdBy: user._id,
-      approvedBy: user._id,
-      approvedDate: new Date()
-    });
-    await ledgerEntry.save();
-
-    // Create Transaction (old system used by Ledger UI)
-    const txn = new Transaction({
-      transactionNumber: `TXN-LDP-${Date.now()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
-      description: `Advanced payment received from ${leadPayment.companyName} for Lead ${leadPayment.leadCode}`,
-      reference: leadPayment.leadCode,
-      totalAmount: leadPayment.amount,
-      unit: user.unit || 'Default',
-      relatedDocument: 'Receipt',
-      relatedDocumentId: leadPayment._id,
-      mode: leadPayment.paymentMethod || 'Other',
-      createdBy: user._id,
-      isApproved: true,
-      approvedBy: user._id,
-      entries: [
-        { account: mainAccountId, debit: leadPayment.amount, credit: 0 },
-        { account: advanceAccount._id, debit: 0, credit: leadPayment.amount }
-      ]
-    });
-    await txn.save();
-
-    // Update Account Balances
-    if (bankAccount) {
-      bankAccount.currentBalance = (bankAccount.currentBalance || 0) + leadPayment.amount;
-      await bankAccount.save();
-    }
-    
-    mainAccount.balance = (mainAccount.balance || 0) + leadPayment.amount;
-    await mainAccount.save();
-
-    advanceAccount.balance = (advanceAccount.balance || 0) + leadPayment.amount;
-    await advanceAccount.save();
-
-    console.log(`Accounting entries & transaction created for Lead Payment: ${leadPayment._id}`);
-    return ledgerEntry;
-  } catch (error) {
-    console.error('Error creating accounting entries:', error);
-    throw error;
   }
+
+  // ------- 2. Find or create the "Advance from Customers" liability account -------
+  let advanceAccount = await Account.findOne({ unit, accountName: 'Advance from Customers' });
+
+  if (!advanceAccount) {
+    const accountNumber = `ADV-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    advanceAccount = new Account({
+      accountNumber,
+      accountName: 'Advance from Customers',
+      accountType: 'Liability',
+      balance: 0,
+      unit
+    });
+    await advanceAccount.save();
+    console.log(`✅ Created Advance from Customers account`);
+  }
+
+  // ------- 3. Create Transaction (shown in Ledger Record page) -------
+  const modeMap = { 'Cash': 'Cash', 'Bank Transfer': 'Bank Transfer', 'Cheque': 'Cheque', 'UPI': 'UPI', 'NEFT': 'NEFT' };
+  const txn = new Transaction({
+    transactionNumber: `TXN-LDP-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+    date: leadPayment.paymentDate || new Date(),
+    description: `Advanced payment received from ${leadPayment.companyName} for Lead ${leadPayment.leadCode}`,
+    reference: leadPayment.leadCode,
+    totalAmount: leadPayment.amount,
+    unit,
+    relatedDocument: 'Receipt',
+    relatedDocumentId: leadPayment._id,
+    mode: modeMap[leadPayment.paymentMethod] || 'Other',
+    createdBy: user._id,
+    isApproved: true,
+    approvedBy: user._id,
+    entries: [
+      // Debit Bank/Cash (money came in)
+      { account: mainAccount._id, debit: leadPayment.amount, credit: 0 },
+      // Credit Advance from Customers (liability)
+      { account: advanceAccount._id, debit: 0, credit: leadPayment.amount }
+    ]
+  });
+  await txn.save();
+
+  // ------- 4. Update Account balances (reflects in Bank & Cash page + Ledger) -------
+  mainAccount.balance = (mainAccount.balance || 0) + leadPayment.amount;
+  await mainAccount.save();
+  console.log(`✅ Account balance updated: ${mainAccount.accountName} → ₹${mainAccount.balance}`);
+
+  advanceAccount.balance = (advanceAccount.balance || 0) + leadPayment.amount;
+  await advanceAccount.save();
+
+  // ------- 5. Create LedgerEntry record -------
+  const ledgerEntry = new LedgerEntry({
+    entryType: 'Receipt',
+    referenceType: 'Lead Payment',
+    referenceId: leadPayment._id,
+    referenceNumber: leadPayment.leadCode,
+    description: `Advanced payment received from ${leadPayment.companyName} for Lead ${leadPayment.leadCode}`,
+    totalAmount: leadPayment.amount,
+    lineItems: [
+      {
+        accountType: bankAccount ? 'Bank' : 'Cash',
+        accountId: mainAccount._id,
+        accountName: mainAccount.accountName,
+        debitAmount: leadPayment.amount,
+        creditAmount: 0,
+        description: `Advanced payment received from ${leadPayment.companyName}`
+      },
+      {
+        accountType: 'Liability',
+        accountId: advanceAccount._id,
+        accountName: `Advance from ${leadPayment.companyName}`,
+        debitAmount: 0,
+        creditAmount: leadPayment.amount,
+        description: `Advanced payment for Lead ${leadPayment.leadCode}`
+      }
+    ],
+    companyId: leadPayment.companyId,
+    createdBy: user._id,
+    approvedBy: user._id,
+    approvedDate: new Date()
+  });
+  await ledgerEntry.save();
+
+  console.log(`✅ Ledger entry created for Lead Payment: ${leadPayment._id}`);
+  return ledgerEntry;
 };
 
 // Get all lead payments
@@ -422,7 +270,7 @@ export const updateLeadPaymentStatus = async (req, res) => {
     const { id } = req.params;
     const { status, remarks } = req.body;
 
-    const payment = await LeadPayment.findById(id).populate('bankAccount');
+    const payment = await LeadPayment.findById(id);
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
@@ -430,19 +278,26 @@ export const updateLeadPaymentStatus = async (req, res) => {
     const oldStatus = payment.status;
     payment.status = status;
     if (remarks) payment.remarks = remarks;
-    if (status === 'Verified') {
+
+    if (status === 'Verified' && oldStatus !== 'Verified') {
       payment.verifiedBy = req.user._id;
       payment.verifiedDate = new Date();
-      
-      // Create accounting entries when payment is verified
-      if (oldStatus !== 'Verified') {
-        await createAccountingEntries(payment, payment.bankAccount, req.user);
+
+      // Create ledger entries when payment is newly verified
+      // Fetch the Account object for the bank
+      let bankAccountObj = null;
+      if (payment.bankAccount) {
+        bankAccountObj = await Account.findById(payment.bankAccount);
+      }
+      try {
+        await createLedgerTransaction(payment, bankAccountObj, req.user);
+      } catch (err) {
+        console.error('⚠️ Ledger entry failed on verify:', err.message);
       }
     }
 
     await payment.save();
 
-    // Update lead history
     const lead = await Lead.findById(payment.leadId);
     if (lead) {
       lead.history.push({
@@ -481,11 +336,7 @@ export const getLeadPaymentSummary = async (req, res) => {
     res.json({ 
       success: true, 
       payments,
-      summary: {
-        totalPaid,
-        totalPending,
-        totalPayments: payments.length
-      }
+      summary: { totalPaid, totalPending, totalPayments: payments.length }
     });
   } catch (error) {
     console.error('Error fetching lead payment summary:', error);
@@ -493,43 +344,25 @@ export const getLeadPaymentSummary = async (req, res) => {
   }
 };
 
-// Get bank accounts for payment dropdown
+// Get bank accounts for the Add Payment dropdown
+// Uses the same Account model that Bank & Cash page uses
 export const getBankAccounts = async (req, res) => {
   try {
-    const BankAccount = (await import('../models/BankAccount.js')).default;
-    
-    const bankAccounts = await BankAccount.find({
-      companyId: req.user.companyId,
-      isActive: true
-    }).select('accountName accountNumber bankName accountType currentBalance');
+    const unit = req.user.unit;
 
-    // If no bank accounts found, return dummy accounts for demo
-    if (bankAccounts.length === 0) {
-      const dummyAccounts = [
-        {
-          _id: '1',
-          bankName: 'HDFC Bank',
-          accountName: 'Company Current Account',
-          accountNumber: '****1234',
-          ifscCode: 'HDFC0001234'
-        },
-        {
-          _id: '2',
-          bankName: 'ICICI Bank',
-          accountName: 'Business Account',
-          accountNumber: '****5678',
-          ifscCode: 'ICIC0005678'
-        },
-        {
-          _id: '3',
-          bankName: 'SBI Bank',
-          accountName: 'Savings Account',
-          accountNumber: '****9012',
-          ifscCode: 'SBIN0009012'
-        }
-      ];
-      return res.json({ success: true, bankAccounts: dummyAccounts });
-    }
+    const accounts = await Account.find({
+      unit,
+      isBankOrCash: true,
+      isActive: true
+    }).select('accountName accountNumber bankDetails balance');
+
+    const bankAccounts = accounts.map(acc => ({
+      _id: acc._id,
+      accountName: acc.accountName,
+      accountNumber: acc.accountNumber,
+      bankName: acc.bankDetails?.bankName || '',
+      balance: acc.balance || 0
+    }));
 
     res.json({ success: true, bankAccounts });
   } catch (error) {

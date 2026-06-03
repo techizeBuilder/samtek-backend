@@ -38,6 +38,9 @@ const leadPaymentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'BankAccount'
   },
+  bankAccountName: {
+    type: String
+  },
   transactionId: String,
   remarks: String,
   status: {

@@ -1,4 +1,4 @@
-import Order from '../models/Order.js';
+﻿import Order from '../models/Order.js';
 import Customer from '../models/Customer.js';
 import { Item } from '../models/Inventory.js';
 import ProductDailySummary from '../models/ProductDailySummary.js';
@@ -10,6 +10,19 @@ import mongoose from 'mongoose';
 import QCJob from '../models/QCJob.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
+
+// Generate a unique requestId safely (avoids E11000 duplicate key errors)
+async function generateUniqueRequestId() {
+  let attempts = 0;
+  while (attempts < 20) {
+    const count = await PurchaseRequest.countDocuments({});
+    const candidate = `PR${String(count + 1 + attempts).padStart(3, '0')}`;
+    const exists = await PurchaseRequest.findOne({ requestId: candidate }).lean();
+    if (!exists) return candidate;
+    attempts++;
+  }
+  return `PR-${Date.now().toString().slice(-6)}`;
+}
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -1270,8 +1283,7 @@ const updateOrderStoreInfo = async (req, res) => {
           const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
           const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
 
-          const count = await PurchaseRequest.countDocuments({});
-          const requestId = `PR${String(count + 1).padStart(3, '0')}`;
+          const requestId = await generateUniqueRequestId();
 
           await PurchaseRequest.create({
             requestId,
@@ -1489,8 +1501,7 @@ const updateSaleStoreInfo = async (req, res) => {
           const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
           const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
 
-          const count = await PurchaseRequest.countDocuments({});
-          const requestId = `PR${String(count + 1).padStart(3, '0')}`;
+          const requestId = await generateUniqueRequestId();
 
           await PurchaseRequest.create({
             requestId,
@@ -1576,7 +1587,8 @@ const getNOCRequests = async (req, res) => {
 
     // Check if there is a Packed job for the sale's order
     for (const sale of sales) {
-      if (sale.order && sale.gatePass && sale.gatePass.status === 'Pending') {
+      if (sale.order && sale.gatePass) {
+        // Include all: Pending NOC, Approved NOC, and Gate Pass Generated
         const job = await PackagingJob.findOne({
           orderId: sale.order.orderCode,
           status: 'Packed',
@@ -1617,6 +1629,11 @@ const getNOCRequests = async (req, res) => {
             paymentStatus: effectivePaymentStatus,
             nocStatus: sale.gatePass?.nocStatus || 'Pending',
             gatePassStatus: sale.gatePass?.status || 'Pending',
+            gatePassNumber: sale.gatePass?.gatePassNumber || '',
+            vehicleNumber: sale.gatePass?.vehicleNumber || '',
+            driverName: sale.gatePass?.driverName || '',
+            contactNumber: sale.gatePass?.contactNumber || '',
+            gatePassGeneratedAt: sale.gatePass?.generatedAt || null,
             machineName: job.machineName,
             machineCode: job.machineCode,
             serialNumber: job.serialNumber
