@@ -49,6 +49,25 @@ const purchaseRequestSchema = new mongoose.Schema({
   purchaseOrder: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Purchase'
+  },
+  // Fields required at the time of marking as Received
+  serialNumber: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  warrantyPeriod: {
+    type: Number,   // in months
+    default: null
+  },
+  warrantyCardUrl: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  receivedAt: {
+    type: Date,
+    default: null
   }
 }, { timestamps: true });
 

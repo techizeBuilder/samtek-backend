@@ -2,6 +2,7 @@ import PurchaseRequest from '../models/PurchaseRequest.js';
 import Sale from '../models/Sale.js';
 import Order from '../models/Order.js'; // Essential to register Order schema for population
 import QCJob from '../models/QCJob.js';
+import fs from 'fs';
 
 // Generate a unique requestId safely (avoids E11000 duplicate key errors)
 async function generateUniqueRequestId() {
@@ -177,12 +178,69 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Request not found' });
     }
 
+    // ── Validate mandatory receive fields ──────────────────────────────────────
+    if (status === 'Received' && request.status !== 'Received') {
+      const serialNumber   = req.body.serialNumber?.trim();
+      const warrantyPeriod = req.body.warrantyPeriod;
+      const warrantyCard   = req.file; // uploaded via multer
+
+      const missing = [];
+      if (!serialNumber)        missing.push('Serial Number');
+      if (!warrantyPeriod)      missing.push('Warranty Period (months)');
+      if (!warrantyCard)        missing.push('Warranty Card (image or PDF)');
+
+      if (missing.length > 0) {
+        // If multer already saved a file but other fields are missing, clean it up
+        if (warrantyCard) {
+          try { fs.unlinkSync(warrantyCard.path); } catch (_) {}
+        }
+        return res.status(400).json({
+          success: false,
+          message: `Cannot mark as Received. The following are required: ${missing.join(', ')}`
+        });
+      }
+
+      // Save receive-specific data on the purchase request
+      request.serialNumber    = serialNumber;
+      request.warrantyPeriod  = Number(warrantyPeriod);
+      request.warrantyCardUrl = `/uploads/warranty-cards/${warrantyCard.filename}`;
+      request.receivedAt      = new Date();
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
     const oldStatus = request.status;
     request.status = status;
     await request.save();
 
     // Trigger QC Job & Purchase Invoice creation on 'Received' status transition
     if (status === 'Received' && oldStatus !== 'Received') {
+
+      // ── Update matching Inventory item with serial + warranty info ───────────
+      try {
+        const { Item } = await import('../models/Inventory.js');
+
+        // Try to match by name (best-effort; productName was copied from the item)
+        const inventoryItem = await Item.findOne({
+          name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
+          companyId: request.companyId
+        });
+
+        if (inventoryItem) {
+          inventoryItem.serialNumber               = request.serialNumber;
+          inventoryItem.warranty.period            = request.warrantyPeriod;
+          inventoryItem.warranty.cardUrl           = request.warrantyCardUrl;
+          inventoryItem.warranty.cardUploadedAt    = new Date();
+          inventoryItem.receivedFromPurchaseRequest = request._id;
+          await inventoryItem.save();
+          console.log(`✅ Inventory item "${inventoryItem.name}" updated with serial & warranty info`);
+        } else {
+          console.warn(`⚠️  No matching inventory item found for "${request.productName}" – skipping inventory update`);
+        }
+      } catch (invErr) {
+        console.error('❌ Error updating inventory item on receive:', invErr);
+      }
+      // ─────────────────────────────────────────────────────────────────────────
+
       // 1. Generate QC Job
       try {
         const sourceRefId = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
