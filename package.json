@@ -5,7 +5,8 @@
   "main": "auth-routes.js",
   "scripts": {
     "dev": "nodemon --exec ts-node index.js",
-    "start": "node dist/server/index.js"
+    "build": "tsc",
+    "start": "node index.js"
   },
   "keywords": [],
   "author": "",
