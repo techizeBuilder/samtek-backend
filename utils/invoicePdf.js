@@ -170,13 +170,30 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
   // ─── SECTION 2: BILLING / SHIPPING ADDRESS ─────────────────────────────────
   const halfW = W / 2;
 
-  // Calculate height needed for address content
-  let addrLines = 1; // name
-  if (custContact) addrLines++;
-  if (custAddr1) addrLines += 2;
-  if (custLoc) addrLines++;
-  if (custGST) addrLines++;
-  const addrBoxH = Math.max(70, 14 + addrLines * 13);
+  // Calculate height needed for address content dynamically to avoid overflow or overlapping
+  let contentHeight = 14 + 4; // header row (14) + initial padding (4)
+  
+  doc.font('Helvetica').fontSize(8);
+  if (custContact) {
+    contentHeight += doc.heightOfString(custContact, { width: halfW - 10 }) + 2;
+  }
+  
+  doc.font('Helvetica-Bold').fontSize(8.5);
+  contentHeight += doc.heightOfString(custName, { width: halfW - 10 }) + 2;
+  
+  doc.font('Helvetica').fontSize(8);
+  if (custAddr1) {
+    contentHeight += doc.heightOfString(custAddr1, { width: halfW - 10 }) + 2;
+  }
+  if (custLoc) {
+    contentHeight += doc.heightOfString(custLoc, { width: halfW - 10 }) + 2;
+  }
+  if (custGST) {
+    doc.font('Helvetica-Bold').fontSize(8);
+    contentHeight += doc.heightOfString(`GSTIN : ${custGST}`, { width: halfW - 10 }) + 2;
+  }
+  
+  const addrBoxH = Math.max(70, contentHeight + 4); // minimum height 70, plus extra bottom padding
 
   drawRect(L, y, W, addrBoxH, null, BORDER);
   drawLine(L + halfW, y, L + halfW, y + addrBoxH, BORDER);
@@ -192,35 +209,44 @@ export const generateStandardizedInvoicePDF = async (res, invoiceData) => {
 
   // Contact person (grey, smaller)
   if (custContact) {
-    doc.font('Helvetica').fontSize(8).fillColor(DGREY)
-       .text(custContact, L + 5, ay, { width: halfW - 10 });
+    doc.font('Helvetica').fontSize(8).fillColor(DGREY);
+    const h = doc.heightOfString(custContact, { width: halfW - 10 });
+    doc.text(custContact, L + 5, ay, { width: halfW - 10 });
     doc.text(custContact, L + halfW + 5, ay, { width: halfW - 10 });
-    ay += 12;
+    ay += h + 2;
   }
 
   // Customer name (bold)
-  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(BLACK)
-     .text(custName, L + 5, ay, { width: halfW - 10 });
+  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(BLACK);
+  const hName = doc.heightOfString(custName, { width: halfW - 10 });
+  doc.text(custName, L + 5, ay, { width: halfW - 10 });
   doc.text(custName, L + halfW + 5, ay, { width: halfW - 10 });
-  ay += 13;
+  ay += hName + 2;
 
+  // Address line 1
   doc.font('Helvetica').fontSize(8).fillColor(BLACK);
   if (custAddr1) {
+    const hAddr = doc.heightOfString(custAddr1, { width: halfW - 10 });
     doc.text(custAddr1, L + 5, ay, { width: halfW - 10 });
     doc.text(custAddr1, L + halfW + 5, ay, { width: halfW - 10 });
-    ay += 12;
+    ay += hAddr + 2;
   }
 
+  // City, State, Pin
   if (custLoc) {
+    const hLoc = doc.heightOfString(custLoc, { width: halfW - 10 });
     doc.text(custLoc, L + 5, ay, { width: halfW - 10 });
     doc.text(custLoc, L + halfW + 5, ay, { width: halfW - 10 });
-    ay += 12;
+    ay += hLoc + 2;
   }
 
+  // GSTIN
   if (custGST) {
-    doc.font('Helvetica-Bold').text(`GSTIN : ${custGST}`, L + 5, ay, { width: halfW - 10 });
-    doc.font('Helvetica-Bold').text(`GSTIN : ${custGST}`, L + halfW + 5, ay, { width: halfW - 10 });
-    ay += 14;
+    doc.font('Helvetica-Bold').fontSize(8);
+    const hGst = doc.heightOfString(`GSTIN : ${custGST}`, { width: halfW - 10 });
+    doc.text(`GSTIN : ${custGST}`, L + 5, ay, { width: halfW - 10 });
+    doc.text(`GSTIN : ${custGST}`, L + halfW + 5, ay, { width: halfW - 10 });
+    ay += hGst + 2;
   }
 
   y += addrBoxH + 6;

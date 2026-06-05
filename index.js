@@ -363,6 +363,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
             app.use('/api/resignation', resignationRouter);
             app.use('/api/documents', documentRouter);
             console.log('HRMS routes registered (including documents)');
+            // MIS Admin routes
+            const misAdminRoutes = (await import('./routes/misAdminRoutes.js')).default;
+            app.use('/api/mis', misAdminRoutes);
+            console.log('MIS Admin routes registered at /api/mis');
             // Dispatch routes
             const dispatchRoutes = (await import('./routes/dispatchRoutes.js')).default;
             app.use('/api/dispatches', dispatchRoutes);

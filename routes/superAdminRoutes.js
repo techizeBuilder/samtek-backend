@@ -24,7 +24,8 @@ import {
   updateCompany,
   deleteCompany,
   getCompanyStats,
-  getCompaniesDropdown
+  getCompaniesDropdown,
+  getCompanyReport
 } from '../controllers/companyController.js';
 
 // Import inventory functions
@@ -129,6 +130,7 @@ router.get('/customers/:id', getSuperAdminCustomerById);
 // Company Management Routes
 router.get('/companies/dropdown', getCompaniesDropdown);
 router.get('/companies/stats', getCompanyStats);
+router.get('/companies/:id/report', getCompanyReport);
 router.get('/companies', getCompanies);
 router.get('/companies/:id', getCompanyById);
 router.post('/companies', createCompany);
