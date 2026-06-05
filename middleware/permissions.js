@@ -83,7 +83,8 @@ export const getUserModules = (role) => {
     'Sales': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
     'Sales Employee': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
     'Sales Head': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
-    'Marketing Head': ['Dashboard', 'Marketing', 'Customers']
+    'Marketing Head': ['Dashboard', 'Marketing', 'Customers'],
+    'MIS Admin': ['Dashboard', 'MIS']
   };
   
   return moduleMap[role] || ['Dashboard'];

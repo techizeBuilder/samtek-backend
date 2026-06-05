@@ -1,6 +1,14 @@
 import { Company } from '../models/Company.js';
 import User from '../models/User.js';
 import { USER_ROLES } from '../shared/schema.js';
+import Lead from '../models/Lead.js';
+import Customer from '../models/Customer.js';
+import Order from '../models/Order.js';
+import Sale from '../models/Sale.js';
+import ProductionBatch from '../models/ProductionBatch.js';
+import { Item } from '../models/Inventory.js';
+import DispatchOrder from '../models/DispatchOrder.js';
+import ServiceTicket from '../models/ComplaintServiceModel.js';
 
 // Helper function to check company permissions
 const checkCompanyPermission = (user, action) => {
@@ -89,11 +97,39 @@ export const getCompanies = async (req, res) => {
     const cities = await Company.distinct('city', { isActive: true });
     const states = await Company.distinct('state', { isActive: true });
 
+    // Fetch Company Admins for each company (role = 'Company Admin')
+    const companyIds = companies.map(c => c._id);
+    const admins = await User.find({
+      companyId: { $in: companyIds },
+      role: 'Company Admin'
+    }).select('_id fullName email mobile companyId');
+
+    // Map admins by companyId for quick lookup
+    const adminMap = {};
+    admins.forEach(admin => {
+      const key = admin.companyId?.toString();
+      if (key && !adminMap[key]) adminMap[key] = admin;
+    });
+
+    // Enrich companies with admin data
+    const enrichedCompanies = companies.map(company => {
+      const admin = adminMap[company._id.toString()];
+      return {
+        ...company.toJSON(),
+        companyAdmin: admin ? {
+          _id: admin._id,
+          fullName: admin.fullName,
+          email: admin.email,
+          mobile: admin.mobile
+        } : null
+      };
+    });
+
     console.log(`Found ${companies.length} companies, total: ${total}`);
 
     res.json({
       success: true,
-      companies,
+      companies: enrichedCompanies,
       pagination: {
         current: parseInt(page),
         total: Math.ceil(total / parseInt(limit)),
@@ -602,6 +638,205 @@ export const getCompaniesSimple = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Internal server error'
+    });
+  }
+};
+
+// Get comprehensive company report
+export const getCompanyReport = async (req, res) => {
+  try {
+    if (!checkCompanyPermission(req.user, 'view')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { id } = req.params;
+
+    // Verify company exists
+    const company = await Company.findById(id);
+    if (!company) {
+      return res.status(404).json({ success: false, message: 'Company not found' });
+    }
+
+    // Dynamically import models to avoid circular dependency issues
+    const mongoose = (await import('mongoose')).default;
+
+    // Helper: safe count
+    const safeCount = async (modelName, filter) => {
+      try {
+        const model = mongoose.models[modelName];
+        if (!model) return 0;
+        return await model.countDocuments(filter);
+      } catch {
+        return 0;
+      }
+    };
+
+    // Helper: safe aggregate
+    const safeAggregate = async (modelName, pipeline) => {
+      try {
+        const model = mongoose.models[modelName];
+        if (!model) return [];
+        return await model.aggregate(pipeline);
+      } catch {
+        return [];
+      }
+    };
+
+    // Get users belonging to this company
+    const companyUsers = await User.find({ companyId: id }).select('_id');
+    const userIds = companyUsers.map(u => u._id);
+
+    // ─── LEADS ───
+    const totalLeads = await Lead.countDocuments({ companyId: id });
+    const leadsByStatus = await Lead.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+    const dealWonLeads = leadsByStatus.find(l => l._id === 'Deal Won')?.count || 0;
+
+    // ─── CUSTOMERS ───
+    const totalCustomers = await Customer.countDocuments({ companyId: id });
+
+    // ─── ORDERS ───
+    const totalOrders = await Order.countDocuments({ companyId: id });
+    const ordersByStatus = await Order.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: '$status', count: { $sum: 1 }, totalAmount: { $sum: '$totalAmount' } } },
+      { $sort: { count: -1 } }
+    ]);
+    const ordersTotalAmount = await Order.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+    ]);
+
+    // ─── SALES ───
+    const totalSales = await Sale.countDocuments({ companyId: id });
+    const salesTotalAmount = await Sale.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: null, total: { $sum: '$totalAmount' }, paid: { $sum: '$paidAmount' }, balance: { $sum: '$balanceAmount' } } }
+    ]);
+
+    // ─── PRODUCTION ───
+    const productionAgg = await ProductionBatch.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: {
+          _id: null,
+          totalQtyAchieved: { $sum: '$qtyAchieved' },
+          totalProductionLoss: { $sum: '$productionLoss' }
+        }
+      }
+    ]);
+    const productionStatusStats = await ProductionBatch.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: '$status', count: { $sum: '$qtyAchieved' } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    // ─── INVENTORY ───
+    const totalInventoryItems = await Item.countDocuments({ companyId: id });
+    const inventoryStats = await Item.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: null, totalItems: { $sum: 1 }, totalStock: { $sum: '$qty' }, lowStockCount: { $sum: { $cond: [{ $lte: ['$qty', '$minStock'] }, 1, 0] } } } }
+    ]);
+
+    // ─── DISPATCH ───
+    const totalDispatches = await DispatchOrder.countDocuments({ company: new mongoose.Types.ObjectId(id) });
+    const dispatchStats = await DispatchOrder.aggregate([
+      { $match: { company: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+    const totalItemsDispatched = await DispatchOrder.countDocuments({ 
+      company: new mongoose.Types.ObjectId(id), 
+      status: { $in: ['Dispatched', 'In Transit', 'Delivered', 'Closed'] } 
+    });
+
+    // ─── COMPLAINTS ───
+    const totalComplaints = await ServiceTicket.countDocuments({ companyId: id });
+    const complaintsByStatus = await ServiceTicket.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    // ─── USERS / EMPLOYEES ───
+    const totalUsers = userIds.length;
+    const usersByRole = await User.aggregate([
+      { $match: { companyId: new mongoose.Types.ObjectId(id) } },
+      { $group: { _id: '$role', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+
+    // Company Admin info
+    const companyAdmin = await User.findOne({ companyId: id, role: 'Company Admin' })
+      .select('fullName email mobile');
+
+    res.json({
+      success: true,
+      company: {
+        _id: company._id,
+        name: company.name,
+        unitName: company.unitName,
+        city: company.city,
+        state: company.state,
+        isActive: company.isActive
+      },
+      companyAdmin: companyAdmin ? {
+        fullName: companyAdmin.fullName,
+        email: companyAdmin.email,
+        mobile: companyAdmin.mobile
+      } : null,
+      report: {
+        leads: {
+          total: totalLeads,
+          dealWon: dealWonLeads,
+          byStatus: leadsByStatus
+        },
+        customers: {
+          total: totalCustomers
+        },
+        orders: {
+          total: totalOrders,
+          totalAmount: ordersTotalAmount[0]?.total || 0,
+          byStatus: ordersByStatus
+        },
+        sales: {
+          total: totalSales,
+          totalAmount: salesTotalAmount[0]?.total || 0,
+          paidAmount: salesTotalAmount[0]?.paid || 0,
+          balanceAmount: salesTotalAmount[0]?.balance || 0
+        },
+        production: {
+          totalQtyProduced: productionAgg[0]?.totalQtyAchieved || 0,
+          totalProductionLoss: productionAgg[0]?.totalProductionLoss || 0,
+          byStatus: productionStatusStats
+        },
+        inventory: {
+          totalItems: totalInventoryItems,
+          totalStock: inventoryStats[0]?.totalStock || 0,
+          lowStockCount: inventoryStats[0]?.lowStockCount || 0
+        },
+        dispatch: {
+          total: totalDispatches,
+          totalDispatchedItems: totalItemsDispatched,
+          byStatus: dispatchStats
+        },
+        complaints: {
+          total: totalComplaints,
+          byStatus: complaintsByStatus
+        },
+        users: {
+          total: totalUsers,
+          byRole: usersByRole
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get company report error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate company report'
     });
   }
 };

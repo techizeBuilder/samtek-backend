@@ -19,8 +19,8 @@ const leadHistorySchema = new mongoose.Schema({
 const leadSchema = new mongoose.Schema({
   leadCode: {
     type: String,
-    required: true,
-    unique: true
+    required: true
+    // unique enforced via compound index: { companyId, leadCode }
   },
   leadDate: {
     type: Date,
@@ -165,8 +165,10 @@ const leadSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Compound unique index: same leadCode allowed in different companies, but not within same company
+leadSchema.index({ companyId: 1, leadCode: 1 }, { unique: true });
+
 // Index for performance
-leadSchema.index({ companyId: 1 });
 leadSchema.index({ assignedTo: 1 });
 leadSchema.index({ mobile: 1 });
 leadSchema.index({ email: 1 });
