@@ -186,14 +186,19 @@ const DEFAULT_POLICIES = [
   },
 ];
 
-// Seed default policies if none exist
+// Seed default policies if none exist for this company
 export const seedHrPolicies = async (req, res) => {
   try {
-    const existing = await HrPolicy.countDocuments();
+    const companyId = req.user.role === 'Super Admin'
+      ? (req.query.companyId || null)
+      : (req.user.companyId || null);
+
+    const existing = await HrPolicy.countDocuments({ companyId });
     if (existing === 0) {
-      await HrPolicy.insertMany(DEFAULT_POLICIES);
+      const policiesWithCompany = DEFAULT_POLICIES.map(p => ({ ...p, companyId }));
+      await HrPolicy.insertMany(policiesWithCompany);
     }
-    const policies = await HrPolicy.find().sort({ no: 1 });
+    const policies = await HrPolicy.find({ companyId }).sort({ no: 1 });
     res.json(policies);
   } catch (err) {
     res.status(500).json({ message: "Error seeding policies", error: err });
@@ -203,10 +208,15 @@ export const seedHrPolicies = async (req, res) => {
 // Get all HR Policies
 export const getHrPolicies = async (req, res) => {
   try {
-    let policies = await HrPolicy.find().sort({ no: 1 });
+    const companyId = req.user.role === 'Super Admin'
+      ? (req.query.companyId || null)
+      : (req.user.companyId || null);
+
+    let policies = await HrPolicy.find({ companyId }).sort({ no: 1 });
     if (policies.length === 0) {
-      await HrPolicy.insertMany(DEFAULT_POLICIES);
-      policies = await HrPolicy.find().sort({ no: 1 });
+      const policiesWithCompany = DEFAULT_POLICIES.map(p => ({ ...p, companyId }));
+      await HrPolicy.insertMany(policiesWithCompany);
+      policies = await HrPolicy.find({ companyId }).sort({ no: 1 });
     }
     res.json(policies);
   } catch (err) {

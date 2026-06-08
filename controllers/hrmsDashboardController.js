@@ -3,6 +3,8 @@ import Attendance from "../models/Attendance.js";
 import Payroll from "../models/Payroll.js";
 import JobOpening from "../models/JobOpenings.js";
 import Holiday from "../models/Holiday.js";
+import Leave from "../models/Leave.js";
+import AttendanceRequest from "../models/AttendanceRequest.js";
 
 export const getHrmsDashboardStats = async (req, res) => {
   try {
@@ -39,11 +41,10 @@ export const getHrmsDashboardStats = async (req, res) => {
       employee: { $in: userIds }
     });
 
-    // 4. Open Jobs
-    // JobOpening schema does not have companyId directly, so we filter by recruitingManager belonging to the company
+    // 4. Open Jobs - now uses companyId directly on JobOpening model
     const openJobs = await JobOpening.countDocuments({ 
       status: "Open",
-      recruitingManager: { $in: userIds }
+      companyId: userCompanyId
     });
 
     // 5. Recent Attendance
@@ -68,6 +69,22 @@ export const getHrmsDashboardStats = async (req, res) => {
       .sort({ date: 1 })
       .limit(5);
 
+    // 7. Pending Approvals (for employees reporting to this manager)
+    const teamEmployees = await User.find({ reportingManager: req.user._id }).select('_id');
+    const teamUserIds = teamEmployees.map(e => e._id);
+
+    const pendingLeaves = await Leave.countDocuments({
+      employee: { $in: teamUserIds },
+      status: "PENDING"
+    });
+
+    const pendingAttendanceRequests = await AttendanceRequest.countDocuments({
+      user: { $in: teamUserIds },
+      status: "PENDING"
+    });
+
+    const pendingApprovals = pendingLeaves + pendingAttendanceRequests;
+
     res.status(200).json({
       success: true,
       data: {
@@ -76,7 +93,8 @@ export const getHrmsDashboardStats = async (req, res) => {
         pendingPayroll,
         openJobs,
         recentAttendance,
-        upcomingHolidays
+        upcomingHolidays,
+        pendingApprovals
       }
     });
   } catch (error) {

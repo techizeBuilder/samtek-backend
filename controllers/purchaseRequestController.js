@@ -278,11 +278,33 @@ export const updatePurchaseRequestStatus = async (req, res) => {
         console.error('❌ Error creating QC job from Purchase Request:', qcError);
       }
 
-      // 2. Generate Purchase Invoice
+      // 2. Generate Purchase Invoice ONLY if one doesn't already exist for this PO
+      //    (Invoice is now created at PO generation time via RFQ flow — avoid duplicate)
       try {
         const { createAutoPurchaseInvoice } = await import('./purchaseInvoiceController.js');
-        await createAutoPurchaseInvoice(request, req.user);
-        console.log(`✅ [Purchase Receipt] Created purchase invoice for request: ${request.requestId}`);
+        const PurchaseInvoice = (await import('../models/PurchaseInvoice.js')).default;
+
+        // Check if invoice already exists linked to this PO's vendor + reference
+        let invoiceAlreadyExists = false;
+        if (request.purchaseOrder) {
+          const poNumber = request.purchaseOrder?.purchaseOrderNumber || '';
+          const vendorId = request.purchaseOrder?.supplier?._id || request.purchaseOrder?.supplier;
+          if (vendorId && poNumber) {
+            const existingInvoice = await PurchaseInvoice.findOne({
+              vendor: vendorId,
+              notes: { $regex: request.requestId, $options: 'i' }
+            });
+            if (existingInvoice) {
+              invoiceAlreadyExists = true;
+              console.log(`ℹ️ [Purchase Receipt] Invoice already exists for ${request.requestId} — skipping duplicate creation`);
+            }
+          }
+        }
+
+        if (!invoiceAlreadyExists) {
+          await createAutoPurchaseInvoice(request, req.user);
+          console.log(`✅ [Purchase Receipt] Purchase Invoice created for request: ${request.requestId}`);
+        }
       } catch (invoiceError) {
         console.error('❌ Error creating purchase invoice on request receipt:', invoiceError);
       }

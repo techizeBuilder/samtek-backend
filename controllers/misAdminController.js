@@ -385,6 +385,12 @@ export const getProductionReport = async (req, res) => {
     const dateMatch = Object.keys(dateFilter).length ? { createdAt: dateFilter } : {};
     const matchFilter = { ...companyFilter, ...dateMatch };
 
+    // Order schema statuses (lowercase): pending, pending_service_approval,
+    // rejected_by_service, approved, rejected, in_production, completed, cancelled
+    const COMPLETED_STATUSES  = ['completed'];
+    const ACTIVE_STATUSES     = ['pending', 'approved', 'in_production', 'pending_service_approval'];
+    const CANCELLED_STATUSES  = ['cancelled', 'rejected', 'rejected_by_service'];
+
     const [orderSummary, ordersByStatus, orderTrend, recentOrders] = await Promise.all([
       // Order summary
       Order.aggregate([
@@ -393,18 +399,18 @@ export const getProductionReport = async (req, res) => {
           $group: {
             _id: null,
             total: { $sum: 1 },
-            completed: { $sum: { $cond: [{ $eq: ['$status', 'Delivered'] }, 1, 0] } },
-            pending: { $sum: { $cond: [{ $in: ['$status', ['Pending', 'Processing']] }, 1, 0] } },
-            cancelled: { $sum: { $cond: [{ $eq: ['$status', 'Cancelled'] }, 1, 0] } }
+            completed: { $sum: { $cond: [{ $in: ['$status', COMPLETED_STATUSES] }, 1, 0] } },
+            pending:   { $sum: { $cond: [{ $in: ['$status', ACTIVE_STATUSES] }, 1, 0] } },
+            cancelled: { $sum: { $cond: [{ $in: ['$status', CANCELLED_STATUSES] }, 1, 0] } }
           }
         }
-      ]),
+      ]).option({ maxTimeMS: 15000 }),
 
       // Orders by status
       Order.aggregate([
         { $match: matchFilter },
         { $group: { _id: '$status', count: { $sum: 1 } } }
-      ]),
+      ]).option({ maxTimeMS: 15000 }),
 
       // Monthly order trend
       Order.aggregate([
@@ -416,13 +422,14 @@ export const getProductionReport = async (req, res) => {
           }
         },
         { $sort: { '_id.year': 1, '_id.month': 1 } }
-      ]),
+      ]).option({ maxTimeMS: 15000 }),
 
-      // Recent orders
+      // Recent orders — lean + no deep populate to avoid hanging
       Order.find(companyFilter)
         .sort({ createdAt: -1 })
         .limit(10)
         .populate('customer', 'name')
+        .maxTimeMS(15000)
         .lean()
     ]);
 
@@ -446,6 +453,8 @@ export const getProductionReport = async (req, res) => {
 // ────────────────────────────────────────────────────────────
 export const getInventoryReport = async (req, res) => {
   try {
+    const companyFilter = getCompanyFilter(req.user);
+
     const [
       totalItems,
       categoryBreakdown,
@@ -453,35 +462,37 @@ export const getInventoryReport = async (req, res) => {
       highValueItems,
       criticalItems
     ] = await Promise.all([
-      Item.countDocuments({}),
+      Item.countDocuments(companyFilter),
 
       Item.aggregate([
+        { $match: companyFilter },
         { $group: { _id: '$category', count: { $sum: 1 }, totalQty: { $sum: '$qty' }, totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } } } }
       ]),
 
-      Item.find({ $expr: { $lte: ['$qty', '$minStock'] } })
+      Item.find({ ...companyFilter, $expr: { $lte: ['$qty', '$minStock'] } })
         .select('name code qty minStock category importance')
         .sort({ qty: 1 })
         .limit(20)
         .lean(),
 
-      Item.find({ stdCost: { $gt: 0 } })
+      Item.find({ ...companyFilter, stdCost: { $gt: 0 } })
         .sort({ stdCost: -1 })
         .limit(10)
         .select('name code qty stdCost category')
         .lean(),
 
-      Item.find({ importance: 'Critical' })
+      Item.find({ ...companyFilter, importance: 'Critical' })
         .select('name code qty minStock importance')
         .lean()
     ]);
 
     const totalValue = await Item.aggregate([
-      { $match: { qty: { $gt: 0 } } },
+      { $match: { ...companyFilter, qty: { $gt: 0 } } },
       { $group: { _id: null, total: { $sum: { $multiply: ['$qty', '$stdCost'] } } } }
     ]);
 
     const typeBreakdown = await Item.aggregate([
+      { $match: companyFilter },
       { $group: { _id: '$type', count: { $sum: 1 }, totalQty: { $sum: '$qty' } } }
     ]);
 
@@ -646,11 +657,12 @@ export const getQualityReport = async (req, res) => {
     const matchFilter = { ...companyFilter, ...dateMatch };
 
     // Use Order model as proxy for quality stats via order status
+    // Order statuses (lowercase): pending, approved, in_production, completed, cancelled, rejected
     const [orderStatusBreakdown, qualityTrend, returnsData] = await Promise.all([
       Order.aggregate([
         { $match: matchFilter },
         { $group: { _id: '$status', count: { $sum: 1 } } }
-      ]),
+      ]).option({ maxTimeMS: 15000 }),
 
       Order.aggregate([
         { $match: matchFilter },
@@ -658,21 +670,21 @@ export const getQualityReport = async (req, res) => {
           $group: {
             _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
             total: { $sum: 1 },
-            delivered: { $sum: { $cond: [{ $eq: ['$status', 'Delivered'] }, 1, 0] } },
-            returned: { $sum: { $cond: [{ $eq: ['$status', 'Returned'] }, 1, 0] } }
+            delivered: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+            returned:  { $sum: { $cond: [{ $eq: ['$status', 'rejected'] }, 1, 0] } }
           }
         },
         { $sort: { '_id.year': 1, '_id.month': 1 } }
-      ]),
+      ]).option({ maxTimeMS: 15000 }),
 
       Order.aggregate([
-        { $match: { ...companyFilter, status: 'Returned' } },
+        { $match: { ...companyFilter, status: 'cancelled' } },
         { $group: { _id: null, count: { $sum: 1 } } }
-      ])
+      ]).option({ maxTimeMS: 15000 })
     ]);
 
     const totalOrders = await Order.countDocuments(companyFilter);
-    const deliveredOrders = await Order.countDocuments({ ...companyFilter, status: 'Delivered' });
+    const deliveredOrders = await Order.countDocuments({ ...companyFilter, status: 'completed' });
     const returnedOrders = returnsData[0]?.count || 0;
     const fulfillmentRate = totalOrders > 0 ? ((deliveredOrders / totalOrders) * 100).toFixed(1) : 0;
     const returnRate = totalOrders > 0 ? ((returnedOrders / totalOrders) * 100).toFixed(1) : 0;

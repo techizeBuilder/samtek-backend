@@ -31,6 +31,11 @@ const LeaveTypeSchema = new Schema(
       type: Boolean,
       default: true,
     },
+    companyId: {
+      type: Schema.Types.ObjectId,
+      ref: "Company",
+      required: false,
+    },
   },
   { timestamps: true }
 );

@@ -9,19 +9,10 @@ import {
 
 const router = express.Router();
 
-// All routes require authentication
-router.use(authenticateToken);
-
-// GET /api/profile - Get current user's profile
-router.get('/profile', getProfile);
-
-// PUT /api/profile - Update profile (fullName, email)
-router.put('/profile', updateProfile);
-
-// PUT /api/profile/password - Change password
-router.put('/profile/password', changePassword);
-
-// POST /api/profile/picture - Upload profile picture
-router.post('/profile/picture', uploadProfilePicture);
+// Auth middleware scoped only to /profile routes — NOT globally on all /api/* paths
+router.get('/profile', authenticateToken, getProfile);
+router.put('/profile', authenticateToken, updateProfile);
+router.put('/profile/password', authenticateToken, changePassword);
+router.post('/profile/picture', authenticateToken, uploadProfilePicture);
 
 export default router;

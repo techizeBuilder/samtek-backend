@@ -243,7 +243,7 @@ export const getAllAttendance = async (req, res) => {
     const userFilter = { ...searchQuery };
     
     // Filter by companyId if user is not a Super Admin
-    if (req.user.role !== 'Superadmin' && req.user.companyId) {
+    if (req.user.role !== 'Super Admin' && req.user.role !== 'Superadmin' && req.user.companyId) {
       userFilter.companyId = req.user.companyId;
     }
 

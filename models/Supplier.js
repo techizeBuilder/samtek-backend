@@ -101,6 +101,10 @@ const supplierSchema = new mongoose.Schema({
     type: String,
     enum: ['194C', '194J', '194Q', '206C_1H', 'None'],
     default: 'None'
+  },
+  vendorCategories: {
+    type: [String],
+    default: []
   }
 }, {
   timestamps: true

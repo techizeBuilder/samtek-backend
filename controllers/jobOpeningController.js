@@ -21,6 +21,7 @@ export const addJobOpening = async (req, res) => {
       location,
       openings,
       recruitingManager,
+      companyId: req.user.companyId || null,
     };
 
     if (req.file) {
@@ -44,9 +45,22 @@ export const addJobOpening = async (req, res) => {
 /**
  * 📋 Get All Job Openings
  */
-export const getAllJobOpenings = async (_req, res) => {
+export const getAllJobOpenings = async (req, res) => {
   try {
-    const jobs = await JobOpenings.find().populate("recruitingManager", "name email").sort({ createdAt: -1 });
+    const filter = {};
+
+    if (req.user.role === 'Super Admin') {
+      // Superadmin can optionally filter by companyId query param
+      const { companyId } = req.query;
+      if (companyId) filter.companyId = companyId;
+    } else {
+      // All other roles are strictly scoped to their own company
+      if (req.user.companyId) {
+        filter.companyId = req.user.companyId;
+      }
+    }
+
+    const jobs = await JobOpenings.find(filter).populate("recruitingManager", "name email").sort({ createdAt: -1 });
     res.json(jobs);
   } catch (error) {
     res.status(500).json({

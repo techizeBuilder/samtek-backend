@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 
+
 /**
  * Create a reusable email transporter
  * Gmail ya koi bhi SMTP use kar sakte ho — .env se config hoga
@@ -251,6 +252,207 @@ export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, 
     return { success: true, messageId: result.messageId };
   } catch (error) {
     console.error(`❌ PO Email failed to ${to}:`, error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Send RFQ (Request for Quotation) Email to Vendor
+ */
+export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantity, requiredByDate, bidLink, companyName, notes }) => {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.log(`[EMAIL SKIPPED] No SMTP config. Would send RFQ ${rfqNo} to: ${to}`);
+    return { success: true, mocked: true, message: 'No SMTP config, mock success' };
+  }
+
+  const transporter = createTransporter();
+  const subject = `📋 Request for Quotation: ${rfqNo} — ${productName} | ${companyName}`;
+
+  const formattedDate = requiredByDate
+    ? new Date(requiredByDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    : 'As Soon As Possible';
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: linear-gradient(135deg, #1e40af, #7c3aed); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 22px;">📋 Request for Quotation</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${companyName} · ${rfqNo}</p>
+      </div>
+
+      <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 16px;">Dear <strong>${vendorName}</strong>,</p>
+        <p style="color: #6b7280; line-height: 1.6;">
+          We are inviting you to participate in our procurement process. Please review the below requirement and submit your best quotation.
+        </p>
+
+        <div style="background: #f0f4ff; border-left: 4px solid #1e40af; border-radius: 4px; padding: 20px; margin: 20px 0;">
+          <h3 style="color: #1e40af; margin: 0 0 12px;">📦 Requirement Details</h3>
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px; width: 40%;">RFQ Number</td>
+              <td style="padding: 6px 0; color: #111827; font-weight: bold;">${rfqNo}</td>
+            </tr>
+            <tr style="border-top: 1px solid #e0e7ff;">
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Product / Item</td>
+              <td style="padding: 6px 0; color: #111827; font-weight: bold;">${productName}</td>
+            </tr>
+            <tr style="border-top: 1px solid #e0e7ff;">
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Required Quantity</td>
+              <td style="padding: 6px 0; color: #111827; font-weight: bold;">${quantity} Unit(s)</td>
+            </tr>
+            <tr style="border-top: 1px solid #e0e7ff;">
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Required By</td>
+              <td style="padding: 6px 0; color: #dc2626; font-weight: bold;">${formattedDate}</td>
+            </tr>
+            ${notes ? `
+            <tr style="border-top: 1px solid #e0e7ff;">
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Additional Notes</td>
+              <td style="padding: 6px 0; color: #374151;">${notes}</td>
+            </tr>` : ''}
+          </table>
+        </div>
+
+        <p style="color: #374151; font-weight: bold; font-size: 15px;">Please submit your quotation including:</p>
+        <ul style="color: #6b7280; line-height: 2; margin: 0 0 20px; padding-left: 20px;">
+          <li>Unit Price (₹ per unit)</li>
+          <li>Delivery Time (in days)</li>
+          <li>Warranty Period (in months)</li>
+          <li>Any additional remarks</li>
+        </ul>
+
+        <div style="text-align: center; margin: 28px 0;">
+          <a href="${bidLink}" style="
+            display: inline-block;
+            background: linear-gradient(135deg, #1e40af, #7c3aed);
+            color: white;
+            text-decoration: none;
+            padding: 14px 36px;
+            border-radius: 8px;
+            font-weight: bold;
+            font-size: 16px;
+            letter-spacing: 0.5px;
+          ">
+            📝 Submit Your Quotation
+          </a>
+        </div>
+
+        <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; padding: 14px; margin-top: 20px;">
+          <p style="color: #92400e; font-size: 13px; margin: 0;">
+            ⏰ <strong>Note:</strong> This quotation link is valid for 7 days. If you have any questions, please contact us directly.
+          </p>
+        </div>
+
+        <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">Thank you for your partnership.</p>
+        <p style="color: #111827; font-weight: bold;">— ${companyName} Procurement Team</p>
+      </div>
+    </div>
+  `;
+
+  try {
+    const result = await transporter.sendMail({
+      from: `"${companyName} Procurement" <${process.env.SMTP_USER}>`,
+      to,
+      subject,
+      html
+    });
+    console.log(`✅ RFQ Email sent to ${to} for ${rfqNo}`);
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    console.error(`❌ RFQ Email failed to ${to}:`, error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Send Vendor Bid Confirmation Email (when vendor is selected as winner)
+ */
+export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, poNumber, productName, quantity, unitPrice, deliveryDays, warrantyMonths, companyName }) => {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.log(`[EMAIL SKIPPED] No SMTP config. Would send confirmation to: ${to}`);
+    return { success: true, mocked: true };
+  }
+
+  const transporter = createTransporter();
+  const subject = `🎉 Congratulations! Your Quotation Selected — PO ${poNumber} | ${companyName}`;
+  const totalValue = (unitPrice * quantity * 1.18).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: linear-gradient(135deg, #065f46, #047857); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 22px;">🎉 Quotation Confirmed!</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${companyName} · PO: ${poNumber}</p>
+      </div>
+
+      <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 16px;">Dear <strong>${vendorName}</strong>,</p>
+        <p style="color: #6b7280; line-height: 1.6;">
+          We are pleased to inform you that your quotation for <strong>${rfqNo}</strong> has been selected. 
+          A Purchase Order has been generated in your name. Please proceed with the delivery as per the agreed terms.
+        </p>
+
+        <div style="background: #f0fdf4; border-left: 4px solid #16a34a; border-radius: 4px; padding: 20px; margin: 20px 0;">
+          <h3 style="color: #15803d; margin: 0 0 12px;">📄 Purchase Order Summary</h3>
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px; width: 45%;">Purchase Order No.</td>
+              <td style="padding: 7px 0; color: #111827; font-weight: bold;">${poNumber}</td>
+            </tr>
+            <tr style="border-top: 1px solid #dcfce7;">
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">RFQ Reference</td>
+              <td style="padding: 7px 0; color: #111827;">${rfqNo}</td>
+            </tr>
+            <tr style="border-top: 1px solid #dcfce7;">
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Product / Item</td>
+              <td style="padding: 7px 0; color: #111827; font-weight: bold;">${productName}</td>
+            </tr>
+            <tr style="border-top: 1px solid #dcfce7;">
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Quantity</td>
+              <td style="padding: 7px 0; color: #111827; font-weight: bold;">${quantity} Unit(s)</td>
+            </tr>
+            <tr style="border-top: 1px solid #dcfce7;">
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Unit Price</td>
+              <td style="padding: 7px 0; color: #111827; font-weight: bold;">₹${Number(unitPrice).toLocaleString('en-IN')}</td>
+            </tr>
+            <tr style="border-top: 1px solid #dcfce7;">
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Order Value (incl. GST)</td>
+              <td style="padding: 7px 0; color: #15803d; font-size: 17px; font-weight: bold;">₹${totalValue}</td>
+            </tr>
+            <tr style="border-top: 1px solid #dcfce7;">
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Delivery Expected Within</td>
+              <td style="padding: 7px 0; color: #dc2626; font-weight: bold;">${deliveryDays} Days</td>
+            </tr>
+            <tr style="border-top: 1px solid #dcfce7;">
+              <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Warranty Period</td>
+              <td style="padding: 7px 0; color: #111827;">${warrantyMonths} Month(s)</td>
+            </tr>
+          </table>
+        </div>
+
+        <p style="color: #374151; font-weight: bold;">Important Instructions:</p>
+        <ul style="color: #6b7280; line-height: 2; padding-left: 20px;">
+          <li>Please deliver within <strong>${deliveryDays} days</strong> as quoted</li>
+          <li>Include warranty card / documentation with delivery</li>
+          <li>Mention PO Number <strong>${poNumber}</strong> on all dispatch documents</li>
+          <li>Contact us immediately if any delivery delays are anticipated</li>
+        </ul>
+
+        <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">Thank you for your competitive pricing and timely response.</p>
+        <p style="color: #111827; font-weight: bold;">— ${companyName} Procurement Team</p>
+      </div>
+    </div>
+  `;
+
+  try {
+    const result = await transporter.sendMail({
+      from: `"${companyName} Procurement" <${process.env.SMTP_USER}>`,
+      to,
+      subject,
+      html
+    });
+    console.log(`✅ Bid Confirmation Email sent to ${to}`);
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    console.error(`❌ Bid Confirmation Email failed to ${to}:`, error.message);
     return { success: false, error: error.message };
   }
 };

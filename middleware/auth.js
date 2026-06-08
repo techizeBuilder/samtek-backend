@@ -69,7 +69,55 @@ const authorizeRoles = (...roles) => {
       return res.status(401).json({ message: 'User not authenticated.' });
     }
 
-    if (!roles.includes(req.user.role)) {
+    // Case-insensitive role matching with group expansion
+    const userRoleLower = (req.user.role || '').toLowerCase().trim();
+    
+    // Expand route-required roles to include equivalent sub-roles/department roles
+    const expandedRoles = new Set();
+    roles.forEach(role => {
+      const rLower = role.toLowerCase().trim();
+      expandedRoles.add(rLower);
+
+      // Accounts department mappings
+      if (rLower === 'accounts' || rLower === 'accounts head' || rLower === 'accounts employee' || rLower === 'account employee') {
+        expandedRoles.add('accounts');
+        expandedRoles.add('accounts head');
+        expandedRoles.add('accounts employee');
+        expandedRoles.add('account employee');
+      }
+
+      // Sales department mappings
+      if (rLower === 'sales' || rLower === 'sales person' || rLower === 'salesman' || rLower === 'sales head' || rLower === 'sales employee') {
+        expandedRoles.add('sales');
+        expandedRoles.add('sales person');
+        expandedRoles.add('salesman');
+        expandedRoles.add('sales head');
+        expandedRoles.add('sales employee');
+      }
+
+      // Production department mappings
+      if (rLower === 'production' || rLower === 'production head' || rLower === 'production employee') {
+        expandedRoles.add('production');
+        expandedRoles.add('production head');
+        expandedRoles.add('production employee');
+      }
+
+      // Packing department mappings
+      if (rLower === 'packing' || rLower === 'packing head' || rLower === 'packing employee') {
+        expandedRoles.add('packing');
+        expandedRoles.add('packing head');
+        expandedRoles.add('packing employee');
+      }
+
+      // Dispatch department mappings
+      if (rLower === 'dispatch' || rLower === 'dispatch head' || rLower === 'dispatch employee') {
+        expandedRoles.add('dispatch');
+        expandedRoles.add('dispatch head');
+        expandedRoles.add('dispatch employee');
+      }
+    });
+
+    if (!expandedRoles.has(userRoleLower)) {
       console.log(`❌ Auth - Role mismatch! User role: "${req.user.role}", Required roles: [${roles.join(', ')}]`);
       return res.status(403).json({
         message: 'Access denied. Insufficient permissions.',

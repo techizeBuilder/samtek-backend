@@ -33,6 +33,12 @@ const jobOpeningSchema = new Schema(
       ref: "User",
     },
 
+    companyId: {
+      type: Schema.Types.ObjectId,
+      ref: "Company",
+      required: false,
+    },
+
     jobDocument: {
       type: String,
     },

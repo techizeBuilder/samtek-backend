@@ -25,7 +25,8 @@ import {
   debugCheckSalesPersons,
   getDamageExpiryList,
   getDamageExpiryDetail,
-  getLedgerRecords
+  getLedgerRecords,
+  getAccountsDashboardData
 } from '../controllers/accountsController.js';
 import {
   getPartners as getPartnersList,
@@ -76,6 +77,20 @@ const accountsRouter = express.Router();
 
 // Apply authentication to all accounts routes
 accountsRouter.use(authenticateToken);
+
+// ==================== ACCOUNTS DASHBOARD ====================
+// GET /api/accounts/dashboard - Dynamic dashboard data for logged-in user's company
+accountsRouter.get(
+  '/dashboard',
+  authorizeRoles(
+    'Accounts', 'Accounts Head', 'Accounts Employee', 'Account Employee',
+    'Superadmin', 'Super Admin',
+    'Unit Head', 'Unit Manager', 'Admin',
+    'Manager', 'Director', 'CFO', 'Finance', 'Finance Head',
+    'Sales', 'Sales Person', 'Salesman'
+  ),
+  getAccountsDashboardData
+);
 
 // Sales Invoices - Get all invoices for the company
 // Can be used by: Unit Manager, Unit Head, Sales Person, Super Admin, Admin, Accounts

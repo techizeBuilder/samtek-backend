@@ -14,7 +14,7 @@ const departmentSchema = new Schema(
     branchId: {
       type: Schema.Types.ObjectId,
       ref: "Branch",
-      required: true,
+      required: false,
     },
     name: {
       type: String,

@@ -11,6 +11,10 @@ import Supplier from '../models/Supplier.js';
 import SalesmanDailySettlement from '../models/SalesmanDailySettlement.js';
 import LeadPayment from '../models/LeadPayment.js';
 import { USER_ROLES } from '../shared/schema.js';
+import Expense from '../models/Expense.js';
+import PurchaseInvoice from '../models/PurchaseInvoice.js';
+import LedgerEntry from '../models/LedgerEntry.js';
+import BankAccount from '../models/BankAccount.js';
 
 /**
  * Get all sales invoices for the company
@@ -1980,6 +1984,314 @@ export const getLedgerRecords = async (req, res) => {
 
   } catch (error) {
     console.error('Get Ledger Records error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Internal server error' });
+  }
+};
+
+/**
+ * Get all data needed for the Accounts Dashboard - scoped to logged-in user's company.
+ * Returns: financial stats, revenue breakdown, expense breakdown,
+ *          pending invoices/payments, recent transactions, and alerts.
+ */
+export const getAccountsDashboardData = async (req, res) => {
+  try {
+    // ── Resolve companyId ─────────────────────────────────────────────────────
+    // The JWT may not always carry companyId if the user was created before
+    // company assignment. Fall back to a fresh DB lookup.
+    let companyId = req.user.companyId;
+
+    if (!companyId) {
+      const freshUser = await User.findById(req.user._id || req.user.userId)
+        .select('companyId unit')
+        .lean();
+      companyId = freshUser?.companyId;
+    }
+
+    // If still no companyId, return empty structured data (not a hard error)
+    if (!companyId) {
+      return res.json({
+        success: true,
+        warning: 'User is not assigned to a company. Showing empty dashboard.',
+        data: {
+          financialStats: {
+            totalRevenue: 0, revenueThisMonth: 0, revenueGrowth: 0,
+            monthlyExpenses: 0, netProfit: 0, profitMargin: 0,
+            pendingInvoices: 0, overduePayments: 0, cashFlow: 0, budgetUtilization: 0
+          },
+          revenueBreakdown: [],
+          expenseCategories: [],
+          pendingTransactions: [],
+          recentTransactions: [],
+          accountsAlerts: [{
+            id: 1, type: 'reconciliation',
+            message: 'User account is not linked to a company. Please contact your administrator.',
+            priority: 'Medium', time: 'Now'
+          }],
+          quarterlyTargets: []
+        }
+      });
+    }
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+
+    const cid = new mongoose.Types.ObjectId(companyId);
+
+
+    // ── 1. Revenue (Sales) ───────────────────────────────────────────────────
+    const [revThisMonth, revLastMonth, revYear] = await Promise.all([
+      Sale.aggregate([
+        { $match: { companyId: cid, saleDate: { $gte: startOfMonth } } },
+        { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+      ]),
+      Sale.aggregate([
+        { $match: { companyId: cid, saleDate: { $gte: startOfLastMonth, $lte: endOfLastMonth } } },
+        { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+      ]),
+      Sale.aggregate([
+        { $match: { companyId: cid, saleDate: { $gte: startOfYear } } },
+        { $group: { _id: null, total: { $sum: '$totalAmount' } } }
+      ])
+    ]);
+
+    const totalRevenue = revYear[0]?.total || 0;
+    const revenueThisMonth = revThisMonth[0]?.total || 0;
+    const revenueLastMonth = revLastMonth[0]?.total || 0;
+    const revenueGrowth = revenueLastMonth > 0
+      ? Math.round(((revenueThisMonth - revenueLastMonth) / revenueLastMonth) * 1000) / 10
+      : 0;
+
+    // ── 2. Expenses ──────────────────────────────────────────────────────────
+    const [expThisMonth, expLastMonth, expYear] = await Promise.all([
+      Expense.aggregate([
+        { $match: { companyId: cid, date: { $gte: startOfMonth } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      Expense.aggregate([
+        { $match: { companyId: cid, date: { $gte: startOfLastMonth, $lte: endOfLastMonth } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      Expense.aggregate([
+        { $match: { companyId: cid, date: { $gte: startOfYear } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ])
+    ]);
+
+    const monthlyExpenses = expThisMonth[0]?.total || 0;
+    const totalExpenses = expYear[0]?.total || 0;
+
+    // ── 3. Purchase Invoices (payable) ────────────────────────────────────────
+    const [purchaseStats] = await Promise.all([
+      PurchaseInvoice.aggregate([
+        { $match: { companyId: cid } },
+        {
+          $group: {
+            _id: null,
+            totalPurchases: { $sum: '$totalAmount' },
+            unpaid: {
+              $sum: {
+                $cond: [{ $in: ['$status', ['Unpaid', 'Partially Paid']] }, '$balanceAmount', 0]
+              }
+            }
+          }
+        }
+      ])
+    ]);
+
+    const totalPurchases = purchaseStats[0]?.totalPurchases || 0;
+    const unpaidPurchases = purchaseStats[0]?.unpaid || 0;
+
+    // ── 4. Net profit & margin ────────────────────────────────────────────────
+    const netProfit = totalRevenue - totalExpenses - totalPurchases;
+    const profitMargin = totalRevenue > 0
+      ? Math.round((netProfit / totalRevenue) * 1000) / 10
+      : 0;
+
+    // ── 5. Pending / overdue Sales Invoices (Orders) ─────────────────────────
+    const orderQuery = { $or: [{ companyId: cid }, { company: cid }] };
+    const [pendingInvoices, overduePayments] = await Promise.all([
+      Order.countDocuments({ ...orderQuery, paymentStatus: { $in: ['Pending', 'Partially Paid'] } }),
+      Order.countDocuments({ ...orderQuery, paymentStatus: 'Overdue' })
+    ]);
+
+    // ── 6. Cash Flow (bank account balances) ─────────────────────────────────
+    const bankSummary = await BankAccount.aggregate([
+      { $match: { companyId: cid, isActive: true } },
+      { $group: { _id: null, total: { $sum: '$currentBalance' } } }
+    ]);
+    const cashFlow = bankSummary[0]?.total || 0;
+
+    // ── 7. Budget utilisation ─────────────────────────────────────────────────
+    // Approximation: expenses-this-month as % of revenue-this-month
+    const budgetUtilization = revenueThisMonth > 0
+      ? Math.round((monthlyExpenses / revenueThisMonth) * 1000) / 10
+      : 0;
+
+    // ── 8. Revenue breakdown by payment status ────────────────────────────────
+    const revenueByStatus = await Sale.aggregate([
+      { $match: { companyId: cid, saleDate: { $gte: startOfYear } } },
+      {
+        $group: {
+          _id: '$paymentStatus',
+          amount: { $sum: '$totalAmount' }
+        }
+      }
+    ]);
+
+    const revenueBreakdown = revenueByStatus.map(r => ({
+      category: r._id || 'Unknown',
+      amount: r.amount,
+      percentage: totalRevenue > 0 ? Math.round((r.amount / totalRevenue) * 1000) / 10 : 0,
+      growth: 0 // Not tracked per-status historically
+    }));
+
+    // ── 9. Expense breakdown by category ─────────────────────────────────────
+    const expByCategory = await Expense.aggregate([
+      { $match: { companyId: cid, date: { $gte: startOfYear } } },
+      {
+        $group: {
+          _id: '$category',
+          amount: { $sum: '$amount' }
+        }
+      }
+    ]);
+
+    const expenseCategories = expByCategory.map(e => ({
+      category: e._id || 'Other',
+      amount: e.amount,
+      budget: e.amount * 1.2, // No budget model yet – use 120% as indicative limit
+      percentage: totalExpenses > 0 ? Math.round((e.amount / totalExpenses) * 1000) / 10 : 0
+    }));
+
+    // ── 10. Pending transactions (orders overdue/due-soon) ────────────────────
+    const pendingOrders = await Order.find({
+      ...orderQuery,
+      paymentStatus: { $in: ['Pending', 'Overdue', 'Partially Paid'] }
+    })
+      .populate('customer', 'name')
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .lean();
+
+    const pendingTransactions = pendingOrders.map(o => ({
+      id: o.orderCode || o._id.toString().slice(-8).toUpperCase(),
+      client: o.customer?.name || 'Unknown Customer',
+      amount: o.totalAmount || 0,
+      dueDate: o.expectedDeliveryDate
+        ? new Date(o.expectedDeliveryDate).toISOString().split('T')[0]
+        : 'N/A',
+      status: o.paymentStatus === 'Overdue' ? 'Overdue'
+        : o.paymentStatus === 'Partially Paid' ? 'Due Soon'
+        : 'Pending',
+      type: 'Invoice'
+    }));
+
+    // ── 11. Recent Transactions (Ledger) ──────────────────────────────────────
+    const recentLedger = await LedgerEntry.find({ companyId: cid, status: 'Posted' })
+      .sort({ entryDate: -1 })
+      .limit(5)
+      .lean();
+
+    const recentTransactions = recentLedger.map((entry, idx) => {
+      const isCredit = entry.entryType === 'Receipt';
+      const timeAgo = (() => {
+        const diffMs = now - new Date(entry.entryDate);
+        const diffH = Math.floor(diffMs / 3600000);
+        if (diffH < 24) return `${diffH} hour${diffH !== 1 ? 's' : ''} ago`;
+        const diffD = Math.floor(diffH / 24);
+        return `${diffD} day${diffD !== 1 ? 's' : ''} ago`;
+      })();
+      return {
+        id: idx + 1,
+        description: entry.description,
+        amount: entry.totalAmount * (isCredit ? 1 : -1),
+        type: isCredit ? 'Credit' : entry.entryType === 'Payment' ? 'Debit' : 'Journal',
+        time: timeAgo
+      };
+    });
+
+    // ── 12. Accounts Alerts ───────────────────────────────────────────────────
+    const alerts = [];
+
+    if (overduePayments > 0) {
+      alerts.push({
+        id: 1,
+        type: 'overdue',
+        message: `${overduePayments} invoice${overduePayments > 1 ? 's are' : ' is'} overdue for payment collection`,
+        priority: 'High',
+        time: 'Just now'
+      });
+    }
+
+    if (budgetUtilization > 80) {
+      alerts.push({
+        id: 2,
+        type: 'budget',
+        message: `Expenses have consumed ${budgetUtilization}% of this month's revenue`,
+        priority: budgetUtilization > 95 ? 'High' : 'Medium',
+        time: 'Today'
+      });
+    }
+
+    if (unpaidPurchases > 0) {
+      alerts.push({
+        id: 3,
+        type: 'approval',
+        message: `Outstanding vendor payables: ₹${(unpaidPurchases / 100000).toFixed(1)} Lakh pending`,
+        priority: 'Medium',
+        time: 'Today'
+      });
+    }
+
+    if (alerts.length === 0) {
+      alerts.push({
+        id: 4,
+        type: 'reconciliation',
+        message: 'All accounts are up to date. No critical alerts.',
+        priority: 'Low',
+        time: 'Today'
+      });
+    }
+
+    // ── 13. Quarterly targets (based on yearly revenue progress) ──────────────
+    const quarterlyTarget = totalRevenue * 1.1; // 10% growth target
+    const quarterlyTargets = [
+      { metric: 'Revenue Target', current: totalRevenue, target: quarterlyTarget, unit: '₹' },
+      { metric: 'Cost Reduction', current: totalExpenses > 0 ? Math.round((1 - totalExpenses / totalRevenue) * 1000) / 10 : 0, target: 15.0, unit: '%' },
+      { metric: 'Profit Margin', current: profitMargin, target: 35.0, unit: '%' },
+      { metric: 'Collection Efficiency', current: pendingInvoices + overduePayments === 0 ? 100 : Math.round((1 - overduePayments / (pendingInvoices + overduePayments + 1)) * 1000) / 10, target: 95.0, unit: '%' }
+    ];
+
+    // ── Return all data ───────────────────────────────────────────────────────
+    res.json({
+      success: true,
+      data: {
+        financialStats: {
+          totalRevenue,
+          revenueThisMonth,
+          revenueGrowth,
+          monthlyExpenses,
+          netProfit,
+          profitMargin,
+          pendingInvoices,
+          overduePayments,
+          cashFlow,
+          budgetUtilization
+        },
+        revenueBreakdown,
+        expenseCategories,
+        pendingTransactions,
+        recentTransactions,
+        accountsAlerts: alerts,
+        quarterlyTargets
+      }
+    });
+
+  } catch (error) {
+    console.error('getAccountsDashboardData error:', error);
     res.status(500).json({ success: false, message: error.message || 'Internal server error' });
   }
 };
