@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 
 const DispatchOrderSchema = new mongoose.Schema({
-  dispatchId: { type: String, unique: true },
+  dispatchId: { type: String },  // uniqueness enforced via compound index: { company, dispatchId }
   packagingJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'PackagingJob', required: true },
   productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', required: false },
   qcJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'QCJob', required: false },
@@ -75,6 +75,8 @@ const DispatchOrderSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 DispatchOrderSchema.index({ company: 1, status: 1 });
+// Compound unique: same dispatchId allowed across companies, not within same company
+DispatchOrderSchema.index({ company: 1, dispatchId: 1 }, { unique: true, sparse: true });
 DispatchOrderSchema.index({ company: 1, packagingJobId: 1 }, { unique: true });
 
 export default mongoose.model('DispatchOrder', DispatchOrderSchema);

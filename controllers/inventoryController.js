@@ -2230,24 +2230,42 @@ export const getInventoryStats = async (req, res) => {
     console.log('DEBUG: Permission check passed for user:', req.user?.username);
 
     // Build match stage for company filtering
-    let matchStage = {};
-    if (req.user.role === 'Unit Head' && req.user.companyId) {
-      // Use string comparison since both companyId and store field are strings
-      matchStage = { store: req.user.companyId };
-    }
+    let baseMatchStage = {};
 
-    console.log('Debug - Match stage:', matchStage);
-    console.log('Debug - User companyId:', req.user.companyId);
-    console.log('Debug - User role:', req.user.role);
+    if (req.user.role === 'Unit Head' && req.user.companyId) {
+      // Unit Head: filter by store field (string or ObjectId)
+      const companyIdStr = String(req.user.companyId);
+      baseMatchStage = {
+        $or: [
+          { store: companyIdStr },
+          { store: req.user.companyId },
+          { companyId: companyIdStr },
+          { companyId: req.user.companyId }
+        ]
+      };
+    } else if (
+      (req.user.role === 'Store Head' || req.user.role === 'Store Employee') &&
+      req.user.companyId
+    ) {
+      // Store roles: filter by companyId or store field
+      const companyIdStr = String(req.user.companyId);
+      baseMatchStage = {
+        $or: [
+          { store: companyIdStr },
+          { store: req.user.companyId },
+          { companyId: companyIdStr },
+          { companyId: req.user.companyId }
+        ]
+      };
+    }
+    // Super Admin / Super Admin sees all — no filter
+
+    console.log('Debug - Base match stage:', JSON.stringify(baseMatchStage));
+
+    const hasFilter = Object.keys(baseMatchStage).length > 0;
 
     const pipeline = [];
-    if (Object.keys(matchStage).length > 0) {
-      // Ensure proper string comparison for MongoDB
-      const fixedMatchStage = { store: String(req.user.companyId) };
-      console.log('Debug - Fixed match stage:', fixedMatchStage);
-      pipeline.push({ $match: fixedMatchStage });
-    }
-
+    if (hasFilter) pipeline.push({ $match: baseMatchStage });
     pipeline.push({
       $group: {
         _id: null,
@@ -2255,46 +2273,46 @@ export const getInventoryStats = async (req, res) => {
         totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } },
         totalQty: { $sum: '$qty' },
         lowStockCount: {
-          $sum: {
-            $cond: [{ $lte: ['$qty', '$minStock'] }, 1, 0]
-          }
+          $sum: { $cond: [{ $lte: ['$qty', '$minStock'] }, 1, 0] }
         }
       }
     });
 
     const stats = await Item.aggregate(pipeline);
 
-    // Build category stats pipeline with company filtering
+    // Category stats pipeline
     const categoryPipeline = [];
-    if (Object.keys(matchStage).length > 0) {
-      const fixedMatchStage = { store: String(req.user.companyId) };
-      categoryPipeline.push({ $match: fixedMatchStage });
-    }
-    categoryPipeline.push({
-      $group: {
-        _id: '$category',
-        count: { $sum: 1 },
-        totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } }
-      }
-    }, { $sort: { count: -1 } });
-
+    if (hasFilter) categoryPipeline.push({ $match: baseMatchStage });
+    categoryPipeline.push(
+      { $group: { _id: '$category', count: { $sum: 1 }, totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } } } },
+      { $sort: { count: -1 } }
+    );
     const categoryStats = await Item.aggregate(categoryPipeline);
 
-    // Build type stats pipeline with company filtering
+    // Type stats pipeline
     const typePipeline = [];
-    if (Object.keys(matchStage).length > 0) {
-      const fixedMatchStage = { store: String(req.user.companyId) };
-      typePipeline.push({ $match: fixedMatchStage });
-    }
+    if (hasFilter) typePipeline.push({ $match: baseMatchStage });
     typePipeline.push({
       $group: {
         _id: '$type',
         count: { $sum: 1 },
+        totalQty: { $sum: '$qty' },
         totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } }
       }
     });
-
     const typeStats = await Item.aggregate(typePipeline);
+
+    // Per-category total qty for inventory overview bars
+    const categoryQtyPipeline = [];
+    if (hasFilter) categoryQtyPipeline.push({ $match: baseMatchStage });
+    categoryQtyPipeline.push({
+      $group: {
+        _id: '$category',
+        totalQty: { $sum: '$qty' },
+        totalItems: { $sum: 1 }
+      }
+    });
+    const categoryQtyStats = await Item.aggregate(categoryQtyPipeline);
 
     res.json({
       stats: {
@@ -2302,7 +2320,8 @@ export const getInventoryStats = async (req, res) => {
         totalCategories: categoryStats.length
       },
       categoryStats,
-      typeStats
+      typeStats,
+      categoryQtyStats
     });
   } catch (error) {
     console.error('Get inventory stats error:', error);

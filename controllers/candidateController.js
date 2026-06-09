@@ -28,6 +28,7 @@ export const addCandidate = async (req, res) => {
       resumeUrl,
       hiringDate,
       joiningDate,
+      companyId: req.user.companyId || null,
     });
 
     res.status(201).json({
@@ -45,9 +46,22 @@ export const addCandidate = async (req, res) => {
 /**
  * 📋 Get All Candidates
  */
-export const getAllCandidates = async (_req, res) => {
+export const getAllCandidates = async (req, res) => {
   try {
-    const candidates = await Candidate.find()
+    const filter = {};
+
+    if (req.user.role === 'Super Admin') {
+      // Superadmin can optionally filter by companyId query param
+      const { companyId } = req.query;
+      if (companyId) filter.companyId = companyId;
+    } else {
+      // All other roles are strictly scoped to their own company
+      if (req.user.companyId) {
+        filter.companyId = req.user.companyId;
+      }
+    }
+
+    const candidates = await Candidate.find(filter)
       .populate({
         path: "jobId",
         populate: {
@@ -155,12 +169,19 @@ export const getCandidatesForManager = async (req, res) => {
   try {
     const managerId = req.user._id;
 
-    // 1. Find jobs where this manager is the recruiting manager
-    const jobs = await JobOpening.find({ recruitingManager: managerId }).select("_id");
+    // Company-wise scope filter
+    const companyFilter = {};
+    if (req.user.companyId) {
+      companyFilter.companyId = req.user.companyId;
+    }
+
+    // 1. Find jobs where this manager is the recruiting manager (within company)
+    const jobs = await JobOpening.find({ recruitingManager: managerId, ...companyFilter }).select("_id");
     const jobIds = jobs.map((job) => job._id);
 
-    // 2. Find candidates for these jobs OR directly assigned candidates
+    // 2. Find candidates for these jobs OR directly assigned candidates (within company)
     const candidates = await Candidate.find({
+      ...companyFilter,
       $or: [
         { jobId: { $in: jobIds } },
         { recruitingManager: managerId },

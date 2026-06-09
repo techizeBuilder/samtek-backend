@@ -54,13 +54,24 @@ export const addSalaryStructure = async (req, res) => {
  */
 export const getAllSalaryStructures = async (req, res) => {
   try {
-    const { companyId } = req.query;
-    let filter = {};
+    let userIds;
 
-    if (companyId) {
-      const users = await User.find({ companyId }).select("_id");
-      filter.employee = { $in: users.map(u => u._id) };
+    if (req.user.role === 'Super Admin') {
+      // Superadmin can optionally filter by companyId query param
+      const { companyId } = req.query;
+      if (companyId) {
+        const users = await User.find({ companyId }).select("_id");
+        userIds = users.map(u => u._id);
+      }
+    } else {
+      // All other roles are strictly scoped to their own company
+      if (req.user.companyId) {
+        const users = await User.find({ companyId: req.user.companyId }).select("_id");
+        userIds = users.map(u => u._id);
+      }
     }
+
+    const filter = userIds ? { employee: { $in: userIds } } : {};
 
     const salaryList = await SalaryStructure.find(filter)
       .populate({
@@ -79,11 +90,22 @@ export const getAllSalaryStructures = async (req, res) => {
 };
 
 /**
- * 🔍 Get Salary Structure By ID
+ * 🔍 Get Salary Structure By ID (employee userId)
+ * - Employee can only see their own salary structure
+ * - HR-Admin / Super Admin can see any
  */
 export const getSalaryStructureById = async (req, res) => {
   try {
-    const salary = await SalaryStructure.find({ employee: req.params.id }).populate({
+    const requestedUserId = req.params.id;
+    const currentUser = req.user;
+
+    // Ownership check: non-admins can only view their own salary structure
+    const isAdmin = currentUser.role === 'Super Admin' || currentUser.role === 'HR-Admin' || currentUser.role === 'Company Admin';
+    if (!isAdmin && currentUser._id.toString() !== requestedUserId) {
+      return res.status(403).json({ message: "Access denied. You can only view your own salary structure." });
+    }
+
+    const salary = await SalaryStructure.find({ employee: requestedUserId }).populate({
       path: "employee",
       select: "fullName email mobile role"
     });

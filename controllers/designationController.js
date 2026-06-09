@@ -8,6 +8,14 @@ export const createDesignation = async (req, res) => {
     if (data.departmentId === "") {
       data.departmentId = null;
     }
+
+    // Non-SuperAdmin can only create designations for their own company
+    if (req.user && req.user.role !== 'Super Admin') {
+      if (req.user.companyId) {
+        data.companyId = req.user.companyId;
+      }
+    }
+
     const designation = await Designation.create(data);
     res.status(201).json(designation);
   } catch (err) {
@@ -20,14 +28,16 @@ export const getDesignations = async (req, res) => {
 
   const filter = {};
 
-  // Role-based filtering for Company Admin / Unit Head / etc.
-  if (req.user && req.user.role !== 'Super Admin' && req.user.role !== 'HR-Admin') {
-    if (req.user.companyId) {
+  if (req.user && req.user.role === 'Super Admin') {
+    // Superadmin can optionally filter by companyId query param
+    if (companyId) filter.companyId = companyId;
+  } else {
+    // All other roles are strictly scoped to their own company
+    if (req.user && req.user.companyId) {
       filter.companyId = req.user.companyId;
     }
   }
 
-  if (companyId) filter.companyId = companyId;
   if (departmentId) filter.departmentId = departmentId;
 
   const data = await Designation.find(filter)

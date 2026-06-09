@@ -81,6 +81,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
         const LeadPayment = (await import('./models/LeadPayment.js')).default;
         const BankAccount = (await import('./models/BankAccount.js')).default;
         const LedgerEntry = (await import('./models/LedgerEntry.js')).default;
+        const RFQ = (await import('./models/RFQ.js')).default;
+        const VendorBid = (await import('./models/VendorBid.js')).default;
         console.log('✅ Models registered:', {
             User: !!User,
             Item: !!Item,
@@ -264,6 +266,14 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
             const purchaseRequestRoutes = (await import('./routes/purchaseRequestRoutes.js')).default;
             app.use('/api/purchase-requests', purchaseRequestRoutes);
             console.log('Purchase Request routes registered at /api/purchase-requests');
+            // RFQ (Vendor Bidding) routes
+            const rfqRoutes = (await import('./routes/rfqRoutes.js')).default;
+            app.use('/api/rfq', rfqRoutes);
+            // ALSO register public bid endpoints at top level to avoid any middleware conflict
+            const { getBidByToken, submitBidByToken } = await import('./controllers/rfqController.js');
+            app.get('/api/vendor-bid/:token', getBidByToken);
+            app.post('/api/vendor-bid/:token', submitBidByToken);
+            console.log('RFQ / Vendor Bidding routes registered at /api/rfq + /api/vendor-bid/:token');
             const dashboardRoutes = (await import('./routes/dashboardRoutes.js')).default;
             app.use('/api/dashboard', dashboardRoutes);
             console.log('Dashboard routes registered at /api/dashboard');

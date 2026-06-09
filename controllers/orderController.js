@@ -1007,11 +1007,38 @@ const getOrderTracking = async (req, res) => {
 
     const trackingData = [...saleTrackingData, ...pendingOrderTrackingData];
 
+    // Calculate "Completed Today" - Gate Pass generated today
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
+    const completedToday = trackingData.filter(item => {
+      if (item.gatePass?.status === 'Generated' && item.gatePass?.generatedAt) {
+        const generatedAt = new Date(item.gatePass.generatedAt);
+        return generatedAt >= todayStart && generatedAt <= todayEnd;
+      }
+      return false;
+    }).length;
+
+    // Summary counts for dashboard
+    const storeOrdersCount = trackingData.filter(item => item.gatePass?.status === 'Generated').length;
+    const pendingDispatchCount = trackingData.filter(item =>
+      (item.orderStatus === 'approved' || item.orderStatus === 'pending' || item.paymentStatus === 'Paid') &&
+      item.gatePass?.status !== 'Generated'
+    ).length;
+
     console.log(`📊 Order Tracking: Found ${trackingData.length} records (${saleTrackingData.length} from Sales, ${pendingOrderTrackingData.length} pending orders) for company ${userCompanyId}`);
 
     res.json({
       success: true,
-      data: trackingData
+      data: trackingData,
+      summary: {
+        total: trackingData.length,
+        storeOrders: storeOrdersCount,
+        pendingDispatch: pendingDispatchCount,
+        completedToday
+      }
     });
   } catch (error) {
     console.error('❌ Error in getOrderTracking:', error);

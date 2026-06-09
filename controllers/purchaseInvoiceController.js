@@ -962,7 +962,18 @@ export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
         const poNumber = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
         const invoiceNo = `INV-PO-${poNumber}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
 
-        // 4. Duplicate invoice check
+        // 4. Duplicate invoice check — by invoiceNo (existing) AND by requestId in notes (new guard)
+        // This prevents double-invoice when PO creates it AND Received also tries to create it
+        const existingByNotes = await PurchaseInvoice.findOne({
+            vendor: vendorId,
+            companyId,
+            notes: { $regex: request.requestId, $options: 'i' }
+        });
+        if (existingByNotes) {
+            console.log(`ℹ️ [Auto Invoice] Invoice already exists for PR ${request.requestId} — returning existing, no duplicate.`);
+            return existingByNotes;
+        }
+
         const existing = await PurchaseInvoice.findOne({ vendor: vendorId, invoiceNo });
         if (existing) {
             console.log(`⚠️ [Auto Invoice] Invoice ${invoiceNo} already exists.`);
@@ -1018,7 +1029,7 @@ export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
             unit,
             companyId,
             createdBy: user._id,
-            notes: `Automatically generated on receipt of Store Purchase Requisition: ${request.requestId}`
+            notes: `Auto-generated on PO creation. Purchase Request: ${request.requestId}. PO: ${request.purchaseOrder?.purchaseOrderNumber || 'N/A'}`
         });
 
         await invoice.save();

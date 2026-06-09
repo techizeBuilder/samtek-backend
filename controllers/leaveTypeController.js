@@ -8,7 +8,11 @@ export const addLeaveType = async (req, res) => {
   try {
     const { name, code, maxDays, paid, carryForward, isActive } = req.body;
 
-    const existingLeaveType = await LeaveType.findOne({ code });
+    // Check duplicate code per company
+    const existingLeaveType = await LeaveType.findOne({
+      code,
+      companyId: req.user.companyId || null,
+    });
     if (existingLeaveType) {
       return res.status(400).json({ message: "Leave type with this code already exists" });
     }
@@ -20,6 +24,7 @@ export const addLeaveType = async (req, res) => {
       paid,
       carryForward,
       isActive,
+      companyId: req.user.companyId || null,
     });
 
     res.status(201).json({ message: "Leave type created successfully", leaveType });
@@ -33,7 +38,20 @@ export const addLeaveType = async (req, res) => {
 // @route   GET /api/leave-types
 export const getAllLeaveTypes = async (req, res) => {
   try {
-    const leaveTypes = await LeaveType.find().sort({ createdAt: -1 });
+    const filter = {};
+
+    if (req.user.role === 'Super Admin') {
+      // Superadmin can optionally filter by companyId query param
+      const { companyId } = req.query;
+      if (companyId) filter.companyId = companyId;
+    } else {
+      // All other roles are strictly scoped to their own company
+      if (req.user.companyId) {
+        filter.companyId = req.user.companyId;
+      }
+    }
+
+    const leaveTypes = await LeaveType.find(filter).sort({ createdAt: -1 });
     res.status(200).json(leaveTypes);
   } catch (error) {
     console.error("Error fetching leave types:", error);

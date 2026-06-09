@@ -133,11 +133,20 @@ export const generatePayslipsFromPayroll = async (
 
 
 /* ================= HR: GET ALL PAYSLIPS ================= */
-export const getAllPayslips = async (_req, res) => {
+export const getAllPayslips = async (req, res) => {
   try {
-    const payslips = await Payslip.find()
+    const filter = {};
+
+    // Company-wise isolation
+    if (req.user && req.user.role !== 'Super Admin' && req.user.role !== 'Superadmin' && req.user.companyId) {
+      const companyUsers = await (await import('../models/User.js')).default
+        .find({ companyId: req.user.companyId }, "_id");
+      filter.user = { $in: companyUsers.map(u => u._id) };
+    }
+
+    const payslips = await Payslip.find(filter)
       .populate("user", "fullName username email role")
-      .populate("payroll") // ❌ koi match / filter nahi
+      .populate("payroll")
       .sort({ createdAt: -1 });
 
     const formattedPayslips = payslips.map(p => {

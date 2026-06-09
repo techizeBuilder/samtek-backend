@@ -175,7 +175,16 @@ export const getAllExpenseRequests = async (
   res
 ) => {
   try {
-    const fetchedExpenses = await Expense.find()
+    const filter = {};
+
+    // Company-wise isolation — SuperAdmin can see all, others only their company
+    if (req.user.role !== 'Super Admin' && req.user.role !== 'Superadmin' && req.user.companyId) {
+      const usersInCompany = await User.find({ companyId: req.user.companyId }, "_id");
+      const userIds = usersInCompany.map(u => u._id);
+      filter.employee = { $in: userIds };
+    }
+
+    const fetchedExpenses = await Expense.find(filter)
       .populate("employee", "fullName username email employeeId")
       .sort({ createdAt: -1 })
       .lean();

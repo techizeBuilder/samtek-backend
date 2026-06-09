@@ -17,8 +17,8 @@ const PayrollRouter = Router();
 PayrollRouter.get("/", authMiddleware, getPayrollByMonth);
 PayrollRouter.post("/run", authMiddleware, savePayroll);
 PayrollRouter.patch("/:id/status", authMiddleware, updatePayrollStatus);
-PayrollRouter.delete("/reset", resetPayrollByMonth);
-PayrollRouter.patch("/:id/reject",rejectPayroll);
-PayrollRouter.post("/recalculate",recalculatePayroll);
+PayrollRouter.delete("/reset", authMiddleware, resetPayrollByMonth);
+PayrollRouter.patch("/:id/reject", authMiddleware, rejectPayroll);
+PayrollRouter.post("/recalculate", authMiddleware, recalculatePayroll);
 
 export default PayrollRouter;

@@ -1,6 +1,7 @@
 /** @format */
 
 import Payroll from "../models/Payroll.js";
+import User from "../models/User.js";
 
 /* ================= GET PAYROLL BY MONTH ================= */
 export const getPayrollByMonth = async (req, res) => {
@@ -11,7 +12,25 @@ export const getPayrollByMonth = async (req, res) => {
       return res.status(400).json({ message: "Month required" });
     }
 
-    const payroll = await Payroll.find({ month })
+    let employeeIds;
+    if (req.user.role !== 'Super Admin') {
+      if (req.user.companyId) {
+        const users = await User.find({ companyId: req.user.companyId }).select("_id");
+        employeeIds = users.map(u => u._id);
+      }
+    } else {
+      // Superadmin: optionally filter by companyId query param
+      const { companyId } = req.query;
+      if (companyId) {
+        const users = await User.find({ companyId }).select("_id");
+        employeeIds = users.map(u => u._id);
+      }
+    }
+
+    const filter = { month };
+    if (employeeIds) filter.employee = { $in: employeeIds };
+
+    const payroll = await Payroll.find(filter)
       .populate("employee", "fullName username email role")
       .sort({ createdAt: -1 });
 

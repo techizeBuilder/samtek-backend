@@ -303,12 +303,29 @@ export const deleteTask = async (req, res) => {
   try {
     const { taskId } = req.params;
 
-    // find task by id
-    const task = await Task.findById(taskId)
+    // Build query with companyId check for non-SuperAdmins
+    const query = { _id: taskId };
+    if (!req.user.permissions?.canAccessAllUnits) {
+      query.companyId = req.user.companyId;
+    }
+
+    // find task by id (with company scope)
+    const task = await Task.findOne(query);
     if (!task) {
       return res.status(404).json({
         success: false,
-        message: "Task not found"
+        message: "Task not found or access denied"
+      });
+    }
+
+    // Only TopAdmins or the task creator can delete
+    const isTopAdmin = TOP_LEVEL_ADMINS.includes(req.user.role);
+    const isCreator = task.createdBy?.toString() === req.user._id.toString();
+
+    if (!isTopAdmin && !isCreator) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: Only task creator or admins can delete this task"
       });
     }
 
@@ -322,7 +339,7 @@ export const deleteTask = async (req, res) => {
     }
 
     // delete task
-    await Task.findByIdAndDelete(taskId)
+    await Task.findByIdAndDelete(taskId);
 
     return res.status(200).json({
       success: true,
@@ -335,7 +352,6 @@ export const deleteTask = async (req, res) => {
       message: "Server error while deleting task",
       error: error.message
     });
-
   }
 }
 

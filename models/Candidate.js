@@ -14,6 +14,12 @@ const candidateSchema = new Schema(
     hiringDate: { type: Date },
     joiningDate: { type: Date },
 
+    companyId: {
+      type: Schema.Types.ObjectId,
+      ref: "Company",
+      required: false,
+    },
+
     status: {
       type: String,
       enum: ["Applied", "Shortlisted", "Rejected", "Hired"],

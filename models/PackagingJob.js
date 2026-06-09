@@ -9,13 +9,13 @@ const ChecklistSchema = new mongoose.Schema({
 }, { _id: false });
 
 const PackagingJobSchema = new mongoose.Schema({
-  jobId: { type: String, unique: true },
+  jobId: { type: String },  // uniqueness enforced via compound index: { company, jobId }
   productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', required: false },
   qcJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'QCJob', required: false },
   orderId: { type: String, required: true },
   machineCode: { type: String, required: true, trim: true },
   machineName: { type: String, required: true, trim: true },
-  serialNumber: { type: String, unique: true },
+  serialNumber: { type: String },  // uniqueness enforced via compound index: { company, serialNumber }
   packingType: {
     type: String,
     enum: ['Wooden Packing', 'Bubble Wrap', 'Loose Dispatch'],
@@ -36,6 +36,9 @@ const PackagingJobSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 PackagingJobSchema.index({ company: 1, status: 1 });
+// Compound unique indexes: same jobId/serialNumber allowed across companies, not within same company
+PackagingJobSchema.index({ company: 1, jobId: 1 }, { unique: true, sparse: true });
+PackagingJobSchema.index({ company: 1, serialNumber: 1 }, { unique: true, sparse: true });
 PackagingJobSchema.index(
   { company: 1, productionOrderId: 1 },
   { unique: true, partialFilterExpression: { productionOrderId: { $exists: true, $type: 'objectId' } } }

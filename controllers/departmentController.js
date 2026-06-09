@@ -1,11 +1,22 @@
 /** @format */
 
 import Department from "../models/Department.js";
+import Branch from "../models/Branch.js";
+import { fixDepartmentBranchIds } from "../scripts/fixDepartmentBranchIds.js";
 
 /* CREATE */
 export const createDepartment = async (req, res) => {
   try {
-    const department = await Department.create(req.body);
+    const data = { ...req.body };
+
+    // Non-SuperAdmin can only create departments for their own company
+    if (req.user && req.user.role !== 'Super Admin') {
+      if (req.user.companyId) {
+        data.companyId = req.user.companyId;
+      }
+    }
+
+    const department = await Department.create(data);
     res.status(201).json(department);
   } catch (error) {
     res.status(400).json({
@@ -19,21 +30,23 @@ export const createDepartment = async (req, res) => {
 export const getDepartments = async (req, res) => {
   const { branchId, companyId } = req.query;
   const filter = {};
-  
-  // Role-based filtering for Company Admin / Unit Head / etc.
-  if (req.user && req.user.role !== 'Super Admin' && req.user.role !== 'HR-Admin') {
-    if (req.user.companyId) {
+
+  if (req.user && req.user.role === 'Super Admin') {
+    // Superadmin can optionally filter by companyId query param
+    if (companyId) filter.companyId = companyId;
+  } else {
+    // All other roles are strictly scoped to their own company
+    if (req.user && req.user.companyId) {
       filter.companyId = req.user.companyId;
     }
   }
 
   if (branchId) filter.branchId = branchId;
-  if (companyId) filter.companyId = companyId;
 
   const departments = await Department.find(filter)
-    .populate("companyId", "name")
+    .populate("companyId", "name unitName")
     .populate("branchId", "name")
-    .populate("headEmployeeId", "name email");
+    .populate("headEmployeeId", "fullName name email");
 
   res.json(departments);
 };
@@ -41,9 +54,9 @@ export const getDepartments = async (req, res) => {
 /* GET BY ID */
 export const getDepartmentById = async (req, res) => {
   const department = await Department.findById(req.params.id)
-    .populate("companyId", "name")
+    .populate("companyId", "name unitName")
     .populate("branchId", "name")
-    .populate("headEmployeeId", "name email");
+    .populate("headEmployeeId", "fullName name email");
 
   if (!department) {
     return res.status(404).json({ message: "Department not found" });
@@ -67,4 +80,22 @@ export const updateDepartment = async (req, res) => {
 export const deleteDepartment = async (req, res) => {
   await Department.findByIdAndDelete(req.params.id);
   res.json({ message: "Department deleted" });
+};
+
+/* ONE-TIME MIGRATION: Fix departments with wrong branchId */
+export const migrateDepartmentBranchIds = async (req, res) => {
+  try {
+    // Only Super Admin can run this
+    if (req.user?.role !== "Super Admin") {
+      return res.status(403).json({ message: "Access denied. Super Admin only." });
+    }
+
+    const results = await fixDepartmentBranchIds();
+    res.json({
+      message: "Migration complete",
+      results,
+    });
+  } catch (err) {
+    res.status(500).json({ message: "Migration failed", error: err.message });
+  }
 };

@@ -243,7 +243,29 @@ const itemSchema = new mongoose.Schema({
     terms: {
       type: String,
       trim: true
+    },
+    // Warranty card document uploaded at time of receiving item from purchase
+    cardUrl: {
+      type: String,
+      trim: true,
+      default: null
+    },
+    cardUploadedAt: {
+      type: Date,
+      default: null
     }
+  },
+  // Serial number of the physical item (added at time of receiving from purchase)
+  serialNumber: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  // Reference back to the purchase request that brought this item in
+  receivedFromPurchaseRequest: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PurchaseRequest',
+    default: null
   }
 }, {
   timestamps: true
