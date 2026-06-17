@@ -300,11 +300,14 @@ export const updateLead = async (req, res) => {
       });
     }
 
+    // Check if lead is being assigned to a new person
+    const isNewAssignment = updates.assignedTo && String(updates.assignedTo) !== String(lead.assignedTo);
+
     Object.assign(lead, updates);
     await lead.save();
 
     // 🔔 Notify if lead assigned to someone
-    if (updates.assignedTo && updates.assignedTo !== String(lead.assignedTo)) {
+    if (isNewAssignment) {
       try {
         await notificationService.triggerSalesNotification({
           action: 'lead_assigned',
@@ -313,6 +316,7 @@ export const updateLead = async (req, res) => {
         });
       } catch (e) { console.error('Lead assign notification error:', e); }
     }
+
 
     res.json({ success: true, message: 'Lead updated successfully', lead });
   } catch (error) {
@@ -498,10 +502,26 @@ export const markLeadAsWon = async (req, res) => {
     lead.status = 'Won';
     lead.history.push({
       action: 'Deal Won',
-      notes: `Lead converted to customer and order created (${orderCode}). Advanced payment: â‚¹${lead.advancedPaymentAmount || 0}`,
+      notes: `Lead converted to customer and order created (${orderCode}). Advanced payment: ₹${lead.advancedPaymentAmount || 0}`,
       performedBy: req.user._id
     });
     await lead.save();
+
+    // 🔔 Notify Complaint Management team for Deal Verification
+    try {
+      await notificationService.triggerComplaintNotification({
+        action: 'deal_verification_required',
+        data: {
+          leadId: lead._id,
+          leadCode: lead.leadCode,
+          orderId: newOrder._id,
+          orderCode: newOrder.orderCode,
+          customerName: customer.name || lead.companyName,
+          dealValue: lead.dealValue || 0,
+        },
+        targetCompanyId: companyId,
+      });
+    } catch (e) { console.error('Deal won - complaint notification error:', e); }
 
     res.json({ success: true, message: 'Lead successfully converted to customer and order created', customer, order: newOrder, advancedPaymentTransferred: lead.advancedPaymentAmount || 0 });
   } catch (error) {

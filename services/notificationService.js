@@ -263,9 +263,9 @@ class NotificationService {
 
     if (action === 'payment_check_requested') {
       // Sales ne Account ko request kiya
-      return this.notifyRoles(['Accounts Head', 'Account Employee'], {
+      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
         title: 'Payment Check Requested',
-        message: `Sales has requested payment verification for Lead ${orderData?.leadCode}`,
+        message: `Request received to check payment for Lead ${orderData?.leadCode}`,
         type: 'payment', icon: 'credit-card', priority: 'high',
         data: { leadId: orderData?._id, leadCode: orderData?.leadCode }, ...common
       });
@@ -273,18 +273,32 @@ class NotificationService {
 
     if (action === 'payment_verified') {
       // Account ne verify kiya, Sales ko batao
-      return this.notifyRoles(['Sales Head', 'Sales Employee'], {
-        title: 'Payment Verified',
-        message: `Payment for Lead ${orderData?.leadCode} has been verified by Accounts`,
-        type: 'payment', icon: 'check-circle', priority: 'high',
-        data: { leadId: orderData?._id, leadCode: orderData?.leadCode }, ...common
-      });
+      const promises = [
+        this.notifyRoles(['Sales Head'], {
+          title: 'Payment Verified',
+          message: `Payment for Lead ${orderData?.leadCode} has been verified by Accounts`,
+          type: 'payment', icon: 'check-circle', priority: 'high',
+          data: { leadId: orderData?._id, leadCode: orderData?.leadCode }, ...common
+        })
+      ];
+
+      if (orderData?.assignedTo) {
+        promises.push(this.createNotification({
+          title: 'Payment Request Approved',
+          message: `Your payment verification request for Lead ${orderData?.leadCode} has been approved/updated to ${orderData?.status}`,
+          type: 'payment', icon: 'check-circle', priority: 'high',
+          targetUserId: orderData.assignedTo,
+          data: { leadId: orderData?._id, leadCode: orderData?.leadCode, action }
+        }));
+      }
+
+      return Promise.all(promises);
     }
 
     if (action === 'lead_sent_to_account') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee'], {
-        title: 'Lead Sent for Payment Processing',
-        message: `Lead ${orderData?.leadCode} sent to Accounts for advanced payment`,
+      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+        title: 'New Lead Received for Payment',
+        message: `Lead ${orderData?.leadCode} has been sent to Accounts. Please add advanced payment.`,
         type: 'payment', icon: 'credit-card', priority: 'high',
         data: { leadId: orderData?._id, leadCode: orderData?.leadCode }, ...common
       });
@@ -325,19 +339,33 @@ class NotificationService {
     }
 
     if (action === 'lead_payment_added') {
-      return this.notifyRoles(['Sales Head', 'Sales Employee'], {
-        title: 'Lead Payment Recorded',
-        message: `Payment of ₹${data?.amount} added for Lead ${data?.leadCode}`,
-        type: 'payment', icon: 'credit-card', priority: 'high',
-        data, ...common
-      });
+      const promises = [
+        this.notifyRoles(['Sales Head'], {
+          title: 'Lead Payment Recorded',
+          message: `Payment of ₹${data?.amount} added for Lead ${data?.leadCode}`,
+          type: 'payment', icon: 'credit-card', priority: 'high',
+          data: { leadId: data?.leadId, leadCode: data?.leadCode }, ...common
+        })
+      ];
+
+      if (data?.assignedTo) {
+        promises.push(this.createNotification({
+          title: 'Lead Payment Added',
+          message: `Advanced payment of ₹${data?.amount} has been added for your Lead ${data?.leadCode}. Status: ${data?.status || 'Updated'}.`,
+          type: 'payment', icon: 'check-circle', priority: 'high',
+          targetUserId: data.assignedTo,
+          data: { leadId: data?.leadId, leadCode: data?.leadCode, action }
+        }));
+      }
+
+      return Promise.all(promises);
     }
 
     if (action === 'packed_order_payment_pending') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee'], {
-        title: 'Packed Order Awaiting Payment',
-        message: `Order ${data?.orderCode} is packed and awaiting payment confirmation`,
-        type: 'account', icon: 'package', priority: 'high',
+      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+        title: '📦 Packed Order - NOC & Payment Required',
+        message: `Order ${data?.orderCode || ''} is packed and ready. Please process NOC and collect final payment before dispatch.`,
+        type: 'account', icon: 'package', priority: 'urgent',
         data, ...common
       });
     }
@@ -413,10 +441,19 @@ class NotificationService {
     }
 
     if (action === 'purchase_request_created') {
-      return this.notifyRoles(['Accounts Head', 'Superadmin'], {
-        title: 'New Purchase Request',
-        message: `Purchase request ${data?.requestId} created by Store`,
+      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts', 'Superadmin'], {
+        title: '🛒 New Purchase Request from Store',
+        message: `Purchase request ${data?.requestId} for "${data?.productName || 'items'}" has arrived. Priority: ${data?.priority || 'Medium'}. Please review.`,
         type: 'purchase', icon: 'shopping-cart', priority: 'high',
+        data, ...common
+      });
+    }
+
+    if (action === 'purchase_request_status_changed') {
+      return this.notifyRoles(['Store Head', 'Store Employee'], {
+        title: '📦 Purchase Request Updated',
+        message: `Purchase request ${data?.requestId} status changed to "${data?.newStatus}". ${data?.remarks || ''}`,
+        type: 'purchase', icon: 'refresh-cw', priority: 'high',
         data, ...common
       });
     }
@@ -543,10 +580,10 @@ class NotificationService {
     }
 
     if (action === 'delivery_confirmed') {
-      return this.notifyRoles(['Sales Head', 'Accounts Head', 'Superadmin'], {
-        title: 'Delivery Confirmed',
-        message: `Order ${data?.orderCode || ''} delivered successfully`,
-        type: 'dispatch', icon: 'check-circle', priority: 'medium',
+      return this.notifyRoles(['Sales Head', 'Sales Employee', 'Accounts Head', 'Account Employee', 'Accounts', 'Complaint Management Head', 'Complaint Management Employee', 'Superadmin'], {
+        title: '✅ Order Delivered Successfully',
+        message: `Order ${data?.orderCode || ''} has been delivered to ${data?.customerName || 'customer'}. Dispatch ID: ${data?.dispatchId || ''}. Please confirm delivery in your module.`,
+        type: 'dispatch', icon: 'check-circle', priority: 'high',
         data, ...common
       });
     }
@@ -610,10 +647,10 @@ class NotificationService {
 
     if (action === 'deal_verification_required') {
       return this.notifyRoles(['Complaint Management Head', 'Complaint Management Employee'], {
-        title: 'Deal Verification Required',
-        message: `Deal verification pending for customer ${data?.customerName || ''}`,
-        type: 'complaint', icon: 'shield', priority: 'high',
-        data, ...common
+        title: '🏆 New Deal - Verification Required',
+        message: `Lead ${data?.leadCode || ''} (Order: ${data?.orderCode || ''}) won for ${data?.customerName || 'customer'}. Deal Value: ₹${data?.dealValue || 0}. Please verify in Deal Verification.`,
+        type: 'complaint', icon: 'shield', priority: 'urgent',
+        data: { leadId: data?.leadId, leadCode: data?.leadCode, orderId: data?.orderId, orderCode: data?.orderCode, customerName: data?.customerName }, ...common
       });
     }
 
@@ -847,9 +884,9 @@ class NotificationService {
     }
 
     if (action === 'packing_completed') {
-      return this.notifyRoles(['Dispatch Head', 'Dispatch Employee', 'Accounts Head', 'Superadmin'], {
-        title: 'Packing Completed',
-        message: `Packing done for ${data?.dcno || data?.orderCode || ''}. Ready for dispatch.`,
+      return this.notifyRoles(['Dispatch Head', 'Dispatch Employee', 'Accounts Head', 'Account Employee', 'Accounts', 'Superadmin'], {
+        title: '✅ Packing Completed',
+        message: `Packing done for ${data?.dcno || data?.orderCode || ''}. Ready for dispatch and NOC/payment clearance.`,
         type: 'dispatch', icon: 'package', priority: 'high',
         data, ...common
       });

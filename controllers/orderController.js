@@ -682,14 +682,9 @@ const updateOrderStatus = async (req, res) => {
     // 🔔 Role-based notifications on status change
     try {
       if (status === 'approved') {
+        // ✅ Only Store gets notified on approval — they check inventory & route further
         await notificationService.triggerStoreNotification({
           action: 'new_order_for_store',
-          data: { orderCode: order.orderCode, orderId: order._id },
-          targetUnit: order.unit,
-          targetCompanyId: order.companyId,
-        });
-        await notificationService.triggerProductionNotification({
-          action: 'order_for_production',
           data: { orderCode: order.orderCode, orderId: order._id },
           targetUnit: order.unit,
           targetCompanyId: order.companyId,
@@ -836,6 +831,37 @@ const verifyServiceOrder = async (req, res) => {
     }
 
     await order.save();
+
+    // 🔔 Notifications after verification
+    try {
+      if (status === 'verified' || status === 'Confirm') {
+        // ✅ Only notify Store team — they will check inventory & decide further routing
+        await notificationService.triggerStoreNotification({
+          action: 'new_order_for_store',
+          data: {
+            orderCode: order.orderCode,
+            orderId: order._id,
+            customerName: order.customer?.name || '',
+            message: 'Deal verified. Please check inventory and order type to proceed.',
+          },
+          targetUnit: order.unit,
+          targetCompanyId: order.companyId,
+        });
+      } else {
+        // ❌ Notify Sales Head that deal was rejected by service
+        await notificationService.triggerSalesNotification({
+          action: 'order_created',
+          orderData: {
+            _id: order._id,
+            orderCode: order.orderCode,
+            customerName: order.customer?.name || '',
+            note: '❌ Deal rejected by Complaint Management/Service team.',
+          },
+          targetUnit: order.unit,
+          targetCompanyId: order.companyId,
+        });
+      }
+    } catch (notifErr) { console.error('Service verification notification error:', notifErr); }
 
     // 📋 Update Lead stage if this order came from a lead (keep status as-is)
     if (order.leadId) {

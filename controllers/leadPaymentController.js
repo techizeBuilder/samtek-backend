@@ -118,7 +118,13 @@ export const addLeadPayment = async (req, res) => {
     try {
       await notificationService.triggerAccountsNotification({
         action: 'lead_payment_added',
-        data: { leadCode: lead.leadCode, leadId: lead._id, amount: leadPayment.amount },
+        data: { 
+          leadCode: lead.leadCode, 
+          leadId: lead._id, 
+          amount: leadPayment.amount,
+          assignedTo: lead.assignedTo,
+          status: lead.paymentCheckStatus
+        },
         targetCompanyId: req.user.companyId,
       });
     } catch (e) { console.error('Lead payment added notification error:', e); }
