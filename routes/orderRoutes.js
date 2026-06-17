@@ -3,6 +3,7 @@ import { authenticateToken } from '../middleware/auth.js';
 import {
   createOrder,
   getOrders,
+  getOrderByLeadId,
   getOrderById,
   updateOrder,
   updateOrderStatus,
@@ -17,7 +18,8 @@ import {
   updateOrderStoreInfo,
   approveSaleOrder,
   getNOCRequests,
-  approveNOC
+  approveNOC,
+  checkInventoryForItem
 } from '../controllers/orderController.js';
 
 const router = express.Router();
@@ -32,6 +34,8 @@ router.post('/approve-noc/:saleId', approveNOC);
 
 router.get('/get-tracking', getOrderTracking);
 router.get('/check-existing', checkExistingOrder);
+router.get('/check-inventory', checkInventoryForItem);
+router.get('/by-lead/:leadId', getOrderByLeadId);
 router.get('/:id', getOrderById);
 router.put('/:id', updateOrder);
 router.patch('/:id/status', updateOrderStatus);

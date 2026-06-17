@@ -7,6 +7,7 @@ import { Item } from '../models/Inventory.js';
 import { Company } from '../models/Company.js';
 import { sendRFQEmail, sendVendorBidConfirmationEmail } from '../services/emailService.js';
 import crypto from 'crypto';
+import notificationService from '../services/notificationService.js';
 
 // ── Helper: generate unique RFQ number ────────────────────────────────────────
 async function generateRFQNo() {
@@ -342,6 +343,15 @@ export const createRFQ = async (req, res) => {
       message: `RFQ ${rfqNo} created. Emails sent to ${matchedVendors.length} vendor(s) [${matchType}].`,
       data: populated
     });
+
+    // 🔔 Notify Accounts about new RFQ
+    try {
+      await notificationService.triggerAccountsNotification({
+        action: 'rfq_vendor_bid_received',
+        data: { rfqNumber: rfqNo, productName: pr.productName, rfqId: rfq._id },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('RFQ notification error:', e); }
   } catch (error) {
     console.error('createRFQ error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -660,6 +670,15 @@ export const submitBidByToken = async (req, res) => {
         warrantyMonths: bid.warrantyMonths
       }
     });
+
+    // 🔔 Notify Accounts team that vendor bid received
+    try {
+      await notificationService.triggerAccountsNotification({
+        action: 'rfq_vendor_bid_received',
+        data: { rfqNumber: bid.rfqNo, vendorName: bid.vendorName, productName: bid.productName, bidId: bid._id },
+        targetCompanyId: bid.companyId,
+      });
+    } catch (e) { console.error('Vendor bid notification error:', e); }
   } catch (error) {
     console.error('submitBidByToken error:', error);
     res.status(500).json({ success: false, message: error.message });

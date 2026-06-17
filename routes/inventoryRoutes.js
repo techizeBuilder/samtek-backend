@@ -5,6 +5,7 @@ import {
   // Item routes
   getItems,
   getItemById,
+  getItemByCode,
   createItem,
   updateItem,
   deleteItem,
@@ -37,6 +38,7 @@ import {
 const router = express.Router();
 
 // Item routes (temporarily remove permission check for Sales order creation)
+router.get('/items/by-code', auth, getItemByCode);
 router.get('/items', auth, getItems);
 router.get('/items/:id', auth, getItemById);
 router.post('/items', auth, createItem);

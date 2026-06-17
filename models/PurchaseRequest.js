@@ -68,6 +68,30 @@ const purchaseRequestSchema = new mongoose.Schema({
   receivedAt: {
     type: Date,
     default: null
+  },
+  // Source of the purchase request
+  source: {
+    type: String,
+    enum: ['Store', 'Production', 'QC'],
+    default: 'Store'
+  },
+  // Whether Store has approved a Production-sourced request to go to Purchase dept
+  storeApproved: {
+    type: Boolean,
+    default: false
+  },
+  storeApprovedAt: {
+    type: Date,
+    default: null
+  },
+  // Production material demand details
+  unit: {
+    type: String,
+    default: null
+  },
+  materialCode: {
+    type: String,
+    default: null
   }
 }, { timestamps: true });
 

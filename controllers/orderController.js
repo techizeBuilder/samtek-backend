@@ -1,4 +1,4 @@
-﻿import Order from '../models/Order.js';
+import Order from '../models/Order.js';
 import Customer from '../models/Customer.js';
 import { Item } from '../models/Inventory.js';
 import ProductDailySummary from '../models/ProductDailySummary.js';
@@ -236,6 +236,7 @@ const getOrders = async (req, res) => {
       startDate = '',
       endDate = '',
       customerId = '',
+      leadId = '',
       sortBy = 'createdAt',
       sortOrder = 'desc'
     } = req.query;
@@ -291,6 +292,10 @@ const getOrders = async (req, res) => {
 
     if (customerId) {
       filter.customer = customerId;
+    }
+
+    if (leadId) {
+      filter.leadId = leadId;
     }
 
     // Date filtering - support both single date and date range
@@ -453,6 +458,15 @@ const updateOrder = async (req, res) => {
     if (orderDate) order.orderDate = new Date(orderDate);
     if (notes !== undefined) order.notes = notes;
     if (status) order.status = status;
+
+    // Update salesChecklist if provided (used by Service Team auto-save during verification)
+    if (req.body.salesChecklist) {
+      order.salesChecklist = req.body.salesChecklist;
+      order.markModified('salesChecklist');
+    }
+
+    // Update priority if provided
+    if (req.body.priority) order.priority = req.body.priority;
 
     // Update products if provided
     if (products && products.length > 0) {
@@ -665,6 +679,40 @@ const updateOrderStatus = async (req, res) => {
 
     await order.save();
 
+    // 🔔 Role-based notifications on status change
+    try {
+      if (status === 'approved') {
+        await notificationService.triggerStoreNotification({
+          action: 'new_order_for_store',
+          data: { orderCode: order.orderCode, orderId: order._id },
+          targetUnit: order.unit,
+          targetCompanyId: order.companyId,
+        });
+        await notificationService.triggerProductionNotification({
+          action: 'order_for_production',
+          data: { orderCode: order.orderCode, orderId: order._id },
+          targetUnit: order.unit,
+          targetCompanyId: order.companyId,
+        });
+      } else if (status === 'in_production') {
+        await notificationService.triggerProductionNotification({
+          action: 'production_started',
+          data: { orderCode: order.orderCode, orderId: order._id },
+          targetUnit: order.unit,
+          targetCompanyId: order.companyId,
+        });
+      } else if (status === 'completed') {
+        await notificationService.triggerDispatchNotification({
+          action: 'ready_for_dispatch',
+          data: { orderCode: order.orderCode, orderId: order._id },
+          targetUnit: order.unit,
+          targetCompanyId: order.companyId,
+        });
+      }
+    } catch (notifErr) {
+      console.error('Order status notification error:', notifErr);
+    }
+
     // Populate the updated order
     const updatedOrder = await Order.findById(id)
       .populate('customer', 'name email mobile address city state')
@@ -743,9 +791,9 @@ const checkExistingOrder = async (req, res) => {
 const verifyServiceOrder = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, remarks, callRecordingUrl, isFakeCommitmentChecked } = req.body;
+    const { status, remarks, callRecordingUrl, isFakeCommitmentChecked, salesChecklist } = req.body;
 
-    console.log(`🔍 Service Verification - Order: ${id}, Status: ${status}`);
+    console.log(`🔍 Service Verification - Order: ${id}, Status: ${status}, Checklist:`, salesChecklist);
 
     const order = await Order.findById(id).populate('customer').populate('leadId');
     if (!order) {
@@ -758,9 +806,14 @@ const verifyServiceOrder = async (req, res) => {
       verifiedBy: req.user._id,
       verifiedAt: new Date(),
       callRecordingUrl,
-      isFakeCommitmentChecked,
+      isFakeCommitmentChecked: isFakeCommitmentChecked || false,
       remarks
     };
+
+    if (salesChecklist) {
+      order.salesChecklist = salesChecklist;
+      order.markModified('salesChecklist');
+    }
 
     // Update status history
     order.statusHistory.push({
@@ -771,9 +824,11 @@ const verifyServiceOrder = async (req, res) => {
     });
 
     if (status === 'verified' || status === 'Confirm') {
-      // ✅ VERIFIED: Move to Store for product type selection
-      order.status = 'pending'; // Now visible to Store
-      console.log(`✅ Order ${order.orderCode} verified by Service - Moving to Store`);
+      // ✅ VERIFIED: Auto-approve and move directly to Accounts > Sales Orders
+      order.status = 'approved';
+      order.approvedBy = req.user._id;
+      order.approvedAt = new Date();
+      console.log(`✅ Order ${order.orderCode} verified by Service - Auto-approved for Accounts Sales Orders`);
     } else {
       // ❌ REJECTED: Mark as rejected by service
       order.status = 'rejected_by_service';
@@ -782,15 +837,15 @@ const verifyServiceOrder = async (req, res) => {
 
     await order.save();
 
-    // 📋 Update Lead status if this order came from a lead
+    // 📋 Update Lead stage if this order came from a lead (keep status as-is)
     if (order.leadId) {
       const Lead = (await import('../models/Lead.js')).default;
       const lead = await Lead.findById(order.leadId);
       if (lead) {
         if (status === 'verified' || status === 'Confirm') {
-          lead.status = 'Service Verified';
+          lead.stage = 'Service Verified';
         } else {
-          lead.status = 'Service Rejected';
+          lead.stage = 'Service Rejected';
         }
         lead.history.push({
           action: 'Service Verification',
@@ -798,7 +853,7 @@ const verifyServiceOrder = async (req, res) => {
           performedBy: req.user._id
         });
         await lead.save();
-        console.log(`📋 Lead ${lead.leadCode} status updated to: ${lead.status}`);
+        console.log(`📋 Lead ${lead.leadCode} stage updated to: ${lead.stage}`);
       }
     }
 
@@ -926,7 +981,13 @@ const getOrderTracking = async (req, res) => {
 
     // 1. Fetch Sale-based records (approved/invoiced orders)
     const sales = await Sale.find(query)
-      .populate('order')
+      .populate({
+        path: 'order',
+        populate: {
+          path: 'products.product',
+          select: 'name specification'
+        }
+      })
       .populate('customer', 'name mobile outstandingAmount')
       .lean();
 
@@ -947,6 +1008,8 @@ const getOrderTracking = async (req, res) => {
         invoiceNumber: sale.invoiceNumber || 'N/A',
         invoiceType: sale.invoiceType || 'Pakka',
         totalAmount: sale.totalAmount || 0,
+        products: order.products || [],
+        requestedDeliveryDate: order.requestedDeliveryDate || null,
         paidAmount: sale.paidAmount || 0,
         balanceAmount: sale.balanceAmount || 0,
         paymentStatus: sale.paymentStatus || 'Pending',
@@ -959,15 +1022,16 @@ const getOrderTracking = async (req, res) => {
       };
     });
 
-    // 🔄 NEW: Also fetch Orders with status='pending_service_approval' (from Lead-to-Order flow)
-    // and 'pending' (service verified) that have NO Sale yet
+    // 🔄 NEW: Also fetch Orders with status='pending_service_approval' (from Lead-to-Order flow),
+    // 'pending', and 'approved' (service-verified orders that have NO Sale/Invoice yet)
     const orderQuery = { 
       ...query, 
-      status: { $in: ['pending_service_approval', 'pending'] }
+      status: { $in: ['pending_service_approval', 'pending', 'approved'] }
     };
     const pendingOrders = await Order.find(orderQuery)
       .populate('customer', 'name mobile outstandingAmount')
-      .populate('leadId', 'leadCode dealValue') // 📋 NEW: Include lead reference
+      .populate('leadId', 'leadCode dealValue')
+      .populate('products.product', 'name specification')
       .lean();
 
     const pendingOrderTrackingData = [];
@@ -987,6 +1051,8 @@ const getOrderTracking = async (req, res) => {
         invoiceNumber: orderSale?.invoiceNumber || 'Pending',
         invoiceType: orderSale?.invoiceType || 'N/A',
         totalAmount: order.totalAmount || 0,
+        products: order.products || [],
+        requestedDeliveryDate: order.requestedDeliveryDate || null,
         paidAmount: 0,
         balanceAmount: order.totalAmount || 0,
         paymentStatus: order.paymentStatus || 'Pending',
@@ -1696,15 +1762,95 @@ const approveNOC = async (req, res) => {
   }
 };
 
+
+// Get order by leadId — no salesPerson restriction, scoped to companyId only
+const getOrderByLeadId = async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    if (!leadId || !mongoose.Types.ObjectId.isValid(leadId)) {
+      return res.status(400).json({ success: false, message: 'Invalid lead ID' });
+    }
+
+    const filter = { leadId: new mongoose.Types.ObjectId(leadId) };
+    // Scope to company (except Super Admin)
+    if (req.user.role !== 'Superadmin' && req.user.role !== 'Super Admin') {
+      if (req.user.companyId) {
+        filter.companyId = new mongoose.Types.ObjectId(req.user.companyId);
+      }
+    }
+
+    const order = await Order.findOne(filter)
+      .populate('customer', 'name email mobile')
+      .populate('salesPerson', 'username fullName')
+      .sort({ createdAt: -1 });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'No order associated with this lead.' });
+    }
+
+    res.json({ success: true, order });
+  } catch (error) {
+    console.error('Error fetching order by leadId:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// 🔍 Auto-check inventory for a product in an order row
+// GET /api/orders/check-inventory?itemId=xxx&requiredQty=2
+const checkInventoryForItem = async (req, res) => {
+  try {
+    const { itemId, requiredQty } = req.query;
+
+    if (!itemId) {
+      return res.status(400).json({ success: false, message: 'itemId is required' });
+    }
+
+    const item = await Item.findById(itemId).lean();
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Item not found in inventory' });
+    }
+
+    const neededQty = parseFloat(requiredQty) || 1;
+    const availableQty = item.qty || 0;
+
+    // Map item category -> productType label
+    // Category 'Purchase Machine' -> 'Purchased (Trading Product)', others -> 'In-house Manufactured'
+    const productType = item.category === 'Purchase Machine'
+      ? 'Purchased (Trading Product)'
+      : 'In-house Manufactured';
+
+    // Check if enough stock exists
+    const isAvailableInInventory = availableQty >= neededQty ? 'Available' : 'Not Available';
+
+    return res.json({
+      success: true,
+      data: {
+        itemId: item._id,
+        itemName: item.name,
+        itemCode: item.code,
+        availableQty,
+        requiredQty: neededQty,
+        internalManufacturing: item.internalManufacturing,
+        productType,
+        isAvailableInInventory
+      }
+    });
+  } catch (error) {
+    console.error('Error checking inventory for item:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export {
   createOrder,
   getOrders,
+  getOrderByLeadId,
   getOrderById,
   updateOrder,
   updateOrderStatus,
   deleteOrder,
   checkExistingOrder,
-  verifyServiceOrder, // 🔄 NEW: Added service verification
+  verifyServiceOrder,
   approveAccountOrder,
   addPaymentEvidence,
   getOrderTracking,
@@ -1713,5 +1859,6 @@ export {
   updateOrderStoreInfo,
   approveSaleOrder,
   getNOCRequests,
-  approveNOC
+  approveNOC,
+  checkInventoryForItem
 };

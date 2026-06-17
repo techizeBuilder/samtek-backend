@@ -162,7 +162,8 @@ const saleSchema = new mongoose.Schema({
       sentAt: { type: Date },
       type: { type: String, enum: ['first', 'second', 'overdue'] }
     }
-  ]
+  ],
+  paymentProofUrl: { type: String, default: '' }
 }, {
   timestamps: true
 });

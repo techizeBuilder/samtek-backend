@@ -3,6 +3,7 @@
 import AttendanceRequest from "../models/AttendanceRequest.js";
 import Attendance from "../models/Attendance.js";
 import User from "../models/User.js";
+import notificationService from "../services/notificationService.js";
 
 /* ================= EMPLOYEE: CREATE REQUEST ================= */
 export const createAttendanceRequest = async (req, res) => {
@@ -21,6 +22,23 @@ export const createAttendanceRequest = async (req, res) => {
     });
 
     await request.save();
+
+    // 🔔 Notify HR Admin and Manager
+    try {
+      const employee = await User.findById(req.user._id).select('fullName username companyId');
+      await notificationService.triggerHRMSNotification({
+        action: 'attendance_correction_requested',
+        data: {
+          employeeName: employee?.fullName || employee?.username,
+          date,
+          type,
+          requestId: request._id,
+          employeeUserId: req.user._id,
+        },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('Attendance request notification error:', e); }
+
     res.status(201).json({
       message: "Attendance request submitted successfully",
       request,
@@ -174,6 +192,21 @@ export const updateAttendanceRequestStatus = async (req, res) => {
     }
 
     await request.save();
+
+    // 🔔 Notify employee about attendance decision
+    try {
+      await notificationService.triggerHRMSNotification({
+        action: 'attendance_approved',
+        data: {
+          employeeUserId: request.user,
+          date: request.date,
+          status,
+          requestId: request._id,
+        },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('Attendance approval notification error:', e); }
+
     res.json(request);
   } catch (error) {
     console.error(error);

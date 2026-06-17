@@ -2,6 +2,7 @@ import Task from "../models/taskManagement.js";
 import fs from "fs";
 import path from "path";
 import { sendTaskEmail } from "../utils/taskEmail.js";
+import notificationService from "../services/notificationService.js";
 
 // --- ROLE HIERARCHY & HELPERS ---
 const TOP_LEVEL_ADMINS = ['HR-Admin', 'MIS Admin', 'Company Admin', 'Super Admin'];
@@ -136,6 +137,23 @@ export const createTask = async (req, res) => {
       });
 
       Promise.allSettled(emailPromises);
+
+      // 🔔 In-app notification for each assigned user
+      const notifPromises = populatedTask.assignedTo.map(assignee =>
+        notificationService.triggerHRMSNotification({
+          action: 'task_assigned',
+          data: {
+            assignedTo: assignee._id,
+            taskTitle: populatedTask.title,
+            taskId: populatedTask._id,
+            priority: populatedTask.priority,
+            dueDate: populatedTask.dueDate,
+            department: populatedTask.department,
+          },
+          targetCompanyId: req.user.companyId,
+        }).catch(e => console.error('Task assign notification error:', e))
+      );
+      Promise.allSettled(notifPromises);
     }
 
     return res.status(201).json({

@@ -16,6 +16,9 @@ import {
   getSuperAdminDispatchById
 } from '../controllers/superAdminController.js';
 
+// Import API Settings functions from leadController
+import { getApiSettings, saveApiSettings } from '../controllers/leadController.js';
+
 // Import company management functions
 import {
   getCompanies,
@@ -190,5 +193,25 @@ router.get('/inventory/customer-categories/export', exportCustomerCategoriesToEx
 // Dispatch Routes
 router.get('/dispatches', getSuperAdminDispatches);
 router.get('/dispatches/:id', getSuperAdminDispatchById);
+
+// ─── API Integration Settings (IndiaMART + Acefone IVR) ───────────────────────
+// Super Admin manages API keys, Caller ID, IndiaMART seller mobile globally
+router.get('/api-settings', getApiSettings);
+router.post('/api-settings', saveApiSettings);
+
+// Get all Sales Employees for assigning in API settings
+router.get('/sales-employees', async (req, res) => {
+  try {
+    const User = (await import('../models/User.js')).default;
+    const employees = await User.find({
+      companyId: req.query.companyId || req.user.companyId,
+      role: { $in: ['Sales Employee', 'Sales', 'Sales Head'] },
+      isActive: true
+    }).select('fullName username role employeeId designationId').populate('designationId', 'name');
+    res.json({ success: true, employees });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 export default router;

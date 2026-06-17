@@ -2,6 +2,7 @@
 
 import Expense from "../models/ExpenseRequest.js";
 import User from "../models/User.js";
+import notificationService from "../services/notificationService.js";
 
 /* ================= EMPLOYEE: CREATE EXPENSE ================= */
 export const createExpense = async (req, res) => {
@@ -30,6 +31,22 @@ export const createExpense = async (req, res) => {
     });
 
     res.status(201).json(expense);
+
+    // 🔔 Notify Manager and HR Admin about expense submission
+    try {
+      const employee = await User.findById(req.user._id).select('fullName username');
+      await notificationService.triggerHRMSNotification({
+        action: 'expense_submitted',
+        data: {
+          employeeName: employee?.fullName || employee?.username,
+          amount,
+          expenseType,
+          expenseId: expense._id,
+          employeeUserId: req.user._id,
+        },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('Expense submitted notification error:', e); }
   } catch (error) {
     res.status(500).json({ message: "Failed to submit expense" });
   }
@@ -102,6 +119,22 @@ export const updateExpenseStatus = async (req, res) => {
 
     expense.status = status;
     await expense.save();
+
+    // 🔔 Notify employee about expense decision
+    if (status === 'APPROVED' || status === 'REJECTED') {
+      try {
+        await notificationService.triggerHRMSNotification({
+          action: 'expense_approved',
+          data: {
+            employeeUserId: expense.employee,
+            amount: expense.amount,
+            status,
+            expenseId: expense._id,
+          },
+          targetCompanyId: req.user.companyId,
+        });
+      } catch (e) { console.error('Expense status notification error:', e); }
+    }
 
     res.json(expense);
   } catch (error) {

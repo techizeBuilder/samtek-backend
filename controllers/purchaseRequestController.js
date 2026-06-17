@@ -1,8 +1,9 @@
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import Sale from '../models/Sale.js';
-import Order from '../models/Order.js'; // Essential to register Order schema for population
+import Order from '../models/Order.js';
 import QCJob from '../models/QCJob.js';
 import fs from 'fs';
+import notificationService from '../services/notificationService.js';
 
 // Generate a unique requestId safely (avoids E11000 duplicate key errors)
 async function generateUniqueRequestId() {
@@ -25,6 +26,8 @@ export const getPurchaseRequests = async (req, res) => {
     if (!companyId) {
       return res.status(400).json({ success: false, message: 'User company is not configured' });
     }
+
+    const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
 
     // --- Auto-sync existing matching Sales to Purchase Requests ---
     try {
@@ -53,6 +56,8 @@ export const getPurchaseRequests = async (req, res) => {
             productName,
             quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
             requestFromDepartment: 'Store',
+            source: 'Store',
+            storeApproved: true, // Store-originated requests go directly to Purchase
             priority: sale.order?.priority || 'Medium',
             companyId,
             storeOrderId: sale.order?._id || sale._id,
@@ -66,9 +71,21 @@ export const getPurchaseRequests = async (req, res) => {
     }
     // -------------------------------------------------------------
 
-    const query = { companyId };
-    if (req.user.role === 'Store Head' || req.user.role === 'Store Employee') {
-      query.requestFromDepartment = 'Store';
+    // Build query based on role:
+    // Store users: see their own (Store-sourced) requests PLUS Production-sourced (pending their approval)
+    // Purchase/other users: see only Store-sourced OR storeApproved Production requests
+    let query = { companyId };
+    if (isStoreUser) {
+      // Store sees all requests for their company (including Store, Production, QC, and old/migrated requests)
+      // No extra source-based filtering is needed
+    } else {
+      // Purchase dept: see Store-sourced (source is 'Store' OR missing/null) OR Production/QC that Store has approved
+      query.$or = [
+        { source: 'Store' },
+        { source: null },
+        { source: { $exists: false } },
+        { source: { $in: ['Production', 'QC'] }, storeApproved: true }
+      ];
     }
 
     const requests = await PurchaseRequest.find(query)
@@ -110,12 +127,21 @@ export const getPurchaseRequests = async (req, res) => {
 // Create a new purchase request
 export const createPurchaseRequest = async (req, res) => {
   try {
-    const { productName, quantity, requestFromDepartment, priority, storeOrderId, itemId } = req.body;
+    const { productName, quantity, requestFromDepartment, priority, storeOrderId, itemId, source, unit, materialCode } = req.body;
     const companyId = req.user.companyId;
 
     if (!companyId) {
       return res.status(400).json({ success: false, message: 'User company is not configured' });
     }
+
+    const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
+
+    // Determine source: explicit source field, or infer from role
+    const resolvedSource = source || (isStoreUser ? 'Store' : 'Production');
+
+    // Store-originated requests go directly to Purchase (storeApproved=true)
+    // Production/QC-originated requests need Store approval first (storeApproved=false)
+    const resolvedStoreApproved = resolvedSource === 'Store';
 
     // Generate Request ID globally to prevent unique index duplicates across companies
     const requestId = await generateUniqueRequestId();
@@ -124,16 +150,62 @@ export const createPurchaseRequest = async (req, res) => {
       requestId,
       productName,
       quantity,
-      requestFromDepartment: (req.user.role === 'Store Head' || req.user.role === 'Store Employee') ? 'Store' : (requestFromDepartment || 'Store'),
-      priority,
+      requestFromDepartment: isStoreUser ? 'Store' : (requestFromDepartment || 'Production'),
+      priority: priority || 'Medium',
       companyId,
       storeOrderId,
-      itemId
+      itemId,
+      source: resolvedSource,
+      storeApproved: resolvedStoreApproved,
+      unit: unit || null,
+      materialCode: materialCode || null
     });
 
     res.status(201).json({ success: true, data: newRequest });
+
+    // 🔔 Notify Accounts about new purchase request
+    try {
+      await notificationService.triggerStoreNotification({
+        action: 'purchase_request_created',
+        data: { requestId: newRequest.requestId, productName: newRequest.productName, priority: newRequest.priority },
+        targetCompanyId: companyId,
+      });
+    } catch (e) { console.error('Purchase request notification error:', e); }
   } catch (error) {
     console.error('Error creating purchase request:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+};
+
+// Store approves a Production-raised demand → makes it visible to Purchase dept
+export const storeApproveRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.user.companyId;
+
+    // Only Store users can approve
+    const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
+    if (!isStoreUser) {
+      return res.status(403).json({ success: false, message: 'Only Store users can approve material demands' });
+    }
+
+    const request = await PurchaseRequest.findOne({ _id: id, companyId });
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+
+    if (request.storeApproved) {
+      return res.status(400).json({ success: false, message: 'Request is already approved' });
+    }
+
+    request.storeApproved = true;
+    request.storeApprovedAt = new Date();
+    await request.save();
+
+    console.log(`✅ Store approved Production request ${request.requestId} → forwarded to Purchase dept`);
+    res.status(200).json({ success: true, data: request, message: 'Request approved and forwarded to Purchase department' });
+  } catch (error) {
+    console.error('Error approving purchase request:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
   }
 };

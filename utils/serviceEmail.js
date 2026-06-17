@@ -108,6 +108,25 @@ export const sendSupportEmail = async ({ type, to, name, data }) => {
             `;
             break;
 
+        case 'INSTALLATION_COMPLETE':
+            subject = `Installation Complete — Share Your Feedback`;
+            content = `
+                <p style="color: #374151; font-size: 16px;">Dear <strong>${name}</strong>,</p>
+                <p style="color: #4b5563; line-height: 1.6;">
+                    Great news! The installation of your <strong>${data.machineName}</strong> has been successfully completed by our technician <strong>${data.technicianName || 'our team'}</strong>.
+                </p>
+                <p style="color: #4b5563; line-height: 1.6;">
+                    We'd love to hear about your experience. Please take a moment to share your feedback by clicking the button below:
+                </p>
+                <div style="text-align: center; margin: 35px 0;">
+                    <a href="${data.link}" style="background-color: #f59e0b; color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 16px;">
+                        ⭐ Give Your Feedback
+                    </a>
+                </div>
+                <p style="color: #6b7280; font-size: 12px; text-align: center;"><em>This link is valid for 7 days. Your feedback helps us improve our services.</em></p>
+            `;
+            break;
+
         case 'SLA_BREACH':
             subject = `🚨 URGENT: SLA Breached on Ticket [${data.ticketId}]`;
             content = `

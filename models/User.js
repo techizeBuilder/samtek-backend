@@ -72,6 +72,12 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Acefone IVR extension number for click-to-call
+  ivrNumber: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   gender: {
     type: String,
     enum: ['Male', 'Female', 'Other', 'Select', '']
