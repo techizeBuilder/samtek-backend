@@ -352,6 +352,21 @@ export const completePacking = async (req, res) => {
       });
     } catch (e) { console.error('Packing completed notification error:', e); }
 
+    // 🔔 Notify Accounts for NOC + Packed Order Payment
+    try {
+      await notificationService.triggerAccountsNotification({
+        action: 'packed_order_payment_pending',
+        data: {
+          jobId: job._id,
+          batchNo: job.jobId,
+          orderCode: job.orderId,
+          machineName: job.machineName,
+          message: 'Packing complete. NOC and final payment collection required before dispatch.',
+        },
+        targetCompanyId: job.company,
+      });
+    } catch (e) { console.error('Accounts NOC payment notification error:', e); }
+
     res.json({ success: true, data: job });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

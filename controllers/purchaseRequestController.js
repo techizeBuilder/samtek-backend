@@ -284,6 +284,23 @@ export const updatePurchaseRequestStatus = async (req, res) => {
     request.status = status;
     await request.save();
 
+    // 🔔 Notify Store team about status change
+    if (oldStatus !== status) {
+      try {
+        await notificationService.triggerStoreNotification({
+          action: 'purchase_request_status_changed',
+          data: {
+            requestId: request.requestId,
+            productName: request.productName,
+            newStatus: status,
+            oldStatus,
+            remarks: `Status updated from ${oldStatus} to ${status}`,
+          },
+          targetCompanyId: request.companyId,
+        });
+      } catch (e) { console.error('PR status change store notification error:', e); }
+    }
+
     // Trigger QC Job & Purchase Invoice creation on 'Received' status transition
     if (status === 'Received' && oldStatus !== 'Received') {
 
@@ -345,6 +362,15 @@ export const updatePurchaseRequestStatus = async (req, res) => {
             notes: `Automatically created from Store Purchase Requisition: ${request.requestId}`
           });
           console.log(`✅ QC Job ${qcJobId} automatically created for Purchase Request ${request.requestId}`);
+
+          // 🔔 Notify QC team about new QC job
+          try {
+            await notificationService.triggerQCNotification({
+              action: 'qc_job_created',
+              data: { qcJobId, itemName: request.productName, requestId: request.requestId, quantity: request.quantity },
+              targetCompanyId: request.companyId,
+            });
+          } catch (e) { console.error('QC job notification error:', e); }
         }
       } catch (qcError) {
         console.error('❌ Error creating QC job from Purchase Request:', qcError);
