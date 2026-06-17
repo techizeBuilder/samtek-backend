@@ -133,6 +133,21 @@ const leadSchema = new mongoose.Schema({
     url: String,
     uploadedAt: { type: Date, default: Date.now }
   }],
+
+  // Documents uploaded at "Go to Account" time (PO, Payment Proof, Quotation)
+  leadDocuments: [{
+    docType: {
+      type: String,
+      enum: ['Purchase Order', 'Payment Proof', 'Quotation'],
+      required: true
+    },
+    originalName: String,
+    fileName: String,
+    url: String,
+    mimeType: String,
+    uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    uploadedAt: { type: Date, default: Date.now }
+  }],
   
   contacts: [{
     contactPerson: { type: String, required: true },

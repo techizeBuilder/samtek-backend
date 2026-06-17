@@ -6,6 +6,7 @@ import LeaveBalanceAdjustment from "../models/LeaveBalanceAdjustment.js";
 import User from "../models/User.js";
 import { sendCommonEmail, CommonEmailType } from "../utils/email.js";
 import mongoose from "mongoose";
+import notificationService from "../services/notificationService.js";
 
 // ================= HELPER =================
 const calculateDays = (from, to) => {
@@ -92,6 +93,23 @@ export const applyLeave = async (req, res) => {
       reason,
       status: "PENDING",
     });
+
+    // 🔔 Notify HR Admin and Manager about leave request
+    try {
+      const employee = await User.findById(req.user._id).select('fullName username companyId');
+      await notificationService.triggerHRMSNotification({
+        action: 'leave_requested',
+        data: {
+          employeeName: employee?.fullName || employee?.username,
+          fromDate,
+          toDate,
+          leaveType,
+          leaveId: leave._id,
+          employeeUserId: req.user._id,
+        },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('Leave request notification error:', e); }
 
     res.status(201).json(leave);
   } catch (error) {
@@ -328,6 +346,21 @@ export const updateLeaveStatus = async (req, res) => {
         remark,
       },
     });
+
+    // 🔔 Notify employee about leave decision
+    try {
+      await notificationService.triggerHRMSNotification({
+        action: status === 'APPROVED' ? 'leave_approved' : 'leave_rejected',
+        data: {
+          employeeUserId: leave.employee._id,
+          fromDate: leave.fromDate,
+          toDate: leave.toDate,
+          reason: remark,
+          leaveId: leave._id,
+        },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('Leave status notification error:', e); }
 
     res.status(200).json(leave);
   } catch (error) {

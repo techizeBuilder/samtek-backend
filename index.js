@@ -79,6 +79,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
         const Sale = (await import('./models/Sale.js')).default;
         const Lead = (await import('./models/Lead.js')).default;
         const LeadPayment = (await import('./models/LeadPayment.js')).default;
+        const Meeting = (await import('./models/Meeting.js')).default;
         const BankAccount = (await import('./models/BankAccount.js')).default;
         const LedgerEntry = (await import('./models/LedgerEntry.js')).default;
         const RFQ = (await import('./models/RFQ.js')).default;
@@ -180,6 +181,28 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
         });
         // STEP 2: Register API routes DIRECTLY
         try {
+        // SMTP Test route (development only)
+            app.get('/api/test-smtp', async (req, res) => {
+                try {
+                    const { sendSupportEmail } = await import('./utils/serviceEmail.js');
+                    const testEmail = req.query.email || process.env.SMTP_USER;
+                    await sendSupportEmail({
+                        type: 'INSTALLATION_COMPLETE',
+                        to: testEmail,
+                        name: 'Test Customer',
+                        data: {
+                            machineName: 'Test Machine',
+                            technicianName: 'Test Technician',
+                            link: 'http://localhost:5173/feedback/test-token-123'
+                        }
+                    });
+                    res.json({ success: true, message: `Test email sent to ${testEmail}` });
+                } catch (error) {
+                    console.error('SMTP Test Error:', error);
+                    res.status(500).json({ success: false, error: error.message, stack: error.stack });
+                }
+            });
+
             // Complaint and Service routes
             const complaintRoutes = (await import('./routes/complaintServiceRoutes.js')).default;
             app.use('/api/complaints', complaintRoutes);
@@ -582,6 +605,21 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
             catch (cronError) {
                 console.warn('⚠️  Cron job setup warning:', cronError.message);
             }
+            // ─── Periodic Cron Job — IndiaMART & IVR Lead Sync ───────────────────────
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runBackgroundApiSync } = await import('./controllers/leadController.js');
+                // Runs every 10 minutes
+                cron.schedule('*/10 * * * *', async () => {
+                    console.log('⏰ [CRON] Starting automatic background Lead Sync (IndiaMART & IVR)...');
+                    await runBackgroundApiSync();
+                });
+                console.log('✅ Automatic Lead Sync cron job scheduled (every 10 minutes)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Lead Sync cron job setup warning:', cronError.message);
+            }
+
             try {
                 const { startSLAMonitor } = await import('./utils/serviceSlaMonitor.ts');
                 startSLAMonitor();

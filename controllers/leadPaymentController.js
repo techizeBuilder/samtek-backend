@@ -1,6 +1,7 @@
 import LeadPayment from '../models/LeadPayment.js';
 import Lead from '../models/Lead.js';
 import { Account, Transaction } from '../models/Account.js';
+import notificationService from '../services/notificationService.js';
 
 // Get all leads sent to account for payment processing
 export const getLeadsForPayment = async (req, res) => {
@@ -112,6 +113,15 @@ export const addLeadPayment = async (req, res) => {
       message: 'Advanced payment added and verified successfully', 
       payment: leadPayment 
     });
+
+    // 🔔 Notify Sales that payment was added
+    try {
+      await notificationService.triggerAccountsNotification({
+        action: 'lead_payment_added',
+        data: { leadCode: lead.leadCode, leadId: lead._id, amount: leadPayment.amount },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('Lead payment added notification error:', e); }
   } catch (error) {
     console.error('Error adding lead payment:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });

@@ -195,6 +195,18 @@ const orderSchema = new mongoose.Schema({
   },
   quotation: {
     type: String  // Stores base64 PDF content
+  },
+  // 📋 SALES CHECKLIST (Filled by Sales Employee during Deal Won, verified by Service Team)
+  salesChecklist: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {
+      advancePayment: { checked: false, value: 0, verified: false },
+      installationCharge: { checked: false, value: '', verified: false },
+      warranty: { checked: false, value: '', verified: false },
+      boardingLodging: { checked: false, value: '', verified: false },
+      backupGenerator: { checked: false, value: '', verified: false },
+      operatorErrorClause: { checked: false, verified: false }
+    }
   }
 }, {
   timestamps: true

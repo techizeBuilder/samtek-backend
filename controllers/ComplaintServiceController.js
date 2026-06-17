@@ -5,8 +5,9 @@ import User from '../models/User.js';
 import { Item } from '../models/Inventory.js';
 import { sendSupportEmail } from '../utils/serviceEmail.js';
 import { generateServiceInvoicePDF } from '../utils/servicePdfGenerator.js';
-import Customer from '../models/Customer.js'; // Adjust path if necessary
-import Order from '../models/Order.js';       // Adjust path if necessary
+import Customer from '../models/Customer.js';
+import Order from '../models/Order.js';
+import notificationService from '../services/notificationService.js';
 
 // --- CONTROLLERS ---
 
@@ -282,6 +283,15 @@ export const createSupportTicket = async (req, res) => {
             data: newTicket
         });
 
+        // 🔔 Notify Complaint Head about new ticket
+        try {
+          await notificationService.triggerComplaintNotification({
+            action: 'ticket_created',
+            data: { ticketId: newTicket.tokenId, customerName: newTicket.customer.name, priorityLevel: priorityLevel },
+            targetCompanyId: req.user.companyId,
+          });
+        } catch (e) { console.error('Ticket created notification error:', e); }
+
     } catch (error) {
         console.error('Error creating support ticket:', error);
         res.status(500).json({
@@ -532,6 +542,21 @@ export const assignTicket = async (req, res) => {
             message: actionText,
             data: responseData
         });
+
+        // 🔔 Notify technician and complaint head about assignment
+        try {
+          await notificationService.triggerComplaintNotification({
+            action: 'ticket_assigned',
+            data: {
+              ticketId: ticket.tokenId,
+              customerName: ticket.customer.name,
+              technicianName: techName,
+              technicianUserId: technicianId,
+              visitDate: ticket.assignment.visitScheduledAt
+            },
+            targetCompanyId: req.user.companyId,
+          });
+        } catch (e) { console.error('Ticket assigned notification error:', e); }
 
     } catch (error) {
         console.error('Error assigning ticket:', error);

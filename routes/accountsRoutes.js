@@ -43,8 +43,11 @@ import {
   getPendingAccountOrders,
   approveOrderAccount,
   rejectOrderAccount,
-  downloadInvoicePDF
+  downloadInvoicePDF,
+  getPackedOrders,
+  uploadPaymentProof
 } from '../controllers/salesAccountController.js';
+import { paymentProofUpload } from '../middleware/paymentProofUpload.js';
 
 import {
   getSalesmanDailyStats,
@@ -269,6 +272,10 @@ accountsRouter.get('/sales/account/invoices/:id/pdf', authorizeRoles('Accounts',
 accountsRouter.post('/sales/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createCustomerPayment);
 accountsRouter.get('/sales/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getCustomerPayments);
 accountsRouter.get('/sales/payment/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getCustomerPaymentStats);
+
+// Packed Orders & Payment Proof Upload
+accountsRouter.get('/packed-orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPackedOrders);
+accountsRouter.post('/sales/invoices/:saleId/payment-proof', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), paymentProofUpload.single('paymentProof'), uploadPaymentProof);
 
 // Receivables & Reports
 accountsRouter.get('/sales/receivables/ageing', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getReceivableAgeing);

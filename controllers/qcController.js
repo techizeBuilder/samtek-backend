@@ -1,6 +1,7 @@
 import QCJob from '../models/QCJob.js';
 import { Item } from '../models/Inventory.js';
 import ProductionOrder from '../models/ProductionOrder.js';
+import notificationService from '../services/notificationService.js';
 
 
 const today = () => new Date().toISOString().split('T')[0];
@@ -138,6 +139,15 @@ export const createQCJob = async (req, res) => {
       company: req.user.companyId,
       createdBy: req.user._id,
     });
+
+    // 🔔 Notify QC team about new job
+    try {
+      await notificationService.triggerQCNotification({
+        action: 'qc_job_created',
+        data: { qcJobId, itemName, jobId: job._id },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('QC job created notification error:', e); }
 
     res.status(201).json({ success: true, data: job });
   } catch (err) {
@@ -327,6 +337,24 @@ export const submitDecision = async (req, res) => {
     }
 
     await job.save();
+
+    // 🔔 Notify based on QC decision
+    try {
+      if (decision === 'Pass') {
+        await notificationService.triggerQCNotification({
+          action: 'qc_passed',
+          data: { qcJobId: job.qcJobId, itemName: job.itemName, jobId: job._id },
+          targetCompanyId: job.company,
+        });
+      } else {
+        await notificationService.triggerQCNotification({
+          action: 'qc_failed',
+          data: { qcJobId: job.qcJobId, itemName: job.itemName, failReason: job.failReason, jobId: job._id },
+          targetCompanyId: job.company,
+        });
+      }
+    } catch (e) { console.error('QC decision notification error:', e); }
+
     res.json({ success: true, data: job });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

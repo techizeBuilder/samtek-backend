@@ -2,6 +2,7 @@ import PackagingJob from '../models/PackagingJob.js';
 import DispatchOrder from '../models/DispatchOrder.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import QCJob from '../models/QCJob.js';
+import notificationService from '../services/notificationService.js';
 
 const now = () => new Date().toISOString();
 
@@ -259,6 +260,16 @@ export const createPackagingJob = async (req, res) => {
     if (actualQcJobId) jobData.qcJobId = actualQcJobId;
 
     const job = await PackagingJob.create(jobData);
+
+    // 🔔 Notify Packing Head & Employee about new job
+    try {
+      await notificationService.triggerPackingNotification({
+        action: 'ready_for_packing',
+        data: { jobId: job._id, batchNo: job.jobId, orderCode: job.orderId, machineName: job.machineName },
+        targetCompanyId: job.company,
+      });
+    } catch (e) { console.error('Ready for packing notification error:', e); }
+
     res.status(201).json({ success: true, data: job });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -331,6 +342,16 @@ export const completePacking = async (req, res) => {
     job.packingCompleteTime = now();
     if (photoProofUrl) job.photoProofUrl = photoProofUrl;
     await job.save();
+
+    // 🔔 Notify Dispatch team that packing is done
+    try {
+      await notificationService.triggerPackingNotification({
+        action: 'packing_completed',
+        data: { jobId: job._id, dcno: job.jobId, orderCode: job.orderId, machineName: job.machineName },
+        targetCompanyId: job.company,
+      });
+    } catch (e) { console.error('Packing completed notification error:', e); }
+
     res.json({ success: true, data: job });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -433,6 +454,15 @@ export const createDispatchOrder = async (req, res) => {
     // Mark packaging job as Dispatched
     await PackagingJob.findByIdAndUpdate(packagingJobId, { status: 'Dispatched' });
 
+    // 🔔 Notify Dispatch Head & Employee that dispatch order is created
+    try {
+      await notificationService.triggerDispatchNotification({
+        action: 'ready_for_dispatch',
+        data: { orderCode: dispatch.orderId, dcno: dispatch.dispatchId, customerName: dispatch.customerName, dispatchOrderId: dispatch._id },
+        targetCompanyId: dispatch.company,
+      });
+    } catch (e) { console.error('Ready for dispatch notification error:', e); }
+
     res.status(201).json({ success: true, data: dispatch });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -456,6 +486,16 @@ export const executeDispatch = async (req, res) => {
       { new: true }
     );
     if (!dispatch) return res.status(404).json({ success: false, message: 'Dispatch order not found or not in Ready state' });
+
+    // 🔔 Notify Sales & Accounts that order is dispatched
+    try {
+      await notificationService.triggerDispatchNotification({
+        action: 'dispatched',
+        data: { orderCode: dispatch.orderId, dispatchId: dispatch.dispatchId, customerName: dispatch.customerName, dispatchOrderId: dispatch._id },
+        targetCompanyId: dispatch.company,
+      });
+    } catch (e) { console.error('Dispatch notification error:', e); }
+
     res.json({ success: true, data: dispatch });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -490,6 +530,16 @@ export const confirmDelivery = async (req, res) => {
       { new: true }
     );
     if (!dispatch) return res.status(404).json({ success: false, message: 'Dispatch order not found or not in transit' });
+
+    // 🔔 Notify Sales Head and Accounts on delivery
+    try {
+      await notificationService.triggerDispatchNotification({
+        action: 'delivery_confirmed',
+        data: { orderCode: dispatch.orderId, customerName: dispatch.customerName, dispatchId: dispatch.dispatchId, dispatchOrderId: dispatch._id },
+        targetCompanyId: dispatch.company,
+      });
+    } catch (e) { console.error('Delivery confirmed notification error:', e); }
+
     res.json({ success: true, data: dispatch });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

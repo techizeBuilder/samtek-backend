@@ -1,5 +1,6 @@
 import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP } from '../models/ProductionOrder.js';
 import ProductionTeam from '../models/ProductionTeam.js';
+import notificationService from '../services/notificationService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -75,6 +76,16 @@ export const createOrder = async (req, res) => {
       company: req.user.companyId,
       createdBy: req.user._id,
     });
+
+    // 🔔 Notify Production Head & Employee about new order
+    try {
+      await notificationService.triggerProductionNotification({
+        action: 'order_for_production',
+        data: { orderCode: order.orderId, orderId: order._id, machineName },
+        targetCompanyId: req.user.companyId,
+      });
+    } catch (e) { console.error('Production order notification error:', e); }
+
     res.status(201).json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -255,6 +266,18 @@ export const approveQC = async (req, res) => {
     }
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+
+    // 🔔 Notify Packing/Dispatch when all processes are done
+    if (order.status === 'Completed') {
+      try {
+        await notificationService.triggerProductionNotification({
+          action: 'production_completed',
+          data: { orderCode: order.orderId, batchNo: order.orderId, orderId: order._id, machineName: order.machineName },
+          targetCompanyId: order.company,
+        });
+      } catch (e) { console.error('Production completed notification error:', e); }
+    }
+
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

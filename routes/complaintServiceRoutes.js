@@ -21,7 +21,9 @@ import {
     getDispatchedOrders, 
     updateCustomerConfirmation, 
     updateInstallationSchedule, 
-    updateFeedbackAndRatings 
+    updateFeedbackAndRatings,
+    getFeedbackByToken,
+    submitFeedbackByToken
 } from "../controllers/ServiceDispatchController.js";
 
 import { serviceUpload } from '../middleware/complaintServiceUpload.js';
@@ -32,6 +34,10 @@ const router = express.Router();
 // 🔓 PUBLIC ROUTE (Notice: No authenticateToken here!)
 // =========================================================================
 router.post('/verify-response/:token', verifyCustomerResponse);
+
+// PUBLIC: Customer feedback form via emailed link
+router.get('/feedback/:token', getFeedbackByToken);
+router.post('/feedback/:token', submitFeedbackByToken);
 
 
 // =========================================================================

@@ -198,7 +198,7 @@ export const createUser = async (req, res) => {
     const {
       username, email, password, fullName, role, unit, companyId, branchId, departmentId, designationId, permissions, isActive,
       mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId,
-      isTrainee,
+      isTrainee, ivrNumber,
       technicianSkills, serviceZone // 🔥 NEW: Added Technician Fields
     } = req.body;
 
@@ -298,6 +298,7 @@ export const createUser = async (req, res) => {
       joiningDate: joiningDate || new Date(),
       reportingManager: reportingManager || managerId || null,
       employeeType: employeeType || employmentType || '',
+      ivrNumber: ivrNumber || '',
 
       // 🔥 INJECT TECHNICIAN FIELDS
       // Only attach these if the user is actually a Complaint Management Employee

@@ -46,8 +46,10 @@ const checkInventoryPermission = (user, action) => {
     return true;
   }
 
-  // Allow Sales and Store users to view items
-  if ((user.role === 'Sales' || user.role === 'Store Head' || user.role === 'Store Employee') && action === 'view') {
+  // Allow Sales, Store, Production and QC users to view items
+  if ((user.role === 'Sales' || user.role === 'Store Head' || user.role === 'Store Employee' || 
+       user.role === 'Production' || user.role === 'Production Head' || user.role === 'Production Employee' ||
+       user.role === 'QC Head' || user.role === 'QC Employee') && action === 'view') {
     return true;
   }
   // need finalized role for technican to view items for complaint service module
@@ -577,6 +579,51 @@ export const getItemById = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
+export const getItemByCode = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'view')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { code } = req.query;
+    if (!code) {
+      return res.status(400).json({ success: false, message: 'Code parameter is required' });
+    }
+
+    // Build query with case-insensitive code matching
+    const escapedCode = code.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let query = { code: { $regex: `^${escapedCode}$`, $options: 'i' } };
+
+    // Apply company/store filtering exactly like other query endpoints
+    if (req.user.companyId) {
+      const companyIdStr = req.user.companyId.toString();
+      query.$and = [
+        { code: { $regex: `^${escapedCode}$`, $options: 'i' } },
+        {
+          $or: [
+            { store: companyIdStr },
+            { store: req.user.companyId },
+            { companyId: companyIdStr },
+            { companyId: req.user.companyId }
+          ]
+        }
+      ];
+    }
+
+    const item = await Item.findOne(query);
+
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    res.json({ success: true, data: item });
+  } catch (error) {
+    console.error('Get item by code error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 
 export const createItem = async (req, res) => {
   try {

@@ -639,3 +639,127 @@ export const downloadInvoicePDF = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+/**
+ * Get Packed Orders for Accounts Module
+ */
+export const getPackedOrders = async (req, res) => {
+    try {
+        const PackagingJob = (await import('../models/PackagingJob.js')).default;
+        const Order = (await import('../models/Order.js')).default;
+        const Sale = (await import('../models/Sale.js')).default;
+
+        const companyId = req.user.companyId;
+
+        // Find packaging jobs with status 'Packed' under user's company
+        const packedJobs = await PackagingJob.find({
+            status: 'Packed',
+            company: companyId
+        }).sort({ updatedAt: -1 });
+
+        const results = [];
+
+        for (const job of packedJobs) {
+            // Query corresponding Order using orderId (which matches order.orderCode)
+            const order = await Order.findOne({
+                orderCode: job.orderId,
+                companyId
+            }).populate('customer').populate('products.product');
+
+            if (!order) continue;
+
+            // Query corresponding Sale
+            const sale = await Sale.findOne({
+                order: order._id,
+                companyId
+            });
+
+            let advancedPaymentAmount = sale?.advancedPaymentAmount || 0;
+            if (sale && !advancedPaymentAmount && order.leadId) {
+                const LeadPayment = (await import('../models/LeadPayment.js')).default;
+                const leadPayments = await LeadPayment.find({
+                    leadId: order.leadId,
+                    status: 'Verified',
+                    companyId
+                }).select('amount').lean();
+                advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+            }
+
+            const totalAmount = sale ? sale.totalAmount : order.totalAmount;
+            const paidAmount = sale ? (sale.paidAmount || 0) : advancedPaymentAmount;
+            const balanceAmount = sale ? sale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+            const paymentStatus = sale ? sale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
+            const paymentProofUrl = sale ? sale.paymentProofUrl : '';
+            const saleId = sale ? sale._id : null;
+
+            results.push({
+                jobId: job._id,
+                jobCode: job.jobId,
+                orderId: order._id,
+                orderCode: order.orderCode,
+                packedDate: job.packingCompleteTime || job.updatedAt,
+                machineName: job.machineName,
+                machineCode: job.machineCode,
+                serialNumber: job.serialNumber,
+                customer: {
+                    id: order.customer?._id,
+                    name: order.customer?.name || 'N/A',
+                    mobile: order.customer?.mobile || 'N/A',
+                    email: order.customer?.email || 'N/A',
+                    address: order.customer?.address1 || 'N/A',
+                    city: order.customer?.city || 'N/A',
+                    state: order.customer?.state || 'N/A'
+                },
+                itemsPacked: order.products.map(p => ({
+                    productName: p.product?.name || 'Unknown Item',
+                    quantity: p.quantity,
+                    price: p.price,
+                    total: p.total
+                })),
+                totalAmount,
+                paidAmount,
+                advancedPaymentAmount,
+                balanceAmount,
+                paymentStatus,
+                paymentProofUrl,
+                saleId
+            });
+        }
+
+        res.json({ success: true, data: results });
+    } catch (error) {
+        console.error('Error in getPackedOrders:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+/**
+ * Upload Payment Proof for Sale
+ */
+export const uploadPaymentProof = async (req, res) => {
+    try {
+        const { saleId } = req.params;
+        const Sale = (await import('../models/Sale.js')).default;
+
+        const sale = await Sale.findOne({ _id: saleId, companyId: req.user.companyId });
+        if (!sale) {
+            return res.status(404).json({ success: false, message: 'Sale Invoice not found' });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'Please upload a payment proof file' });
+        }
+
+        sale.paymentProofUrl = `/uploads/payment-proofs/${req.file.filename}`;
+        await sale.save();
+
+        res.json({
+            success: true,
+            message: 'Payment proof uploaded successfully',
+            paymentProofUrl: sale.paymentProofUrl
+        });
+    } catch (error) {
+        console.error('Error in uploadPaymentProof:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};

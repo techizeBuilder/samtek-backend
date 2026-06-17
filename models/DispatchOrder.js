@@ -13,6 +13,7 @@ const DispatchOrderSchema = new mongoose.Schema({
   // Customer / destination
   customerName: { type: String, default: '' },
   customerContact: { type: String, default: '' },
+  customerEmail: { type: String, default: '' },
   deliveryAddress: { type: String, default: '' },
 
   // Transport
@@ -66,7 +67,10 @@ const DispatchOrderSchema = new mongoose.Schema({
   feedback: {
     rating: { type: Number, min: 1, max: 5 },
     comments: { type: String, default: '' },
-    collectedAt: { type: Date }
+    collectedAt: { type: Date },
+    submittedViaForm: { type: Boolean, default: false }, // true = customer filled the form themselves
+    feedbackToken: { type: String, default: null, index: true },
+    feedbackTokenExpiry: { type: Date, default: null }
   },
 
   notes: { type: String, default: '' },

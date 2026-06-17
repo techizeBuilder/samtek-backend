@@ -14,7 +14,12 @@ const notificationSchema = new mongoose.Schema({
   type: {
     type: String,
     required: true,
-    enum: ['order', 'inventory', 'customer', 'general', 'system'],
+    enum: [
+      'order', 'inventory', 'customer', 'general', 'system',
+      'lead', 'payment', 'production', 'dispatch', 'qc', 'store',
+      'complaint', 'hrms', 'leave', 'attendance', 'payroll',
+      'purchase', 'account', 'task', 'rd', 'marketing', 'mis'
+    ],
     default: 'general'
   },
   icon: {
@@ -23,7 +28,24 @@ const notificationSchema = new mongoose.Schema({
   },
   targetRole: {
     type: String,
-    enum: ['Superadmin', 'Unit Head', 'Unit Manager', 'Sales', 'Production', 'Manufacturing', 'Packing', 'Dispatch', 'Accounts', 'all'],
+    enum: [
+      'Superadmin', 'Super Admin',
+      'Unit Head', 'Unit Manager',
+      'Sales', 'Sales Head', 'Sales Employee',
+      'Production', 'Production Head', 'Production Employee',
+      'Manufacturing',
+      'Packing', 'Packing Head', 'Packing Employee',
+      'Dispatch', 'Dispatch Head', 'Dispatch Employee',
+      'Accounts', 'Accounts Head', 'Account Employee',
+      'Store', 'Store Head', 'Store Employee',
+      'QC', 'QC Head', 'QC Employee',
+      'Complaint Management Head', 'Complaint Management Employee',
+      'HR-Admin', 'Manager', 'Employee', 'Company Admin',
+      'Research & Development Head', 'Research Development Employee',
+      'MIS Admin',
+      'Marketing',
+      'all'
+    ],
     default: 'all'
   },
   targetUserId: {
@@ -101,29 +123,13 @@ notificationSchema.statics.getUnreadCount = async function(userId, userRole, use
     ]
   };
 
-  // Apply unit and company filtering based on role
-  if (userRole === 'Superadmin') {
-    // Super Admin sees all notifications - no additional filtering
-  } else if (userRole === 'Unit Head' || userRole === 'Unit Manager' || userRole === 'Sales' || 
-             userRole === 'Production' || userRole === 'Manufacturing' || userRole === 'Packing' || 
-             userRole === 'Dispatch' || userRole === 'Accounts') {
-    
-    // Unit-based roles should only see notifications for their unit/company or global ones
+  // Super Admin and MIS see all notifications
+  const globalRoles = ['Superadmin', 'Super Admin', 'MIS Admin'];
+  if (!globalRoles.includes(userRole)) {
     const unitCompanyFilters = [];
-    
-    // Add unit filtering if user has a unit
-    if (userUnit) {
-      unitCompanyFilters.push({ targetUnit: userUnit });
-    }
-    
-    // Add company filtering if user has a company
-    if (userCompanyId) {
-      unitCompanyFilters.push({ targetCompanyId: userCompanyId });
-    }
-    
-    // Add global notifications (no specific unit or company target)
+    if (userUnit) unitCompanyFilters.push({ targetUnit: userUnit });
+    if (userCompanyId) unitCompanyFilters.push({ targetCompanyId: userCompanyId });
     unitCompanyFilters.push({ targetUnit: null, targetCompanyId: null });
-    
     if (unitCompanyFilters.length > 0) {
       query.$and.push({ $or: unitCompanyFilters });
     }
