@@ -357,6 +357,10 @@ export const getSuperAdminOrders = async (req, res) => {
           path: 'salesPerson',
           select: 'username fullName email'
         })
+        .populate({
+          path: 'companyId',
+          select: 'name unitName'
+        })
         .sort(sort)
         .skip(skip)
         .limit(parseInt(limit))
@@ -474,7 +478,8 @@ export const getSuperAdminSales = async (req, res) => {
 
     // Get sales persons with their order statistics
     const salesPersons = await User.find(query)
-      .select('username fullName email isActive createdAt')
+      .select('username fullName email isActive createdAt companyId')
+      .populate({ path: 'companyId', select: 'name unitName' })
       .lean();
 
     // Get order statistics for each sales person

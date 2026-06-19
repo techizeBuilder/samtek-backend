@@ -8,22 +8,90 @@ const now = () => new Date().toISOString();
 
 // ── ID Generators ─────────────────────────────────────────────────────────────
 
+// Short company suffix — last 6 chars of companyId ObjectId (globally unique enough)
+// ObjectId is a 24-char hex string; last 6 chars give ~16M combinations — collision is practically impossible
+function companySuffix(companyId) {
+  return String(companyId).slice(-6).toUpperCase();
+}
+
 async function generateJobId(companyId) {
   const year = new Date().getFullYear();
-  const count = await PackagingJob.countDocuments({ company: companyId });
-  return `PKG-${year}-${String(count + 1).padStart(3, '0')}`;
+  const suffix = companySuffix(companyId);
+  const prefix = `PKG-${year}-${suffix}-`;
+
+  const last = await PackagingJob.findOne(
+    { company: companyId, jobId: { $regex: `^${prefix}` } },
+    { jobId: 1 }
+  ).sort({ jobId: -1 }).lean();
+
+  let next = 1;
+  if (last?.jobId) {
+    const num = parseInt(last.jobId.replace(prefix, ''), 10);
+    if (!isNaN(num)) next = num + 1;
+  }
+
+  // Collision retry loop (handles race conditions)
+  let attempts = 0;
+  while (attempts < 20) {
+    const candidate = `${prefix}${String(next + attempts).padStart(3, '0')}`;
+    const exists = await PackagingJob.exists({ jobId: candidate }); // global check
+    if (!exists) return candidate;
+    attempts++;
+  }
+  return `${prefix}${Date.now().toString().slice(-6)}`;
 }
 
 async function generateSerialNumber(companyId) {
   const year = new Date().getFullYear();
-  const count = await PackagingJob.countDocuments({ company: companyId });
-  return `SN-${year}-${String(count + 1).padStart(4, '0')}`;
+  const suffix = companySuffix(companyId);
+  const prefix = `SN-${year}-${suffix}-`;
+
+  const last = await PackagingJob.findOne(
+    { company: companyId, serialNumber: { $regex: `^${prefix}` } },
+    { serialNumber: 1 }
+  ).sort({ serialNumber: -1 }).lean();
+
+  let next = 1;
+  if (last?.serialNumber) {
+    const num = parseInt(last.serialNumber.replace(prefix, ''), 10);
+    if (!isNaN(num)) next = num + 1;
+  }
+
+  // Collision retry loop
+  let attempts = 0;
+  while (attempts < 20) {
+    const candidate = `${prefix}${String(next + attempts).padStart(4, '0')}`;
+    const exists = await PackagingJob.exists({ serialNumber: candidate }); // global check
+    if (!exists) return candidate;
+    attempts++;
+  }
+  return `${prefix}${Date.now().toString().slice(-6)}`;
 }
 
 async function generateDispatchId(companyId) {
   const year = new Date().getFullYear();
-  const count = await DispatchOrder.countDocuments({ company: companyId });
-  return `DIS-${year}-${String(count + 1).padStart(3, '0')}`;
+  const suffix = companySuffix(companyId);
+  const prefix = `DIS-${year}-${suffix}-`;
+
+  const last = await DispatchOrder.findOne(
+    { company: companyId, dispatchId: { $regex: `^${prefix}` } },
+    { dispatchId: 1 }
+  ).sort({ dispatchId: -1 }).lean();
+
+  let next = 1;
+  if (last?.dispatchId) {
+    const num = parseInt(last.dispatchId.replace(prefix, ''), 10);
+    if (!isNaN(num)) next = num + 1;
+  }
+
+  let attempts = 0;
+  while (attempts < 20) {
+    const candidate = `${prefix}${String(next + attempts).padStart(3, '0')}`;
+    const exists = await DispatchOrder.exists({ dispatchId: candidate }); // global check
+    if (!exists) return candidate;
+    attempts++;
+  }
+  return `${prefix}${Date.now().toString().slice(-6)}`;
 }
 
 function generateTrackingId() {

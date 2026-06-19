@@ -31,7 +31,7 @@ const purchaseRequestSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['Pending', 'Approved', 'Ordered', 'Received'],
+    enum: ['Pending', 'Approved', 'Ordered', 'Received', 'Rejected'],
     default: 'Pending'
   },
   companyId: {
@@ -90,6 +90,15 @@ const purchaseRequestSchema = new mongoose.Schema({
     default: null
   },
   materialCode: {
+    type: String,
+    default: null
+  },
+  // Rejection details
+  rejectedAt: {
+    type: Date,
+    default: null
+  },
+  rejectionReason: {
     type: String,
     default: null
   }

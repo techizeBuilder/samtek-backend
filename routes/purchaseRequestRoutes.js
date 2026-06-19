@@ -3,7 +3,9 @@ import {
   getPurchaseRequests,
   createPurchaseRequest,
   updatePurchaseRequestStatus,
-  storeApproveRequest
+  storeApproveRequest,
+  storeRejectRequest,
+  checkInventoryForPR
 } from '../controllers/purchaseRequestController.js';
 import { authenticateToken as authenticateUser } from '../middleware/auth.js';
 import { warrantyUpload } from '../middleware/warrantyUpload.js';
@@ -20,5 +22,11 @@ router.patch('/:id/status', warrantyUpload.single('warrantyCard'), updatePurchas
 
 // Store approves a Production-raised demand → forwards it to Purchase dept
 router.patch('/:id/store-approve', storeApproveRequest);
+
+// Store rejects a Production-raised demand
+router.patch('/:id/store-reject', storeRejectRequest);
+
+// Check inventory availability for a purchase request item
+router.get('/:id/check-inventory', checkInventoryForPR);
 
 export default router;

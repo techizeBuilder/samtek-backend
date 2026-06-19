@@ -5,48 +5,61 @@ import Settings from '../models/Settings.js';
 
 // ============================================================
 // ROLE CHANNEL MAPPING - har role ka Pusher channel name
+// Company-scoped channels use companyId suffix for isolation
 // ============================================================
-const getRoleChannel = (role) => {
+const getRoleSlug = (role) => {
   const map = {
-    'Superadmin': 'notifications-superadmin',
-    'Super Admin': 'notifications-superadmin',
-    'Sales': 'notifications-sales',
-    'Sales Head': 'notifications-sales-head',
-    'Sales Employee': 'notifications-sales-employee',
-    'Accounts': 'notifications-accounts',
-    'Accounts Head': 'notifications-accounts-head',
-    'Account Employee': 'notifications-account-employee',
-    'Production': 'notifications-production',
-    'Production Head': 'notifications-production-head',
-    'Production Employee': 'notifications-production-employee',
-    'Packing': 'notifications-packing',
-    'Packing Head': 'notifications-packing-head',
-    'Packing Employee': 'notifications-packing-employee',
-    'Dispatch': 'notifications-dispatch',
-    'Dispatch Head': 'notifications-dispatch-head',
-    'Dispatch Employee': 'notifications-dispatch-employee',
-    'Store': 'notifications-store',
-    'Store Head': 'notifications-store-head',
-    'Store Employee': 'notifications-store-employee',
-    'QC': 'notifications-qc',
-    'QC Head': 'notifications-qc-head',
-    'QC Employee': 'notifications-qc-employee',
-    'Complaint Management Head': 'notifications-complaint-head',
-    'Complaint Management Employee': 'notifications-complaint-employee',
-    'HR-Admin': 'notifications-hr-admin',
-    'Manager': 'notifications-manager',
-    'Employee': 'notifications-employee',
-    'Company Admin': 'notifications-company-admin',
-    'Research & Development Head': 'notifications-rd-head',
-    'Research Development Employee': 'notifications-rd-employee',
-    'MIS Admin': 'notifications-mis-admin',
-    'Marketing': 'notifications-marketing',
-    'Unit Head': 'notifications-unit-head',
-    'Unit Manager': 'notifications-unit-manager',
-    'Manufacturing': 'notifications-manufacturing',
-    'all': 'notifications-all',
+    'Superadmin': 'superadmin',
+    'Super Admin': 'superadmin',
+    'Sales': 'sales',
+    'Sales Head': 'sales-head',
+    'Sales Employee': 'sales-employee',
+    'Accounts': 'accounts',
+    'Accounts Head': 'accounts-head',
+    'Account Employee': 'account-employee',
+    'Production': 'production',
+    'Production Head': 'production-head',
+    'Production Employee': 'production-employee',
+    'Packing': 'packing',
+    'Packing Head': 'packing-head',
+    'Packing Employee': 'packing-employee',
+    'Dispatch': 'dispatch',
+    'Dispatch Head': 'dispatch-head',
+    'Dispatch Employee': 'dispatch-employee',
+    'Store': 'store',
+    'Store Head': 'store-head',
+    'Store Employee': 'store-employee',
+    'QC': 'qc',
+    'QC Head': 'qc-head',
+    'QC Employee': 'qc-employee',
+    'Complaint Management Head': 'complaint-head',
+    'Complaint Management Employee': 'complaint-employee',
+    'HR-Admin': 'hr-admin',
+    'Manager': 'manager',
+    'Employee': 'employee',
+    'Company Admin': 'company-admin',
+    'Research & Development Head': 'rd-head',
+    'Research Development Employee': 'rd-employee',
+    'MIS Admin': 'mis-admin',
+    'Marketing': 'marketing',
+    'Unit Head': 'unit-head',
+    'Unit Manager': 'unit-manager',
+    'Manufacturing': 'manufacturing',
   };
-  return map[role] || `notifications-${(role || 'all').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')}`;
+  return map[role] || (role || 'all').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+};
+
+/**
+ * Company-scoped channel: notifications-{roleSlug}-{companyId}
+ * Global roles (Superadmin, MIS Admin) get a single global channel.
+ */
+const getRoleChannel = (role, companyId = null) => {
+  const slug = getRoleSlug(role);
+  const globalRoles = ['superadmin', 'mis-admin'];
+  if (globalRoles.includes(slug) || !companyId) {
+    return `notifications-${slug}`;
+  }
+  return `notifications-${slug}-${companyId.toString()}`;
 };
 
 class NotificationService {
@@ -76,17 +89,26 @@ class NotificationService {
         icon: notification.icon,
         priority: notification.priority,
         data: notification.data,
-        createdAt: notification.createdAt
+        createdAt: notification.createdAt,
+        // Include companyId in payload so frontend can do extra client-side check
+        targetCompanyId: targetCompanyId ? targetCompanyId.toString() : null,
+        targetRole: targetRole
       };
 
       if (targetUserId) {
+        // Direct personal notification — only that user's channel
         await pusher.trigger(`user-${targetUserId}`, 'notification', payload);
       } else if (targetRole === 'all') {
-        await pusher.trigger('notifications-all', 'notification', payload);
+        // Truly global — scoped to company if companyId provided, else broadcast all
+        if (targetCompanyId) {
+          await pusher.trigger(`notifications-all-${targetCompanyId.toString()}`, 'notification', payload);
+        } else {
+          await pusher.trigger('notifications-all', 'notification', payload);
+        }
       } else {
-        const channel = getRoleChannel(targetRole);
+        // Role-specific: trigger company-scoped role channel only
+        const channel = getRoleChannel(targetRole, targetCompanyId);
         await pusher.trigger(channel, 'notification', payload);
-        await pusher.trigger('notifications-all', 'notification', payload);
       }
 
       return notification;

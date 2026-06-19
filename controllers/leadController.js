@@ -632,6 +632,49 @@ export const sendLeadToAccount = async (req, res) => {
   }
 };
 
+// Add a single document to lead's documents array (Manage Document List modal)
+export const addLeadDocument = async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    const { docType } = req.body;
+    if (!docType) {
+      return res.status(400).json({ success: false, message: 'Document type is required' });
+    }
+
+    const newDoc = {
+      type: docType,
+      name: req.file.originalname,
+      url: `/uploads/lead-documents/${req.file.filename}`,
+      uploadedAt: new Date()
+    };
+
+    lead.documents = [...(lead.documents || []), newDoc];
+    lead.history.push({
+      action: 'Document Uploaded',
+      notes: `Document uploaded: ${docType} (${req.file.originalname})`,
+      performedBy: req.user._id
+    });
+
+    await lead.save();
+
+    res.json({
+      success: true,
+      message: 'Document uploaded successfully',
+      document: newDoc,
+      documents: lead.documents
+    });
+  } catch (error) {
+    console.error('Error adding lead document:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
 // Upload Documents for Lead (PO, Payment Proof, Quotation) — called before Go to Account
 export const uploadLeadDocuments = async (req, res) => {
   try {

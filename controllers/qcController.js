@@ -282,34 +282,40 @@ export const submitDecision = async (req, res) => {
       }
 
       // 2. Link QC Job / Purchase Request back to Sale / Order and update statuses if applicable
-      try {
-        const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
-        const pr = await PurchaseRequest.findOne({
-          $or: [
-            { requestId: job.sourceRefId },
-            { requestId: job.itemCode }
-          ]
-        }).populate('storeOrderId');
-
-        if (pr && pr.storeOrderId) {
-          console.log(`[QC Approval] Found related storeOrderId: ${pr.storeOrderId._id || pr.storeOrderId} for Purchase Request ${pr.requestId}`);
-          
-          const Sale = (await import('../models/Sale.js')).default;
-          const sale = await Sale.findOne({
+      // ⚠️ NOTE: If QC job source is 'Purchase', do NOT mark sale as Available.
+      // Purchase items are added to inventory only — they must NOT trigger dispatch/packing queue.
+      if (job.source !== 'Purchase') {
+        try {
+          const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+          const pr = await PurchaseRequest.findOne({
             $or: [
-              { order: pr.storeOrderId._id || pr.storeOrderId },
-              { _id: pr.storeOrderId._id || pr.storeOrderId }
+              { requestId: job.sourceRefId },
+              { requestId: job.itemCode }
             ]
-          });
+          }).populate('storeOrderId');
 
-          if (sale) {
-            console.log(`[QC Approval] Auto-updating Sale ${sale._id} status to Available since QC approved.`);
-            sale.isAvailableInInventory = 'Available';
-            await sale.save();
+          if (pr && pr.storeOrderId) {
+            console.log(`[QC Approval] Found related storeOrderId: ${pr.storeOrderId._id || pr.storeOrderId} for Purchase Request ${pr.requestId}`);
+            
+            const Sale = (await import('../models/Sale.js')).default;
+            const sale = await Sale.findOne({
+              $or: [
+                { order: pr.storeOrderId._id || pr.storeOrderId },
+                { _id: pr.storeOrderId._id || pr.storeOrderId }
+              ]
+            });
+
+            if (sale) {
+              console.log(`[QC Approval] Auto-updating Sale ${sale._id} status to Available since QC approved.`);
+              sale.isAvailableInInventory = 'Available';
+              await sale.save();
+            }
           }
+        } catch (workflowError) {
+          console.error('❌ Error in linking purchase request workflow on QC Approval:', workflowError);
         }
-      } catch (workflowError) {
-        console.error('❌ Error in linking purchase request workflow on QC Approval:', workflowError);
+      } else {
+        console.log(`[QC Approval] Source is 'Purchase' — skipping sale status update. Item added to inventory only.`);
       }
     }
     

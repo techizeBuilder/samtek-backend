@@ -4,6 +4,7 @@ import Order from '../models/Order.js';
 import QCJob from '../models/QCJob.js';
 import fs from 'fs';
 import notificationService from '../services/notificationService.js';
+import { Item } from '../models/Inventory.js';
 
 // Generate a unique requestId safely (avoids E11000 duplicate key errors)
 async function generateUniqueRequestId() {
@@ -206,6 +207,129 @@ export const storeApproveRequest = async (req, res) => {
     res.status(200).json({ success: true, data: request, message: 'Request approved and forwarded to Purchase department' });
   } catch (error) {
     console.error('Error approving purchase request:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+};
+
+// Store rejects a Production-raised demand
+export const storeRejectRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const companyId = req.user.companyId;
+
+    // Only Store users can reject
+    const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
+    if (!isStoreUser) {
+      return res.status(403).json({ success: false, message: 'Only Store users can reject material demands' });
+    }
+
+    const request = await PurchaseRequest.findOne({ _id: id, companyId });
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Request not found' });
+    }
+
+    if (request.storeApproved) {
+      return res.status(400).json({ success: false, message: 'Cannot reject an already approved request' });
+    }
+
+    if (request.status === 'Rejected') {
+      return res.status(400).json({ success: false, message: 'Request is already rejected' });
+    }
+
+    request.status = 'Rejected';
+    request.rejectedAt = new Date();
+    request.rejectionReason = reason || 'Rejected by Store';
+    await request.save();
+
+    console.log(`❌ Store rejected Production request ${request.requestId}`);
+    res.status(200).json({ success: true, data: request, message: 'Request rejected successfully' });
+  } catch (error) {
+    console.error('Error rejecting purchase request:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+};
+
+// Check Inventory availability for a Purchase Request item
+export const checkInventoryForPR = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.user.companyId;
+
+    const request = await PurchaseRequest.findOne({ _id: id, companyId }).lean();
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Purchase request not found' });
+    }
+
+    const { productName, materialCode, quantity: requestedQty } = request;
+
+    // Build search conditions: match by code (exact) OR name (case-insensitive partial)
+    const orConditions = [];
+    if (materialCode && materialCode.trim()) {
+      orConditions.push({ code: { $regex: new RegExp(`^${materialCode.trim()}$`, 'i') } });
+    }
+    if (productName && productName.trim()) {
+      orConditions.push({ name: { $regex: new RegExp(productName.trim(), 'i') } });
+    }
+
+    if (orConditions.length === 0) {
+      return res.status(400).json({ success: false, message: 'No product name or material code available to search inventory' });
+    }
+
+    // Search in inventory (company-scoped)
+    const matches = await Item.find({
+      $and: [
+        { $or: orConditions },
+        { $or: [{ companyId }, { store: companyId.toString() }] }
+      ]
+    }).select('name code qty unit category minStock importance').lean();
+
+    if (matches.length === 0) {
+      return res.json({
+        success: true,
+        found: false,
+        message: `No item found in inventory matching "${productName}"${materialCode ? ` or code "${materialCode}"` : ''}.`,
+        items: []
+      });
+    }
+
+    // Enrich each match with availability info
+    const enriched = matches.map(item => {
+      const available = item.qty || 0;
+      const needed = requestedQty || 1;
+      const isSufficient = available >= needed;
+      const isLow = available > 0 && available < needed;
+      const isOut = available === 0;
+
+      return {
+        _id: item._id,
+        name: item.name,
+        code: item.code,
+        currentQty: available,
+        requestedQty: needed,
+        unit: item.unit || 'pcs',
+        category: item.category,
+        minStock: item.minStock || 0,
+        importance: item.importance,
+        status: isSufficient ? 'sufficient' : isLow ? 'low' : 'out_of_stock',
+        statusLabel: isSufficient ? 'Sufficient Stock' : isLow ? 'Insufficient Stock' : 'Out of Stock',
+        canFulfill: isSufficient
+      };
+    });
+
+    const anySufficient = enriched.some(i => i.canFulfill);
+
+    return res.json({
+      success: true,
+      found: true,
+      canFulfill: anySufficient,
+      message: anySufficient
+        ? `Item found in inventory with sufficient stock.`
+        : `Item found in inventory but stock is insufficient for requested quantity (${requestedQty}).`,
+      items: enriched
+    });
+  } catch (error) {
+    console.error('Error checking inventory for PR:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
   }
 };

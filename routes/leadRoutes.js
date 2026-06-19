@@ -14,6 +14,7 @@ import {
   updatePaymentCheckStatus,
   sendLeadToAccount,
   uploadLeadDocuments,
+  addLeadDocument,
   // ─── New API Integration Routes ───────────────────────────────
   getApiSettings,
   saveApiSettings,
@@ -62,6 +63,7 @@ router.post('/:id/upload-documents',      leadDocumentUpload.fields([
   { name: 'paymentProof', maxCount: 1 },
   { name: 'quotation', maxCount: 1 }
 ]), uploadLeadDocuments);
+router.post('/:id/add-document',          leadDocumentUpload.single('file'), addLeadDocument);
 router.post('/:id/won',                   markLeadAsWon);
 router.delete('/:id',                     deleteLead);
 router.get('/:id/call-logs',              getCallLogs);

@@ -17,7 +17,7 @@ const login = async (req, res) => {
     const user = await User.findOne({
       $or: [{ username }, { email: username }],
       isActive: true
-    });
+    }).populate('companyId', 'name unitName city state');
 
     console.log('=== USER LOOKUP RESULT ===');
     console.log('Search username/email:', username);
@@ -85,7 +85,13 @@ const login = async (req, res) => {
       email: user.email,
       fullName: user.fullName,
       role: user.role,
-      unit: user.unit,
+      unit: user.unit || user.companyId?.unitName || 'Main Unit',
+      companyId: user.companyId?._id || user.companyId,
+      company: user.companyId ? {
+        id: user.companyId._id || user.companyId,
+        name: user.companyId.name,
+        unitName: user.companyId.unitName,
+      } : null,
       isActive: user.isActive,
       modules: userModules,
       lastLogin: user.lastLogin,
