@@ -793,11 +793,13 @@ export const createItem = async (req, res) => {
 
     // Trigger notification for new inventory item
     try {
-      await notificationService.triggerInventoryNotification(item, 'created');
+      // ✅ FIX 5: companyId pass karo taaki notification company-scoped ho
+      const notifCompanyId = req.user.companyId || null;
+      await notificationService.triggerInventoryNotification(item, 'created', null, notifCompanyId);
 
       // Check for low stock alert
       if (item.qty <= (item.minStock || 10)) {
-        await notificationService.triggerLowStockNotification(item);
+        await notificationService.triggerLowStockNotification(item, notifCompanyId);
       }
     } catch (notificationError) {
       console.error('Failed to send inventory notification:', notificationError);

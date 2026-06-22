@@ -775,9 +775,27 @@ export const getCustomerDropdownList = async (req, res) => {
   try {
     console.log('📋 Getting customer dropdown list');
 
-    const customers = await Customer.find({
-      active: 'Yes'
-    }).select('_id name customerCode category entityType tdsSection').sort({ name: 1 });
+    // Build filter object
+    const filter = { active: 'Yes' };
+
+    // STRICT company filtering based on user role
+    if (req.user.role === 'Superadmin' || req.user.role === 'Super Admin') {
+      console.log('🔐 Super Admin access - no company filtering');
+    } else {
+      if (!req.user.companyId) {
+        console.error('❌ User has no company assignment:', req.user.username);
+        return res.status(400).json({
+          success: false,
+          message: 'User is not assigned to any company/location. Please contact system administrator.'
+        });
+      }
+      filter.companyId = new mongoose.Types.ObjectId(req.user.companyId);
+      console.log('✅ Company filtering applied for role', req.user.role, ':', req.user.companyId);
+    }
+
+    const customers = await Customer.find(filter)
+      .select('_id name customerCode category entityType tdsSection')
+      .sort({ name: 1 });
 
     console.log(`👥 Found ${customers.length} active customers`);
 

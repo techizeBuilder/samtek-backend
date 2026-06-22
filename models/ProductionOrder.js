@@ -53,9 +53,12 @@ const ProductionOrderSchema = new mongoose.Schema({
   priority: { type: String, enum: ['Urgent', 'Normal'], default: 'Normal' },
   source: { 
     type: String, 
-    enum: ['Store', 'QC_Rejected'], 
+    enum: ['Store', 'QC_Rejected', 'Stock'], 
     default: 'Store' 
   },
+  // purpose field removed — use 'source' to distinguish:
+  //   'Store' / 'QC_Rejected' = order-triggered → dispatch after QC
+  //   'Stock'                 = company stock production → inventory after QC
   rejectionDetails: {
     originalOrderId: { type: String, default: null },
     rejectionReason: { type: String, default: null },
