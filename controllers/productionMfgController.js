@@ -1,5 +1,6 @@
 import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP } from '../models/ProductionOrder.js';
 import ProductionTeam from '../models/ProductionTeam.js';
+import Sale from '../models/Sale.js';
 import notificationService from '../services/notificationService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
@@ -69,7 +70,7 @@ export const createOrder = async (req, res) => {
       machineCode,
       machineName,
       priority: priority || (source === 'QC_Rejected' ? 'Urgent' : 'Normal'),
-      source: source || 'Store',
+      source: source || 'Stock', // manually created = 'Stock' by default (no linked sale)
       rejectionDetails: rejectionDetails || {},
       receivedDate: today(),
       deliveryDate,
@@ -276,6 +277,29 @@ export const approveQC = async (req, res) => {
           targetCompanyId: order.company,
         });
       } catch (e) { console.error('Production completed notification error:', e); }
+
+      // 🏪 Update linked Sale storeQCStatus to 'Production Completed'
+      try {
+        // notes field contains sourceRefId (invoiceNumber). Extract it from the notes string.
+        const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
+        const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
+
+        if (sourceRefId) {
+          const linkedSale = await Sale.findOne({
+            $or: [
+              { invoiceNumber: sourceRefId },
+              { _id: sourceRefId.match(/^[0-9a-fA-F]{24}$/) ? sourceRefId : null }
+            ]
+          });
+          if (linkedSale) {
+            linkedSale.storeQCStatus = 'Production Completed';
+            await linkedSale.save();
+            console.log(`🏪 [Production Completed] Updated storeQCStatus to 'Production Completed' for Sale ${linkedSale._id}`);
+          }
+        }
+      } catch (saleUpdateErr) {
+        console.error('❌ Error updating Sale storeQCStatus on production completion:', saleUpdateErr);
+      }
     }
 
     res.json({ success: true, data: order });

@@ -156,6 +156,24 @@ const saleSchema = new mongoose.Schema({
     enum: ['Available', 'Not Available'],
     default: null
   },
+  // Store QC Status - visible to Store team to track where item went
+  // Available path:     'Goes to QC' -> 'Approved from QC' | 'Rejected from QC'
+  // Purchase path:      'Goes to Purchase' -> 'Purchase Completed'
+  // Production path:    'Goes to Production' -> 'Production Completed'
+  storeQCStatus: {
+    type: String,
+    enum: [
+      null,
+      'Goes to QC',
+      'Approved from QC',
+      'Rejected from QC',
+      'Goes to Purchase',
+      'Purchase Completed',
+      'Goes to Production',
+      'Production Completed'
+    ],
+    default: null
+  },
   // Track dates when reminders were sent (avoid duplicate emails)
   reminderSentDates: [
     {

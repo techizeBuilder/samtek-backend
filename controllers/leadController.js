@@ -12,6 +12,67 @@ export const createLead = async (req, res) => {
   try {
     const leadData = req.body;
 
+    // ─── Server-side Validation ──────────────────────────────────
+    const errors = [];
+
+    // Required fields
+    if (!leadData.productRequired || !leadData.productRequired.trim()) {
+      errors.push('Product / Service Required field fill karein');
+    }
+    if (!leadData.contactPerson || !leadData.contactPerson.trim()) {
+      errors.push('Contact Person fill karein');
+    }
+    if (!leadData.companyName || !leadData.companyName.trim()) {
+      errors.push('Company Name fill karein');
+    }
+    if (!leadData.source || !leadData.source.trim()) {
+      errors.push('Source field fill karein');
+    }
+    // At least email or mobile required
+    if (!leadData.email && !leadData.mobile) {
+      errors.push('Email ya Mobile number mein se ek zaroor enter karein');
+    }
+    // Email format
+    if (leadData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(leadData.email.trim())) {
+      errors.push('Sahi email format enter karein');
+    }
+    // Mobile: 10 digits only
+    if (leadData.mobile && !/^[0-9]{10}$/.test(leadData.mobile.trim())) {
+      errors.push('Mobile number sirf 10 digits ka hona chahiye');
+    }
+    // Alternate mobile
+    if (leadData.alternateMobile && !/^[0-9]{10}$/.test(leadData.alternateMobile.trim())) {
+      errors.push('Alternate Mobile sirf 10 digits ka hona chahiye');
+    }
+    // Alternate email
+    if (leadData.alternateEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(leadData.alternateEmail.trim())) {
+      errors.push('Sahi alternate email format enter karein');
+    }
+    // Pincode: max 6 digits
+    if (leadData.pincode && !/^[0-9]{1,6}$/.test(leadData.pincode.trim())) {
+      errors.push('Pincode mein sirf numbers enter karein (max 6 digits)');
+    }
+    // GST: 15 alphanumeric
+    if (leadData.gstNumber && !/^[0-9A-Z]{15}$/.test(leadData.gstNumber.trim().toUpperCase())) {
+      errors.push('GST Number 15 characters ka hona chahiye');
+    }
+    // PAN: ABCDE1234F format
+    if (leadData.pan && !/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(leadData.pan.trim().toUpperCase())) {
+      errors.push('PAN format sahi nahi hai (e.g. ABCDE1234F)');
+    }
+    // Text-only fields
+    const textOnlyFields = { contactPerson: 'Contact Person', designation: 'Designation', state: 'State', city: 'City', profile: 'Profile' };
+    for (const [field, label] of Object.entries(textOnlyFields)) {
+      if (leadData[field] && /[0-9]/.test(leadData[field])) {
+        errors.push(`${label} mein sirf text enter karein (numbers allowed nahi)`);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({ success: false, message: errors[0], errors });
+    }
+    // ─────────────────────────────────────────────────────────────
+
     // Auto-generate lead code (e.g., LD-0001)
     const count = await Lead.countDocuments({ companyId: req.user.companyId });
     const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;

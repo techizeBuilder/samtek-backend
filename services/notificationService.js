@@ -74,9 +74,14 @@ class NotificationService {
     data = {}, priority = 'medium'
   }) {
     try {
+      // ✅ FIX 1: Jab targetUserId set ho, targetRole null karo
+      // Warna targetRole:'all' se ye notification sabko dikhti thi
+      const effectiveTargetRole = targetUserId ? null : (targetRole || 'all');
+
       const notification = new Notification({
         title, message, type, icon,
-        targetRole, targetUserId, targetUnit, targetCompanyId,
+        targetRole: effectiveTargetRole,
+        targetUserId, targetUnit, targetCompanyId,
         data, priority
       });
       await notification.save();
@@ -90,24 +95,24 @@ class NotificationService {
         priority: notification.priority,
         data: notification.data,
         createdAt: notification.createdAt,
-        // Include companyId in payload so frontend can do extra client-side check
         targetCompanyId: targetCompanyId ? targetCompanyId.toString() : null,
-        targetRole: targetRole
+        targetRole: effectiveTargetRole
       };
 
       if (targetUserId) {
-        // Direct personal notification — only that user's channel
+        // ✅ Personal notification — sirf us user ke channel pe
         await pusher.trigger(`user-${targetUserId}`, 'notification', payload);
-      } else if (targetRole === 'all') {
-        // Truly global — scoped to company if companyId provided, else broadcast all
+      } else if (effectiveTargetRole === 'all') {
+        // Company-wide broadcast — agar companyId hai toh scoped, warna truly global
         if (targetCompanyId) {
           await pusher.trigger(`notifications-all-${targetCompanyId.toString()}`, 'notification', payload);
         } else {
+          // Sirf Superadmin level notifications ke liye (koi company nahi)
           await pusher.trigger('notifications-all', 'notification', payload);
         }
       } else {
-        // Role-specific: trigger company-scoped role channel only
-        const channel = getRoleChannel(targetRole, targetCompanyId);
+        // Role-specific: company-scoped role channel
+        const channel = getRoleChannel(effectiveTargetRole, targetCompanyId);
         await pusher.trigger(channel, 'notification', payload);
       }
 
@@ -154,26 +159,63 @@ class NotificationService {
       }
 
       const skip = (page - 1) * limit;
-      let query = {
-        $and: [{
-          $or: [
-            { targetRole: 'all' },
-            { targetRole: userRole },
-            { targetUserId: userId }
-          ]
-        }]
-      };
-
       const globalRoles = ['Superadmin', 'Super Admin', 'MIS Admin'];
-      if (!globalRoles.includes(userRole)) {
-        const filters = [];
-        if (userUnit) filters.push({ targetUnit: userUnit });
-        if (userCompanyId) filters.push({ targetCompanyId: userCompanyId });
-        filters.push({ targetUnit: null, targetCompanyId: null });
-        query.$and.push({ $or: filters });
+      const isGlobal = globalRoles.includes(userRole);
+
+      // ✅ FIX 2: Proper role + company + personal isolation
+      //
+      // We build a query that matches notifications if:
+      //   (A) Directly targeted to this user (personal), OR
+      //   (B) Role-targeted OR company-wide 'all', AND company/unit matches
+      //
+      // For non-global roles we MUST enforce company scoping.
+
+      let query;
+
+      if (isGlobal) {
+        // Superadmin / MIS Admin — see everything
+        query = {};
+      } else {
+        // Build company/unit scope filter
+        // A notification is "in scope" if:
+        //   - It targets this company specifically, OR
+        //   - It targets this unit specifically, OR
+        //   - It has NO company AND NO unit (truly global broadcast, e.g. system alerts)
+        //     BUT only if it also has no targetUserId (otherwise it's someone else's personal notif)
+        const companyOrUnitFilter = [];
+        if (userCompanyId) companyOrUnitFilter.push({ targetCompanyId: userCompanyId });
+        if (userUnit) companyOrUnitFilter.push({ targetUnit: userUnit });
+        // Global broadcasts (null company + null unit + no personal userId)
+        companyOrUnitFilter.push({
+          targetUnit: null,
+          targetCompanyId: null,
+          targetUserId: null
+        });
+
+        query = {
+          $and: [
+            {
+              // Role match OR personal to this user
+              $or: [
+                { targetRole: 'all' },
+                { targetRole: userRole },
+                { targetUserId: userId }
+              ]
+            },
+            {
+              // ✅ Company scope: personal notifs bypass company filter
+              // Role/broadcast notifs must match company/unit or be truly global
+              $or: [
+                { targetUserId: userId },      // Personal → always show
+                ...companyOrUnitFilter          // Role/broadcast → must match company
+              ]
+            }
+          ]
+        };
       }
 
-      if (unreadOnly) query.$and.push({ 'isRead.userId': { $ne: userId } });
+      if (unreadOnly) query.$and = [...(query.$and || []), { 'isRead.userId': { $ne: userId } }];
+
       const notifications = await Notification.find(query)
         .sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit))
         .populate('targetUserId', 'username fullName')
@@ -212,20 +254,28 @@ class NotificationService {
 
   // Mark all as read
   async markAllAsRead(userId, userRole, userUnit = null, userCompanyId = null) {
-    let query = {
-      $and: [
-        { $or: [{ targetRole: 'all' }, { targetRole: userRole }, { targetUserId: userId }] },
-        { 'isRead.userId': { $ne: userId } }
-      ]
-    };
     const globalRoles = ['Superadmin', 'Super Admin', 'MIS Admin'];
-    if (!globalRoles.includes(userRole)) {
-      const filters = [];
-      if (userUnit) filters.push({ targetUnit: userUnit });
-      if (userCompanyId) filters.push({ targetCompanyId: userCompanyId });
-      filters.push({ targetUnit: null, targetCompanyId: null });
-      query.$and.push({ $or: filters });
+    const isGlobal = globalRoles.includes(userRole);
+
+    let query;
+    if (isGlobal) {
+      query = { 'isRead.userId': { $ne: userId } };
+    } else {
+      // ✅ FIX: Same isolation logic as getUserNotifications
+      const companyOrUnitFilter = [];
+      if (userCompanyId) companyOrUnitFilter.push({ targetCompanyId: userCompanyId });
+      if (userUnit) companyOrUnitFilter.push({ targetUnit: userUnit });
+      companyOrUnitFilter.push({ targetUnit: null, targetCompanyId: null, targetUserId: null });
+
+      query = {
+        $and: [
+          { $or: [{ targetRole: 'all' }, { targetRole: userRole }, { targetUserId: userId }] },
+          { 'isRead.userId': { $ne: userId } },
+          { $or: [{ targetUserId: userId }, ...companyOrUnitFilter] }
+        ]
+      };
     }
+
     const notifications = await Notification.find(query);
     await Promise.all(notifications.map(n => {
       n.isRead.push({ userId, readAt: new Date() });
@@ -966,15 +1016,21 @@ class NotificationService {
     return this.triggerSalesNotification({ action: 'customer_added', customerData, targetUnit, targetCompanyId });
   }
 
-  async triggerLowStockNotification(itemData) {
-    return this.createNotification({
-      title: 'Low Stock Alert',
-      message: `${itemData.name} is running low (${itemData.currentStock} remaining)`,
-      type: 'inventory', icon: 'alert-triangle',
-      targetRole: 'all',
-      data: { itemId: itemData._id, itemName: itemData.name, currentStock: itemData.currentStock },
-      priority: 'urgent'
-    });
+  async triggerLowStockNotification(itemData, targetCompanyId = null) {
+    // ✅ FIX 3: targetRole:'all' se specific roles pe shift karo + companyId add karo
+    // Pehle ye globally sabko dikhti thi, ab sirf Store + Accounts ko dikhegi
+    const companyId = targetCompanyId || itemData?.companyId || null;
+    return this.notifyRoles(
+      ['Store Head', 'Store Employee', 'Accounts Head', 'Account Employee'],
+      {
+        title: '⚠️ Low Stock Alert',
+        message: `${itemData.name} is running low (${itemData.currentStock ?? itemData.qty} remaining)`,
+        type: 'inventory', icon: 'alert-triangle',
+        targetCompanyId: companyId,
+        data: { itemId: itemData._id, itemName: itemData.name, currentStock: itemData.currentStock ?? itemData.qty },
+        priority: 'urgent'
+      }
+    );
   }
 
   async createUnitNotification({ title, message, type = 'general', icon = 'bell', targetRole = 'all', targetUnit, targetCompanyId, data = {}, priority = 'medium' }) {

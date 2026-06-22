@@ -29,6 +29,7 @@ const notificationSchema = new mongoose.Schema({
   targetRole: {
     type: String,
     enum: [
+      null,                          // ✅ Personal notifications (targetUserId set hoga)
       'Superadmin', 'Super Admin',
       'Unit Head', 'Unit Manager',
       'Sales', 'Sales Head', 'Sales Employee',
@@ -108,33 +109,48 @@ notificationSchema.methods.isReadByUser = function(userId) {
 
 // Static method to get unread count for user
 notificationSchema.statics.getUnreadCount = async function(userId, userRole, userUnit = null, userCompanyId = null) {
-  let query = {
-    $and: [
-      {
-        $or: [
-          { targetRole: 'all' },
-          { targetRole: userRole },
-          { targetUserId: userId }
-        ]
-      },
-      {
-        'isRead.userId': { $ne: userId }
-      }
-    ]
-  };
-
-  // Super Admin and MIS see all notifications
   const globalRoles = ['Superadmin', 'Super Admin', 'MIS Admin'];
-  if (!globalRoles.includes(userRole)) {
-    const unitCompanyFilters = [];
-    if (userUnit) unitCompanyFilters.push({ targetUnit: userUnit });
-    if (userCompanyId) unitCompanyFilters.push({ targetCompanyId: userCompanyId });
-    unitCompanyFilters.push({ targetUnit: null, targetCompanyId: null });
-    if (unitCompanyFilters.length > 0) {
-      query.$and.push({ $or: unitCompanyFilters });
-    }
+  const isGlobal = globalRoles.includes(userRole);
+
+  let query;
+
+  if (isGlobal) {
+    // Global roles see all unread notifications
+    query = { 'isRead.userId': { $ne: userId } };
+  } else {
+    // ✅ FIX 4: Same isolation logic as getUserNotifications
+    // Personal notifs only count for owner; role notifs must match company/unit
+    const companyOrUnitFilter = [];
+    if (userUnit) companyOrUnitFilter.push({ targetUnit: userUnit });
+    if (userCompanyId) companyOrUnitFilter.push({ targetCompanyId: userCompanyId });
+    // Truly global broadcast (no company, no unit, not personal to someone else)
+    companyOrUnitFilter.push({
+      targetUnit: null,
+      targetCompanyId: null,
+      targetUserId: null
+    });
+
+    query = {
+      $and: [
+        {
+          $or: [
+            { targetRole: 'all' },
+            { targetRole: userRole },
+            { targetUserId: userId }
+          ]
+        },
+        {
+          // Personal notifs bypass company check; role/broadcast must match
+          $or: [
+            { targetUserId: userId },
+            ...companyOrUnitFilter
+          ]
+        },
+        { 'isRead.userId': { $ne: userId } }
+      ]
+    };
   }
-  
+
   return await this.countDocuments(query);
 };
 

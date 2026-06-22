@@ -189,7 +189,7 @@ export const getReadyForPackaging = async (req, res) => {
         'processes': { $elemMatch: { step: 'Final Testing', qcStatus: 'Approved' } },
         _id: { $nin: existingJobOrderIds },
       })
-        .sort({ createdAt: -1 })
+        .sort({ updatedAt: -1 })
         .populate('processes.assignedTeam', 'name supervisor')
         .lean(),
 
@@ -210,6 +210,7 @@ export const getReadyForPackaging = async (req, res) => {
       machineCode: job.sourceRefId || 'N/A',
       machineName: job.itemName || 'Store Item',
       createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
       processes: [
         {
           step: 'Final Testing',
@@ -220,6 +221,13 @@ export const getReadyForPackaging = async (req, res) => {
 
     // Combine production orders and QC-approved store items
     const combined = [...orders, ...qcMapped];
+
+    // Sort the combined array by updatedAt descending (latest approved from QA first)
+    combined.sort((a, b) => {
+      const dateA = a.updatedAt ? new Date(a.updatedAt) : new Date(a.createdAt || 0);
+      const dateB = b.updatedAt ? new Date(b.updatedAt) : new Date(b.createdAt || 0);
+      return dateB - dateA;
+    });
 
     res.json({ success: true, data: combined });
   } catch (err) {

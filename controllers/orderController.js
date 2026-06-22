@@ -1043,6 +1043,7 @@ const getOrderTracking = async (req, res) => {
         gatePass: sale.gatePass || { status: 'Pending' },
         productType: sale.productType || null,
         isAvailableInInventory: sale.isAvailableInInventory || null,
+        storeQCStatus: sale.storeQCStatus || null,
         orderStatus: order.status || 'pending',
         source: 'sale'
       };
@@ -1086,6 +1087,7 @@ const getOrderTracking = async (req, res) => {
         gatePass: { status: 'Pending' },
         productType: orderSale?.productType || null,
         isAvailableInInventory: orderSale?.isAvailableInInventory || null,
+        storeQCStatus: orderSale?.storeQCStatus || null,
         orderStatus: order.status, // 🔄 NEW: Include actual status (pending_service_approval/pending)
         serviceVerification: order.serviceVerification || { status: 'pending' }, // 🔄 NEW: Service verification info
         leadId: order.leadId?._id || null, // 📋 NEW: Lead reference
@@ -1284,7 +1286,7 @@ const updateOrderStoreInfo = async (req, res) => {
     
     console.log(`🔄 Applying automation for ${orderCode} - ProductType: ${sale.productType}, Available: ${sale.isAvailableInInventory}`);
 
-    // CASE 1: Available -> Create QC Job & Cleanup Pending Production/Purchase
+    // CASE 1: Available -> Deduct from inventory, Create QC Job & Cleanup Pending Production/Purchase
     if (sale.isAvailableInInventory === 'Available') {
       try {
         await ProductionOrder.deleteMany({
@@ -1298,10 +1300,29 @@ const updateOrderStoreInfo = async (req, res) => {
           status: 'Pending'
         });
 
+        // ✂️ Deduct inventory qty for each product in the order
+        for (const p of order.products) {
+          const productId = p.product?._id || p.product;
+          const deductQty = p.quantity || 1;
+          if (productId) {
+            try {
+              const invItem = await Item.findById(productId);
+              if (invItem && invItem.qty >= deductQty) {
+                invItem.qty = invItem.qty - deductQty;
+                await invItem.save();
+                console.log(`✂️ Deducted ${deductQty} from ${invItem.name}. New qty: ${invItem.qty}`);
+              }
+            } catch (deductErr) {
+              console.error(`❌ Error deducting inventory for product ${productId}:`, deductErr);
+            }
+          }
+        }
+
         const existingQC = await QCJob.findOne({
           source: 'Store',
           sourceRefId: sourceRefId,
-          company: sale.companyId
+          company: sale.companyId,
+          status: { $in: ['Pending', 'In Progress'] }
         });
 
         if (!existingQC) {
@@ -1328,6 +1349,9 @@ const updateOrderStoreInfo = async (req, res) => {
           });
           console.log(`✅ QC Job ${qcJobId} created for Order ${orderId}`);
         }
+
+        // Set store status to reflect item went to QC
+        sale.storeQCStatus = 'Goes to QC';
       } catch (qcError) {
         console.error('❌ Error in Available case automation:', qcError);
       }
@@ -1368,12 +1392,16 @@ const updateOrderStoreInfo = async (req, res) => {
             receivedDate: today(),
             deliveryDate: today(),
             status: 'Pending',
+            source: 'Store',
             company: sale.companyId,
             createdBy: req.user._id,
             notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
           });
           console.log(`✅ Production Order ${prodOrderId} created for Order ${orderId}`);
         }
+
+        // Set store status to reflect item went to Production
+        sale.storeQCStatus = 'Goes to Production';
       } catch (prodError) {
         console.error('❌ Error in In-house case automation:', prodError);
       }
@@ -1416,6 +1444,9 @@ const updateOrderStoreInfo = async (req, res) => {
           });
           console.log(`✅ Purchase Request ${requestId} created for Order ${orderId}`);
         }
+
+        // Set store status to reflect item went to Purchase
+        sale.storeQCStatus = 'Goes to Purchase';
       } catch (purchaseError) {
         console.error('❌ Error in Purchased case automation:', purchaseError);
       }
@@ -1434,6 +1465,7 @@ const updateOrderStoreInfo = async (req, res) => {
         invoiceNumber: sale.invoiceNumber,
         productType: sale.productType,
         isAvailableInInventory: sale.isAvailableInInventory,
+        storeQCStatus: sale.storeQCStatus,
         isNewSale: isNewSale,
         flowStatus: 'store_completed'
       }
@@ -1485,7 +1517,7 @@ const updateSaleStoreInfo = async (req, res) => {
 
     // --- AUTOMATION LOGIC WITH CLEANUP ---
 
-    // CASE 1: Available -> Create QC Job & Cleanup Pending Production/Purchase
+    // CASE 1: Available -> Deduct inventory, Create QC Job & Cleanup Pending Production/Purchase
     if (sale.isAvailableInInventory === 'Available') {
       try {
         const orderCode = sale.order?.orderCode || 'N/A';
@@ -1503,11 +1535,33 @@ const updateSaleStoreInfo = async (req, res) => {
           status: 'Pending'
         });
 
-        // 2. Create QC Job
+        // ✂️ Deduct inventory qty for each item in sale (linked via order products)
+        const linkedOrder = sale.order?._id ? await Order.findById(sale.order._id).populate('products.product') : null;
+        if (linkedOrder && linkedOrder.products) {
+          for (const p of linkedOrder.products) {
+            const productId = p.product?._id || p.product;
+            const deductQty = p.quantity || 1;
+            if (productId) {
+              try {
+                const invItem = await Item.findById(productId);
+                if (invItem && invItem.qty >= deductQty) {
+                  invItem.qty = invItem.qty - deductQty;
+                  await invItem.save();
+                  console.log(`✂️ [Sale] Deducted ${deductQty} from ${invItem.name}. New qty: ${invItem.qty}`);
+                }
+              } catch (deductErr) {
+                console.error(`❌ Error deducting inventory for product ${productId}:`, deductErr);
+              }
+            }
+          }
+        }
+
+        // 2. Create QC Job (skip if one already active for this ref)
         const existingQC = await QCJob.findOne({
           source: 'Store',
           sourceRefId: sourceRefId,
-          company: sale.companyId
+          company: sale.companyId,
+          status: { $in: ['Pending', 'In Progress'] }
         });
 
         if (!existingQC) {
@@ -1534,6 +1588,8 @@ const updateSaleStoreInfo = async (req, res) => {
           });
           console.log(`✅ QC Job ${qcJobId} created and Production/Purchase cleaned up for Sale ${saleId}`);
         }
+
+        sale.storeQCStatus = 'Goes to QC';
       } catch (qcError) {
         console.error('❌ Error in Available case automation:', qcError);
       }
@@ -1580,12 +1636,15 @@ const updateSaleStoreInfo = async (req, res) => {
             receivedDate: today(),
             deliveryDate: sale.dueDate ? sale.dueDate.toISOString().split('T')[0] : today(),
             status: 'Pending',
+            source: 'Store',
             company: sale.companyId,
             createdBy: req.user._id,
             notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
           });
           console.log(`✅ Production Order ${prodOrderId} created successfully for Sale ${saleId}`);
         }
+
+        sale.storeQCStatus = 'Goes to Production';
       } catch (prodError) {
         console.error('❌ Error in In-house case automation:', prodError);
       }
@@ -1634,6 +1693,8 @@ const updateSaleStoreInfo = async (req, res) => {
           });
           console.log(`✅ Purchase Request ${requestId} created successfully for Sale ${saleId}`);
         }
+
+        sale.storeQCStatus = 'Goes to Purchase';
       } catch (purchaseError) {
         console.error('❌ Error in Purchased case automation:', purchaseError);
       }
@@ -1644,8 +1705,14 @@ const updateSaleStoreInfo = async (req, res) => {
     res.json({
       success: true,
       message: 'Store information updated successfully',
+      data: {
+        productType: sale.productType,
+        isAvailableInInventory: sale.isAvailableInInventory,
+        storeQCStatus: sale.storeQCStatus
+      },
       productType: sale.productType,
-      isAvailableInInventory: sale.isAvailableInInventory
+      isAvailableInInventory: sale.isAvailableInInventory,
+      storeQCStatus: sale.storeQCStatus
     });
   } catch (error) {
     console.error('Error updating store info:', error);
@@ -1695,69 +1762,92 @@ const getNOCRequests = async (req, res) => {
     const LeadPayment = (await import('../models/LeadPayment.js')).default;
 
     // Find all sales with populated orders
+    // Sort: 'Pakka' invoices first (so Pakka is preferred over Kachha for same order),
+    // then by createdAt descending for recency within same type
     const sales = await Sale.find({ companyId: req.user.companyId })
       .populate({
         path: 'order',
         populate: { path: 'customer' }
       })
-      .sort({ createdAt: -1 });
+      .sort({ invoiceType: 1, createdAt: -1 }); // 'Kachha' < 'Pakka' alphabetically, so Pakka comes last - we reverse below
+
+    // Re-sort: Pakka first, then Kachha (so dedup keeps Pakka for a given order)
+    sales.sort((a, b) => {
+      if (a.invoiceType === 'Pakka' && b.invoiceType !== 'Pakka') return -1;
+      if (a.invoiceType !== 'Pakka' && b.invoiceType === 'Pakka') return 1;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
 
     const nocRequests = [];
+    // Track processed orderIds to prevent duplicate NOC entries
+    // Same order can have multiple Sale docs (Pakka + Kachha dual billing)
+    // We only want ONE NOC entry per order - prefer 'Pakka' bill, fallback to first found
+    const processedOrderIds = new Set();
 
     // Check if there is a Packed job for the sale's order
     for (const sale of sales) {
-      if (sale.order && sale.gatePass) {
-        // Include all: Pending NOC, Approved NOC, and Gate Pass Generated
-        const job = await PackagingJob.findOne({
-          orderId: sale.order.orderCode,
-          status: 'Packed',
-          company: req.user.companyId
+      if (!sale.order || !sale.gatePass) continue;
+
+      const orderIdStr = sale.order._id?.toString();
+      if (!orderIdStr) continue;
+
+      // Skip if this order was already added to NOC list (duplicate from dual billing)
+      if (processedOrderIds.has(orderIdStr)) continue;
+
+      // Include all: Pending NOC, Approved NOC, and Gate Pass Generated
+      const job = await PackagingJob.findOne({
+        orderId: sale.order.orderCode,
+        status: 'Packed',
+        company: req.user.companyId
+      });
+
+      if (job) {
+        // Fetch advanced payment from linked lead (if any)
+        let advancedPaymentAmount = sale.advancedPaymentAmount || 0;
+        if (!advancedPaymentAmount && sale.order.leadId) {
+          const leadPayments = await LeadPayment.find({
+            leadId: sale.order.leadId,
+            status: 'Verified',
+            companyId: req.user.companyId
+          }).select('amount').lean();
+          advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+        }
+
+        const effectivePaidAmount = (sale.paidAmount || 0) + advancedPaymentAmount;
+        const effectiveBalance = Math.max(0, sale.totalAmount - effectivePaidAmount);
+        let effectivePaymentStatus = sale.paymentStatus;
+        if (advancedPaymentAmount > 0 && effectiveBalance <= 0) {
+          effectivePaymentStatus = 'Paid';
+        } else if (advancedPaymentAmount > 0 && effectivePaidAmount > 0) {
+          effectivePaymentStatus = 'Partially Paid';
+        }
+
+        nocRequests.push({
+          saleId: sale._id,
+          orderId: sale.order._id,
+          orderCode: sale.order.orderCode,
+          customerName: sale.order.customer?.name || 'N/A',
+          customerMobile: sale.order.customer?.mobile || 'N/A',
+          totalAmount: sale.totalAmount,
+          paidAmount: effectivePaidAmount,
+          advancedPaymentAmount,
+          balanceAmount: effectiveBalance,
+          paymentStatus: effectivePaymentStatus,
+          nocStatus: sale.gatePass?.nocStatus || 'Pending',
+          gatePassStatus: sale.gatePass?.status || 'Pending',
+          gatePassNumber: sale.gatePass?.gatePassNumber || '',
+          vehicleNumber: sale.gatePass?.vehicleNumber || '',
+          driverName: sale.gatePass?.driverName || '',
+          contactNumber: sale.gatePass?.contactNumber || '',
+          gatePassGeneratedAt: sale.gatePass?.generatedAt || null,
+          machineName: job.machineName,
+          machineCode: job.machineCode,
+          serialNumber: job.serialNumber,
+          invoiceType: sale.invoiceType || 'Pakka'
         });
 
-        if (job) {
-          // Fetch advanced payment from linked lead (if any)
-          let advancedPaymentAmount = sale.advancedPaymentAmount || 0;
-          if (!advancedPaymentAmount && sale.order.leadId) {
-            const leadPayments = await LeadPayment.find({
-              leadId: sale.order.leadId,
-              status: 'Verified',
-              companyId: req.user.companyId
-            }).select('amount').lean();
-            advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
-          }
-
-          const effectivePaidAmount = (sale.paidAmount || 0) + advancedPaymentAmount;
-          const effectiveBalance = Math.max(0, sale.totalAmount - effectivePaidAmount);
-          let effectivePaymentStatus = sale.paymentStatus;
-          if (advancedPaymentAmount > 0 && effectiveBalance <= 0) {
-            effectivePaymentStatus = 'Paid';
-          } else if (advancedPaymentAmount > 0 && effectivePaidAmount > 0) {
-            effectivePaymentStatus = 'Partially Paid';
-          }
-
-          nocRequests.push({
-            saleId: sale._id,
-            orderId: sale.order._id,
-            orderCode: sale.order.orderCode,
-            customerName: sale.order.customer?.name || 'N/A',
-            customerMobile: sale.order.customer?.mobile || 'N/A',
-            totalAmount: sale.totalAmount,
-            paidAmount: effectivePaidAmount,
-            advancedPaymentAmount,
-            balanceAmount: effectiveBalance,
-            paymentStatus: effectivePaymentStatus,
-            nocStatus: sale.gatePass?.nocStatus || 'Pending',
-            gatePassStatus: sale.gatePass?.status || 'Pending',
-            gatePassNumber: sale.gatePass?.gatePassNumber || '',
-            vehicleNumber: sale.gatePass?.vehicleNumber || '',
-            driverName: sale.gatePass?.driverName || '',
-            contactNumber: sale.gatePass?.contactNumber || '',
-            gatePassGeneratedAt: sale.gatePass?.generatedAt || null,
-            machineName: job.machineName,
-            machineCode: job.machineCode,
-            serialNumber: job.serialNumber
-          });
-        }
+        // Mark this orderId as processed so duplicate Sale docs are skipped
+        processedOrderIds.add(orderIdStr);
       }
     }
 

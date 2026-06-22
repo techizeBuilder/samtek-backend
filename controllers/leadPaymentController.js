@@ -91,16 +91,6 @@ export const addLeadPayment = async (req, res) => {
     // Update lead's advanced payment amount
     lead.advancedPaymentAmount = (lead.advancedPaymentAmount || 0) + parseFloat(amount);
     
-    // Auto-update payment check status
-    if (lead.paymentCheckStatus === 'Pending' || lead.paymentCheckStatus === 'Rejected') {
-      lead.paymentCheckStatus = lead.advancedPaymentAmount >= (lead.dealValue || 0) ? 'Paid' : 'Partially Paid';
-      lead.history.push({
-        action: 'Payment Check Updated',
-        notes: `Payment check status auto-updated to '${lead.paymentCheckStatus}' after adding ₹${amount}.`,
-        performedBy: req.user._id
-      });
-    }
-
     lead.history.push({
       action: 'Advanced Payment Added',
       notes: `Advanced payment of ₹${amount} added by ${req.user.fullName || req.user.username}. ${bankAccountName ? `Bank: ${bankAccountName}` : 'Cash payment.'}`,

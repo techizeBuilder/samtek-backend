@@ -58,7 +58,7 @@ export const getOverdueInvoices = async (req, res) => {
             paymentStatus: { $in: ['Pending', 'Partially Paid', 'Overdue'] }
         })
         .populate('customer', 'name email mobile city state')
-        .sort({ dueDate: 1 })
+        .sort({ saleDate: -1 })
         .lean();
 
         // Enrich with overdue data

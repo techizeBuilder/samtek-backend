@@ -1,6 +1,7 @@
 import QCJob from '../models/QCJob.js';
 import { Item } from '../models/Inventory.js';
 import ProductionOrder from '../models/ProductionOrder.js';
+import Sale from '../models/Sale.js';
 import notificationService from '../services/notificationService.js';
 
 
@@ -173,9 +174,12 @@ export const updateQCJob = async (req, res) => {
 export const startInspection = async (req, res) => {
   try {
     const { inspector } = req.body;
+    if (!inspector || !inspector.trim()) {
+      return res.status(400).json({ success: false, message: 'Inspector name is required to start inspection' });
+    }
     const job = await QCJob.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, status: 'Pending' },
-      { status: 'In Progress', inspector: inspector || req.user.fullName || '', inspectionStartDate: today() },
+      { status: 'In Progress', inspector: inspector.trim(), inspectionStartDate: today() },
       { new: true }
     );
     if (!job) return res.status(404).json({ success: false, message: 'Job not found or not in Pending state' });
@@ -220,6 +224,17 @@ export const submitDecision = async (req, res) => {
     const job = await QCJob.findOne({ _id: req.params.id, company: req.user.companyId, status: 'In Progress' });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found or not In Progress' });
 
+    // Enforce: all checklist items must be inspected before a decision can be submitted
+    if (job.checklist && job.checklist.length > 0) {
+      const pendingItems = job.checklist.filter(c => c.status === 'Pending');
+      if (pendingItems.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `${pendingItems.length} checklist item${pendingItems.length > 1 ? 's' : ''} still pending. Complete all checklist items before submitting a decision.`
+        });
+      }
+    }
+
     job.decision = decision;
     job.status = decision === 'Pass' ? 'Approved' : 'Rejected';
     job.inspectionEndDate = today();
@@ -229,62 +244,129 @@ export const submitDecision = async (req, res) => {
     if (decision === 'Pass') {
       job.transferredToStore = true;
 
-      // 1. Add to Item Inventory
-      try {
-        let inventoryItem = null;
-        
-        // Attempt 1: Search by ObjectId
-        if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
-          inventoryItem = await Item.findById(job.itemCode);
+      // 1. Update Item Inventory
+      // Rules:
+      // - 'Purchase' source  → item received from vendor → ADD to inventory
+      // - 'Stock' source     → company produced for own stock → ADD to inventory
+      // - 'Store' source     → item was from store order (qty already deducted) → dispatch, no add
+      // - 'QC_Rejected'      → item re-made for original order → dispatch, no add
+      
+      const shouldAddToInventory = job.source === 'Purchase' || job.source === 'Stock';
+
+      if (shouldAddToInventory) {
+        try {
+          let inventoryItem = null;
+          
+          // Attempt 1: Search by ObjectId
+          if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
+            inventoryItem = await Item.findById(job.itemCode);
+          }
+          
+          // Attempt 2: Search by Code and Store
+          if (!inventoryItem && job.itemCode) {
+            inventoryItem = await Item.findOne({
+              code: job.itemCode,
+              store: job.company.toString()
+            });
+          }
+          
+          // Attempt 3: Search by Name and Store
+          if (!inventoryItem && job.itemName) {
+            inventoryItem = await Item.findOne({
+              name: job.itemName,
+              store: job.company.toString()
+            });
+          }
+          
+          if (inventoryItem) {
+            const prevQty = inventoryItem.qty || 0;
+            inventoryItem.qty = prevQty + (job.quantity || 1);
+            await inventoryItem.save();
+            console.log(`✅ [QC Approval - ${job.source}] Inventory updated for ${inventoryItem.name}. Prev: ${prevQty}, New: ${inventoryItem.qty}`);
+          } else {
+            const newCode = job.itemCode || `ITEM-${Date.now()}`;
+            inventoryItem = await Item.create({
+              name: job.itemName,
+              code: newCode,
+              category: job.category || 'Raw Material',
+              qty: job.quantity || 1,
+              unit: job.unit || 'pcs',
+              store: job.company.toString(),
+              companyId: job.company,
+              type: job.category === 'Finished Good' ? 'Product' : 'Material',
+              stdCost: 0,
+              purchaseCost: 0,
+              salePrice: 0
+            });
+            console.log(`✅ [QC Approval - ${job.source}] Created new inventory item: ${job.itemName}`);
+          }
+        } catch (invError) {
+          console.error('❌ Error updating inventory upon QC Approval:', invError);
         }
-        
-        // Attempt 2: Search by Code and Store
-        if (!inventoryItem && job.itemCode) {
-          inventoryItem = await Item.findOne({
-            code: job.itemCode,
-            store: job.company.toString()
-          });
-        }
-        
-        // Attempt 3: Search by Name and Store
-        if (!inventoryItem && job.itemName) {
-          inventoryItem = await Item.findOne({
-            name: job.itemName,
-            store: job.company.toString()
-          });
-        }
-        
-        if (inventoryItem) {
-          const prevQty = inventoryItem.qty || 0;
-          inventoryItem.qty = prevQty + (job.quantity || 1);
-          await inventoryItem.save();
-          console.log(`✅ [QC Approval] Inventory updated for item ${inventoryItem.name}. Previous Qty: ${prevQty}, New Qty: ${inventoryItem.qty}`);
-        } else {
-          // If item does not exist, let's create a new inventory item!
-          const newCode = job.itemCode || `ITEM-${Date.now()}`;
-          inventoryItem = await Item.create({
-            name: job.itemName,
-            code: newCode,
-            category: job.category || 'Raw Material',
-            qty: job.quantity || 1,
-            unit: job.unit || 'pcs',
-            store: job.company.toString(),
-            companyId: job.company,
-            type: job.category === 'Finished Good' ? 'Product' : 'Material',
-            stdCost: 0,
-            purchaseCost: 0,
-            salePrice: 0
-          });
-          console.log(`✅ [QC Approval] Created new inventory item for ${job.itemName} with code ${newCode}`);
-        }
-      } catch (invError) {
-        console.error('❌ Error updating inventory upon QC Approval:', invError);
+      } else {
+        console.log(`[QC Approval - ${job.source}] No inventory add — item goes to dispatch/packing.`);
       }
 
-      // 2. Link QC Job / Purchase Request back to Sale / Order and update statuses if applicable
-      // ⚠️ NOTE: If QC job source is 'Purchase', do NOT mark sale as Available.
-      // Purchase items are added to inventory only — they must NOT trigger dispatch/packing queue.
-      if (job.source !== 'Purchase') {
+      // 2. Link QC Job back to Sale / Order and update statuses
+      //
+      // Rules per source:
+      // - 'Store'      → set storeQCStatus='Approved from QC' (item already deducted, goes to dispatch)
+      // - 'QC_Rejected'→ same as Store — find linked Sale via ProductionOrder notes, mark available for dispatch
+      // - 'Stock'      → inventory already updated above; no sale/dispatch update
+      // - 'Purchase'   → set storeQCStatus='Purchase Completed' on linked sale
+
+      if (job.source === 'Store') {
+        try {
+          const saleByRef = await Sale.findOne({
+            $or: [
+              { invoiceNumber: job.sourceRefId },
+              { _id: job.sourceRefId && /^[0-9a-fA-F]{24}$/.test(job.sourceRefId) ? job.sourceRefId : null }
+            ]
+          });
+          if (saleByRef) {
+            saleByRef.storeQCStatus = 'Approved from QC';
+            await saleByRef.save();
+            console.log(`[QC Approval - Store] storeQCStatus='Approved from QC' for Sale ${saleByRef._id}`);
+          }
+        } catch (e) { console.error('❌ Error updating Sale on Store QC approval:', e); }
+
+      } else if (job.source === 'QC_Rejected') {
+        // Re-made item for original order — find linked Sale via ProductionOrder notes and trigger dispatch
+        try {
+          const linkedProdOrder = await ProductionOrder.findOne({
+            $or: [
+              { orderId: job.sourceRefId },
+              { _id: job.sourceRefId && /^[0-9a-fA-F]{24}$/.test(job.sourceRefId) ? job.sourceRefId : null }
+            ],
+            company: job.company
+          }).lean();
+
+          if (linkedProdOrder && linkedProdOrder.notes) {
+            const notesRefMatch = linkedProdOrder.notes.match(/Ref:\s*(\S+)/);
+            const saleRef = notesRefMatch ? notesRefMatch[1] : null;
+            if (saleRef) {
+              const linkedSale = await Sale.findOne({
+                $or: [
+                  { invoiceNumber: saleRef },
+                  { _id: /^[0-9a-fA-F]{24}$/.test(saleRef) ? saleRef : null }
+                ]
+              });
+              if (linkedSale) {
+                linkedSale.isAvailableInInventory = 'Available';
+                linkedSale.storeQCStatus = 'Approved from QC';
+                await linkedSale.save();
+                console.log(`[QC Approval - QC_Rejected] Sale ${linkedSale._id} → Available + Approved from QC. Ready for dispatch.`);
+              }
+            }
+          }
+        } catch (e) { console.error('❌ Error updating Sale on QC_Rejected approval:', e); }
+
+      } else if (job.source === 'Stock') {
+        // Stock production — qty added to inventory above, no sale/dispatch update needed
+        console.log(`[QC Approval - Stock] Inventory updated. No sale/dispatch update.`);
+
+      } else if (job.source === 'Purchase') {
+        // Purchase source — item added to inventory; update storeQCStatus on linked sale
         try {
           const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
           const pr = await PurchaseRequest.findOne({
@@ -295,27 +377,19 @@ export const submitDecision = async (req, res) => {
           }).populate('storeOrderId');
 
           if (pr && pr.storeOrderId) {
-            console.log(`[QC Approval] Found related storeOrderId: ${pr.storeOrderId._id || pr.storeOrderId} for Purchase Request ${pr.requestId}`);
-            
-            const Sale = (await import('../models/Sale.js')).default;
-            const sale = await Sale.findOne({
+            const salePurch = await Sale.findOne({
               $or: [
                 { order: pr.storeOrderId._id || pr.storeOrderId },
                 { _id: pr.storeOrderId._id || pr.storeOrderId }
               ]
             });
-
-            if (sale) {
-              console.log(`[QC Approval] Auto-updating Sale ${sale._id} status to Available since QC approved.`);
-              sale.isAvailableInInventory = 'Available';
-              await sale.save();
+            if (salePurch) {
+              salePurch.storeQCStatus = 'Purchase Completed';
+              await salePurch.save();
+              console.log(`[QC Approval - Purchase] storeQCStatus='Purchase Completed' for Sale ${salePurch._id}`);
             }
           }
-        } catch (workflowError) {
-          console.error('❌ Error in linking purchase request workflow on QC Approval:', workflowError);
-        }
-      } else {
-        console.log(`[QC Approval] Source is 'Purchase' — skipping sale status update. Item added to inventory only.`);
+        } catch (e) { console.error('❌ Error updating purchase status on QC Approval:', e); }
       }
     }
     
@@ -332,12 +406,53 @@ export const submitDecision = async (req, res) => {
           console.error('❌ Error creating purchase return for rejected purchase item:', returnError);
         }
       } else {
+        // For Store source: restore inventory qty (item was deducted when sent to QC, now it's rejected so it comes back)
+        if (job.source === 'Store') {
+          try {
+            let inventoryItem = null;
+            if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
+              inventoryItem = await Item.findById(job.itemCode);
+            }
+            if (!inventoryItem && job.itemCode) {
+              inventoryItem = await Item.findOne({ code: job.itemCode, store: job.company.toString() });
+            }
+            if (!inventoryItem && job.itemName) {
+              inventoryItem = await Item.findOne({ name: job.itemName, store: job.company.toString() });
+            }
+            if (inventoryItem) {
+              const prevQty = inventoryItem.qty || 0;
+              inventoryItem.qty = prevQty + (job.quantity || 1);
+              await inventoryItem.save();
+              console.log(`↩️ [QC Rejection - Store] Restored ${job.quantity || 1} qty to ${inventoryItem.name}. New qty: ${inventoryItem.qty}`);
+            }
+          } catch (restoreErr) {
+            console.error('❌ Error restoring inventory on QC rejection:', restoreErr);
+          }
+        }
+
         // Auto-create production order for rejected production/store items
         try {
           await createRejectedProductionOrder(job, req.user);
           console.log(`✅ [QC Rejection] Created production order for rejected item: ${job.itemName}`);
         } catch (prodError) {
           console.error('❌ Error creating production order for rejected item:', prodError);
+        }
+
+        // Update linked Sale storeQCStatus to 'Rejected from QC' so Store knows
+        try {
+          const saleRej = await Sale.findOne({
+            $or: [
+              { invoiceNumber: job.sourceRefId },
+              { _id: job.sourceRefId.match(/^[0-9a-fA-F]{24}$/) ? job.sourceRefId : null }
+            ]
+          });
+          if (saleRej) {
+            saleRej.storeQCStatus = 'Rejected from QC';
+            await saleRej.save();
+            console.log(`[QC Rejection] Updated storeQCStatus to 'Rejected from QC' for Sale ${saleRej._id}`);
+          }
+        } catch (saleRejErr) {
+          console.error('❌ Error updating sale storeQCStatus on rejection:', saleRejErr);
         }
       }
     }
@@ -396,6 +511,7 @@ async function createRejectedProductionOrder(qcJob, user) {
       machineName: qcJob.itemName,
       priority: 'Urgent', // Rejected items get urgent priority
       source: 'QC_Rejected',
+      purpose: 'Order',   // Rejected items are always re-made for the original order
       rejectionDetails: {
         originalOrderId: qcJob.sourceRefId,
         rejectionReason: qcJob.failReason,
