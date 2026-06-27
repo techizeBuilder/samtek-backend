@@ -79,6 +79,8 @@ const ProductionOrderSchema = new mongoose.Schema({
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   notes: { type: String, default: '' },
+  // Direct reference to the Sale that triggered this production order (Store source only)
+  saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', default: null },
   processes: { type: [ProcessStepSchema], default: () => PROCESS_STEPS.map(step => ({
     step,
     type: PROCESS_TYPE_MAP[step],

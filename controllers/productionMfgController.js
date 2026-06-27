@@ -1,6 +1,7 @@
 import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP } from '../models/ProductionOrder.js';
 import ProductionTeam from '../models/ProductionTeam.js';
 import Sale from '../models/Sale.js';
+import QCJob from '../models/QCJob.js';
 import notificationService from '../services/notificationService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
@@ -278,27 +279,112 @@ export const approveQC = async (req, res) => {
         });
       } catch (e) { console.error('Production completed notification error:', e); }
 
-      // 🏪 Update linked Sale storeQCStatus to 'Production Completed'
+    // 🏪 Update linked Sale storeQCStatus to 'Production Completed'
       try {
-        // notes field contains sourceRefId (invoiceNumber). Extract it from the notes string.
-        const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
-        const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
+        // Strategy 1: Use direct saleId reference (most reliable — set when prod order created from Store)
+        let linkedSale = null;
+        if (order.saleId) {
+          linkedSale = await Sale.findById(order.saleId);
+        }
 
-        if (sourceRefId) {
-          const linkedSale = await Sale.findOne({
-            $or: [
-              { invoiceNumber: sourceRefId },
-              { _id: sourceRefId.match(/^[0-9a-fA-F]{24}$/) ? sourceRefId : null }
-            ]
-          });
-          if (linkedSale) {
-            linkedSale.storeQCStatus = 'Production Completed';
-            await linkedSale.save();
-            console.log(`🏪 [Production Completed] Updated storeQCStatus to 'Production Completed' for Sale ${linkedSale._id}`);
+        // Strategy 2: Fall back to notes regex (for older records without saleId)
+        if (!linkedSale) {
+          const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
+          const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
+          if (sourceRefId) {
+            linkedSale = await Sale.findOne({
+              $or: [
+                { invoiceNumber: sourceRefId },
+                { _id: /^[0-9a-fA-F]{24}$/.test(sourceRefId) ? sourceRefId : null }
+              ]
+            });
           }
+        }
+
+        if (linkedSale) {
+          linkedSale.storeQCStatus = 'Production Completed';
+          await linkedSale.save();
+          console.log(`🏪 [Production Completed] storeQCStatus='Production Completed' for Sale ${linkedSale._id}`);
+        } else {
+          console.warn(`⚠️ [Production Completed] Could not find linked Sale for ProductionOrder ${order.orderId}`);
         }
       } catch (saleUpdateErr) {
         console.error('❌ Error updating Sale storeQCStatus on production completion:', saleUpdateErr);
+      }
+
+      // 🏭 Auto-create QC Job for completed production order
+      try {
+        const existingQC = await QCJob.findOne({
+          source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+          sourceRefId: order.orderId,
+          company: order.company
+        });
+
+        if (!existingQC) {
+          const year = new Date().getFullYear();
+          const lastJob = await QCJob.findOne({ 
+            qcJobId: new RegExp(`^QC-${year}-`) 
+          }).sort({ qcJobId: -1 }).lean();
+
+          let nextNumber = 1;
+          if (lastJob && lastJob.qcJobId) {
+            const parts = lastJob.qcJobId.split('-');
+            if (parts.length === 3) {
+              const lastNumber = parseInt(parts[2]);
+              if (!isNaN(lastNumber)) {
+                nextNumber = lastNumber + 1;
+              }
+            }
+          }
+          const qcJobId = `QC-${year}-${String(nextNumber).padStart(4, '0')}`;
+
+          let qcCategory = 'Finished Good'; // default for production
+          try {
+            const { Item } = await import('../models/Inventory.js');
+            const inventoryItem = await Item.findOne({
+              $or: [
+                { code: order.machineCode },
+                { name: order.machineName }
+              ],
+              companyId: order.company
+            });
+            if (inventoryItem && inventoryItem.category) {
+              qcCategory = inventoryItem.category;
+            }
+          } catch (itemErr) {
+            console.error('Error looking up inventory item for category:', itemErr);
+          }
+
+          const qcJob = await QCJob.create({
+            qcJobId,
+            source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+            sourceRefId: order.orderId,
+            sourceDepartment: 'Production',
+            sentBy: qcBy || 'Production Dept',
+            itemName: order.machineName,
+            itemCode: order.machineCode,
+            category: qcCategory,
+            quantity: 1,
+            unit: 'pcs',
+            receivedDate: today(),
+            status: 'Pending',
+            saleId: order.saleId,
+            company: order.company,
+            createdBy: req.user._id,
+            notes: `Automatically created from completed Production Order: ${order.orderId}`
+          });
+          console.log(`✅ QC Job ${qcJobId} automatically created for Production Order ${order.orderId}`);
+
+          try {
+            await notificationService.triggerQCNotification({
+              action: 'qc_job_created',
+              data: { qcJobId, itemName: order.machineName, jobId: qcJob._id },
+              targetCompanyId: order.company,
+            });
+          } catch (e) { console.error('QC job notification error:', e); }
+        }
+      } catch (qcCreateErr) {
+        console.error('❌ Error creating QC Job for completed production order:', qcCreateErr);
       }
     }
 

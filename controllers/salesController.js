@@ -2,6 +2,7 @@ import User from '../models/User.js';
 import Customer from '../models/Customer.js';
 import Order from '../models/Order.js';
 import Dispatch from '../models/Dispatch.js';
+import DispatchOrder from '../models/DispatchOrder.js';
 import Sale from '../models/Sale.js';
 import Return from '../models/Return.js';
 import { Item } from '../models/Inventory.js';
@@ -475,24 +476,24 @@ export const getSalespersonDeliveries = async (req, res) => {
     const userCompanyId = req.user.companyId;
     const userRole = req.user.role;
 
-    console.log('🚚 getSalespersonDeliveries (Dispatch-Based) called:', {
+    console.log('🚚 getSalespersonDeliveries (Unified: Dispatch & DispatchOrder) called:', {
       userId: salespersonId,
       role: userRole,
-      companyId: userCompanyId
+      companyId: userCompanyId,
+      status,
+      search
     });
 
-    // Build match stage
+    // 1. QUERY BULK DISPATCHES
     const matchQuery = {
-      // For Dispatch model, the field is 'company' (ObjectId)
       company: userCompanyId
     };
 
-    // Role-based filtering
+    // Role-based filtering for bulk dispatches
     if (userRole === 'Sales' || userRole === 'Sales Employee' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Unit Head' && userRole !== 'Sales Head')) {
       matchQuery.salesPerson = salespersonId;
     }
 
-    // Only show dispatches that are verified or further
     matchQuery.status = { $in: ['verified', 'dispatched', 'completed', 'approved'] };
 
     if (status && status !== 'all') {
@@ -507,9 +508,6 @@ export const getSalespersonDeliveries = async (req, res) => {
       ];
     }
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    // Use aggregation to group individual dispatch product entries by DC number
     const aggregationStages = [
       { $match: matchQuery },
       { $sort: { createdAt: -1 } },
@@ -535,39 +533,144 @@ export const getSalespersonDeliveries = async (req, res) => {
           createdAt: { $first: '$createdAt' }
         }
       },
-      { $sort: { createdAt: -1 } },
-      {
-        $facet: {
-          metadata: [{ $count: 'total' }],
-          data: [{ $skip: skip }, { $limit: parseInt(limit) }]
-        }
-      }
+      { $sort: { createdAt: -1 } }
     ];
 
-    const results = await Dispatch.aggregate(aggregationStages);
+    const bulkDeliveries = await Dispatch.aggregate(aggregationStages);
 
-    // Populate customer info for the grouped results
-    const deliveries = results[0].data;
-    const total = results[0].metadata[0]?.total || 0;
-
-    // Manual population because aggregate doesn't support easy multi-level population across models
-    const populatedDeliveries = await Promise.all(deliveries.map(async (delivery) => {
+    // Populate customer info for bulk deliveries
+    const populatedBulkDeliveries = await Promise.all(bulkDeliveries.map(async (delivery) => {
       if (delivery.customer) {
         delivery.customer = await Customer.findById(delivery.customer).select('name email mobile city area address category').lean();
       }
       return delivery;
     }));
 
+    // 2. QUERY DISPATCH ORDERS (Specific machines from packaging-dispatch)
+    const dispatchOrderQuery = {
+      company: userCompanyId
+    };
+
+    // Role-based filtering for DispatchOrder: must match salesperson's orders
+    if (userRole === 'Sales' || userRole === 'Sales Employee' || (userRole !== 'Superadmin' && userRole !== 'Unit Manager' && userRole !== 'Unit Head' && userRole !== 'Sales Head')) {
+      const salesOrders = await Order.find({
+        companyId: userCompanyId,
+        salesPerson: salespersonId
+      }).select('orderCode').lean();
+      const salesOrderCodes = salesOrders.map(o => o.orderCode);
+      dispatchOrderQuery.orderId = { $in: salesOrderCodes };
+    }
+
+    if (status && status !== 'all') {
+      if (status === 'pending') {
+        dispatchOrderQuery.status = 'Ready';
+      } else if (status === 'dispatched') {
+        dispatchOrderQuery.status = { $in: ['Dispatched', 'In Transit'] };
+      } else if (status === 'completed') {
+        dispatchOrderQuery.status = { $in: ['Delivered', 'Closed'] };
+      } else {
+        // Status filter applies to bulk dispatches but not dispatch orders
+        dispatchOrderQuery.status = '__none__';
+      }
+    }
+
+    if (search) {
+      dispatchOrderQuery.$or = [
+        { dispatchId: { $regex: search, $options: 'i' } },
+        { machineName: { $regex: search, $options: 'i' } },
+        { vehicleNumber: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const rawDispatchOrders = await DispatchOrder.find(dispatchOrderQuery).sort({ createdAt: -1 }).lean();
+
+    const mappedDispatchOrders = await Promise.all(rawDispatchOrders.map(async (doEntry) => {
+      let customerObj = null;
+      if (doEntry.orderId) {
+        const order = await Order.findOne({ orderCode: doEntry.orderId, companyId: userCompanyId }).populate('customer').lean();
+        if (order && order.customer) {
+          customerObj = {
+            _id: order.customer._id,
+            name: order.customer.name,
+            email: order.customer.email,
+            mobile: order.customer.mobile,
+            city: order.customer.city,
+            area: order.customer.area,
+            address: order.customer.address,
+            category: order.customer.category
+          };
+        }
+      }
+
+      if (!customerObj && doEntry.customerName) {
+        customerObj = {
+          name: doEntry.customerName,
+          mobile: doEntry.customerContact,
+          email: doEntry.customerEmail,
+          address: doEntry.deliveryAddress,
+          city: '',
+          area: ''
+        };
+      }
+
+      // Map status values to match UI classes in MyDeliveries.jsx
+      let mappedStatus = 'outline';
+      if (doEntry.status === 'Ready') mappedStatus = 'pending';
+      else if (doEntry.status === 'Dispatched') mappedStatus = 'dispatched';
+      else if (doEntry.status === 'In Transit') mappedStatus = 'dispatched';
+      else if (doEntry.status === 'Delivered') mappedStatus = 'completed';
+      else if (doEntry.status === 'Closed') mappedStatus = 'completed';
+
+      const dateValue = doEntry.actualDispatchDate || doEntry.plannedDispatchDate || doEntry.createdAt;
+
+      return {
+        _id: doEntry._id,
+        dcno: doEntry.dispatchId,
+        date: new Date(dateValue),
+        customer: customerObj,
+        vehicleNumber: doEntry.vehicleNumber,
+        transporterName: doEntry.transportCompanyName,
+        status: mappedStatus,
+        notes: doEntry.notes,
+        items: [
+          {
+            productName: `${doEntry.machineName} (${doEntry.machineCode})`,
+            quantity: 1,
+            indentQty: 1,
+            productId: null
+          }
+        ],
+        totalItems: 1,
+        createdAt: doEntry.createdAt
+      };
+    }));
+
+    // 3. MERGE, SORT AND PAGINATE
+    const allDeliveries = [...populatedBulkDeliveries, ...mappedDispatchOrders];
+
+    // Sort by date / createdAt descending
+    allDeliveries.sort((a, b) => {
+      const dateA = new Date(a.date || a.createdAt);
+      const dateB = new Date(b.date || b.createdAt);
+      return dateB - dateA;
+    });
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const total = allDeliveries.length;
+    const paginated = allDeliveries.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+
     res.json({
       success: true,
-      deliveries: populatedDeliveries,
+      deliveries: paginated,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / limitNum)
       }
     });
+
   } catch (error) {
     console.error('Get salesperson deliveries error:', error);
     res.status(500).json({ message: 'Internal server error', error: error.message });

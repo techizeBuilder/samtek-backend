@@ -3,6 +3,7 @@ import DispatchOrder from '../models/DispatchOrder.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import QCJob from '../models/QCJob.js';
 import notificationService from '../services/notificationService.js';
+import Sale from '../models/Sale.js';
 
 const now = () => new Date().toISOString();
 
@@ -130,6 +131,7 @@ export const getDashboard = async (req, res) => {
       QCJob.countDocuments({
         company: cid,
         status: 'Approved',
+        source: { $ne: 'Purchase' },
         _id: { $nin: existingQCJobIds },
       }),
       PackagingJob.countDocuments({ company: cid, status: 'Pending' }),
@@ -179,57 +181,131 @@ export const getReadyForPackaging = async (req, res) => {
     const cid = req.user.companyId;
 
     // Get IDs already assigned to a packaging job
-    const existingJobOrderIds = await PackagingJob.distinct('productionOrderId', { company: cid, productionOrderId: { $ne: null } });
     const existingQCJobIds = await PackagingJob.distinct('qcJobId', { company: cid, qcJobId: { $ne: null } });
 
-    const [orders, qcJobs] = await Promise.all([
-      ProductionOrder.find({
-        company: cid,
-        status: 'Completed',
-        'processes': { $elemMatch: { step: 'Final Testing', qcStatus: 'Approved' } },
-        _id: { $nin: existingJobOrderIds },
-      })
-        .sort({ updatedAt: -1 })
-        .populate('processes.assignedTeam', 'name supervisor')
-        .lean(),
+    // Fetch approved QC Jobs:
+    // - Either non-Purchase source (covers Store, Production, QC_Rejected)
+    // - Or Purchase source where the category is a Purchase Machine or Manufacturing Machine
+    //   NOTE: Also include Purchase jobs whose category may have been mis-stored (e.g. "Raw Material")
+    //         but whose actual inventory item is a machine — we filter them below after item lookup.
+    const qcJobsRaw = await QCJob.find({
+      company: cid,
+      status: 'Approved',
+      source: { $ne: 'Stock' },   // Stock items go to inventory, never to dispatch
+      _id: { $nin: existingQCJobIds }
+    })
+      .sort({ updatedAt: -1 })
+      .lean();
 
-      QCJob.find({
-        company: cid,
-        status: 'Approved',
-        _id: { $nin: existingQCJobIds }
-      })
-        .sort({ updatedAt: -1 })
-        .lean()
-    ]);
+    const { Item } = await import('../models/Inventory.js');
+    const MACHINE_CATEGORIES = ['Purchase Machine', 'Manufacturing Machine'];
 
-    // Map QCJobs to the format expected by the frontend packaging queue page
-    const qcMapped = qcJobs.map(job => ({
-      _id: job._id,
-      isQCJob: true,
-      orderId: job.itemCode || job.qcJobId || 'Store Order',
-      machineCode: job.sourceRefId || 'N/A',
-      machineName: job.itemName || 'Store Item',
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
-      processes: [
-        {
-          step: 'Final Testing',
-          qcStatus: 'Approved'
+    // For Purchase source: keep only machine-category items (check DB item if category looks wrong)
+    const qcJobs = await Promise.all(qcJobsRaw.map(async (job) => {
+      if (job.source !== 'Purchase') return job; // non-purchase always included
+
+      const catLower = (job.category || '').toLowerCase().trim();
+      const isMachineCat = MACHINE_CATEGORIES.map(c => c.toLowerCase()).includes(catLower);
+      if (isMachineCat) return job; // category already correct
+
+      // Category may be wrong (e.g. stored as "Raw Material") — verify via actual inventory item
+      try {
+        let inventoryItem = null;
+        if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
+          inventoryItem = await Item.findById(job.itemCode).lean();
         }
-      ]
+        if (!inventoryItem && job.itemCode) {
+          inventoryItem = await Item.findOne({ code: job.itemCode, store: cid.toString() }).lean();
+        }
+        if (!inventoryItem && job.itemName) {
+          inventoryItem = await Item.findOne({ name: job.itemName, store: cid.toString() }).lean();
+        }
+        if (inventoryItem && MACHINE_CATEGORIES.includes(inventoryItem.category)) {
+          console.log(`[PackagingQueue] Purchase QC job ${job.qcJobId} has category '${job.category}' but item is '${inventoryItem.category}' — including in packaging queue`);
+          return { ...job, category: inventoryItem.category }; // return with corrected category
+        }
+      } catch (e) {
+        console.error('[PackagingQueue] Error verifying item category for QC job:', job.qcJobId, e);
+      }
+
+      return null; // not a machine — exclude from packaging queue
     }));
 
-    // Combine production orders and QC-approved store items
-    const combined = [...orders, ...qcMapped];
+    // Remove nulls (non-machine Purchase items filtered out)
+    const filteredQcJobs = qcJobs.filter(Boolean);
+
+    const Order = (await import('../models/Order.js')).default;
+    const Sale = (await import('../models/Sale.js')).default;
+    const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+
+    // Map QCJobs to the format expected by the frontend packaging queue page
+    // and resolve sales order code for proper tracking
+    const qcMapped = await Promise.all(filteredQcJobs.map(async (job) => {
+      let salesOrderCode = null;
+      let orderIdVal = job.itemCode || job.qcJobId || 'Store Order';
+      let machineCodeVal = job.sourceRefId || 'N/A';
+
+      if (job.saleId) {
+        try {
+          const sale = await Sale.findById(job.saleId).select('order').lean();
+          if (sale?.order) {
+            const salesOrder = await Order.findById(sale.order).select('orderCode').lean();
+            salesOrderCode = salesOrder?.orderCode || null;
+            if (salesOrderCode) {
+              orderIdVal = salesOrderCode;
+            }
+          }
+        } catch (e) { console.error('Error resolving saleId for QC job sales code:', e); }
+      } else if (job.purchaseRequestId) {
+        try {
+          const pr = await PurchaseRequest.findById(job.purchaseRequestId).lean();
+          if (pr && pr.storeOrderId) {
+            // Find linked order
+            const salesOrder = await Order.findById(pr.storeOrderId).select('orderCode').lean();
+            salesOrderCode = salesOrder?.orderCode || null;
+            if (salesOrderCode) {
+              orderIdVal = salesOrderCode;
+            } else {
+              // Try check if storeOrderId is a Sale ID
+              const sale = await Sale.findById(pr.storeOrderId).select('order').lean();
+              if (sale?.order) {
+                const salesOrder2 = await Order.findById(sale.order).select('orderCode').lean();
+                salesOrderCode = salesOrder2?.orderCode || null;
+                if (salesOrderCode) {
+                  orderIdVal = salesOrderCode;
+                }
+              }
+            }
+          }
+        } catch (e) { console.error('Error resolving purchaseRequestId for QC job sales code:', e); }
+      }
+
+      return {
+        _id: job._id,
+        isQCJob: true,
+        orderId: orderIdVal,
+        salesOrderCode: salesOrderCode,
+        machineCode: machineCodeVal,
+        machineName: job.itemName || 'Store Item',
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        processes: [
+          {
+            step: 'Final Testing',
+            qcStatus: 'Approved'
+          }
+        ]
+      };
+    }));
 
     // Sort the combined array by updatedAt descending (latest approved from QA first)
-    combined.sort((a, b) => {
+    qcMapped.sort((a, b) => {
       const dateA = a.updatedAt ? new Date(a.updatedAt) : new Date(a.createdAt || 0);
       const dateB = b.updatedAt ? new Date(b.updatedAt) : new Date(b.createdAt || 0);
       return dateB - dateA;
     });
 
-    res.json({ success: true, data: combined });
+    res.json({ success: true, data: qcMapped });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -315,12 +391,68 @@ export const createPackagingJob = async (req, res) => {
       if (existing) return res.status(400).json({ success: false, message: 'Packaging job already exists for this QC Job' });
     }
 
+    // Resolve the actual sales Order.orderCode to store in orderId field
+    // This is critical: Accounts pages (NOC Request, Packed Orders) match on Order.orderCode
+    // so PackagingJob.orderId MUST be the sales orderCode (e.g. "ORD-2024-XXX-001"), not the MFG ID
+    let resolvedOrderId = orderId;
+    if (actualProdOrderId) {
+      try {
+        const Order = (await import('../models/Order.js')).default;
+        const prodOrder = await ProductionOrder.findById(actualProdOrderId).select('saleId').lean();
+        if (prodOrder?.saleId) {
+          const linkedSale = await Sale.findById(prodOrder.saleId).select('order').lean();
+          if (linkedSale?.order) {
+            const salesOrder = await Order.findById(linkedSale.order).select('orderCode').lean();
+            if (salesOrder?.orderCode) {
+              resolvedOrderId = salesOrder.orderCode;
+            }
+          }
+        }
+      } catch (resolveErr) {
+        console.warn('Could not resolve salesOrderCode for packaging job, using provided orderId:', resolveErr.message);
+      }
+    } else if (actualQcJobId) {
+      try {
+        const Order = (await import('../models/Order.js')).default;
+        const Sale = (await import('../models/Sale.js')).default;
+        const qcJob = await QCJob.findById(actualQcJobId).select('saleId purchaseRequestId').lean();
+        if (qcJob?.saleId) {
+          const linkedSale = await Sale.findById(qcJob.saleId).select('order').lean();
+          if (linkedSale?.order) {
+            const salesOrder = await Order.findById(linkedSale.order).select('orderCode').lean();
+            if (salesOrder?.orderCode) {
+              resolvedOrderId = salesOrder.orderCode;
+            }
+          }
+        } else if (qcJob?.purchaseRequestId) {
+          const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+          const pr = await PurchaseRequest.findById(qcJob.purchaseRequestId).lean();
+          if (pr && pr.storeOrderId) {
+            const salesOrder = await Order.findById(pr.storeOrderId).select('orderCode').lean();
+            if (salesOrder?.orderCode) {
+              resolvedOrderId = salesOrder.orderCode;
+            } else {
+              const sale = await Sale.findById(pr.storeOrderId).select('order').lean();
+              if (sale?.order) {
+                const salesOrder2 = await Order.findById(sale.order).select('orderCode').lean();
+                if (salesOrder2?.orderCode) {
+                  resolvedOrderId = salesOrder2.orderCode;
+                }
+              }
+            }
+          }
+        }
+      } catch (resolveErr) {
+        console.warn('Could not resolve salesOrderCode for QC packaging job, using provided orderId:', resolveErr.message);
+      }
+    }
+
     const jobId = await generateJobId(req.user.companyId);
     const serialNumber = await generateSerialNumber(req.user.companyId);
 
     const jobData = {
       jobId,
-      orderId,
+      orderId: resolvedOrderId,   // ← sales orderCode (e.g. "ORD-..."), resolved above
       machineCode,
       machineName,
       serialNumber,

@@ -424,37 +424,40 @@ export const selectVendor = async (req, res) => {
     // 3. Auto-create Purchase Order
     const pr = rfq.purchaseRequest;
 
-    // Find matching inventory item
+    // Find matching inventory item (optional — PO is created even if no match)
     let inventoryItemId = null;
     let inventoryItemName = pr.productName;
-    
-    const matchedItem = await Item.findOne({
-      name: { $regex: new RegExp(`^${pr.productName.trim()}$`, 'i') },
-      companyId
-    });
 
-    if (matchedItem) {
-      inventoryItemId = matchedItem._id;
-      inventoryItemName = matchedItem.name;
-    } else {
-      // Try partial match
-      const partialMatch = await Item.findOne({
-        name: { $regex: new RegExp(pr.productName.split(' ')[0], 'i') },
+    try {
+      // Escape special regex characters in product name before using in regex
+      const escapedName = pr.productName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      const matchedItem = await Item.findOne({
+        name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
         companyId
       });
-      if (partialMatch) {
-        inventoryItemId = partialMatch._id;
-        inventoryItemName = partialMatch.name;
+
+      if (matchedItem) {
+        inventoryItemId = matchedItem._id;
+        inventoryItemName = matchedItem.name;
+      } else {
+        // Try partial match using first meaningful word (skip very short words)
+        const firstWord = pr.productName.trim().split(/\s+/).find(w => w.length > 3) || pr.productName.split(' ')[0];
+        const escapedWord = firstWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const partialMatch = await Item.findOne({
+          name: { $regex: new RegExp(escapedWord, 'i') },
+          companyId
+        });
+        if (partialMatch) {
+          inventoryItemId = partialMatch._id;
+          inventoryItemName = partialMatch.name;
+        }
       }
+    } catch (itemLookupErr) {
+      console.warn('[selectVendor] Inventory item lookup failed (non-fatal):', itemLookupErr.message);
     }
 
-    if (!inventoryItemId) {
-      // Use a fallback — create PO without item ref won't be ideal but we need the PO
-      return res.status(400).json({
-        success: false,
-        message: `Could not find inventory item matching "${pr.productName}". Please ensure the item exists in inventory before creating PO.`
-      });
-    }
+    // inventoryItemId may be null — PO will be created with itemName only (item link added on receipt)
 
     const unitPrice = winningBid.unitPrice;
     const totalAmount = unitPrice * pr.quantity;
@@ -469,17 +472,22 @@ export const selectVendor = async (req, res) => {
 
     const expectedDelivery = new Date(Date.now() + winningBid.deliveryDays * 24 * 60 * 60 * 1000);
 
+    // Build PO line item — only include item ref if we found one in inventory
+    const poLineItem = {
+      itemName: inventoryItemName,
+      quantity: pr.quantity,
+      unitPrice,
+      totalPrice: totalAmount,
+      receivedQuantity: 0,
+      pendingQuantity: pr.quantity
+    };
+    if (inventoryItemId) {
+      poLineItem.item = inventoryItemId;
+    }
+
     const po = await Purchase.create({
       supplier: winningBid.vendor._id,
-      items: [{
-        item: inventoryItemId,
-        itemName: inventoryItemName,
-        quantity: pr.quantity,
-        unitPrice,
-        totalPrice: totalAmount,
-        receivedQuantity: 0,
-        pendingQuantity: pr.quantity
-      }],
+      items: [poLineItem],
       totalAmount,
       taxAmount,
       grandTotal,

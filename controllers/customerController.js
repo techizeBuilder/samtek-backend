@@ -794,7 +794,7 @@ export const getCustomerDropdownList = async (req, res) => {
     }
 
     const customers = await Customer.find(filter)
-      .select('_id name customerCode category entityType tdsSection')
+      .select('_id name customerCode category entityType tdsSection outstandingAmount')
       .sort({ name: 1 });
 
     console.log(`👥 Found ${customers.length} active customers`);

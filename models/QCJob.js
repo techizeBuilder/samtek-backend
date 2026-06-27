@@ -14,7 +14,7 @@ const QCJobSchema = new mongoose.Schema({
   // Source info
   source: {
     type: String,
-    enum: ['Purchase', 'Production', 'Store'],
+    enum: ['Purchase', 'Production', 'Store', 'QC_Rejected', 'Stock'],
     required: true,
   },
   sourceRefId: { type: String, default: '' },   // orderId / PO number / stock ref
@@ -26,7 +26,6 @@ const QCJobSchema = new mongoose.Schema({
   itemCode: { type: String, default: '', trim: true },
   category: {
     type: String,
-    enum: ['Machine', 'Raw Material', 'Tool', 'Finished Good'],
     required: true,
   },
   quantity: { type: Number, default: 1 },
@@ -51,6 +50,11 @@ const QCJobSchema = new mongoose.Schema({
 
   // Attachments
   attachments: [{ url: String, type: { type: String, enum: ['Image', 'Video', 'Document'] }, label: String }],
+
+  // Back-reference to the Purchase Request that originated this QC job (Purchase source only)
+  purchaseRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseRequest', default: null },
+  // Back-reference to the Sale that originated this QC job (Store source only)
+  saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', default: null },
 
   // Post-decision
   transferredToStore: { type: Boolean, default: false },

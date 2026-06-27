@@ -37,6 +37,7 @@ const leadSchema = new mongoose.Schema({
     required: true
   },
   describeRequirements: String,
+  indiamartQueryId: { type: String, default: null }, // for dedup of IndiaMart leads
   source: {
     type: String,
     required: true,
@@ -54,6 +55,10 @@ const leadSchema = new mongoose.Schema({
     type: String,
     enum: ['Not Requested', 'Pending', 'Paid', 'Partially Paid', 'Rejected'],
     default: 'Not Requested'
+  },
+  paymentCheckRequestedAt: {
+    type: Date,
+    default: null
   },
   sentToAccount: {
     type: Boolean,
@@ -187,5 +192,6 @@ leadSchema.index({ companyId: 1, leadCode: 1 }, { unique: true });
 leadSchema.index({ assignedTo: 1 });
 leadSchema.index({ mobile: 1 });
 leadSchema.index({ email: 1 });
+leadSchema.index({ companyId: 1, indiamartQueryId: 1 }, { sparse: true });
 
 export default mongoose.model('Lead', leadSchema);

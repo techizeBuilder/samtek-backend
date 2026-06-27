@@ -1334,6 +1334,7 @@ const updateOrderStoreInfo = async (req, res) => {
             qcJobId,
             source: 'Store',
             sourceRefId: sourceRefId,
+            saleId: sale._id,               // ← direct Sale ref for reliable status update
             sourceDepartment: 'Store',
             sentBy: req.user.fullName || req.user.username || 'Store Dept',
             itemName: itemName,
@@ -1393,6 +1394,7 @@ const updateOrderStoreInfo = async (req, res) => {
             deliveryDate: today(),
             status: 'Pending',
             source: 'Store',
+            saleId: sale._id,               // ← direct Sale ref for reliable status update
             company: sale.companyId,
             createdBy: req.user._id,
             notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
@@ -1573,6 +1575,7 @@ const updateSaleStoreInfo = async (req, res) => {
             qcJobId,
             source: 'Store',
             sourceRefId: sourceRefId,
+            saleId: sale._id,               // ← direct Sale ref for reliable status update
             sourceDepartment: 'Store',
             sentBy: req.user.fullName || req.user.username || 'Store Dept',
             itemName: itemName,
@@ -1637,6 +1640,7 @@ const updateSaleStoreInfo = async (req, res) => {
             deliveryDate: sale.dueDate ? sale.dueDate.toISOString().split('T')[0] : today(),
             status: 'Pending',
             source: 'Store',
+            saleId: sale._id,               // ← direct Sale ref for reliable status update
             company: sale.companyId,
             createdBy: req.user._id,
             notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
@@ -1786,7 +1790,7 @@ const getNOCRequests = async (req, res) => {
 
     // Check if there is a Packed job for the sale's order
     for (const sale of sales) {
-      if (!sale.order || !sale.gatePass) continue;
+      if (!sale.order) continue;
 
       const orderIdStr = sale.order._id?.toString();
       if (!orderIdStr) continue;
@@ -1794,12 +1798,30 @@ const getNOCRequests = async (req, res) => {
       // Skip if this order was already added to NOC list (duplicate from dual billing)
       if (processedOrderIds.has(orderIdStr)) continue;
 
-      // Include all: Pending NOC, Approved NOC, and Gate Pass Generated
-      const job = await PackagingJob.findOne({
-        orderId: sale.order.orderCode,
+      // Check for packaging job via orderCode or saleId/sale ref
+      // Also try matching via the productionOrder that links to this sale
+      let job = await PackagingJob.findOne({
+        $or: [
+            { orderId: sale.order.orderCode },
+            { saleId: sale._id }
+        ],
         status: 'Packed',
         company: req.user.companyId
       });
+
+      // Fallback: find via productionOrderId → if that prodOrder links to this sale
+      if (!job) {
+        const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
+        const linkedProdOrders = await ProductionOrder.find({ saleId: sale._id, company: req.user.companyId }).select('_id').lean();
+        if (linkedProdOrders.length > 0) {
+          const prodOrderIds = linkedProdOrders.map(p => p._id);
+          job = await PackagingJob.findOne({
+            productionOrderId: { $in: prodOrderIds },
+            status: 'Packed',
+            company: req.user.companyId
+          });
+        }
+      }
 
       if (job) {
         // Fetch advanced payment from linked lead (if any)
@@ -1814,7 +1836,14 @@ const getNOCRequests = async (req, res) => {
         }
 
         const effectivePaidAmount = (sale.paidAmount || 0) + advancedPaymentAmount;
-        const effectiveBalance = Math.max(0, sale.totalAmount - effectivePaidAmount);
+
+        // Use sale.totalAmount if invoice is generated (> 0), else fallback to order value + 18% GST
+        const orderBaseAmount = sale.order?.totalAmount || 0;
+        const effectiveTotalAmount = (sale.totalAmount && sale.totalAmount > 0)
+          ? sale.totalAmount
+          : Math.round(orderBaseAmount * 1.18);
+
+        const effectiveBalance = Math.max(0, effectiveTotalAmount - effectivePaidAmount);
         let effectivePaymentStatus = sale.paymentStatus;
         if (advancedPaymentAmount > 0 && effectiveBalance <= 0) {
           effectivePaymentStatus = 'Paid';
@@ -1828,7 +1857,7 @@ const getNOCRequests = async (req, res) => {
           orderCode: sale.order.orderCode,
           customerName: sale.order.customer?.name || 'N/A',
           customerMobile: sale.order.customer?.mobile || 'N/A',
-          totalAmount: sale.totalAmount,
+          totalAmount: effectiveTotalAmount,
           paidAmount: effectivePaidAmount,
           advancedPaymentAmount,
           balanceAmount: effectiveBalance,
@@ -1957,6 +1986,197 @@ const checkInventoryForItem = async (req, res) => {
   }
 };
 
+// =============================================================================
+// GET DEAL VERIFICATIONS (Service Team Pagination)
+// Supports tab filtering: pending / verified / rejected / all
+// =============================================================================
+const getDealVerifications = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 10,
+      serviceStatus = '',   // 'pending' | 'verified' | 'rejected' | '' (all)
+      search = '',
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+    } = req.query;
+
+    const userCompanyId = req.user.companyId;
+    const userRole = req.user.role;
+
+    // Base filter: company-scoped unless Superadmin
+    const filter = {};
+    if (userRole !== 'Superadmin' && userRole !== 'Super Admin' && userCompanyId) {
+      filter.companyId = new mongoose.Types.ObjectId(userCompanyId);
+    }
+
+    // Service status filter
+    if (serviceStatus === 'pending') {
+      filter.$and = [
+        { 'serviceVerification.status': { $ne: 'verified' } },
+        { 'statusHistory.status': { $nin: ['service_verified', 'service_Confirm'] } },
+        { status: { $ne: 'rejected_by_service' } },
+        { 'serviceVerification.status': { $ne: 'rejected' } }
+      ];
+    } else if (serviceStatus === 'rejected') {
+      filter.$or = [
+        { status: 'rejected_by_service' },
+        { 'serviceVerification.status': 'rejected' }
+      ];
+    } else if (serviceStatus === 'verified') {
+      filter.$or = [
+        { 'serviceVerification.status': 'verified' },
+        { 'statusHistory.status': 'service_verified' },
+        { 'statusHistory.status': 'service_Confirm' }
+      ];
+    }
+
+    // Optional search
+    if (search) {
+      const searchRegex = { $regex: search, $options: 'i' };
+      const searchFilter = {
+        $or: [
+          { orderCode: searchRegex },
+          { notes: searchRegex },
+        ]
+      };
+      if (filter.$and) {
+        filter.$and.push(searchFilter);
+      } else if (filter.$or) {
+        filter.$and = [{ $or: filter.$or }, searchFilter];
+        delete filter.$or;
+      } else {
+        filter.$or = searchFilter.$or;
+      }
+    }
+
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    const [dealOrders, totalOrders] = await Promise.all([
+      Order.find(filter)
+        .populate('customer', 'name email mobile address city state contactPerson category')
+        .populate('products.product', 'name salePrice purchaseCost mrp brand category subCategory image')
+        .populate('salesPerson', 'username fullName email role companyId')
+        .populate('leadId', 'leadCode dealValue')
+        .sort(sort)
+        .skip(skip)
+        .limit(limitNum),
+      Order.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(totalOrders / limitNum);
+
+    return res.json({
+      success: true,
+      orders: dealOrders,
+      pagination: {
+        currentPage: pageNum,
+        totalPages,
+        totalOrders,
+        hasNextPage: pageNum < totalPages,
+        hasPrevPage: pageNum > 1,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching deal verifications:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/orders/repair-store-status
+// One-time repair: fixes Sale records whose storeQCStatus is stuck at
+// 'Goes to Purchase' because QC was approved before the purchaseRequestId fix.
+// Safe to call multiple times — only touches Sales with the stuck status.
+// ─────────────────────────────────────────────────────────────────────────────
+const repairStoreQCStatus = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+
+    // Find all Sales stuck at 'Goes to Purchase' for this company
+    const stuckSales = await Sale.find({
+      companyId,
+      storeQCStatus: 'Goes to Purchase'
+    }).lean();
+
+    if (stuckSales.length === 0) {
+      return res.json({ success: true, message: 'No stuck records found.', repaired: 0 });
+    }
+
+    const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+    const QCJob = (await import('../models/QCJob.js')).default;
+
+    let repaired = 0;
+    const details = [];
+
+    for (const sale of stuckSales) {
+      const saleRef = sale.invoiceNumber || sale._id.toString();
+
+      // Find the PurchaseRequest linked to this Sale
+      const pr = await PurchaseRequest.findOne({
+        $or: [
+          { storeOrderId: sale.order || sale._id },
+          { itemId: saleRef }
+        ],
+        companyId
+      });
+
+      if (!pr) {
+        details.push({ saleId: sale._id, invoiceNumber: sale.invoiceNumber, result: 'No PR found — skipped' });
+        continue;
+      }
+
+      // Check if there's a QC job for this PR that was approved
+      const approvedQCJob = await QCJob.findOne({
+        $or: [
+          { purchaseRequestId: pr._id },
+          { sourceRefId: pr.purchaseOrder?.toString() || pr.requestId },
+          { itemCode: pr.itemId || pr.requestId }
+        ],
+        source: 'Purchase',
+        status: 'Approved',
+        company: companyId
+      });
+
+      if (approvedQCJob) {
+        // QC was approved — update Sale to Purchase Completed
+        await Sale.findByIdAndUpdate(sale._id, { storeQCStatus: 'Purchase Completed' });
+        repaired++;
+        details.push({ saleId: sale._id, invoiceNumber: sale.invoiceNumber, result: 'Repaired → Purchase Completed' });
+
+        // Also patch the QC job with purchaseRequestId and saleId for future reliability
+        await QCJob.findByIdAndUpdate(approvedQCJob._id, {
+          purchaseRequestId: pr._id,
+          saleId: sale._id
+        });
+      } else {
+        // PR exists but QC not yet approved — check PR status
+        if (pr.status === 'Received') {
+          details.push({ saleId: sale._id, invoiceNumber: sale.invoiceNumber, result: `PR Received but QC not found (PR: ${pr.requestId})` });
+        } else {
+          details.push({ saleId: sale._id, invoiceNumber: sale.invoiceNumber, result: `PR status: ${pr.status} — still in progress` });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `Repair complete. ${repaired} record(s) updated.`,
+      repaired,
+      total: stuckSales.length,
+      details
+    });
+  } catch (error) {
+    console.error('repairStoreQCStatus error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export {
   createOrder,
   getOrders,
@@ -1976,5 +2196,7 @@ export {
   approveSaleOrder,
   getNOCRequests,
   approveNOC,
-  checkInventoryForItem
+  checkInventoryForItem,
+  getDealVerifications,
+  repairStoreQCStatus,
 };
