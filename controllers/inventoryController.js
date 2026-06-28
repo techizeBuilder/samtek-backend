@@ -41,19 +41,16 @@ const DELIVERY_CHALLAN_ORDER = [
 
 // Helper function to check inventory permissions
 const checkInventoryPermission = (user, action) => {
-  // Super Admin and Unit Head have all permissions
-  if (user.role === 'Super Admin' || user.role === 'Unit Head') {
+  // Research & Development Head and Unit Head have all permissions (Super Admin removed)
+  if (user.role === 'Research & Development Head' || user.role === 'Unit Head') {
     return true;
   }
 
-  // Allow Sales, Store, Production and QC users to view items
-  if ((user.role === 'Sales' || user.role === 'Store Head' || user.role === 'Store Employee' || 
-       user.role === 'Production' || user.role === 'Production Head' || user.role === 'Production Employee' ||
-       user.role === 'QC Head' || user.role === 'QC Employee') && action === 'view') {
-    return true;
-  }
-  // need finalized role for technican to view items for complaint service module
-  if(user.role === 'Complaint Management Employee' && action === 'view') {
+  // Allow Sales, Store, Production, QC, and Complaint Techs to view items
+  if ((user.role === 'Sales' || user.role === 'Store Head' || user.role === 'Store Employee' ||
+    user.role === 'Production' || user.role === 'Production Head' || user.role === 'Production Employee' ||
+    user.role === 'QC Head' || user.role === 'QC Employee' ||
+    user.role === 'Complaint Management Employee') && action === 'view') {
     return true;
   }
 
@@ -222,12 +219,24 @@ export const getItems = async (req, res) => {
     if ((req.user.role === 'Store Head' || req.user.role === 'Store Employee') && req.user.companyId) {
       const storeCompanyIdStr = req.user.companyId.toString();
       query.$or = [
-        { store: storeCompanyIdStr },          // items stored with string store field
-        { store: req.user.companyId },          // items stored with ObjectId store field
-        { companyId: storeCompanyIdStr },       // items stored with string companyId
-        { companyId: req.user.companyId }       // items stored with ObjectId companyId
+        { store: storeCompanyIdStr },
+        { store: req.user.companyId },
+        { companyId: storeCompanyIdStr },
+        { companyId: req.user.companyId }
       ];
       console.log('🏢 Store user filtering applied: company =', storeCompanyIdStr);
+    }
+
+    // Add company filtering for Research & Development roles
+    if ((req.user.role === 'Research & Development Head' || req.user.role === 'Research Development Employee') && req.user.companyId) {
+      const rdCompanyIdStr = req.user.companyId.toString();
+      query.$or = [
+        { store: rdCompanyIdStr },
+        { store: req.user.companyId },
+        { companyId: rdCompanyIdStr },
+        { companyId: req.user.companyId }
+      ];
+      console.log('🔬 R&D user filtering applied: company =', rdCompanyIdStr);
     }
 
     // Search filter with improved partial matching
@@ -518,6 +527,300 @@ export const getItems = async (req, res) => {
   }
 };
 
+export const createItem = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'add')) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Insufficient permissions.'
+      });
+    }
+
+    const itemData = req.body;
+    console.log('📝 Received item data:', itemData);
+
+    // Enhanced validation
+    const validation = validateItemData(itemData);
+    if (!validation.isValid) {
+      return res.status(400).json({
+        message: 'Validation failed',
+        errors: validation.errors
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // STRICT R&D CODING RULE (Point 8 Enforced):
+    // System will NOT auto-generate codes. R&D must define them.
+    // ─────────────────────────────────────────────────────────────
+    if (!itemData.code || itemData.code.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        message: 'Item Code is mandatory. Per company standardization rules, R&D must explicitly define the universal ERP Item Code.'
+      });
+    }
+
+    itemData.code = itemData.code.trim();
+
+    // Check if R&D's defined code already exists in the company
+    const codeQuery = { code: itemData.code };
+    if (req.user.companyId) {
+      codeQuery.companyId = req.user.companyId;
+    }
+
+    const existingCode = await Item.findOne(codeQuery);
+    if (existingCode) {
+      return res.status(400).json({
+        success: false,
+        message: `Coding Conflict: The Item Code "${itemData.code}" is already assigned to "${existingCode.name}". R&D must assign a unique ERP code.`
+      });
+    }
+
+    // Check for duplicate item name (case-insensitive) within location
+    if (itemData.name && itemData.name.trim()) {
+      const trimmedName = itemData.name.trim();
+      let companyIdForCheck = req.user.companyId;
+
+      if (itemData.store && itemData.store.match(/^[0-9a-fA-F]{24}$/)) {
+        companyIdForCheck = itemData.store;
+      }
+
+      const escapedName = trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const query = {
+        name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
+        category: itemData.category,
+        type: itemData.type
+      };
+
+      if (companyIdForCheck) {
+        query.$or = [
+          { companyId: companyIdForCheck },
+          { store: companyIdForCheck }
+        ];
+      } else if (itemData.store) {
+        query.store = itemData.store;
+      }
+
+      const existingItemByName = await Item.findOne(query);
+
+      if (existingItemByName) {
+        return res.status(400).json({
+          success: false,
+          message: `Duplicate item detected! Item "${trimmedName}" already exists in category "${itemData.category}" (Code: ${existingItemByName.code}).`,
+          duplicateItem: {
+            name: existingItemByName.name,
+            code: existingItemByName.code,
+            id: existingItemByName._id
+          }
+        });
+      }
+    }
+
+    // Sanitize and prepare data
+    const sanitizedData = sanitizeItemData(itemData);
+
+    // Ensure company assignment
+    if (req.user.companyId) {
+      sanitizedData.companyId = req.user.companyId;
+      sanitizedData.store = req.user.companyId.toString(); // Syncs missing frontend dropdown
+    }
+    if (sanitizedData.store && sanitizedData.store.match(/^[0-9a-fA-F]{24}$/)) {
+      sanitizedData.companyId = sanitizedData.store;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // GUARANTEE ALL R&D AND FINANCIAL FIELDS ARE PRESERVED
+    // ─────────────────────────────────────────────────────────────
+    // 1. R&D Master Fields
+    sanitizedData.specifications = itemData.specifications || [];
+    sanitizedData.applications = itemData.applications || [];
+    sanitizedData.variants = itemData.variants || [];
+    if (itemData.warranty) {
+      sanitizedData.warranty = itemData.warranty;
+    }
+
+    // 2. Pricing, Tax & Category Fields (Restored & Protected)
+    if (itemData.stdCost !== undefined) sanitizedData.stdCost = Number(itemData.stdCost) || 0;
+    if (itemData.purchaseCost !== undefined) sanitizedData.purchaseCost = Number(itemData.purchaseCost) || 0;
+    if (itemData.salePrice !== undefined) sanitizedData.salePrice = Number(itemData.salePrice) || 0;
+    if (itemData.mrp !== undefined) sanitizedData.mrp = Number(itemData.mrp) || 0;
+    if (itemData.gst !== undefined) sanitizedData.gst = Number(itemData.gst) || 0;
+    if (itemData.hsn !== undefined) sanitizedData.hsn = itemData.hsn;
+    if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
+
+    const item = await Item.create(sanitizedData);
+    console.log('✅ R&D Master Item created successfully:', item.code);
+
+    // Initialize production summary
+    try {
+      const companyId = req.user.companyId ? req.user.companyId.toString() : (sanitizedData.store || item.store);
+      if (companyId) {
+        await initializeProductSummary(item._id.toString(), item.name, companyId);
+
+        if (item.batch && !isNaN(parseFloat(item.batch))) {
+          const today = new Date().toISOString().split('T')[0];
+          await updateProductSummaryQtyPerBatch(item._id.toString(), item.name, parseFloat(item.batch), today, companyId);
+        }
+      }
+    } catch (summaryError) {
+      console.error('Failed to initialize production summary:', summaryError);
+    }
+
+    // Notifications
+    try {
+      const notifCompanyId = req.user.companyId || null;
+      await notificationService.triggerInventoryNotification(item, 'created', null, notifCompanyId);
+      if (item.qty <= (item.minStock || 10)) {
+        await notificationService.triggerLowStockNotification(item, notifCompanyId);
+      }
+    } catch (notificationError) {
+      console.error('Failed to send inventory notification:', notificationError);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Master Item created successfully with R&D assigned code.',
+      item
+    });
+  } catch (error) {
+    console.error('Create item error:', error);
+    res.status(500).json({ message: error.message || 'Internal server error' });
+  }
+};
+
+
+export const updateItem = async (req, res) => {
+  try {
+    console.log('🔧 UPDATE ITEM - Debug user info:', {
+      userId: req.user._id,
+      username: req.user.username,
+      role: req.user.role,
+      companyId: req.user.companyId,
+      companyObject: req.user.company
+    });
+
+    if (!checkInventoryPermission(req.user, 'edit')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { id } = req.params;
+    const itemData = req.body;
+
+    // Enhanced validation
+    const validation = validateItemData(itemData);
+    if (!validation.isValid) {
+      return res.status(400).json({
+        message: 'Validation failed',
+        errors: validation.errors
+      });
+    }
+
+    // Check if code is being changed and if it already exists
+    if (itemData.code && itemData.code.trim() !== '') {
+      const existingItem = await Item.findOne({
+        code: itemData.code.trim(),
+        _id: { $ne: id }
+      });
+      if (existingItem) {
+        return res.status(400).json({
+          message: 'Validation failed',
+          errors: { code: 'Item code already exists' }
+        });
+      }
+    }
+
+    // Sanitize and prepare data
+    const sanitizedData = sanitizeItemData(itemData);
+
+    // ─────────────────────────────────────────────────────────────
+    // GUARANTEE ALL R&D AND FINANCIAL FIELDS ARE UPDATED
+    // ─────────────────────────────────────────────────────────────
+    // 1. R&D Master Fields
+    if (itemData.specifications !== undefined) sanitizedData.specifications = itemData.specifications;
+    if (itemData.applications !== undefined) sanitizedData.applications = itemData.applications;
+    if (itemData.variants !== undefined) sanitizedData.variants = itemData.variants;
+    if (itemData.warranty !== undefined) sanitizedData.warranty = itemData.warranty;
+
+    // 2. Pricing, Tax & Category Fields (Restored & Protected)
+    if (itemData.stdCost !== undefined) sanitizedData.stdCost = Number(itemData.stdCost) || 0;
+    if (itemData.purchaseCost !== undefined) sanitizedData.purchaseCost = Number(itemData.purchaseCost) || 0;
+    if (itemData.salePrice !== undefined) sanitizedData.salePrice = Number(itemData.salePrice) || 0;
+    if (itemData.mrp !== undefined) sanitizedData.mrp = Number(itemData.mrp) || 0;
+    if (itemData.gst !== undefined) sanitizedData.gst = Number(itemData.gst) || 0;
+    if (itemData.hsn !== undefined) sanitizedData.hsn = itemData.hsn;
+    if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
+
+    const item = await Item.findByIdAndUpdate(
+      id,
+      sanitizedData,
+      { new: true, runValidators: true }
+    );
+
+    if (!item) {
+      return res.status(404).json({ message: 'Item not found' });
+    }
+
+    // Sync qtyPerBatch if batch field was updated
+    try {
+      if (item.batch && !isNaN(parseFloat(item.batch))) {
+        const today = new Date().toISOString().split('T')[0];
+        const companyId = req.user.companyId ? req.user.companyId.toString() : item.store;
+
+        console.log('🔧 Debug sync info:', {
+          itemBatch: item.batch,
+          itemName: item.name,
+          itemId: item._id,
+          itemStore: item.store,
+          userCompanyId: req.user.companyId,
+          finalCompanyId: companyId,
+          userRole: req.user.role
+        });
+
+        if (companyId) {
+          await updateProductSummaryQtyPerBatch(
+            item._id.toString(),
+            item.name,
+            parseFloat(item.batch),
+            today,
+            companyId
+          );
+          console.log('QtyPerBatch synced for updated product:', item.name, 'Value:', item.batch, 'Company:', companyId);
+        } else {
+          console.log('❌ No company ID available for qtyPerBatch sync');
+        }
+      } else {
+        console.log('❌ Batch sync skipped - invalid batch value:', item.batch);
+      }
+    } catch (syncError) {
+      console.error('Failed to sync qtyPerBatch:', syncError);
+    }
+
+    res.json({
+      message: 'Item updated successfully',
+      item
+    });
+  } catch (error) {
+    console.error('Update item error:', error);
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      res.status(400).json({
+        message: 'Validation failed',
+        errors: { [field]: `${field} already exists` }
+      });
+    } else if (error.name === 'ValidationError') {
+      const errors = {};
+      Object.keys(error.errors).forEach(key => {
+        errors[key] = error.errors[key].message;
+      });
+      res.status(400).json({
+        message: 'Validation failed',
+        errors
+      });
+    } else {
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  }
+};
+
 export const getItemById = async (req, res) => {
   try {
     if (!checkInventoryPermission(req.user, 'view')) {
@@ -625,213 +928,7 @@ export const getItemByCode = async (req, res) => {
 };
 
 
-export const createItem = async (req, res) => {
-  try {
-    if (!checkInventoryPermission(req.user, 'add')) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied. Insufficient permissions.'
-      });
-    }
 
-    const itemData = req.body;
-    console.log('📝 Received item data:', itemData);
-    console.log('👤 User info:', {
-      id: req.user._id,
-      username: req.user.username,
-      role: req.user.role,
-      companyId: req.user.companyId,
-      hasCompany: !!req.user.company
-    });
-
-    // Enhanced validation
-    const validation = validateItemData(itemData);
-    if (!validation.isValid) {
-      return res.status(400).json({
-        message: 'Validation failed',
-        errors: validation.errors
-      });
-    }
-
-    // Check for duplicate item name (case-insensitive) within company
-    if (itemData.name && itemData.name.trim()) {
-      const trimmedName = itemData.name.trim();
-
-      // Determine the company ID for duplicate checking
-      let companyIdForCheck = req.user.companyId;
-
-      // If store field contains a companyId (ObjectId), use it for checking
-      if (itemData.store && itemData.store.match(/^[0-9a-fA-F]{24}$/)) {
-        companyIdForCheck = itemData.store;
-      }
-
-      // Escape special regex characters and create case-insensitive query
-      const escapedName = trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const query = {
-        name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
-        category: itemData.category, // Include category to allow same names in different categories
-        type: itemData.type // Include type to allow same names with different types
-      };
-
-      // Add company/store filter for proper isolation
-      if (companyIdForCheck) {
-        // Check duplicates in both companyId and store fields
-        // This handles both old items (stored in store field) and new items (stored in companyId)
-        query.$or = [
-          { companyId: companyIdForCheck },
-          { store: companyIdForCheck }
-        ];
-      } else if (itemData.store) {
-        // If no companyIdForCheck but we have store, still filter by store to prevent cross-store duplicates
-        query.store = itemData.store;
-        console.log('🚨 No companyId available, falling back to store-only filtering:', itemData.store);
-      }
-
-      console.log('📋 Duplicate check details:', {
-        itemName: trimmedName,
-        category: itemData.category,
-        userCompanyId: req.user.companyId,
-        storeValue: itemData.store,
-        companyIdForCheck,
-        finalQuery: query
-      });
-      const existingItemByName = await Item.findOne(query);
-      console.log('Found existing item:', existingItemByName ? `${existingItemByName.name} (${existingItemByName.code})` : 'None');
-
-      if (existingItemByName) {
-        console.log(`Duplicate item found: "${trimmedName}" in category "${itemData.category}" (existing: "${existingItemByName.name}", ID: ${existingItemByName._id})`);
-        return res.status(400).json({
-          success: false,
-          message: `Duplicate item detected! Item "${trimmedName}" already exists in category "${itemData.category}" with type "${itemData.type}" (Code: ${existingItemByName.code}). Please use a different name, category, or type.`,
-          duplicateItem: {
-            name: existingItemByName.name,
-            code: existingItemByName.code,
-            id: existingItemByName._id
-          }
-        });
-      }
-    }
-
-    // Auto-generate code if not provided or if code already exists
-    if (!itemData.code || itemData.code.trim() === '') {
-      itemData.code = await generateItemCode(itemData.type);
-    } else {
-      // Check if code already exists within same company
-      const codeQuery = {
-        code: itemData.code.trim()
-      };
-
-      if (req.user.companyId) {
-        codeQuery.companyId = req.user.companyId;
-      }
-
-      console.log('Code duplicate check query:', codeQuery);
-      const existingItem = await Item.findOne(codeQuery);
-
-      if (existingItem) {
-        console.log('Code already exists, auto-generating new code...');
-        itemData.code = await generateItemCode(itemData.type);
-        console.log('New auto-generated code:', itemData.code);
-      }
-    }
-
-    // Sanitize and prepare data
-    const sanitizedData = sanitizeItemData(itemData);
-
-    // Ensure company assignment - crucial for proper isolation
-    if (req.user.companyId) {
-      sanitizedData.companyId = req.user.companyId;
-    }
-
-    // If store field contains a companyId, use it for companyId
-    if (sanitizedData.store && sanitizedData.store.match(/^[0-9a-fA-F]{24}$/)) {
-      sanitizedData.companyId = sanitizedData.store;
-    }
-
-    console.log('Final data before creation:', {
-      name: sanitizedData.name,
-      code: sanitizedData.code,
-      companyId: sanitizedData.companyId,
-      userCompanyId: req.user.companyId
-    });
-
-    const item = await Item.create(sanitizedData);
-    console.log('Item saved successfully:', item);
-
-    // Initialize production summary for new product
-    try {
-      // Get company ID from user (for Unit Head) or from item's store field (for Super Admin)
-      const companyId = req.user.companyId ? req.user.companyId.toString() : (sanitizedData.store || item.store);
-
-      if (companyId) {
-        await initializeProductSummary(
-          item._id.toString(),
-          item.name,
-          companyId
-        );
-        console.log('Production summary initialized for new product:', item.name, 'Company:', companyId);
-
-        // Sync qtyPerBatch if batch field is provided
-        if (item.batch && !isNaN(parseFloat(item.batch))) {
-          const today = new Date().toISOString().split('T')[0];
-          await updateProductSummaryQtyPerBatch(
-            item._id.toString(),
-            item.name,
-            parseFloat(item.batch),
-            today,
-            companyId
-          );
-          console.log('QtyPerBatch synced for new product:', item.name, 'Value:', item.batch, 'Company:', companyId);
-        }
-      } else {
-        console.log('No company ID available for production summary initialization');
-      }
-    } catch (summaryError) {
-      console.error('Failed to initialize production summary:', summaryError);
-      // Don't fail the item creation if summary initialization fails
-    }
-
-    // Trigger notification for new inventory item
-    try {
-      // ✅ FIX 5: companyId pass karo taaki notification company-scoped ho
-      const notifCompanyId = req.user.companyId || null;
-      await notificationService.triggerInventoryNotification(item, 'created', null, notifCompanyId);
-
-      // Check for low stock alert
-      if (item.qty <= (item.minStock || 10)) {
-        await notificationService.triggerLowStockNotification(item, notifCompanyId);
-      }
-    } catch (notificationError) {
-      console.error('Failed to send inventory notification:', notificationError);
-    }
-
-    res.status(201).json({
-      success: true,
-      message: 'Item created successfully',
-      item
-    });
-  } catch (error) {
-    console.error('Create item error:', error);
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern)[0];
-      res.status(400).json({
-        message: 'Validation failed',
-        errors: { [field]: `${field} already exists` }
-      });
-    } else if (error.name === 'ValidationError') {
-      const errors = {};
-      Object.keys(error.errors).forEach(key => {
-        errors[key] = error.errors[key].message;
-      });
-      res.status(400).json({
-        message: 'Validation failed',
-        errors
-      });
-    } else {
-      res.status(500).json({ message: 'Internal server error' });
-    }
-  }
-};
 
 // Enhanced validation helper function
 const validateItemData = (data, isUpdate = false) => {
@@ -966,122 +1063,7 @@ const sanitizeItemData = (data) => {
   return sanitized;
 };
 
-export const updateItem = async (req, res) => {
-  try {
-    console.log('🔧 UPDATE ITEM - Debug user info:', {
-      userId: req.user._id,
-      username: req.user.username,
-      role: req.user.role,
-      companyId: req.user.companyId,
-      companyObject: req.user.company
-    });
 
-    if (!checkInventoryPermission(req.user, 'edit')) {
-      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
-    }
-
-    const { id } = req.params;
-    const itemData = req.body;
-    //'🔧 UPDATE ITEM - Item data:';
-    // Enhanced validation
-    const validation = validateItemData(itemData);
-    if (!validation.isValid) {
-      return res.status(400).json({
-        message: 'Validation failed',
-        errors: validation.errors
-      });
-    }
-
-    // Check if code is being changed and if it already exists
-    if (itemData.code && itemData.code.trim() !== '') {
-      const existingItem = await Item.findOne({
-        code: itemData.code.trim(),
-        _id: { $ne: id }
-      });
-      if (existingItem) {
-        return res.status(400).json({
-          message: 'Validation failed',
-          errors: { code: 'Item code already exists' }
-        });
-      }
-    }
-
-    // Sanitize and prepare data
-    const sanitizedData = sanitizeItemData(itemData);
-
-    const item = await Item.findByIdAndUpdate(
-      id,
-      sanitizedData,
-      { new: true, runValidators: true }
-    );
-
-    if (!item) {
-      return res.status(404).json({ message: 'Item not found' });
-    }
-
-    // Sync qtyPerBatch if batch field was updated
-    try {
-      if (item.batch && !isNaN(parseFloat(item.batch))) {
-        const today = new Date().toISOString().split('T')[0];
-        // Get company ID from user (for Unit Head) or from item's store field (for Super Admin)
-        const companyId = req.user.companyId ? req.user.companyId.toString() : item.store;
-
-        console.log('🔧 Debug sync info:', {
-          itemBatch: item.batch,
-          itemName: item.name,
-          itemId: item._id,
-          itemStore: item.store,
-          userCompanyId: req.user.companyId,
-          finalCompanyId: companyId,
-          userRole: req.user.role
-        });
-
-        if (companyId) {
-          await updateProductSummaryQtyPerBatch(
-            item._id.toString(),
-            item.name,
-            parseFloat(item.batch),
-            today,
-            companyId
-          );
-          console.log('QtyPerBatch synced for updated product:', item.name, 'Value:', item.batch, 'Company:', companyId);
-        } else {
-          console.log('❌ No company ID available for qtyPerBatch sync');
-        }
-      } else {
-        console.log('❌ Batch sync skipped - invalid batch value:', item.batch);
-      }
-    } catch (syncError) {
-      console.error('Failed to sync qtyPerBatch:', syncError);
-      // Don't fail the update if sync fails
-    }
-
-    res.json({
-      message: 'Item updated successfully',
-      item
-    });
-  } catch (error) {
-    console.error('Update item error:', error);
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern)[0];
-      res.status(400).json({
-        message: 'Validation failed',
-        errors: { [field]: `${field} already exists` }
-      });
-    } else if (error.name === 'ValidationError') {
-      const errors = {};
-      Object.keys(error.errors).forEach(key => {
-        errors[key] = error.errors[key].message;
-      });
-      res.status(400).json({
-        message: 'Validation failed',
-        errors
-      });
-    } else {
-      res.status(500).json({ message: 'Internal server error' });
-    }
-  }
-};
 
 
 
@@ -1278,7 +1260,8 @@ export const reorderItems = async (req, res) => {
   }
 };
 
-// CATEGORY CONTROLLERS
+// ─── CATEGORY MANAGEMENT (COMPANY-WISE) ─────────────────────────────────
+
 export const getCategories = async (req, res) => {
   try {
     console.log('🔍 GetCategories called by:', req.user?.role);
@@ -1287,51 +1270,29 @@ export const getCategories = async (req, res) => {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
-    let categories;
-
-    // For Unit Head users, show all categories but with company-specific product counts
-    if (req.user.role === 'Unit Head' && req.user.companyId) {
-      console.log('🏢 Unit Head - showing all categories with company-specific counts:', req.user.companyId);
-
-      // Get all categories (not just ones with items in the company)
-      const allCategories = await Category.find().sort({ createdAt: -1, name: 1 });
-
-      // Add product count for each category (company-specific)
-      categories = await Promise.all(
-        allCategories.map(async (category) => {
-          const productCount = await Item.countDocuments({
-            category: category.name,
-            store: req.user.companyId
-          });
-          const categoryObj = category.toObject();
-          categoryObj.productCount = productCount;
-          console.log(`📊 Category "${category.name}" has ${productCount} products in company ${req.user.companyId}`);
-          return categoryObj;
-        })
-      );
-    } else {
-      console.log('👑 Super Admin or other role - showing all categories');
-
-      // For Super Admin and other roles, show all categories
-      categories = await Category.find().sort({ createdAt: -1, name: 1 });
-
-      // Add product count for each category (all companies)
-      const categoriesWithCount = await Promise.all(
-        categories.map(async (category) => {
-          const productCount = await Item.countDocuments({
-            category: category.name
-          });
-          const categoryObj = category.toObject();
-          categoryObj.productCount = productCount;
-          console.log(`📊 Category "${category.name}" has ${productCount} products (global)`);
-          return categoryObj;
-        })
-      );
-      categories = categoriesWithCount;
+    const companyId = req.user.companyId;
+    if (!companyId) {
+      return res.status(400).json({ message: 'Access denied. User does not belong to a company.' });
     }
 
-    console.log(`✅ Returning ${categories.length} categories with product counts`);
-    res.json({ categories });
+    // Fetch ONLY categories belonging to the user's company
+    const categories = await Category.find({ companyId }).sort({ createdAt: -1, name: 1 });
+
+    // Add product count specifically for this company
+    const categoriesWithCount = await Promise.all(
+      categories.map(async (category) => {
+        const productCount = await Item.countDocuments({
+          category: category.name,
+          companyId: companyId // Ensures it only counts items in this company
+        });
+        const categoryObj = category.toObject();
+        categoryObj.productCount = productCount;
+        return categoryObj;
+      })
+    );
+
+    console.log(`✅ Returning ${categoriesWithCount.length} categories for company ${companyId}`);
+    res.json({ categories: categoriesWithCount });
   } catch (error) {
     console.error('❌ Get categories error:', error);
     res.status(500).json({ message: 'Internal server error' });
@@ -1345,13 +1306,16 @@ export const createCategory = async (req, res) => {
     }
 
     const { name, description, subcategories = [] } = req.body;
-    console.log('Creating category with data:', { name, description, subcategories });
+    const companyId = req.user.companyId;
 
     if (!name || name.trim() === '') {
-      return res.status(400).json({
-        success: false,
-        message: 'Category name is required'
-      });
+      return res.status(400).json({ success: false, message: 'Category name is required' });
+    }
+
+    // Check if category already exists IN THIS COMPANY
+    const existingCategory = await Category.findOne({ name: name.trim(), companyId });
+    if (existingCategory) {
+      return res.status(400).json({ success: false, message: 'Category name already exists in your company.' });
     }
 
     // Filter out empty subcategories
@@ -1360,11 +1324,12 @@ export const createCategory = async (req, res) => {
     const categoryData = {
       name: name.trim(),
       description: description ? description.trim() : '',
-      subcategories: validSubcategories
+      subcategories: validSubcategories,
+      companyId // Assign to the user's company
     };
 
     const category = await Category.create(categoryData);
-    console.log('Category created successfully:', category);
+    console.log('Category created successfully:', category.name);
 
     res.status(201).json({
       success: true,
@@ -1373,17 +1338,7 @@ export const createCategory = async (req, res) => {
     });
   } catch (error) {
     console.error('Create category error:', error);
-    if (error.code === 11000) {
-      res.status(400).json({
-        success: false,
-        message: 'Category name already exists'
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error'
-      });
-    }
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
@@ -1395,16 +1350,18 @@ export const updateCategory = async (req, res) => {
 
     const { id } = req.params;
     const { name, description, subcategories = [] } = req.body;
-    console.log('Updating category with data:', { id, name, description, subcategories });
+    const companyId = req.user.companyId;
 
     if (!name || name.trim() === '') {
-      return res.status(400).json({
-        success: false,
-        message: 'Category name is required'
-      });
+      return res.status(400).json({ success: false, message: 'Category name is required' });
     }
 
-    // Filter out empty subcategories
+    // Prevent renaming to an existing category IN THIS COMPANY
+    const existingCategory = await Category.findOne({ name: name.trim(), companyId, _id: { $ne: id } });
+    if (existingCategory) {
+      return res.status(400).json({ success: false, message: 'Category name already exists in your company.' });
+    }
+
     const validSubcategories = subcategories.filter(sub => sub && sub.trim() !== '');
 
     const updateData = {
@@ -1413,20 +1370,16 @@ export const updateCategory = async (req, res) => {
       subcategories: validSubcategories
     };
 
-    const category = await Category.findByIdAndUpdate(
-      id,
+    // Strict update: Must match both ID and Company ID
+    const category = await Category.findOneAndUpdate(
+      { _id: id, companyId },
       updateData,
       { new: true, runValidators: true }
     );
 
     if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: 'Category not found'
-      });
+      return res.status(404).json({ success: false, message: 'Category not found or access denied.' });
     }
-
-    console.log('Category updated successfully:', category);
 
     res.json({
       success: true,
@@ -1435,17 +1388,7 @@ export const updateCategory = async (req, res) => {
     });
   } catch (error) {
     console.error('Update category error:', error);
-    if (error.code === 11000) {
-      res.status(400).json({
-        success: false,
-        message: 'Category name already exists'
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error'
-      });
-    }
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
@@ -1456,26 +1399,27 @@ export const deleteCategory = async (req, res) => {
     }
 
     const { id } = req.params;
+    const companyId = req.user.companyId;
 
-    // Check if category is being used by any items
+    // Verify category belongs to this company
+    const category = await Category.findOne({ _id: id, companyId });
+    if (!category) {
+      return res.status(404).json({ message: 'Category not found or access denied.' });
+    }
+
+    // Check if category is being used by any items IN THIS COMPANY
     const itemsUsingCategory = await Item.countDocuments({
-      $or: [
-        { category: id },
-        { category: (await Category.findById(id))?.name }
-      ]
+      category: category.name,
+      companyId: companyId
     });
 
     if (itemsUsingCategory > 0) {
       return res.status(400).json({
-        message: `Cannot delete category. ${itemsUsingCategory} items are using this category.`
+        message: `Cannot delete category. ${itemsUsingCategory} items in your inventory are using this category.`
       });
     }
 
-    const category = await Category.findByIdAndDelete(id);
-
-    if (!category) {
-      return res.status(404).json({ message: 'Category not found' });
-    }
+    await Category.findByIdAndDelete(id);
 
     res.json({ message: 'Category deleted successfully' });
   } catch (error) {
@@ -1484,14 +1428,21 @@ export const deleteCategory = async (req, res) => {
   }
 };
 
-// CUSTOMER CATEGORY CONTROLLERS
+// ─── CUSTOMER CATEGORY CONTROLLERS (COMPANY-WISE) ───────────────────────
+
 export const getCustomerCategories = async (req, res) => {
   try {
     if (!checkInventoryPermission(req.user, 'view')) {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
-    const customerCategories = await CustomerCategory.find().sort({ createdAt: -1, name: 1 });
+    const companyId = req.user.companyId;
+    if (!companyId) {
+      return res.status(400).json({ message: 'Access denied. User does not belong to a company.' });
+    }
+
+    // Fetch ONLY customer categories belonging to the user's company
+    const customerCategories = await CustomerCategory.find({ companyId }).sort({ createdAt: -1, name: 1 });
     res.json({ customerCategories });
   } catch (error) {
     console.error('Get customer categories error:', error);
@@ -1506,12 +1457,23 @@ export const createCustomerCategory = async (req, res) => {
     }
 
     const { name, description } = req.body;
+    const companyId = req.user.companyId;
 
-    if (!name) {
+    if (!name || name.trim() === '') {
       return res.status(400).json({ message: 'Customer category name is required' });
     }
 
-    const customerCategory = await CustomerCategory.create({ name, description });
+    // Check for duplicate name IN THIS COMPANY
+    const existingCategory = await CustomerCategory.findOne({ name: name.trim(), companyId });
+    if (existingCategory) {
+      return res.status(400).json({ message: 'Customer category name already exists in your company.' });
+    }
+
+    const customerCategory = await CustomerCategory.create({
+      name: name.trim(),
+      description: description ? description.trim() : '',
+      companyId
+    });
 
     res.status(201).json({
       message: 'Customer category created successfully',
@@ -1519,11 +1481,7 @@ export const createCustomerCategory = async (req, res) => {
     });
   } catch (error) {
     console.error('Create customer category error:', error);
-    if (error.code === 11000) {
-      res.status(400).json({ message: 'Customer category name already exists' });
-    } else {
-      res.status(500).json({ message: 'Internal server error' });
-    }
+    res.status(500).json({ message: 'Internal server error' });
   }
 };
 
@@ -1534,16 +1492,37 @@ export const updateCustomerCategory = async (req, res) => {
     }
 
     const { id } = req.params;
-    const updateData = req.body;
+    const { name, description } = req.body;
+    const companyId = req.user.companyId;
 
-    const customerCategory = await CustomerCategory.findByIdAndUpdate(
-      id,
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ message: 'Customer category name is required' });
+    }
+
+    // Prevent renaming to an existing category IN THIS COMPANY
+    const existingCategory = await CustomerCategory.findOne({
+      name: name.trim(),
+      companyId,
+      _id: { $ne: id }
+    });
+    if (existingCategory) {
+      return res.status(400).json({ message: 'Customer category name already exists in your company.' });
+    }
+
+    const updateData = {
+      name: name.trim(),
+      description: description ? description.trim() : ''
+    };
+
+    // Strict update: Must match both ID and Company ID
+    const customerCategory = await CustomerCategory.findOneAndUpdate(
+      { _id: id, companyId },
       updateData,
       { new: true, runValidators: true }
     );
 
     if (!customerCategory) {
-      return res.status(404).json({ message: 'Customer category not found' });
+      return res.status(404).json({ message: 'Customer category not found or access denied.' });
     }
 
     res.json({
@@ -1563,12 +1542,27 @@ export const deleteCustomerCategory = async (req, res) => {
     }
 
     const { id } = req.params;
+    const companyId = req.user.companyId;
 
-    const customerCategory = await CustomerCategory.findByIdAndDelete(id);
-
-    if (!customerCategory) {
-      return res.status(404).json({ message: 'Customer category not found' });
+    // Verify category belongs to this company
+    const category = await CustomerCategory.findOne({ _id: id, companyId });
+    if (!category) {
+      return res.status(404).json({ message: 'Customer category not found or access denied.' });
     }
+
+    // Check if category is being used by any items IN THIS COMPANY
+    const itemsUsingCategory = await Item.countDocuments({
+      customerCategory: category.name,
+      companyId: companyId
+    });
+
+    if (itemsUsingCategory > 0) {
+      return res.status(400).json({
+        message: `Cannot delete. ${itemsUsingCategory} items in your inventory are assigned to this customer category.`
+      });
+    }
+
+    await CustomerCategory.findOneAndDelete({ _id: id, companyId });
 
     res.json({ message: 'Customer category deleted successfully' });
   } catch (error) {

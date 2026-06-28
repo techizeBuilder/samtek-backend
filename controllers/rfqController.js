@@ -81,7 +81,7 @@ export const getVendorsForRFQ = async (req, res) => {
             score += 2;
           } else {
             const shorter = keyword.length < cat.length ? keyword : cat;
-            const longer  = keyword.length < cat.length ? cat : keyword;
+            const longer = keyword.length < cat.length ? cat : keyword;
             if (shorter.length >= 4 && longer.includes(shorter.slice(0, shorter.length - 1))) {
               score += 1;
             }
@@ -158,6 +158,14 @@ export const getRFQs = async (req, res) => {
   }
 };
 
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/rfq  — Create RFQ and send emails to matching vendors
+// ──────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/rfq  — Create RFQ and send emails to matching vendors
+// ──────────────────────────────────────────────────────────────────────────────
 // ──────────────────────────────────────────────────────────────────────────────
 // POST /api/rfq  — Create RFQ and send emails to matching vendors
 // ──────────────────────────────────────────────────────────────────────────────
@@ -182,8 +190,23 @@ export const createRFQ = async (req, res) => {
       });
     }
 
-    // 3. Vendor resolution — manual selection takes priority over auto-matching
-    //    Frontend always sends vendorIds (either auto-matched or manually picked)
+    // 3. Fetch Master Inventory Item early to get Category AND R&D Specifications
+    let inventoryItem = null;
+    let itemCategory = '';
+    try {
+      inventoryItem = await Item.findOne({
+        $or: [
+          { name: { $regex: new RegExp(pr.productName.trim().split(' ').slice(0, 2).join(' '), 'i') } },
+          { code: pr.itemId }
+        ],
+        companyId
+      });
+      if (inventoryItem) itemCategory = (inventoryItem.category || '').toLowerCase();
+    } catch (e) {
+      console.warn('Could not fetch inventory item for RFQ matching:', e.message);
+    }
+
+    // 4. Fetch all active vendors
     const allVendors = await Supplier.find({
       unit: { $in: [unit, 'Main'] },
       status: 'active'
@@ -193,28 +216,13 @@ export const createRFQ = async (req, res) => {
     let matchType = 'manual';
 
     if (vendorIds && Array.isArray(vendorIds) && vendorIds.length > 0) {
-      // Frontend sent explicit vendor IDs — use those directly
+      // Frontend sent explicit vendor IDs (User picked them from the popup)
       matchedVendors = allVendors.filter(v => vendorIds.includes(v._id.toString()));
       matchType = 'manual-selected';
-      console.log(`[RFQ] Manual vendor selection: ${matchedVendors.map(v => v.supplierName).join(', ')}`);
     }
 
-    // Fallback: no vendors sent from frontend — run auto-match
+    // Fallback: no vendors sent from frontend — run auto-match algorithm!
     if (matchedVendors.length === 0) {
-      let itemCategory = '';
-      try {
-        const inventoryItem = await Item.findOne({
-          $or: [
-            { name: { $regex: new RegExp(pr.productName.trim().split(' ').slice(0, 2).join(' '), 'i') } },
-            { code: pr.itemId }
-          ],
-          companyId
-        });
-        if (inventoryItem) itemCategory = (inventoryItem.category || '').toLowerCase();
-      } catch (e) {
-        console.warn('Could not fetch inventory item for RFQ matching:', e.message);
-      }
-
       const nameKeywords = pr.productName.toLowerCase().split(/[\s\-_,]+/).filter(w => w.length > 2);
       const categoryKeywords = itemCategory ? itemCategory.split(/[\s\-_,]+/).filter(w => w.length > 2) : [];
       const allKeywords = [...new Set([...nameKeywords, ...categoryKeywords])];
@@ -229,7 +237,7 @@ export const createRFQ = async (req, res) => {
             else if (cat.includes(keyword) || keyword.includes(cat)) score += 2;
             else {
               const shorter = keyword.length < cat.length ? keyword : cat;
-              const longer  = keyword.length < cat.length ? cat : keyword;
+              const longer = keyword.length < cat.length ? cat : keyword;
               if (shorter.length >= 4 && longer.includes(shorter.slice(0, shorter.length - 1))) score += 1;
             }
           }
@@ -244,16 +252,19 @@ export const createRFQ = async (req, res) => {
         .map(sv => sv.vendor);
 
       matchType = matchedVendors.length > 0 ? 'category-matched' : 'no-match';
-      console.log(`[RFQ] Auto-match | Item: "${pr.productName}" | Category: "${itemCategory}" | Found: ${matchedVendors.length}`);
+      if (matchedVendors.length > 0) {
+        console.log(`[RFQ] Auto-match Success | Item: "${pr.productName}" | Found: ${matchedVendors.length}`);
+      }
     }
 
-    // Still no vendors — cannot create RFQ
+    // Still no vendors — Cannot auto-send. Return 400 to open frontend Popup!
     if (matchedVendors.length === 0) {
       return res.status(400).json({
         success: false,
-        message: `No vendors selected or matched for "${pr.productName}". Please select vendors manually.`,
+        message: `No vendors matched for "${pr.productName}". Please select vendors manually.`,
         data: {
           productName: pr.productName,
+          detectedCategory: itemCategory,
           allVendors: allVendors.map(v => ({
             _id: v._id,
             supplierName: v.supplierName,
@@ -264,7 +275,18 @@ export const createRFQ = async (req, res) => {
       });
     }
 
-    // 4. Create RFQ
+    // ─────────────────────────────────────────────────────────────
+    // 5. INJECT R&D SPECS (Warranty excluded based on your request)
+    // ─────────────────────────────────────────────────────────────
+    let enrichedNotes = notes ? `${notes}\n\n` : '';
+    if (inventoryItem && inventoryItem.specifications && inventoryItem.specifications.length > 0) {
+      enrichedNotes += '--- STRICT R&D SPECIFICATIONS MUST BE MET ---\n';
+      inventoryItem.specifications.forEach(spec => {
+        if (spec.key && spec.value) enrichedNotes += `• ${spec.key}: ${spec.value}\n`;
+      });
+    }
+
+    // 6. Create RFQ
     const rfqNo = await generateRFQNo();
     const rfq = await RFQ.create({
       rfqNo,
@@ -273,20 +295,19 @@ export const createRFQ = async (req, res) => {
       quantity: pr.quantity,
       requiredByDate: requiredByDate ? new Date(requiredByDate) : null,
       vendors: matchedVendors.map(v => v._id),
-      notes,
+      notes: enrichedNotes, // <-- Has user notes + specs injected
       companyId,
       unit,
       createdBy: req.user._id,
       emailSentAt: new Date()
     });
 
-    // 5. Create VendorBid invite records with unique tokens and send emails
+    // 7. Create VendorBid invite records with unique tokens and send emails
     const company = await Company.findById(companyId);
     const companyName = company?.name || 'Samtek';
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
     const emailPromises = matchedVendors.map(async (vendor) => {
-      // Create a unique token for this vendor's bid
       const token = crypto.randomBytes(32).toString('hex');
       const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
@@ -307,10 +328,8 @@ export const createRFQ = async (req, res) => {
         unit
       });
 
-      // Send email with bid link
       const bidLink = `${frontendUrl}/vendor-bid/${token}`;
-      const backendBidLink = `${process.env.BACKEND_URL || 'http://localhost:5000'}/api/vendor-bid/${token}`;
-      
+
       try {
         await sendRFQEmail({
           to: vendor.email,
@@ -321,9 +340,8 @@ export const createRFQ = async (req, res) => {
           requiredByDate: requiredByDate,
           bidLink,
           companyName,
-          notes
+          notes: enrichedNotes // <-- Vendors see specs in email, no warranty sent
         });
-        console.log(`✅ RFQ email sent to ${vendor.supplierName} (${vendor.email})`);
       } catch (emailError) {
         console.error(`❌ RFQ email failed for ${vendor.email}:`, emailError.message);
       }
@@ -331,7 +349,7 @@ export const createRFQ = async (req, res) => {
 
     await Promise.allSettled(emailPromises);
 
-    // 6. Update PR status to Approved (RFQ sent)
+    // 8. Update PR status to Approved (RFQ sent)
     await PurchaseRequest.findByIdAndUpdate(purchaseRequestId, { status: 'Approved' });
 
     const populated = await RFQ.findById(rfq._id)
@@ -352,12 +370,12 @@ export const createRFQ = async (req, res) => {
         targetCompanyId: req.user.companyId,
       });
     } catch (e) { console.error('RFQ notification error:', e); }
+
   } catch (error) {
     console.error('createRFQ error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 // ──────────────────────────────────────────────────────────────────────────────
 // GET /api/rfq/:id/bids  — Get all bids for an RFQ
 // ──────────────────────────────────────────────────────────────────────────────
@@ -427,7 +445,7 @@ export const selectVendor = async (req, res) => {
     // Find matching inventory item
     let inventoryItemId = null;
     let inventoryItemName = pr.productName;
-    
+
     const matchedItem = await Item.findOne({
       name: { $regex: new RegExp(`^${pr.productName.trim()}$`, 'i') },
       companyId
@@ -583,8 +601,8 @@ export const getBidByToken = async (req, res) => {
     if (bid.rfq.status !== 'Open') {
       return res.status(400).json({
         success: false,
-        message: bid.status === 'Submitted' 
-          ? 'You have already submitted your bid for this RFQ.' 
+        message: bid.status === 'Submitted'
+          ? 'You have already submitted your bid for this RFQ.'
           : 'This RFQ is no longer accepting bids.'
       });
     }

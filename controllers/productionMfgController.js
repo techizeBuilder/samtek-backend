@@ -2,6 +2,8 @@ import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP } from '../models/Prod
 import ProductionTeam from '../models/ProductionTeam.js';
 import Sale from '../models/Sale.js';
 import notificationService from '../services/notificationService.js';
+import RDRequest from '../models/RDRequest.js';
+import { Item } from "../models/Inventory.js"
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -121,15 +123,43 @@ export const verifyDesign = async (req, res) => {
   }
 };
 
+// Fast-fetch utility
+const getTrueMachineCode = async (machineName, companyId) => {
+  const item = await Item.findOne({ name: machineName, companyId })
+    .select('code -_id')
+    .lean();
+
+  if (!item) throw new Error(`Machine name "${machineName}" not found in Inventory.`);
+  return item.code;
+};
+
 export const raiseRDRequest = async (req, res) => {
   try {
-    const order = await ProductionOrder.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { rdRequestRaised: true, status: 'BOM Pending' },
-      { new: true }
-    );
+    const order = await ProductionOrder.findOne({
+      _id: req.params.id,
+      company: req.user.companyId
+    });
+
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    res.json({ success: true, data: order });
+
+    // 1. Get the true code from inventory based on the machine name
+    const trueCode = await getTrueMachineCode(order.machineName, req.user.companyId);
+
+    // 2. Create the workspace for R&D
+    await RDRequest.create({
+      productionOrderId: order._id,
+      machineCode: trueCode, // Pass the corrected code
+      machineName: order.machineName,
+      company: req.user.companyId
+    });
+
+    // 3. Update the Production Order with the corrected code and new status
+    order.machineCode = trueCode;
+    order.rdRequestRaised = true;
+    order.status = 'BOM Pending';
+    await order.save();
+
+    res.json({ success: true, message: 'R&D Request raised successfully.', data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

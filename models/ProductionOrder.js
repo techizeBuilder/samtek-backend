@@ -51,10 +51,10 @@ const ProductionOrderSchema = new mongoose.Schema({
   machineCode: { type: String, required: true, trim: true },
   machineName: { type: String, required: true, trim: true },
   priority: { type: String, enum: ['Urgent', 'Normal'], default: 'Normal' },
-  source: { 
-    type: String, 
-    enum: ['Store', 'QC_Rejected', 'Stock'], 
-    default: 'Store' 
+  source: {
+    type: String,
+    enum: ['Store', 'QC_Rejected', 'Stock'],
+    default: 'Store'
   },
   // purpose field removed — use 'source' to distinguish:
   //   'Store' / 'QC_Rejected' = order-triggered → dispatch after QC
@@ -79,20 +79,28 @@ const ProductionOrderSchema = new mongoose.Schema({
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   notes: { type: String, default: '' },
-  processes: { type: [ProcessStepSchema], default: () => PROCESS_STEPS.map(step => ({
-    step,
-    type: PROCESS_TYPE_MAP[step],
-    status: 'Pending',
-    assignedTeam: null,
-    startDate: null,
-    endDate: null,
-    qcStatus: 'Pending',
-    qcBy: null,
-    qcDate: null,
-    notes: '',
-    reworks: [],
-  })) },
+  processes: {
+    type: [ProcessStepSchema], default: () => PROCESS_STEPS.map(step => ({
+      step,
+      type: PROCESS_TYPE_MAP[step],
+      status: 'Pending',
+      assignedTeam: null,
+      startDate: null,
+      endDate: null,
+      qcStatus: 'Pending',
+      qcBy: null,
+      qcDate: null,
+      notes: '',
+      reworks: [],
+    }))
+  },
   materialDemands: { type: [MaterialDemandSchema], default: [] },
+  // NEW: Store the snapshot of the design URLs
+  designDocuments: [{
+    name: { type: String },
+    fileUrl: { type: String },
+    version: { type: String }
+  }],
 }, { timestamps: true });
 
 ProductionOrderSchema.index({ company: 1, status: 1 });

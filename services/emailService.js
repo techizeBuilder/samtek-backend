@@ -306,8 +306,10 @@ export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantit
             </tr>
             ${notes ? `
             <tr style="border-top: 1px solid #e0e7ff;">
-              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Additional Notes</td>
-              <td style="padding: 6px 0; color: #374151;">${notes}</td>
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px; vertical-align: top;">Additional Notes / Specs</td>
+              <td style="padding: 6px 0; color: #374151; font-size: 14px; line-height: 1.6;">
+                ${notes.replace(/\n/g, '<br/>')}
+              </td>
             </tr>` : ''}
           </table>
         </div>

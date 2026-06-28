@@ -2,16 +2,22 @@ import mongoose from 'mongoose';
 
 const MaterialSchema = new mongoose.Schema({
   code: { type: String, required: true, trim: true },
-  name: { type: String, required: true, trim: true },
+  childPart: { type: String, default: '' },
+  subChildPart: { type: String, default: '' },
+  item: { type: String, required: true, trim: true }, // Replaces 'name'
+  itemType: {
+    type: String,
+    enum: ['Fabricated Item', 'Assembly Item', 'Job Work', 'Laser Cutting', 'Coating'],
+    required: true
+  },
   quantity: { type: Number, required: true, min: 0 },
   unit: { type: String, required: true },
-  grade: { type: String, default: '' },
-  specification: { type: String, default: '' },
   isDiscontinued: { type: Boolean, default: false },
 });
 
 const RDBOMSchema = new mongoose.Schema({
   machine: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMachine', required: true },
+  variant: { type: String, default: 'Standard' }, // Added Machine Variant
   version: { type: String, default: 'v1.0' },
   isLocked: { type: Boolean, default: false },
   lockedAt: { type: String, default: null },

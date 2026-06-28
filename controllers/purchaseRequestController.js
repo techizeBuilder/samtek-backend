@@ -2,6 +2,7 @@ import PurchaseRequest from '../models/PurchaseRequest.js';
 import Sale from '../models/Sale.js';
 import Order from '../models/Order.js';
 import QCJob from '../models/QCJob.js';
+
 import fs from 'fs';
 import notificationService from '../services/notificationService.js';
 import { Item } from '../models/Inventory.js';
@@ -19,6 +20,8 @@ async function generateUniqueRequestId() {
   // Fallback: timestamp-based ID
   return `PR-${Date.now().toString().slice(-6)}`;
 }
+
+
 
 // Get all purchase requests for a company
 export const getPurchaseRequests = async (req, res) => {
@@ -40,16 +43,13 @@ export const getPurchaseRequests = async (req, res) => {
 
       for (const sale of matchingSales) {
         const sourceRefId = sale.invoiceNumber || sale._id.toString();
-        
-        const existingReq = await PurchaseRequest.findOne({
-          companyId,
-          itemId: sourceRefId
-        });
+
+        const existingReq = await PurchaseRequest.findOne({ companyId, itemId: sourceRefId });
 
         if (!existingReq) {
           const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
           const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
-          
+
           const requestId = await generateUniqueRequestId();
 
           await PurchaseRequest.create({
@@ -72,15 +72,9 @@ export const getPurchaseRequests = async (req, res) => {
     }
     // -------------------------------------------------------------
 
-    // Build query based on role:
-    // Store users: see their own (Store-sourced) requests PLUS Production-sourced (pending their approval)
-    // Purchase/other users: see only Store-sourced OR storeApproved Production requests
     let query = { companyId };
-    if (isStoreUser) {
-      // Store sees all requests for their company (including Store, Production, QC, and old/migrated requests)
-      // No extra source-based filtering is needed
-    } else {
-      // Purchase dept: see Store-sourced (source is 'Store' OR missing/null) OR Production/QC that Store has approved
+    if (!isStoreUser) {
+      // Purchase dept: see Store-sourced or Production/QC that Store has approved
       query.$or = [
         { source: 'Store' },
         { source: null },
@@ -90,40 +84,58 @@ export const getPurchaseRequests = async (req, res) => {
     }
 
     const requests = await PurchaseRequest.find(query)
-      .populate({
-        path: 'purchaseOrder',
-        populate: { path: 'supplier' }
-      })
+      .populate({ path: 'purchaseOrder', populate: { path: 'supplier' } })
       .sort({ createdAt: -1 });
 
-    // --- Self-healing sync: Auto-update status to Ordered if a PO is linked and status is Pending/Approved ---
+    // --- Self-healing sync ---
     let updatedAny = false;
     for (const reqObj of requests) {
       if (reqObj.purchaseOrder && (reqObj.status === 'Pending' || reqObj.status === 'Approved')) {
         reqObj.status = 'Ordered';
         await reqObj.save();
         updatedAny = true;
-        console.log(`[Self-healing] Auto-synced request status to Ordered for ${reqObj.requestId} because PO exists`);
       }
     }
-    
-    // Re-fetch if any requests were modified to have correct populated data and status in response
+
     let finalRequests = requests;
     if (updatedAny) {
       finalRequests = await PurchaseRequest.find(query)
-        .populate({
-          path: 'purchaseOrder',
-          populate: { path: 'supplier' }
-        })
+        .populate({ path: 'purchaseOrder', populate: { path: 'supplier' } })
         .sort({ createdAt: -1 });
     }
 
-    res.status(200).json({ success: true, data: finalRequests });
+    // ─────────────────────────────────────────────────────────────
+    // NEW: Attach Master Inventory Item (R&D Specs) to each PR
+    // ─────────────────────────────────────────────────────────────
+    const enrichedRequests = await Promise.all(finalRequests.map(async (reqObj) => {
+      const pr = reqObj.toObject();
+
+      // Attempt to find the Master Item to attach R&D Specs
+      const masterItem = await Item.findOne({
+        companyId,
+        $or: [
+          { code: pr.itemId },
+          { name: { $regex: new RegExp(`^${pr.productName}$`, 'i') } }
+        ]
+      }).select('name code specifications');
+
+      if (masterItem) {
+        pr.item = masterItem; // Attaches to PR so the frontend UI can read it
+      }
+
+      return pr;
+    }));
+
+    res.status(200).json({ success: true, data: enrichedRequests });
   } catch (error) {
     console.error('Error fetching purchase requests:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
   }
 };
+
+
+
+
 
 // Create a new purchase request
 export const createPurchaseRequest = async (req, res) => {
@@ -134,6 +146,48 @@ export const createPurchaseRequest = async (req, res) => {
     if (!companyId) {
       return res.status(400).json({ success: false, message: 'User company is not configured' });
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // STRICT R&D COMPLIANCE CHECK (The Gatekeeper)
+    // ─────────────────────────────────────────────────────────────
+    try {
+      const searchCriteria = [{ name: { $regex: new RegExp(`^${productName.trim()}$`, 'i') } }];
+      if (itemId) searchCriteria.push({ code: itemId });
+      if (materialCode) searchCriteria.push({ code: materialCode });
+
+      // If itemId is a valid MongoDB ObjectId, check by _id too
+      if (itemId && itemId.match(/^[0-9a-fA-F]{24}$/)) {
+        searchCriteria.push({ _id: itemId });
+      }
+
+      const masterItem = await Item.findOne({
+        companyId,
+        $or: searchCriteria
+      });
+
+      // LOCK 1: Block completely unknown items (Forces users to use Master Inventory)
+      if (!masterItem) {
+        return res.status(400).json({
+          success: false,
+          message: `R&D Restriction: Product "${productName}" does not exist in the Master Inventory. R&D must define and approve an item before it can be purchased.`
+        });
+      }
+
+      // LOCK 2: Block items meant only for internal manufacturing
+      if (masterItem.purchase === false) {
+        return res.status(403).json({
+          success: false,
+          message: `R&D Restriction: "${masterItem.name}" is marked for Internal Manufacturing only and is NOT authorized for vendor purchasing.`
+        });
+      }
+    } catch (validationError) {
+      console.warn('Error during R&D purchase validation:', validationError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal error validating product against Master Inventory.'
+      });
+    }
+    // ─────────────────────────────────────────────────────────────
 
     const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
 
@@ -171,7 +225,10 @@ export const createPurchaseRequest = async (req, res) => {
         data: { requestId: newRequest.requestId, productName: newRequest.productName, priority: newRequest.priority },
         targetCompanyId: companyId,
       });
-    } catch (e) { console.error('Purchase request notification error:', e); }
+    } catch (e) {
+      console.error('Purchase request notification error:', e);
+    }
+
   } catch (error) {
     console.error('Error creating purchase request:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
@@ -338,8 +395,8 @@ const today = () => new Date().toISOString().split('T')[0];
 
 async function generateQCJobId() {
   const year = new Date().getFullYear();
-  const lastJob = await QCJob.findOne({ 
-    qcJobId: new RegExp(`^QC-${year}-`) 
+  const lastJob = await QCJob.findOne({
+    qcJobId: new RegExp(`^QC-${year}-`)
   }).sort({ qcJobId: -1 }).lean();
 
   let nextNumber = 1;
@@ -376,19 +433,19 @@ export const updatePurchaseRequestStatus = async (req, res) => {
 
     // ── Validate mandatory receive fields ──────────────────────────────────────
     if (status === 'Received' && request.status !== 'Received') {
-      const serialNumber   = req.body.serialNumber?.trim();
+      const serialNumber = req.body.serialNumber?.trim();
       const warrantyPeriod = req.body.warrantyPeriod;
-      const warrantyCard   = req.file; // uploaded via multer
+      const warrantyCard = req.file; // uploaded via multer
 
       const missing = [];
-      if (!serialNumber)        missing.push('Serial Number');
-      if (!warrantyPeriod)      missing.push('Warranty Period (months)');
-      if (!warrantyCard)        missing.push('Warranty Card (image or PDF)');
+      if (!serialNumber) missing.push('Serial Number');
+      if (!warrantyPeriod) missing.push('Warranty Period (months)');
+      if (!warrantyCard) missing.push('Warranty Card (image or PDF)');
 
       if (missing.length > 0) {
         // If multer already saved a file but other fields are missing, clean it up
         if (warrantyCard) {
-          try { fs.unlinkSync(warrantyCard.path); } catch (_) {}
+          try { fs.unlinkSync(warrantyCard.path); } catch (_) { }
         }
         return res.status(400).json({
           success: false,
@@ -397,10 +454,10 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       }
 
       // Save receive-specific data on the purchase request
-      request.serialNumber    = serialNumber;
-      request.warrantyPeriod  = Number(warrantyPeriod);
+      request.serialNumber = serialNumber;
+      request.warrantyPeriod = Number(warrantyPeriod);
       request.warrantyCardUrl = `/uploads/warranty-cards/${warrantyCard.filename}`;
-      request.receivedAt      = new Date();
+      request.receivedAt = new Date();
     }
     // ──────────────────────────────────────────────────────────────────────────
 
@@ -439,10 +496,10 @@ export const updatePurchaseRequestStatus = async (req, res) => {
         });
 
         if (inventoryItem) {
-          inventoryItem.serialNumber               = request.serialNumber;
-          inventoryItem.warranty.period            = request.warrantyPeriod;
-          inventoryItem.warranty.cardUrl           = request.warrantyCardUrl;
-          inventoryItem.warranty.cardUploadedAt    = new Date();
+          inventoryItem.serialNumber = request.serialNumber;
+          inventoryItem.warranty.period = request.warrantyPeriod;
+          inventoryItem.warranty.cardUrl = request.warrantyCardUrl;
+          inventoryItem.warranty.cardUploadedAt = new Date();
           inventoryItem.receivedFromPurchaseRequest = request._id;
           await inventoryItem.save();
           console.log(`✅ Inventory item "${inventoryItem.name}" updated with serial & warranty info`);
@@ -457,7 +514,7 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       // 1. Generate QC Job
       try {
         const sourceRefId = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
-        
+
         // Check if a QC job for this sourceRefId already exists
         const existingQC = await QCJob.findOne({
           source: 'Purchase',
@@ -467,7 +524,7 @@ export const updatePurchaseRequestStatus = async (req, res) => {
 
         if (!existingQC) {
           const qcJobId = await generateQCJobId();
-          
+
           await QCJob.create({
             qcJobId,
             source: 'Purchase',

@@ -11,6 +11,11 @@ import {
   getToolProcesses, addTool, removeTool, discontinueTool, reactivateTool, addProcess, removeProcess,
   getQualityParams, addQualityParam, deleteQualityParam, addQCItem, deleteQCItem,
   getDocuments, createDocument, deleteDocument,
+  getRDRequests,
+  processRDRequest,
+  getRDRequestReviewData,
+  getDropdownOptions,
+  addDropdownOption,
 } from '../controllers/rdController.js';
 
 const router = express.Router();
@@ -66,5 +71,15 @@ router.delete('/quality-params/:machineId/qc-items/:itemId', deleteQCItem);
 router.get('/documents', getDocuments);
 router.post('/documents', rdDocumentUpload.single('file'), createDocument);
 router.delete('/documents/:id', deleteDocument);
+
+//production rnd request
+router.get('/production-rnd-requests', getRDRequests);
+// PUT /api/rd-requests/:id/process
+// Body: { "action": "Approve" } OR { "action": "Reject", "rejectReason": "Incomplete requirements" }
+router.put('/:id/process', processRDRequest);
+router.get('/production-rnd-requests/:id/review', getRDRequestReviewData);
+// New Routes for Dynamic Dropdowns
+router.get('/master-options', getDropdownOptions);
+router.post('/master-options', addDropdownOption);
 
 export default router;

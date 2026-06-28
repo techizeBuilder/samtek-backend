@@ -22,7 +22,7 @@ const itemSchema = new mongoose.Schema({
     trim: true,
     enum: [
       'Purchase Machine',
-      'Manufacturing Machine', 
+      'Manufacturing Machine',
       'Raw Material',
       'Tool',
       'Asset',
@@ -275,7 +275,7 @@ const categorySchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
-    unique: true,
+    // unique: true, <--- REMOVE THIS GLOBAL UNIQUE CONSTRAINT
     trim: true
   },
   description: {
@@ -285,25 +285,42 @@ const categorySchema = new mongoose.Schema({
   subcategories: [{
     type: String,
     trim: true
-  }]
+  }],
+  // ADD COMPANY ID
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    required: true
+  }
 }, {
   timestamps: true
 });
+
+
 
 const customerCategorySchema = new mongoose.Schema({
   name: {
     type: String,
     required: true,
-    unique: true,
+    // unique: true,  <--- REMOVE THIS GLOBAL CONSTRAINT
     trim: true
   },
   description: {
     type: String,
     trim: true
+  },
+  // ADD COMPANY ID
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    required: true
   }
 }, {
   timestamps: true
 });
+
+// ADD THIS: Ensures names are unique PER COMPANY, not globally
+customerCategorySchema.index({ name: 1, companyId: 1 }, { unique: true });
 
 // Indexes for better performance
 itemSchema.index({ name: 1, code: 1 });
@@ -313,7 +330,8 @@ itemSchema.index({ qty: 1, minStock: 1 });
 itemSchema.index({ order: 1 });
 itemSchema.index({ companyId: 1 });
 itemSchema.index({ store: 1 });
-
+// ADD THIS: Ensures category names are unique PER COMPANY, not globally
+categorySchema.index({ name: 1, companyId: 1 }, { unique: true });
 export const Item = mongoose.model('Item', itemSchema);
 export const Category = mongoose.model('Category', categorySchema);
 export const CustomerCategory = mongoose.model('CustomerCategory', customerCategorySchema);
