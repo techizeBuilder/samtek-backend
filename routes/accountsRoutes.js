@@ -45,7 +45,8 @@ import {
   rejectOrderAccount,
   downloadInvoicePDF,
   getPackedOrders,
-  uploadPaymentProof
+  uploadPaymentProof,
+  getDueBillData
 } from '../controllers/salesAccountController.js';
 import { paymentProofUpload } from '../middleware/paymentProofUpload.js';
 
@@ -275,6 +276,7 @@ accountsRouter.get('/sales/payment/stats', authorizeRoles('Accounts', 'Accounts 
 
 // Packed Orders & Payment Proof Upload
 accountsRouter.get('/packed-orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPackedOrders);
+accountsRouter.get('/packed-orders/:jobId/due-bill', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getDueBillData);
 accountsRouter.post('/sales/invoices/:saleId/payment-proof', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), paymentProofUpload.single('paymentProof'), uploadPaymentProof);
 
 // Receivables & Reports

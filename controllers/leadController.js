@@ -473,6 +473,41 @@ export const markLeadAsWon = async (req, res) => {
 
     console.log(`[Deal Won] Using CompanyId: ${companyId}, SalesPersonId: ${salesPersonId}, Unit: ${unit}`);
 
+    const { Item } = await import('../models/Inventory.js');
+    let item = null;
+    if (lead.productRequired) {
+      const searchStr = lead.productRequired.trim();
+      const escapedProduct = searchStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      item = await Item.findOne({
+        $and: [
+          { $or: [{ companyId: companyId }, { store: companyId.toString() }] },
+          { $or: [{ name: { $regex: new RegExp(`^${escapedProduct}$`, 'i') } }, { code: searchStr }] }
+        ]
+      });
+    }
+
+    const orderProducts = [];
+    if (item) {
+      orderProducts.push({ product: item._id, quantity: 1, price: lead.dealValue || item.salePrice || 0, total: lead.dealValue || item.salePrice || 0 });
+    } else {
+      const genericItem = await Item.findOne({ $or: [{ companyId: companyId }, { store: companyId.toString() }] });
+      if (genericItem) {
+        orderProducts.push({ product: genericItem._id, quantity: 1, price: lead.dealValue || 0, total: lead.dealValue || 0 });
+      } else {
+        throw new Error('No items found in inventory to create an order. Please add products first.');
+      }
+    }
+
+    const totalAmount = orderProducts.reduce((sum, p) => sum + (p.total || 0), 0);
+    const baseDealValue = lead.dealValue || totalAmount || 0;
+
+    // Use the actual quotation final amount (Net Amount from sent quotation PDF) for outstanding.
+    // This includes items + additional charges + GST as shown in the quotation.
+    // Fall back to dealValue * 1.18 only if no quotation final amount was saved.
+    const quotationNetAmount = lead.quotationFinalAmount || 0;
+    const outstandingBase = quotationNetAmount > 0 ? quotationNetAmount : Math.round(baseDealValue * 1.18);
+    console.log(`[Deal Won] Outstanding base: ₹${outstandingBase} (quotationFinalAmount: ₹${quotationNetAmount}, dealValue fallback: ₹${Math.round(baseDealValue * 1.18)})`);
+
     let customer = await Customer.findOne({
       companyId: companyId,
       $or: [{ email: lead.email }, { mobile: lead.mobile }]
@@ -496,31 +531,18 @@ export const markLeadAsWon = async (req, res) => {
         salesContact: salesPersonId,
         active: 'Yes',
         advancePayment: lead.advancedPaymentAmount || 0,
-        // Set outstanding = dealValue + 18% GST - advance already paid
-        outstandingAmount: Math.max(0, Math.round((lead.dealValue || 0) * 1.18) - (lead.advancedPaymentAmount || 0))
+        // Outstanding = quotation Net Amount (already includes all charges + GST) - advance paid
+        outstandingAmount: Math.max(0, outstandingBase - (lead.advancedPaymentAmount || 0))
       });
       await customer.save();
     } else {
-      // Existing customer — add this deal's outstanding (dealValue + 18% GST - advance)
-      const newDealOutstanding = Math.max(0, Math.round((lead.dealValue || 0) * 1.18) - (lead.advancedPaymentAmount || 0));
+      // Existing customer — add this deal's outstanding
+      const newDealOutstanding = Math.max(0, outstandingBase - (lead.advancedPaymentAmount || 0));
       customer.outstandingAmount = (customer.outstandingAmount || 0) + newDealOutstanding;
       if (lead.advancedPaymentAmount > 0) {
         customer.advancePayment = (customer.advancePayment || 0) + lead.advancedPaymentAmount;
       }
       await customer.save();
-    }
-
-    const { Item } = await import('../models/Inventory.js');
-    let item = null;
-    if (lead.productRequired) {
-      const searchStr = lead.productRequired.trim();
-      const escapedProduct = searchStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      item = await Item.findOne({
-        $and: [
-          { $or: [{ companyId: companyId }, { store: companyId.toString() }] },
-          { $or: [{ name: { $regex: new RegExp(`^${escapedProduct}$`, 'i') } }, { code: searchStr }] }
-        ]
-      });
     }
 
     const Order = (await import('../models/Order.js')).default;
@@ -536,19 +558,6 @@ export const markLeadAsWon = async (req, res) => {
     }
     if (!isUnique) orderCode = `ORD-L-${Date.now().toString().slice(-6)}`;
 
-    const orderProducts = [];
-    if (item) {
-      orderProducts.push({ product: item._id, quantity: 1, price: lead.dealValue || item.salePrice || 0, total: lead.dealValue || item.salePrice || 0 });
-    } else {
-      const genericItem = await Item.findOne({ $or: [{ companyId: companyId }, { store: companyId.toString() }] });
-      if (genericItem) {
-        orderProducts.push({ product: genericItem._id, quantity: 1, price: lead.dealValue || 0, total: lead.dealValue || 0 });
-      } else {
-        throw new Error('No items found in inventory to create an order. Please add products first.');
-      }
-    }
-
-    const totalAmount = orderProducts.reduce((sum, p) => sum + (p.total || 0), 0);
     const newOrder = new Order({
       orderCode,
       customer: customer._id,

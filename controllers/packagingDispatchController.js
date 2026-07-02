@@ -741,18 +741,41 @@ export const markInTransit = async (req, res) => {
 
 export const confirmDelivery = async (req, res) => {
   try {
-    const { deliveryProofUrl, deliveryOTPVerified } = req.body;
+    // Validate that all 3 documents are uploaded
+    const files = req.files || {};
+    const nocFile = files.noc?.[0];
+    const ewayBillFile = files.ewayBill?.[0];
+    const invoiceFile = files.invoice?.[0];
+
+    if (!nocFile || !ewayBillFile || !invoiceFile) {
+      const missing = [];
+      if (!nocFile) missing.push('NOC');
+      if (!ewayBillFile) missing.push('E-Way Bill');
+      if (!invoiceFile) missing.push('Invoice');
+      return res.status(400).json({
+        success: false,
+        message: `Missing required documents: ${missing.join(', ')}. All three documents must be uploaded to confirm delivery.`,
+      });
+    }
+
+    const { deliveryOTPVerified } = req.body;
+
     const dispatch = await DispatchOrder.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, status: { $in: ['Dispatched', 'In Transit'] } },
       {
         status: 'Delivered',
         actualDeliveryDate: new Date().toISOString().split('T')[0],
-        deliveryProofUrl: deliveryProofUrl || '',
         deliveryOTPVerified: !!deliveryOTPVerified,
+        'deliveryDocs.noc': nocFile.path.replace(/\\/g, '/'),
+        'deliveryDocs.ewayBill': ewayBillFile.path.replace(/\\/g, '/'),
+        'deliveryDocs.invoice': invoiceFile.path.replace(/\\/g, '/'),
       },
       { new: true }
     );
-    if (!dispatch) return res.status(404).json({ success: false, message: 'Dispatch order not found or not in transit' });
+
+    if (!dispatch) {
+      return res.status(404).json({ success: false, message: 'Dispatch order not found or not in transit' });
+    }
 
     // 🔔 Notify Sales Head and Accounts on delivery
     try {

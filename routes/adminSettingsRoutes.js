@@ -1,0 +1,69 @@
+import express from 'express';
+import { authenticateToken } from '../middleware/auth.js';
+import {
+  getAdminSettings,
+  addSmtp, updateSmtp, deleteSmtp,
+  leadStagesCrud,
+  leadSourcesCrud,
+  businessTypesCrud,
+  documentTypesCrud,
+  termsCrud,
+  chargesCrud,
+  notesCrud,
+} from '../controllers/adminSettingsController.js';
+
+const router = express.Router();
+router.use(authenticateToken);
+
+// ─── Full settings (read all) ─────────────────────────────────────────────────
+router.get('/', getAdminSettings);
+
+// ─── SMTP ─────────────────────────────────────────────────────────────────────
+router.post('/smtp', addSmtp);
+router.put('/smtp/:id', updateSmtp);
+router.delete('/smtp/:id', deleteSmtp);
+
+// ─── Lead Stages ──────────────────────────────────────────────────────────────
+router.get('/lead-stages', leadStagesCrud.list);
+router.post('/lead-stages', leadStagesCrud.add);
+router.put('/lead-stages/:id', leadStagesCrud.update);
+router.delete('/lead-stages/:id', leadStagesCrud.remove);
+router.post('/lead-stages/reorder', leadStagesCrud.reorder);
+
+// ─── Lead Sources ─────────────────────────────────────────────────────────────
+router.get('/lead-sources', leadSourcesCrud.list);
+router.post('/lead-sources', leadSourcesCrud.add);
+router.put('/lead-sources/:id', leadSourcesCrud.update);
+router.delete('/lead-sources/:id', leadSourcesCrud.remove);
+
+// ─── Business Types ───────────────────────────────────────────────────────────
+router.get('/business-types', businessTypesCrud.list);
+router.post('/business-types', businessTypesCrud.add);
+router.put('/business-types/:id', businessTypesCrud.update);
+router.delete('/business-types/:id', businessTypesCrud.remove);
+
+// ─── Document Types ───────────────────────────────────────────────────────────
+router.get('/document-types', documentTypesCrud.list);
+router.post('/document-types', documentTypesCrud.add);
+router.put('/document-types/:id', documentTypesCrud.update);
+router.delete('/document-types/:id', documentTypesCrud.remove);
+
+// ─── Terms & Conditions ───────────────────────────────────────────────────────
+router.get('/terms', termsCrud.list);
+router.post('/terms', termsCrud.add);
+router.put('/terms/:id', termsCrud.update);
+router.delete('/terms/:id', termsCrud.remove);
+
+// ─── Additional Charges ───────────────────────────────────────────────────────
+router.get('/charges', chargesCrud.list);
+router.post('/charges', chargesCrud.add);
+router.put('/charges/:id', chargesCrud.update);
+router.delete('/charges/:id', chargesCrud.remove);
+
+// ─── Quotation Notes ──────────────────────────────────────────────────────────
+router.get('/notes', notesCrud.list);
+router.post('/notes', notesCrud.add);
+router.put('/notes/:id', notesCrud.update);
+router.delete('/notes/:id', notesCrud.remove);
+
+export default router;

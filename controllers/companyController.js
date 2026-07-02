@@ -154,11 +154,15 @@ export const getCompanies = async (req, res) => {
 // Get company by ID
 export const getCompanyById = async (req, res) => {
   try {
-    if (!checkCompanyPermission(req.user, 'view')) {
+    const { id } = req.params;
+
+    // A user is always allowed to view their own company
+    const isOwnCompany = req.user && req.user.companyId && req.user.companyId.toString() === id;
+
+    if (!isOwnCompany && !checkCompanyPermission(req.user, 'view')) {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
-    const { id } = req.params;
     const company = await Company.findById(id);
 
     if (!company) {

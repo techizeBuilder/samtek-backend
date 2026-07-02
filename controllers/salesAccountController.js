@@ -777,6 +777,195 @@ export const getPackedOrders = async (req, res) => {
 /**
  * Upload Payment Proof for Sale
  */
+/**
+ * Get full Due Bill data for a specific packed order (for PDF generation)
+ * GET /api/accounts/packed-orders/:jobId/due-bill
+ */
+export const getDueBillData = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const companyId = req.user.companyId;
+
+        const PackagingJob = (await import('../models/PackagingJob.js')).default;
+        const Order        = (await import('../models/Order.js')).default;
+        const Sale         = (await import('../models/Sale.js')).default;
+        const LeadPayment  = (await import('../models/LeadPayment.js')).default;
+        const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
+        const QCJob        = (await import('../models/QCJob.js')).default;
+        const CustomerPayment = (await import('../models/CustomerPayment.js')).default;
+
+        // 1. Find the packaging job
+        const job = await PackagingJob.findOne({ _id: jobId, company: companyId });
+        if (!job) return res.status(404).json({ success: false, message: 'Packaging job not found' });
+
+        // 2. Resolve Order + Sale (same fallback chain as getPackedOrders)
+        let order = null;
+        let sale  = null;
+
+        order = await Order.findOne({ orderCode: job.orderId, companyId })
+            .populate('customer')
+            .populate('products.product');
+
+        if (order) {
+            sale = await Sale.findOne({ order: order._id, companyId });
+        } else {
+            if (job.productionOrderId) {
+                const po = await ProductionOrder.findById(job.productionOrderId).select('saleId').lean();
+                if (po?.saleId) {
+                    sale = await Sale.findOne({ _id: po.saleId, companyId });
+                    if (sale?.order) order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                }
+            }
+            if (!sale && job.qcJobId) {
+                const qj = await QCJob.findById(job.qcJobId).select('saleId').lean();
+                if (qj?.saleId) {
+                    sale = await Sale.findOne({ _id: qj.saleId, companyId });
+                    if (sale?.order) order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                }
+            }
+            if (!sale) {
+                const po2 = await ProductionOrder.findOne({ orderId: job.orderId, company: companyId }).select('saleId').lean();
+                if (po2?.saleId) {
+                    sale = await Sale.findOne({ _id: po2.saleId, companyId });
+                    if (sale?.order) order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                }
+            }
+        }
+
+        if (!order) return res.status(404).json({ success: false, message: 'Order not found for this job' });
+
+        // 3. Build advance payment history (with dates)
+        let advancePayments = [];
+        let advancedPaymentAmount = sale?.advancedPaymentAmount || 0;
+
+        if (order.leadId) {
+            const leadPays = await LeadPayment.find({
+                leadId: order.leadId,
+                status: 'Verified',
+                companyId
+            }).sort({ paymentDate: 1 }).lean();
+
+            advancePayments = leadPays.map(p => ({
+                date: p.paymentDate,
+                amount: p.amount,
+                mode: p.paymentMethod,
+                transactionId: p.transactionId || '',
+                remarks: p.remarks || ''
+            }));
+
+            if (!advancedPaymentAmount && leadPays.length > 0) {
+                advancedPaymentAmount = leadPays.reduce((s, p) => s + (p.amount || 0), 0);
+            }
+        }
+
+        // 4. Post-invoice payments received (CustomerPayment records)
+        let postInvoicePayments = [];
+        if (order.customer?._id) {
+            const custPays = await CustomerPayment.find({
+                customer: order.customer._id,
+                companyId
+            }).sort({ paymentDate: 1 }).lean();
+
+            postInvoicePayments = custPays.map(p => ({
+                date: p.paymentDate,
+                amount: p.amount,
+                mode: p.paymentMode,
+                referenceNo: p.referenceNo || '',
+                notes: p.notes || ''
+            }));
+        }
+
+        // 5. Amounts
+        const subtotal   = sale ? sale.subtotal   : (order.totalAmount || 0);
+        const taxAmount  = sale ? sale.taxAmount  : Math.round((order.totalAmount || 0) * 0.18);
+        const totalAmount = sale ? sale.totalAmount : (subtotal + taxAmount);
+        const paidAmount = sale ? (sale.paidAmount || 0) : 0;
+        const balanceAmount = sale ? sale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+        const gstType = sale?.gstType || 'CGST_SGST';
+        const invoiceNumber = sale?.invoiceNumber || null;
+        const saleDate = sale?.saleDate || order.orderDate;
+        const dueDate  = sale?.dueDate || null;
+
+        // 6. Fetch company info
+        const { Company } = await import('../models/Company.js');
+        const company = await Company.findById(companyId).lean();
+
+        res.json({
+            success: true,
+            data: {
+                // Identifiers
+                jobId: job._id,
+                jobCode: job.jobId,
+                orderCode: order.orderCode,
+                invoiceNumber,
+                saleDate,
+                dueDate,
+                packedDate: job.packingCompleteTime || job.updatedAt,
+                billDate: new Date(),
+
+                // Machine/serial
+                machineName: job.machineName || '',
+                machineCode: job.machineCode || '',
+                serialNumber: job.serialNumber || '',
+
+                // Customer
+                customer: {
+                    id: order.customer?._id,
+                    name: order.customer?.name || 'N/A',
+                    mobile: order.customer?.mobile || '',
+                    email: order.customer?.email || '',
+                    address: order.customer?.address1 || '',
+                    city: order.customer?.city || '',
+                    state: order.customer?.state || '',
+                    gstin: order.customer?.gstin || order.customer?.gst || ''
+                },
+
+                // Items
+                items: order.products.map(p => ({
+                    productName: p.product?.name || 'Unknown Item',
+                    quantity: p.quantity,
+                    unitPrice: p.price,
+                    total: p.total,
+                    tax: 0
+                })),
+
+                // Financials
+                subtotal,
+                taxAmount,
+                gstType,
+                totalAmount,
+                advancedPaymentAmount,
+                paidAmount,
+                balanceAmount,
+                paymentStatus: sale?.paymentStatus || (advancedPaymentAmount >= totalAmount ? 'Paid' : advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'),
+
+                // Payment history
+                advancePayments,
+                postInvoicePayments,
+
+                // Company
+                company: {
+                    name: company?.name || company?.unitName || 'SAMTEK MACHINERY',
+                    legalName: company?.legalName || '',
+                    address: company?.address || '',
+                    city: company?.city || '',
+                    state: company?.state || '',
+                    pin: company?.locationPin || '',
+                    mobile: company?.mobile || '',
+                    email: company?.email || '',
+                    gst: company?.gst || '',
+                    pan: company?.pan || '',
+                    website: company?.website || '',
+                    stampUrl: company?.stampUrl || ''
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Error in getDueBillData:', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 export const uploadPaymentProof = async (req, res) => {
     try {
         const { saleId } = req.params;

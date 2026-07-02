@@ -10,7 +10,6 @@ export const getLeadsForPayment = async (req, res) => {
     
     const leads = await Lead.find({
       companyId,
-      sentToAccount: true,
       status: { $ne: 'Won' }
     })
     .populate('assignedTo', 'fullName username')
@@ -31,10 +30,6 @@ export const addLeadPayment = async (req, res) => {
     const lead = await Lead.findById(leadId);
     if (!lead) {
       return res.status(404).json({ success: false, message: 'Lead not found' });
-    }
-
-    if (!lead.sentToAccount) {
-      return res.status(400).json({ success: false, message: 'Lead not sent to account yet' });
     }
 
     // Validate and fetch bank account if provided
