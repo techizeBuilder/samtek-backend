@@ -48,6 +48,13 @@ const DispatchOrderSchema = new mongoose.Schema({
   deliveryOTP: { type: String, default: '' },
   deliveryOTPVerified: { type: Boolean, default: false },
 
+  // Delivery documents (required before confirming delivery)
+  deliveryDocs: {
+    noc: { type: String, default: '' },         // NOC file path
+    ewayBill: { type: String, default: '' },    // E-Way Bill file path
+    invoice: { type: String, default: '' },     // Invoice file path
+  },
+
   // Documents
   invoiceNumber: { type: String, default: '' },
   packingListNotes: { type: String, default: '' },

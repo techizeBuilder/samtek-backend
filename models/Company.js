@@ -98,6 +98,11 @@ const companySchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  stampUrl: {
+    type: String,
+    trim: true,
+    default: null
+  },
   isActive: {
     type: Boolean,
     default: true

@@ -32,6 +32,10 @@ const leadSchema = new mongoose.Schema({
     default: 0
   },
   quotation: String,
+  quotationFinalAmount: {
+    type: Number,
+    default: 0
+  },
   productRequired: {
     type: String,
     required: true

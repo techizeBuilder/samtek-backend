@@ -2326,7 +2326,7 @@ export const deleteSalespersonDamage = async (req, res) => {
 export const sendQuotationEmailHandler = async (req, res) => {
   console.log('📬 [API] Received request to send quotation email');
   try {
-    const { to, customerName, leadCode, attachmentBase64 } = req.body;
+    const { to, customerName, leadCode, attachmentBase64, quotationFinalAmount } = req.body;
     const userCompanyId = req.user.companyId;
 
     // Fetch company name for branding
@@ -2348,14 +2348,22 @@ export const sendQuotationEmailHandler = async (req, res) => {
       if (leadCode) {
         try {
           const Lead = (await import('../models/Lead.js')).default;
+          const updateFields = {
+            quotation: attachmentBase64,
+          };
+          // Save the quotation final amount (Net Amount from PDF) so outstanding is accurate at Deal Won
+          if (quotationFinalAmount && !isNaN(quotationFinalAmount) && Number(quotationFinalAmount) > 0) {
+            updateFields.quotationFinalAmount = Number(quotationFinalAmount);
+            console.log(`💰 Saving quotationFinalAmount: ₹${quotationFinalAmount} for lead ${leadCode}`);
+          }
           await Lead.findOneAndUpdate(
             { leadCode, companyId: userCompanyId },
             {
-              quotation: attachmentBase64,
+              ...updateFields,
               $push: {
                 history: {
                   action: 'Quotation Sent',
-                  notes: `Quotation sent to ${to}`,
+                  notes: `Quotation sent to ${to}. Final amount: ₹${quotationFinalAmount || 0}`,
                   performedBy: req.user._id,
                   timestamp: new Date()
                 }

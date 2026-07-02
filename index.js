@@ -48,8 +48,14 @@ app.use((req, res, next) => {
 // Add body parsing and static file serving
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-// Serve static files from uploads directory (for company logos and other uploads)
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+// Serve static files from uploads directory (for company logos and other uploads) with CORS enabled
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
+    setHeaders: (res) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.set('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    }
+}));
 (async () => {
     try {
         // Connect to MongoDB
@@ -319,6 +325,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
             const adminRoutes = (await import('./routes/adminRoutes.js')).default;
             app.use('/api/admin', adminRoutes);
             console.log('Admin routes registered at /api/admin');
+            // Admin Settings routes (SMTP, Lead Settings, Quotation Settings)
+            const adminSettingsRoutes = (await import('./routes/adminSettingsRoutes.js')).default;
+            app.use('/api/admin-settings', adminSettingsRoutes);
+            console.log('Admin Settings routes registered at /api/admin-settings');
             // Production routes (batch/shift - existing)
             const productionRoutes = (await import('./routes/productionRoutes.js')).default;
             app.use('/api/production', productionRoutes);
