@@ -37,12 +37,17 @@ const ProcessStepSchema = new mongoose.Schema({
 const MaterialDemandSchema = new mongoose.Schema({
   materialCode: { type: String, required: true, trim: true },
   materialName: { type: String, required: true, trim: true },
+  bomQuantity: { type: Number, default: null },
   quantity: { type: Number, required: true, min: 0 },
+
+  // ── NEW: Tracks partial or full fulfillment ──
+  issuedQuantity: { type: Number, default: 0, min: 0 },
+
   unit: { type: String, required: true },
   status: {
     type: String,
-    enum: ['Requested', 'Issued', 'Pending Purchase'],
-    default: 'Requested',
+    enum: ['Pending R&D', 'Requested', 'Issued', 'Pending Purchase', 'R&D Rejected'],
+    default: 'Pending R&D',
   },
 });
 

@@ -1,5 +1,5 @@
 import express from 'express';
-import { authenticateToken as auth } from '../middleware/auth.js';
+import { authenticateToken as auth, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
 import {
   // Item routes
@@ -11,28 +11,35 @@ import {
   deleteItem,
   bulkDeleteItems,
   adjustStock,
-  
+
   // Category routes
   getCategories,
   createCategory,
   updateCategory,
   deleteCategory,
-  
+
   // Customer category routes
   getCustomerCategories,
   createCustomerCategory,
   updateCustomerCategory,
   deleteCustomerCategory,
-  
+
+  // Group routes
+  getGroups,
+  createGroup,
+  updateGroup,
+  deleteGroup,
+
   // Utility routes
   getLowStockItems,
   getInventoryStats,
-  
+
   // Excel import/export routes
   exportItemsToExcel,
   importItemsFromExcel,
   exportCategoriesToExcel,
-  exportCustomerCategoriesToExcel
+  exportCustomerCategoriesToExcel,
+  getMaterialIssueLogs
 } from '../controllers/inventoryController.js';
 
 const router = express.Router();
@@ -59,9 +66,16 @@ router.post('/customer-categories', auth, createCustomerCategory);
 router.put('/customer-categories/:id', auth, updateCustomerCategory);
 router.delete('/customer-categories/:id', auth, deleteCustomerCategory);
 
+// Group routes
+router.get('/inventory/groups', auth, getGroups);
+router.post('/inventory/groups', auth, createGroup);
+router.put('/inventory/groups/:id', auth, updateGroup);
+router.delete('/inventory/groups/:id', auth, deleteGroup);
+
 // Utility routes
 router.get('/inventory/low-stock', auth, getLowStockItems);
 router.get('/inventory/stats', auth, getInventoryStats);
+router.get('/inventory/material-issues', auth, authorizeRoles("Store Head", "Store Employee"), getMaterialIssueLogs)
 
 // Excel import/export routes
 router.get('/items/export', auth, exportItemsToExcel);

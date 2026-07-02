@@ -332,6 +332,29 @@ itemSchema.index({ companyId: 1 });
 itemSchema.index({ store: 1 });
 // ADD THIS: Ensures category names are unique PER COMPANY, not globally
 categorySchema.index({ name: 1, companyId: 1 }, { unique: true });
+
+const groupSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  description: {
+    type: String,
+    trim: true
+  },
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    required: true
+  }
+}, {
+  timestamps: true
+});
+
+groupSchema.index({ name: 1, companyId: 1 }, { unique: true });
+
 export const Item = mongoose.model('Item', itemSchema);
 export const Category = mongoose.model('Category', categorySchema);
 export const CustomerCategory = mongoose.model('CustomerCategory', customerCategorySchema);
+export const Group = mongoose.model('Group', groupSchema);

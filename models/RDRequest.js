@@ -8,12 +8,28 @@ const rdRequestSchema = new mongoose.Schema({
     },
     machineCode: { type: String, required: true },
     machineName: { type: String, required: true },
+
+    // ── NEW: Distinguish between the two workflows ──
+    requestType: {
+        type: String,
+        enum: ['Initial BOM', 'Material Change'],
+        default: 'Initial BOM'
+    },
+
+    // ── NEW: Holds data if requestType is 'Material Change' ──
+    materialChangeDetails: {
+        materialCode: String,
+        materialName: String,
+        bomQuantity: { type: Number, default: null },
+        requestedQuantity: Number,
+        unit: String
+    },
+
     status: {
         type: String,
         enum: ['Pending', 'Drafting BOM', 'Approved', 'Rejected'],
         default: 'Pending'
     },
-    // R&D populates this by searching the Item collection on their frontend
     draftBOM: [{
         itemCode: { type: String, required: true },
         quantity: { type: Number, required: true },

@@ -12,6 +12,13 @@ const apiSettingsSchema = new mongoose.Schema({
   indiamart: {
     enabled: { type: Boolean, default: false },
     sellerMobile: { type: String, default: '' },
+    authKey: { type: String, default: '' },
+    accounts: [{
+      apiName: { type: String, default: '' },
+      sellerMobile: { type: String, default: '' },
+      authKey: { type: String, default: '' },
+      lastSyncedAt: { type: Date }
+    }],
     assignmentRule: {
       type: String,
       enum: ['round_robin', 'random'],

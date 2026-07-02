@@ -5,7 +5,8 @@ const purchaseItemSchema = new mongoose.Schema({
   item: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Inventory',
-    required: true
+    required: false,  // Optional — item link is added when goods are received into inventory
+    default: null
   },
   itemName: {
     type: String,

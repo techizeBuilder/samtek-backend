@@ -29,11 +29,50 @@ async function generateChangeId(companyId) {
 
 // ─── MACHINES ─────────────────────────────────────────────────────────────────
 
+import RDMachine from '../models/RDMachine.js';
+import RDDocument from '../models/RDDocument.js';
+
 export const getMachines = async (req, res) => {
   try {
-    const machines = await RDMachine.find({ company: req.user.companyId }).sort({ createdAt: -1 });
-    res.json({ success: true, data: machines });
+    const companyId = req.user.companyId;
+
+    // 1. Fetch all machines for the company (.lean() makes it plain JSON so we can add properties)
+    const machines = await RDMachine.find({ company: companyId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (machines.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // 2. Fetch all Design Files for these machines
+    const machineIds = machines.map(m => m._id);
+    const designDocuments = await RDDocument.find({
+      company: companyId,
+      machine: { $in: machineIds },
+      type: 'Design Files' // Only pulling design files for the approval workflow
+    }).lean();
+
+    // 3. Group the design files by machine ID
+    const docsByMachine = {};
+    designDocuments.forEach(doc => {
+      const mId = doc.machine.toString();
+      if (!docsByMachine[mId]) {
+        docsByMachine[mId] = [];
+      }
+      docsByMachine[mId].push(doc);
+    });
+
+    // 4. Attach the grouped documents to their respective machines
+    const enrichedMachines = machines.map(machine => ({
+      ...machine,
+      // This feeds the files directly into the frontend response
+      designFiles: docsByMachine[machine._id.toString()] || []
+    }));
+
+    res.json({ success: true, data: enrichedMachines });
   } catch (err) {
+    console.error('Error fetching machines with design files:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -46,7 +85,8 @@ export const createMachine = async (req, res) => {
     const {
       code, name, description,
       category, pType, pSourceType,
-      pSpecification, brand, machineType
+      brand, machineType,
+      specifications
     } = req.body;
 
     // Strict validation for required fields
@@ -64,9 +104,9 @@ export const createMachine = async (req, res) => {
       category,
       pType,
       pSourceType,
-      pSpecification: pSpecification || '',
       brand: brand || '',
       machineType: machineType || 'Standard',
+      specifications: specifications || [],
       company: req.user.companyId,
       createdBy: req.user._id,
     });
@@ -81,6 +121,19 @@ export const createMachine = async (req, res) => {
   }
 };
 
+export const updateMachine = async (req, res) => {
+  try {
+    const machine = await RDMachine.findOneAndUpdate(
+      { _id: req.params.id, company: req.user.companyId },
+      { ...req.body },
+      { new: true }
+    );
+    if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
+    res.json({ success: true, data: machine });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 // ─── 2. GET DYNAMIC DROPDOWN OPTIONS (Call this when page loads) ───────────────
 export const getDropdownOptions = async (req, res) => {
@@ -128,19 +181,7 @@ export const addDropdownOption = async (req, res) => {
   }
 };
 
-export const updateMachine = async (req, res) => {
-  try {
-    const machine = await RDMachine.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { ...req.body },
-      { new: true }
-    );
-    if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
-    res.json({ success: true, data: machine });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
+
 
 export const updateDesignStatus = async (req, res) => {
   try {
@@ -763,10 +804,11 @@ export const deleteDocument = async (req, res) => {
 
 
 // ─── 1. GET LIST VIEW (WITH TABS, SEARCH, FILTER & PAGINATION) ─────────────
+// ─── 1. GET LIST VIEW (WITH TABS, SEARCH, FILTER & PAGINATION) ─────────────
 export const getRDRequests = async (req, res) => {
   try {
-    // Extract page from query, defaulting to 1
-    const { tab, search, status, page = 1 } = req.query;
+    // 1. Added `requestType` to the extracted query variables
+    const { tab, search, status, requestType, page = 1 } = req.query;
     const companyId = req.user.companyId;
 
     const query = { company: companyId };
@@ -783,11 +825,20 @@ export const getRDRequests = async (req, res) => {
       query.status = status;
     }
 
-    // Search by Machine Code or Name
+    // ── NEW: Explicit Type Filter ──
+    // Allows the frontend to filter by "Initial BOM" vs "Material Change"
+    if (requestType && requestType !== 'All') {
+      query.requestType = requestType;
+    }
+
+    // ── IMPROVED: Smart Search ──
     if (search) {
       query.$or = [
         { machineCode: { $regex: search, $options: 'i' } },
-        { machineName: { $regex: search, $options: 'i' } }
+        { machineName: { $regex: search, $options: 'i' } },
+        // Now R&D can search by the specific material code/name requested!
+        { "materialChangeDetails.materialCode": { $regex: search, $options: 'i' } },
+        { "materialChangeDetails.materialName": { $regex: search, $options: 'i' } }
       ];
     }
 
@@ -823,116 +874,96 @@ export const getRDRequests = async (req, res) => {
 };
 
 
-// ─── APPROVE OR REJECT REQUEST ──────────────────────────────────────────
 export const processRDRequest = async (req, res) => {
   try {
     const { id } = req.params;
     const { action, rejectReason } = req.body;
     const companyId = req.user.companyId;
 
-    // 1. Validate the Request
     const rdRequest = await RDRequest.findOne({ _id: id, company: companyId });
-    if (!rdRequest) {
-      return res.status(404).json({ success: false, message: 'R&D Request not found.' });
-    }
-    if (rdRequest.status !== 'Pending') {
-      return res.status(400).json({ success: false, message: `This request is already ${rdRequest.status}.` });
-    }
+    if (!rdRequest) return res.status(404).json({ success: false, message: 'R&D Request not found.' });
+    if (rdRequest.status !== 'Pending') return res.status(400).json({ success: false, message: `Already ${rdRequest.status}.` });
 
-    // 2. Handle REJECTION
+    // ─────────────────────────────────────────────────────────────
+    // SCENARIO A: HANDLING REJECTIONS
+    // ─────────────────────────────────────────────────────────────
     if (action === 'Reject') {
       rdRequest.status = 'Rejected';
-
-      await ProductionOrder.findByIdAndUpdate(rdRequest.productionOrderId, {
-        rdRequestRaised: false,
-        status: 'On Hold', // Pauses production queue
-        notes: `R&D Rejected: ${rejectReason || 'No reason provided.'}`
-      });
-
       await rdRequest.save();
-      return res.json({ success: true, message: 'Request rejected and Production Order placed on hold.', data: rdRequest });
+
+      if (rdRequest.requestType === 'Material Change') {
+        // Unlock the specific material and mark it rejected
+        await ProductionOrder.findOneAndUpdate(
+          { _id: rdRequest.productionOrderId, "materialDemands.materialCode": rdRequest.materialChangeDetails.materialCode },
+          { $set: { "materialDemands.$.status": "R&D Rejected" } }
+        );
+        return res.json({ success: true, message: 'Material change rejected.' });
+      } else {
+        // Original logic: Put the whole production order on hold
+        await ProductionOrder.findByIdAndUpdate(rdRequest.productionOrderId, {
+          rdRequestRaised: false,
+          status: 'On Hold',
+          notes: `R&D Rejected: ${rejectReason || 'No reason provided.'}`
+        });
+        return res.json({ success: true, message: 'Initial BOM rejected. Order on hold.' });
+      }
     }
 
-    // 3. Handle APPROVAL (Strict Validation -> Injection)
+    // ─────────────────────────────────────────────────────────────
+    // SCENARIO B: HANDLING APPROVALS
+    // ─────────────────────────────────────────────────────────────
     if (action === 'Approve') {
 
-      // Check 1: Does the R&D Machine exist?
+      // ── WORKFLOW 1: MATERIAL CHANGE APPROVAL ──
+      if (rdRequest.requestType === 'Material Change') {
+        // Unlock the specific material so Production can raise purchase/issue
+        await ProductionOrder.findOneAndUpdate(
+          { _id: rdRequest.productionOrderId, "materialDemands.materialCode": rdRequest.materialChangeDetails.materialCode },
+          { $set: { "materialDemands.$.status": "Requested" } } // Unlocked!
+        );
+
+        rdRequest.status = 'Approved';
+        await rdRequest.save();
+        return res.json({ success: true, message: 'Material change approved. Production can now request the items.' });
+      }
+
+      // ── WORKFLOW 2: INITIAL BOM APPROVAL (Your original code) ──
       const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId });
-      if (!machineProfile) {
-        return res.status(400).json({
-          success: false,
-          message: `R&D Profile for machine code '${rdRequest.machineCode}' not found. Please create it first.`
-        });
+      if (!machineProfile || machineProfile.releaseStatus !== 'Released') {
+        return res.status(400).json({ success: false, message: 'Machine profile missing or not released.' });
       }
 
-      // Check 2: Is the Machine officially Released?
-      if (machineProfile.releaseStatus !== 'Released') {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot approve. Machine '${machineProfile.name}' is currently marked as '${machineProfile.releaseStatus}'. Update the release status to 'Released' to proceed.`
-        });
-      }
-
-      // Check 3: Does it have a Master BOM?
       const masterBOM = await RDBOM.findOne({ machine: machineProfile._id, company: companyId });
       if (!masterBOM || masterBOM.materials.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot approve. No materials found in the RDBOM for '${machineProfile.name}'. Please add materials first.`
-        });
+        return res.status(400).json({ success: false, message: 'No materials found in Master BOM.' });
       }
 
-      // Check 4: Fetch ONLY Design Documents (Snapshotting)
-      const designDocs = await RDDocument.find({
-        machine: machineProfile._id,
-        company: companyId,
-        type: 'Design Files' // Explicitly filtering for 'Design Files' only
-      });
+      const designDocs = await RDDocument.find({ machine: machineProfile._id, company: companyId, type: 'Design Files' });
 
-      // Map R&D Materials -> Production Demands
       const demandsToPush = masterBOM.materials.map(mat => ({
         materialCode: mat.code,
         materialName: mat.item,
+        bomQuantity: mat.quantity,
         quantity: mat.quantity,
         unit: mat.unit,
         status: 'Requested'
       }));
 
-      // Map R&D Design Docs -> Production Design Documents
-      const docsToPush = designDocs.map(doc => ({
-        name: doc.name,
-        fileUrl: doc.fileUrl,
-        version: doc.version
-      }));
+      const docsToPush = designDocs.map(doc => ({ name: doc.name, fileUrl: doc.fileUrl, version: doc.version }));
 
-      // Update Production Order (Injecting both Materials and Documents)
-      await ProductionOrder.findByIdAndUpdate(
-        rdRequest.productionOrderId,
-        {
-          $push: {
-            materialDemands: { $each: demandsToPush },
-            designDocuments: { $each: docsToPush } // Pushing the URLs here
-          },
-          bomVerified: true,
-          designVerified: true,
-          rdRequestRaised: false,
-          status: 'Pending', // Order clears "BOM Pending" and goes back to standard Production queue
-          notes: `BOM & Design approved by R&D on ${new Date().toLocaleDateString()}`
-        }
-      );
+      await ProductionOrder.findByIdAndUpdate(rdRequest.productionOrderId, {
+        $push: { materialDemands: { $each: demandsToPush }, designDocuments: { $each: docsToPush } },
+        bomVerified: true, designVerified: true, rdRequestRaised: false, status: 'Pending',
+        notes: `BOM & Design approved by R&D on ${new Date().toLocaleDateString()}`
+      });
 
-      // Close the R&D Request
       rdRequest.status = 'Approved';
       await rdRequest.save();
 
-      return res.json({
-        success: true,
-        message: 'Request approved successfully. Materials and Design Documents have been injected into the Production Order.'
-      });
+      return res.json({ success: true, message: 'Initial BOM injected into Production Order.' });
     }
 
-    return res.status(400).json({ success: false, message: 'Invalid action. Must be "Approve" or "Reject".' });
-
+    return res.status(400).json({ success: false, message: 'Invalid action.' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

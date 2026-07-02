@@ -17,6 +17,7 @@ import {
   updateProcessNotes,
   getTeams,
   createTeam,
+  issueMaterialToProduction,
 } from '../controllers/productionMfgController.js';
 
 const router = express.Router();
@@ -29,7 +30,7 @@ router.post('/orders', createOrder);
 router.put('/orders/:id/verify-bom', verifyBOM);
 router.put('/orders/:id/verify-design', verifyDesign);
 router.put('/orders/:id/raise-rd-request', raiseRDRequest);
-router.put('/orders/:id/mark-material-issued', markMaterialIssued);
+router.put('/orders/:id/mark-material-issued', issueMaterialToProduction);
 
 // ── Material demands ────────────────────────────────────────────────────────
 router.post('/orders/:id/materials', addMaterialDemand);

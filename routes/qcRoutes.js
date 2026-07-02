@@ -11,6 +11,7 @@ import {
   submitDecision,
   addChecklistItem,
   removeChecklistItem,
+  syncRDToQCJob,
 } from '../controllers/qcController.js';
 
 const router = express.Router();
@@ -18,7 +19,7 @@ router.use(authenticateToken);
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 router.get('/dashboard', getDashboard);
-
+router.put('/jobs/:id/sync-rd', syncRDToQCJob);
 // ── QC Jobs ───────────────────────────────────────────────────────────────────
 router.get('/jobs', getQCJobs);
 router.get('/jobs/:id', getQCJob);

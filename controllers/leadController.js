@@ -262,7 +262,10 @@ export const getLeads = async (req, res) => {
 
     // Sorting
     let sortOptions = {};
-    if (sortBy === 'date' || sortBy === 'createdAt') {
+    if (paymentCheckRequested === 'true') {
+      // Payment verifications queue: oldest request first (FIFO)
+      sortOptions.paymentCheckRequestedAt = 1;
+    } else if (sortBy === 'date' || sortBy === 'createdAt') {
       sortOptions.createdAt = order === 'asc' ? 1 : -1;
     } else if (sortBy === 'value') {
       sortOptions.dealValue = order === 'asc' ? 1 : -1;
@@ -492,14 +495,19 @@ export const markLeadAsWon = async (req, res) => {
         companyId: companyId,
         salesContact: salesPersonId,
         active: 'Yes',
-        advancePayment: lead.advancedPaymentAmount || 0
+        advancePayment: lead.advancedPaymentAmount || 0,
+        // Set outstanding = dealValue + 18% GST - advance already paid
+        outstandingAmount: Math.max(0, Math.round((lead.dealValue || 0) * 1.18) - (lead.advancedPaymentAmount || 0))
       });
       await customer.save();
     } else {
+      // Existing customer — add this deal's outstanding (dealValue + 18% GST - advance)
+      const newDealOutstanding = Math.max(0, Math.round((lead.dealValue || 0) * 1.18) - (lead.advancedPaymentAmount || 0));
+      customer.outstandingAmount = (customer.outstandingAmount || 0) + newDealOutstanding;
       if (lead.advancedPaymentAmount > 0) {
         customer.advancePayment = (customer.advancePayment || 0) + lead.advancedPaymentAmount;
-        await customer.save();
       }
+      await customer.save();
     }
 
     const { Item } = await import('../models/Inventory.js');
@@ -603,6 +611,7 @@ export const requestPaymentCheck = async (req, res) => {
     const totalAdvancedPayment = verifiedPayments.reduce((sum, p) => sum + p.amount, 0);
 
     lead.paymentCheckStatus = 'Pending';
+    lead.paymentCheckRequestedAt = new Date();
     lead.advancedPaymentAmount = totalAdvancedPayment;
     lead.history.push({
       action: 'Payment Check Requested',
@@ -852,92 +861,137 @@ export const syncIndiamartLeads = async (req, res) => {
     const settings = await ApiSettings.findOne({ companyId: req.user.companyId })
       .populate('indiamart.assignedUserIds', 'fullName username _id');
 
-    if (!settings?.indiamart?.enabled || !settings.indiamart.sellerMobile) {
-      return res.status(400).json({ success: false, message: 'IndiaMART API not configured or disabled. Please configure in API Settings.' });
+    if (!settings?.indiamart?.enabled) {
+      return res.status(400).json({ success: false, message: 'IndiaMART API integration is disabled. Please enable it in API Settings.' });
     }
 
-    const { sellerMobile, assignmentRule, assignedUserIds, lastAssignedIndex } = settings.indiamart;
+    let activeAccounts = [];
+    if (settings.indiamart.accounts && settings.indiamart.accounts.length > 0) {
+      activeAccounts = settings.indiamart.accounts.filter(acc => acc.sellerMobile && acc.authKey);
+    } else if (settings.indiamart.sellerMobile && settings.indiamart.authKey) {
+      activeAccounts = [{
+        apiName: 'Primary Account',
+        sellerMobile: settings.indiamart.sellerMobile,
+        authKey: settings.indiamart.authKey,
+        _id: null
+      }];
+    }
+
+    if (activeAccounts.length === 0) {
+      return res.status(400).json({ success: false, message: 'No active IndiaMART accounts (Seller Mobile & Auth Key) configured. Please configure in API Settings.' });
+    }
 
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - 3);
     const fmt = (d) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
 
-    const url = `https://mapi.indiamart.com/wservce/enquiry/listing/v2/?GLUSR_MOBILE=${sellerMobile}&START_TIME=${fmt(startDate)}&END_TIME=${fmt(new Date())}&LIMIT=50&FLAG=1`;
-
-    let data;
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      const rawText = await response.text();
-      console.log(`[IndiaMART] HTTP ${response.status} — Raw response: ${rawText.substring(0, 500)}`);
-      try {
-        data = JSON.parse(rawText);
-      } catch {
-        return res.status(502).json({ success: false, message: `IndiaMART API returned non-JSON response: ${rawText.substring(0, 200)}` });
-      }
-    } catch (fetchErr) {
-      console.error('[IndiaMART] Fetch error:', fetchErr.message, fetchErr.cause || '');
-      return res.status(502).json({ success: false, message: `Failed to connect to IndiaMART API: ${fetchErr.message}` });
-    }
-
-    if (!data?.RESPONSE?.length) {
-      return res.json({ success: true, message: 'No new leads found from IndiaMART', imported: 0 });
-    }
-
     let imported = 0;
     let skipped = 0;
+    let errors = [];
 
-    for (const lead of data.RESPONSE) {
-      const queryId = (lead.QUERY_ID || '').trim();
-      if (!queryId) continue;
+    for (const account of activeAccounts) {
+      try {
+        const { sellerMobile, authKey, apiName } = account;
+        // Correct IndiaMART query URL incorporating GLUSR_MOBILE_KEY
+        const url = `https://mapi.indiamart.com/wservce/enquiry/listing/v2/?GLUSR_MOBILE=${sellerMobile}&GLUSR_MOBILE_KEY=${authKey}&START_TIME=${fmt(startDate)}&END_TIME=${fmt(new Date())}&LIMIT=50&FLAG=1`;
 
-      // Check duplicate by queryId in description
-      const exists = await Lead.findOne({ companyId: req.user.companyId, describeRequirements: { $regex: `QueryID:${queryId}`, $options: 'i' } });
-      if (exists) { skipped++; continue; }
+        let data;
+        const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+        const rawText = await response.text();
+        console.log(`[IndiaMART - ${apiName || sellerMobile}] HTTP ${response.status} — Raw response: ${rawText.substring(0, 300)}`);
+        
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          errors.push(`Account ${apiName || sellerMobile}: Non-JSON response returned from API.`);
+          continue;
+        }
 
-      // 🎯 CRUNCHER FLOW: IndiaMART leads are always UNASSIGNED
-      // Cruncher will review and manually assign to Sales Employees
-      const assignedTo = null;
+        if (data?.RESPONSE?.length) {
+          for (const lead of data.RESPONSE) {
+            const queryId = (lead.QUERY_ID || '').trim();
+            if (!queryId) continue;
 
-      const count = await Lead.countDocuments({ companyId: req.user.companyId });
-      const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+            // Check duplicate using fast indexed field first
+            let exists = await Lead.findOne({ companyId: req.user.companyId, indiamartQueryId: queryId });
+            if (!exists) {
+              // Fallback legacy check to avoid duplicates for older imported leads
+              exists = await Lead.findOne({ 
+                companyId: req.user.companyId, 
+                describeRequirements: { $regex: `QueryID:${queryId}`, $options: 'i' } 
+              });
+              // Auto-migrate legacy lead to populate indiamartQueryId
+              if (exists) {
+                exists.indiamartQueryId = queryId;
+                await exists.save();
+              }
+            }
+            if (exists) { skipped++; continue; }
 
-      const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
-      const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
-      const senderEmail = lead.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`;
+            // 🎯 CRUNCHER FLOW: IndiaMART leads are always UNASSIGNED
+            // Cruncher will review and manually assign to Sales Employees
+            const assignedTo = null;
 
-      const newLead = new Lead({
-        leadCode,
-        companyId: req.user.companyId,
-        source: 'IndiaMart',
-        status: 'New',
-        stage: 'N/A',
-        productRequired: lead.PRODUCT_NAME || lead.SUBJECT || 'Unknown',
-        describeRequirements: `${lead.QUERY_MESSAGE || ''} [QueryID:${queryId}]`,
-        companyName: senderName,
-        contactPerson: senderName,
-        mobile: senderMobile,
-        email: senderEmail,
-        address: lead.SENDER_ADDRESS || '',
-        assignedTo,
-        leadDate: lead.QUERY_TIME ? new Date(lead.QUERY_TIME) : new Date(),
-        history: [{
-          action: 'Lead Created',
-          notes: `Auto-imported from IndiaMART (QueryID: ${queryId}) — Pending Cruncher assignment`,
-          performedBy: req.user._id
-        }]
-      });
+            const count = await Lead.countDocuments({ companyId: req.user.companyId });
+            const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
 
-      await newLead.save();
-      imported++;
+            const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
+            const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
+            const senderEmail = lead.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`;
+
+            const newLead = new Lead({
+              leadCode,
+              companyId: req.user.companyId,
+              source: 'IndiaMart',
+              status: 'New',
+              stage: 'N/A',
+              productRequired: lead.PRODUCT_NAME || lead.SUBJECT || 'Unknown',
+              describeRequirements: `${lead.QUERY_MESSAGE || ''} [QueryID:${queryId}] (Account: ${apiName || 'Default'})`,
+              indiamartQueryId: queryId,
+              companyName: senderName,
+              contactPerson: senderName,
+              mobile: senderMobile,
+              email: senderEmail,
+              address: lead.SENDER_ADDRESS || '',
+              assignedTo,
+              leadDate: lead.QUERY_TIME ? new Date(lead.QUERY_TIME) : new Date(),
+              history: [{
+                action: 'Lead Created',
+                notes: `Auto-imported from IndiaMART account "${apiName || 'Default'}" (QueryID: ${queryId}) — Pending Cruncher assignment`,
+                performedBy: req.user._id
+              }]
+            });
+
+            await newLead.save();
+            imported++;
+          }
+        }
+
+        // Update lastSyncedAt for this specific account
+        if (account._id && settings.indiamart.accounts) {
+          const accDoc = settings.indiamart.accounts.id(account._id);
+          if (accDoc) accDoc.lastSyncedAt = new Date();
+        }
+      } catch (accErr) {
+        console.error(`[IndiaMART] Sync error for account ${account.apiName || account.sellerMobile}:`, accErr);
+        errors.push(`Account ${account.apiName || account.sellerMobile}: ${accErr.message}`);
+      }
     }
 
-    // Update sync time (no more lastAssignedIndex needed for IndiaMART)
-    await ApiSettings.findOneAndUpdate(
-      { companyId: req.user.companyId },
-      { 'indiamart.lastSyncedAt': new Date() }
-    );
+    // Update global sync time for IndiaMART
+    settings.indiamart.lastSyncedAt = new Date();
+    await settings.save();
 
-    res.json({ success: true, message: `IndiaMART sync complete. Imported: ${imported}, Skipped (duplicates): ${skipped}`, imported, skipped });
+    if (errors.length > 0 && imported === 0) {
+      return res.status(502).json({ success: false, message: `Failed to sync IndiaMART leads: ${errors.join(' | ')}` });
+    }
+
+    res.json({
+      success: true,
+      message: `IndiaMART sync complete. Imported: ${imported}, Skipped (duplicates): ${skipped} across ${activeAccounts.length} account(s).${errors.length > 0 ? ` Errors: ${errors.join(' | ')}` : ''}`,
+      imported,
+      skipped
+    });
   } catch (error) {
     console.error('Error syncing IndiaMART leads:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
@@ -1292,67 +1346,108 @@ export const runBackgroundApiSync = async () => {
     for (const settings of indiamartSettings) {
       try {
         const { companyId } = settings;
-        const { sellerMobile, assignmentRule, assignedUserIds, lastAssignedIndex } = settings.indiamart;
-        if (!sellerMobile) continue;
+        
+        let activeAccounts = [];
+        if (settings.indiamart.accounts && settings.indiamart.accounts.length > 0) {
+          activeAccounts = settings.indiamart.accounts.filter(acc => acc.sellerMobile && acc.authKey);
+        } else if (settings.indiamart.sellerMobile && settings.indiamart.authKey) {
+          activeAccounts = [{
+            apiName: 'Primary Account',
+            sellerMobile: settings.indiamart.sellerMobile,
+            authKey: settings.indiamart.authKey,
+            _id: null
+          }];
+        }
+
+        if (activeAccounts.length === 0) continue;
 
         const startDate = new Date();
         startDate.setDate(startDate.getDate() - 3);
         const fmt = (d) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
-        const url = `https://mapi.indiamart.com/wservce/enquiry/listing/v2/?GLUSR_MOBILE=${sellerMobile}&START_TIME=${fmt(startDate)}&END_TIME=${fmt(new Date())}&LIMIT=50&FLAG=1`;
 
-        const response = await fetch(url);
-        const data = await response.json();
+        let companyImported = 0;
 
-        if (data?.RESPONSE?.length) {
-          let imported = 0;
-          let assignIdx = lastAssignedIndex || 0;
-          const users = assignedUserIds || [];
+        for (const account of activeAccounts) {
+          try {
+            const { sellerMobile, authKey, apiName } = account;
+            const url = `https://mapi.indiamart.com/wservce/enquiry/listing/v2/?GLUSR_MOBILE=${sellerMobile}&GLUSR_MOBILE_KEY=${authKey}&START_TIME=${fmt(startDate)}&END_TIME=${fmt(new Date())}&LIMIT=50&FLAG=1`;
 
-          for (const lead of data.RESPONSE) {
-            const queryId = (lead.QUERY_ID || '').trim();
-            if (!queryId) continue;
+            const response = await fetch(url);
+            const data = await response.json();
 
-            const exists = await Lead.findOne({ companyId, describeRequirements: { $regex: `QueryID:${queryId}`, $options: 'i' } });
-            if (exists) continue;
+            if (data?.RESPONSE?.length) {
+              for (const lead of data.RESPONSE) {
+                const queryId = (lead.QUERY_ID || '').trim();
+                if (!queryId) continue;
 
-            // 🎯 CRUNCHER FLOW: IndiaMART leads always UNASSIGNED — Cruncher will assign manually
-            const assignedTo = null;
+                // Check duplicate using fast indexed field first
+                let exists = await Lead.findOne({ companyId, indiamartQueryId: queryId });
+                if (!exists) {
+                  // Fallback legacy check to avoid duplicates for older imported leads
+                  exists = await Lead.findOne({ 
+                    companyId, 
+                    describeRequirements: { $regex: `QueryID:${queryId}`, $options: 'i' } 
+                  });
+                  // Auto-migrate legacy lead to populate indiamartQueryId
+                  if (exists) {
+                    exists.indiamartQueryId = queryId;
+                    await exists.save();
+                  }
+                }
+                if (exists) continue;
 
-            const count = await Lead.countDocuments({ companyId });
-            const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
-            const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
-            const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
-            const senderEmail = lead.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`;
+                // 🎯 CRUNCHER FLOW: IndiaMART leads always UNASSIGNED — Cruncher will assign manually
+                const assignedTo = null;
 
-            const newLead = new Lead({
-              leadCode,
-              companyId,
-              source: 'IndiaMart',
-              status: 'New',
-              stage: 'N/A',
-              productRequired: lead.PRODUCT_NAME || lead.SUBJECT || 'Unknown',
-              describeRequirements: `${lead.QUERY_MESSAGE || ''} [QueryID:${queryId}]`,
-              companyName: senderName,
-              contactPerson: senderName,
-              mobile: senderMobile,
-              email: senderEmail,
-              address: lead.SENDER_ADDRESS || '',
-              assignedTo,
-              leadDate: lead.QUERY_TIME ? new Date(lead.QUERY_TIME) : new Date(),
-              history: [{
-                action: 'Lead Created',
-                notes: `Auto-imported via background sync (QueryID: ${queryId}) — Pending Cruncher assignment`,
-                performedBy: null
-              }]
-            });
-            await newLead.save();
-            imported++;
+                const count = await Lead.countDocuments({ companyId });
+                const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+                const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
+                const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
+                const senderEmail = lead.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`;
+
+                const newLead = new Lead({
+                  leadCode,
+                  companyId,
+                  source: 'IndiaMart',
+                  status: 'New',
+                  stage: 'N/A',
+                  productRequired: lead.PRODUCT_NAME || lead.SUBJECT || 'Unknown',
+                  describeRequirements: `${lead.QUERY_MESSAGE || ''} [QueryID:${queryId}] (Account: ${apiName || 'Default'})`,
+                  indiamartQueryId: queryId,
+                  companyName: senderName,
+                  contactPerson: senderName,
+                  mobile: senderMobile,
+                  email: senderEmail,
+                  address: lead.SENDER_ADDRESS || '',
+                  assignedTo,
+                  leadDate: lead.QUERY_TIME ? new Date(lead.QUERY_TIME) : new Date(),
+                  history: [{
+                    action: 'Lead Created',
+                    notes: `Auto-imported via background sync from account "${apiName || 'Default'}" (QueryID: ${queryId}) — Pending Cruncher assignment`,
+                    performedBy: null
+                  }]
+                });
+                await newLead.save();
+                companyImported++;
+              }
+
+              // Update lastSyncedAt for this specific account
+              if (account._id && settings.indiamart.accounts) {
+                const accDoc = settings.indiamart.accounts.id(account._id);
+                if (accDoc) accDoc.lastSyncedAt = new Date();
+              }
+            }
+          } catch (accErr) {
+            console.error(`[CRON] IndiaMART sync error for account ${account.apiName || account.sellerMobile} in company ${companyId}:`, accErr.message);
           }
+        }
 
-          await ApiSettings.findByIdAndUpdate(settings._id, {
-            'indiamart.lastSyncedAt': new Date()
-          });
-          console.log(`[CRON] IndiaMART sync completed for company ${companyId}. Imported: ${imported}`);
+        // Save settings with updated lastSyncedAt times for accounts
+        settings.indiamart.lastSyncedAt = new Date();
+        await settings.save();
+
+        if (companyImported > 0) {
+          console.log(`[CRON] IndiaMART sync completed for company ${companyId}. Imported: ${companyImported}`);
         }
       } catch (err) {
         console.error(`[CRON] IndiaMART sync error for settings ID ${settings._id}:`, err.message);

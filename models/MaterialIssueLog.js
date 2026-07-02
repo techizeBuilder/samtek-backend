@@ -1,0 +1,36 @@
+import mongoose from 'mongoose';
+
+const MaterialIssueLogSchema = new mongoose.Schema({
+    productionOrderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'ProductionOrder',
+        required: true
+    },
+    machineCode: { type: String, required: true },
+    materialCode: { type: String, required: true },
+    materialName: { type: String, required: true },
+    quantityIssued: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+    unit: { type: String, required: true },
+    // Tracks the production worker who received/requested the item
+    issuedTo: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    },
+    company: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Company',
+        required: true
+    }
+}, { timestamps: true });
+
+// Index for fast searching by store employees
+MaterialIssueLogSchema.index({ company: 1, createdAt: -1 });
+MaterialIssueLogSchema.index({ company: 1, materialCode: 1 });
+MaterialIssueLogSchema.index({ productionOrderId: 1 });
+
+export default mongoose.model('MaterialIssueLog', MaterialIssueLogSchema);

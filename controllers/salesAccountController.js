@@ -648,6 +648,8 @@ export const getPackedOrders = async (req, res) => {
         const PackagingJob = (await import('../models/PackagingJob.js')).default;
         const Order = (await import('../models/Order.js')).default;
         const Sale = (await import('../models/Sale.js')).default;
+        const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
+        const QCJob = (await import('../models/QCJob.js')).default;
 
         const companyId = req.user.companyId;
 
@@ -660,19 +662,54 @@ export const getPackedOrders = async (req, res) => {
         const results = [];
 
         for (const job of packedJobs) {
-            // Query corresponding Order using orderId (which matches order.orderCode)
-            const order = await Order.findOne({
+            let order = null;
+            let sale = null;
+
+            // Primary lookup: find Order by orderCode matching job.orderId (standard sales flow)
+            order = await Order.findOne({
                 orderCode: job.orderId,
                 companyId
             }).populate('customer').populate('products.product');
 
-            if (!order) continue;
+            if (order) {
+                // Found order via orderCode — find the linked Sale
+                sale = await Sale.findOne({ order: order._id, companyId });
+            } else {
+                // Fallback: packaging job was created from a ProductionOrder or QCJob
+                // Try to find the Sale directly via saleId on those source records
+                if (job.productionOrderId) {
+                    const prodOrder = await ProductionOrder.findById(job.productionOrderId).select('saleId').lean();
+                    if (prodOrder?.saleId) {
+                        sale = await Sale.findOne({ _id: prodOrder.saleId, companyId });
+                        if (sale?.order) {
+                            order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                        }
+                    }
+                }
+                if (!sale && job.qcJobId) {
+                    const qcJob = await QCJob.findById(job.qcJobId).select('saleId').lean();
+                    if (qcJob?.saleId) {
+                        sale = await Sale.findOne({ _id: qcJob.saleId, companyId });
+                        if (sale?.order) {
+                            order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                        }
+                    }
+                }
+                // Extra fallback: job.orderId might be a ProductionOrder.orderId string (e.g. "PROD-2026-XXX")
+                // Try finding the Production order by its orderId string field
+                if (!sale) {
+                    const prodByOrderId = await ProductionOrder.findOne({ orderId: job.orderId, company: companyId }).select('saleId').lean();
+                    if (prodByOrderId?.saleId) {
+                        sale = await Sale.findOne({ _id: prodByOrderId.saleId, companyId });
+                        if (sale?.order) {
+                            order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                        }
+                    }
+                }
+            }
 
-            // Query corresponding Sale
-            const sale = await Sale.findOne({
-                order: order._id,
-                companyId
-            });
+            // If still no order found, skip this job (no associated sales order exists)
+            if (!order) continue;
 
             let advancedPaymentAmount = sale?.advancedPaymentAmount || 0;
             if (sale && !advancedPaymentAmount && order.leadId) {
@@ -685,7 +722,9 @@ export const getPackedOrders = async (req, res) => {
                 advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
             }
 
-            const totalAmount = sale ? sale.totalAmount : order.totalAmount;
+            const totalAmount = sale
+              ? sale.totalAmount
+              : Math.round((order.totalAmount || 0) * 1.18); // No invoice yet → add 18% GST to order value
             const paidAmount = sale ? (sale.paidAmount || 0) : advancedPaymentAmount;
             const balanceAmount = sale ? sale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
             const paymentStatus = sale ? sale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
@@ -732,6 +771,8 @@ export const getPackedOrders = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+
 
 /**
  * Upload Payment Proof for Sale

@@ -1,6 +1,7 @@
-import { Item, Category, CustomerCategory } from '../models/Inventory.js';
+import { Item, Category, CustomerCategory, Group } from '../models/Inventory.js';
 import { Company } from '../models/Company.js';
 import ProductDailySummary from '../models/ProductDailySummary.js';
+import MaterialIssueLog from '../models/MaterialIssueLog.js';
 import * as XLSX from 'xlsx';
 import multer from 'multer';
 import mongoose from 'mongoose';
@@ -646,6 +647,7 @@ export const createItem = async (req, res) => {
     if (itemData.gst !== undefined) sanitizedData.gst = Number(itemData.gst) || 0;
     if (itemData.hsn !== undefined) sanitizedData.hsn = itemData.hsn;
     if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
+    if (itemData.group !== undefined) sanitizedData.group = itemData.group;
 
     const item = await Item.create(sanitizedData);
     console.log('✅ R&D Master Item created successfully:', item.code);
@@ -748,6 +750,7 @@ export const updateItem = async (req, res) => {
     if (itemData.gst !== undefined) sanitizedData.gst = Number(itemData.gst) || 0;
     if (itemData.hsn !== undefined) sanitizedData.hsn = itemData.hsn;
     if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
+    if (itemData.group !== undefined) sanitizedData.group = itemData.group;
 
     const item = await Item.findByIdAndUpdate(
       id,
@@ -948,6 +951,10 @@ const validateItemData = (data, isUpdate = false) => {
     errors.customerCategory = 'Customer Category must be a valid string';
   }
 
+  if (data.group && typeof data.group !== 'string') {
+    errors.group = 'Group must be a valid string';
+  }
+
   if (data.quality && typeof data.quality !== 'string') {
     errors.quality = 'Quality must be a valid string';
   }
@@ -1020,6 +1027,7 @@ const sanitizeItemData = (data) => {
   if (sanitized.category) sanitized.category = sanitized.category.trim();
   if (sanitized.subCategory) sanitized.subCategory = sanitized.subCategory.trim();
   if (sanitized.customerCategory) sanitized.customerCategory = sanitized.customerCategory.trim();
+  if (sanitized.group) sanitized.group = sanitized.group.trim();
   if (sanitized.type) sanitized.type = sanitized.type.trim();
   if (sanitized.importance) sanitized.importance = sanitized.importance.trim();
   if (sanitized.batch) sanitized.batch = sanitized.batch.trim();
@@ -2368,6 +2376,269 @@ export const getInventoryStats = async (req, res) => {
     });
   } catch (error) {
     console.error('Get inventory stats error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+export const getMaterialIssueLogs = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+
+    // Step 1: Base match for logs
+    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
+    if (search) {
+      matchStage.$or = [
+        { machineCode: { $regex: search, $options: 'i' } },
+        { materialCode: { $regex: search, $options: 'i' } },
+        { materialName: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      { $sort: { createdAt: -1 } },
+      
+      // Step 2: Lookup user details to get the name of who issued it
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'issuedTo',
+          foreignField: '_id',
+          as: 'issuerData'
+        }
+      },
+      {
+        $unwind: { path: '$issuerData', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 3: Group by production order id
+      {
+        $group: {
+          _id: '$productionOrderId',
+          machineCode: { $first: '$machineCode' }, 
+          lastIssueDate: { $max: '$createdAt' }, // the most recent issue log for this order
+          logs: {
+            $push: {
+              _id: '$_id',
+              materialCode: '$materialCode',
+              materialName: '$materialName',
+              quantityIssued: '$quantityIssued',
+              unit: '$unit',
+              issuedTo: '$issuedTo',
+              issuedToName: { $ifNull: ['$issuerData.fullName', '$issuerData.username'] },
+              createdAt: '$createdAt'
+            }
+          }
+        }
+      },
+
+      // Step 4: Lookup the Production Order details to show at the wrapper level
+      {
+        $lookup: {
+          from: 'productionorders',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'order'
+        }
+      },
+      {
+        $unwind: { path: '$order', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 5: Sort grouped results by the last issue date (newest first)
+      { $sort: { lastIssueDate: -1 } },
+
+      // Step 6: Pagination using $facet
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limit }]
+        }
+      }
+    ];
+
+    const results = await MaterialIssueLog.aggregate(pipeline);
+    
+    const data = results[0].data;
+    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        totalPages,
+        limit
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching material issue logs:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// ─── ITEM GROUP CONTROLLERS (COMPANY-WISE) ───────────────────────
+
+export const getGroups = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'view')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const companyId = req.user.companyId;
+    if (!companyId) {
+      return res.status(400).json({ message: 'Access denied. User does not belong to a company.' });
+    }
+
+    // Fetch ONLY groups belonging to the user's company
+    const groups = await Group.find({ companyId }).sort({ createdAt: -1, name: 1 });
+
+    // Add product count specifically for this company
+    const groupsWithCount = await Promise.all(
+      groups.map(async (group) => {
+        const productCount = await Item.countDocuments({
+          group: group.name,
+          companyId: companyId // Ensures it only counts items in this company
+        });
+        const groupObj = group.toObject();
+        groupObj.productCount = productCount;
+        return groupObj;
+      })
+    );
+
+    console.log(`✅ Returning ${groupsWithCount.length} groups for company ${companyId}`);
+    res.json({ success: true, groups: groupsWithCount });
+  } catch (error) {
+    console.error('❌ Get groups error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+export const createGroup = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'add')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { name, description } = req.body;
+    const companyId = req.user.companyId;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ success: false, message: 'Group name is required' });
+    }
+
+    // Check if group already exists IN THIS COMPANY
+    const existingGroup = await Group.findOne({ name: name.trim(), companyId });
+    if (existingGroup) {
+      return res.status(400).json({ success: false, message: 'Group name already exists in your company.' });
+    }
+
+    const groupData = {
+      name: name.trim(),
+      description: description ? description.trim() : '',
+      companyId // Assign to the user's company
+    };
+
+    const group = await Group.create(groupData);
+    console.log('Group created successfully:', group.name);
+
+    res.status(201).json({
+      success: true,
+      message: 'Group created successfully',
+      group
+    });
+  } catch (error) {
+    console.error('Create group error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+export const updateGroup = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'edit')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { id } = req.params;
+    const { name, description } = req.body;
+    const companyId = req.user.companyId;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ success: false, message: 'Group name is required' });
+    }
+
+    // Prevent renaming to an existing group IN THIS COMPANY
+    const existingGroup = await Group.findOne({ name: name.trim(), companyId, _id: { $ne: id } });
+    if (existingGroup) {
+      return res.status(400).json({ success: false, message: 'Group name already exists in your company.' });
+    }
+
+    const updateData = {
+      name: name.trim(),
+      description: description ? description.trim() : ''
+    };
+
+    // Strict update: Must match both ID and Company ID
+    const group = await Group.findOneAndUpdate(
+      { _id: id, companyId },
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    if (!group) {
+      return res.status(404).json({ success: false, message: 'Group not found or access denied.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Group updated successfully',
+      group
+    });
+  } catch (error) {
+    console.error('Update group error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+export const deleteGroup = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'delete')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { id } = req.params;
+    const companyId = req.user.companyId;
+
+    // Verify group belongs to this company
+    const group = await Group.findOne({ _id: id, companyId });
+    if (!group) {
+      return res.status(404).json({ message: 'Group not found or access denied.' });
+    }
+
+    // Check if group is being used by any items IN THIS COMPANY
+    const itemsUsingGroup = await Item.countDocuments({
+      group: group.name,
+      companyId: companyId
+    });
+
+    if (itemsUsingGroup > 0) {
+      return res.status(400).json({
+        message: `Cannot delete group. ${itemsUsingGroup} items in your inventory are using this group.`
+      });
+    }
+
+    await Group.findByIdAndDelete(id);
+
+    res.json({ message: 'Group deleted successfully' });
+  } catch (error) {
+    console.error('Delete group error:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

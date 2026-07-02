@@ -489,11 +489,22 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       try {
         const { Item } = await import('../models/Inventory.js');
 
-        // Try to match by name (best-effort; productName was copied from the item)
-        const inventoryItem = await Item.findOne({
-          name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
-          companyId: request.companyId
-        });
+        // Item model uses `store` (string of companyId), NOT `companyId` field
+        const storeStr = request.companyId.toString();
+        let inventoryItem = null;
+
+        // Attempt 1: match by itemId (ObjectId reference — most reliable)
+        if (request.itemId && /^[0-9a-fA-F]{24}$/.test(request.itemId)) {
+          inventoryItem = await Item.findById(request.itemId);
+        }
+
+        // Attempt 2: match by name + store field
+        if (!inventoryItem) {
+          inventoryItem = await Item.findOne({
+            name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
+            store: storeStr
+          });
+        }
 
         if (inventoryItem) {
           inventoryItem.serialNumber = request.serialNumber;
@@ -525,24 +536,38 @@ export const updatePurchaseRequestStatus = async (req, res) => {
         if (!existingQC) {
           const qcJobId = await generateQCJobId();
 
+          let qcCategory = 'Raw Material';
+          try {
+            const inventoryItem = await Item.findOne({
+              name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
+              companyId: request.companyId
+            });
+            if (inventoryItem && inventoryItem.category) {
+              qcCategory = inventoryItem.category;
+            }
+          } catch (invLookupErr) {
+            console.error('Error looking up inventory item for QC job category:', invLookupErr);
+          }
+
           await QCJob.create({
             qcJobId,
             source: 'Purchase',
             sourceRefId: sourceRefId,
+            purchaseRequestId: request._id,   // ← direct PR ref for reliable Sale lookup
             sourceDepartment: 'Store',
             sentBy: req.user.fullName || req.user.username || 'Store Dept',
             itemName: request.productName,
             itemCode: request.itemId || request.requestId,
-            category: 'Raw Material', // purchase items are typically raw materials/trading goods
+            category: qcCategory,
             quantity: request.quantity || 1,
-            unit: 'pcs',
+            unit: request.unit || 'pcs',
             receivedDate: today(),
             status: 'Pending',
             company: request.companyId,
             createdBy: req.user._id,
             notes: `Automatically created from Store Purchase Requisition: ${request.requestId}`
           });
-          console.log(`✅ QC Job ${qcJobId} automatically created for Purchase Request ${request.requestId}`);
+          console.log(`✅ QC Job ${qcJobId} automatically created for Purchase Request ${request.requestId} with category ${qcCategory}`);
 
           // 🔔 Notify QC team about new QC job
           try {

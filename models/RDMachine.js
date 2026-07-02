@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 
 const RDMachineSchema = new mongoose.Schema({
-  // Existing Base Fields (Mapped to Product Code, P-Name, P-Description on Frontend)
+  // Existing Base Fields
   code: { type: String, required: true, trim: true },
   name: { type: String, required: true, trim: true },
   description: { type: String, default: '' },
@@ -11,11 +11,16 @@ const RDMachineSchema = new mongoose.Schema({
   pType: { type: String, required: true, trim: true },
   pSourceType: { type: String, required: true, trim: true },
 
-  // New Text Fields
-  pSpecification: { type: String, default: '' },
+  // Other Text Fields
   brand: { type: String, default: '' },
 
-  // Status Fields (These remain hardcoded enums as they dictate system logic)
+  // Dynamic Key-Value Specifications
+  specifications: [{
+    key: { type: String, trim: true },
+    value: { type: String, trim: true }
+  }],
+
+  // Status Fields
   designStatus: {
     type: String,
     enum: ['Draft', 'Testing', 'Approved', 'Rejected'],

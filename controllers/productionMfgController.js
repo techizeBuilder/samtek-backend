@@ -1,9 +1,15 @@
 import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP } from '../models/ProductionOrder.js';
 import ProductionTeam from '../models/ProductionTeam.js';
 import Sale from '../models/Sale.js';
+import QCJob from '../models/QCJob.js';
 import notificationService from '../services/notificationService.js';
-import RDRequest from '../models/RDRequest.js';
-import { Item } from "../models/Inventory.js"
+import RDRequest from '../models/RDRequest.js'
+import RDBOM from '../models/RDBOM.js';
+import mongoose from 'mongoose';
+import { Item } from '../models/Inventory.js'; // Adjust path
+import MaterialIssueLog from '../models/MaterialIssueLog.js';
+
+
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -165,36 +171,217 @@ export const raiseRDRequest = async (req, res) => {
   }
 };
 
-export const markMaterialIssued = async (req, res) => {
+
+
+export const issueMaterialToProduction = async (req, res) => {
   try {
-    const order = await ProductionOrder.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { materialIssued: true, 'materialDemands.$[].status': 'Issued' },
-      { new: true }
+    const { materialCode, quantityToIssue } = req.body;
+    const orderId = req.params.id;
+    const companyId = req.user.companyId;
+
+    const issueQty = Number(quantityToIssue);
+
+    if (!materialCode || !issueQty || issueQty <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid material code and quantity are required.' });
+    }
+
+    // 2. Fetch the Order
+    const order = await ProductionOrder.findOne({
+      _id: orderId,
+      company: companyId
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    // 3. Find the specific material demand
+    const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
+    if (demandIndex === -1) {
+      return res.status(404).json({ success: false, message: 'Material not found in this order.' });
+    }
+    const demand = order.materialDemands[demandIndex];
+
+    // 4. Application-Level Gatekeepers
+    if (demand.status === 'Pending R&D' || demand.status === 'R&D Rejected') {
+      return res.status(403).json({ success: false, message: 'Material is locked by R&D.' });
+    }
+
+    const remainingToIssue = demand.quantity - (demand.issuedQuantity || 0);
+    if (issueQty > remainingToIssue) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot issue ${issueQty}. Only ${remainingToIssue} more required for this order.`
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 5. ATOMIC INVENTORY DEDUCTION 
+    // ─────────────────────────────────────────────────────────────
+    // This query says: Find it ONLY if qty is Greater Than or Equal to issueQty
+    const inventoryItem = await Item.findOneAndUpdate(
+      {
+        code: materialCode,
+        companyId: companyId,
+        qty: { $gte: issueQty } // Database-level lock to prevent negative inventory
+      },
+      {
+        $inc: { qty: -issueQty } // Atomically deduct
+      },
+      { new: true } 
     );
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    res.json({ success: true, data: order });
+
+    // If inventoryItem is null, it means it either doesn't exist, OR qty was too low.
+    if (!inventoryItem) {
+      // Let's check which one it is so we can give a helpful error message
+      const existingItem = await Item.findOne({ code: materialCode, companyId: companyId });
+
+      if (!existingItem) {
+        return res.status(404).json({ success: false, message: `Material ${materialCode} not found in Master Inventory.` });
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock! Store only has ${existingItem.qty} available.`
+        });
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 6. UPDATE PRODUCTION ORDER 
+    // ─────────────────────────────────────────────────────────────
+    try {
+      const newIssuedQty = (demand.issuedQuantity || 0) + issueQty;
+      const newStatus = newIssuedQty >= demand.quantity ? 'Issued' : 'Requested';
+
+      order.materialDemands[demandIndex].issuedQuantity = newIssuedQty;
+      order.materialDemands[demandIndex].status = newStatus;
+
+      // Auto-Complete Check
+      const allIssued = order.materialDemands.every(m => m.status === 'Issued');
+      if (allIssued) {
+        order.materialIssued = true;
+      }
+
+      // Save order
+      await order.save();
+
+      // ─────────────────────────────────────────────────────────────
+      // 7. GENERATE AUDIT LOG
+      // ─────────────────────────────────────────────────────────────
+      await MaterialIssueLog.create({
+        productionOrderId: order._id,
+        machineCode: order.machineCode,
+        materialCode: demand.materialCode,
+        materialName: demand.materialName,
+        quantityIssued: issueQty,
+        unit: demand.unit,
+        issuedTo: req.user._id,
+        company: companyId
+      });
+
+      res.json({
+        success: true,
+        data: order,
+        message: `Successfully issued ${issueQty} ${demand.unit} of ${demand.materialName}.`
+      });
+    } catch (innerErr) {
+      // ─────────────────────────────────────────────────────────────
+      // MANUAL ROLLBACK (Compensating Transaction)
+      // ─────────────────────────────────────────────────────────────
+      // If saving the order or creating the log fails, we MUST refund the inventory
+      // to avoid 'ghost inventory' deductions.
+      console.error("Post-deduction failure! Refunding inventory...", innerErr);
+      await Item.findOneAndUpdate(
+        { code: materialCode, companyId: companyId },
+        { $inc: { qty: issueQty } } // ADD IT BACK
+      );
+      throw innerErr; // Rethrow to the outer catch block to send the 500 response
+    }
+
   } catch (err) {
+    console.error("Error issuing material:", err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─── MATERIAL DEMANDS ─────────────────────────────────────────────────────────
-
 export const addMaterialDemand = async (req, res) => {
   try {
     const { materialCode, materialName, quantity, unit } = req.body;
+
     if (!materialCode || !materialName || !quantity || !unit) {
       return res.status(400).json({ success: false, message: 'All material fields are required' });
     }
-    const order = await ProductionOrder.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { $push: { materialDemands: { materialCode, materialName, quantity: Number(quantity), unit, status: 'Requested' } } },
-      { new: true }
-    );
+
+    const companyId = req.user.companyId;
+    const orderId = req.params.id;
+
+    // Fetch the order first to get machine details for the RD ticket
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    res.json({ success: true, data: order });
+
+    const materialExists = order.materialDemands.find(m => m.materialCode === materialCode);
+
+    // ─────────────────────────────────────────────────────────────
+    // FAST LOOKUP: Grab original BOM quantity from the snapshot
+    // ─────────────────────────────────────────────────────────────
+    const originalBomQty = materialExists && materialExists.bomQuantity !== undefined
+      ? materialExists.bomQuantity
+      : null;
+
+    // 1. Update or Push the Material as "Pending R&D"
+    let updatedOrder;
+    if (materialExists) {
+      updatedOrder = await ProductionOrder.findOneAndUpdate(
+        { _id: orderId, "materialDemands.materialCode": materialCode },
+        {
+          $set: {
+            "materialDemands.$.status": "Pending R&D", // Lock it!
+            "materialDemands.$.quantity": Number(quantity),
+            "materialDemands.$.unit": unit
+            // Note: We DO NOT overwrite bomQuantity here. It stays as the original baseline.
+          }
+        },
+        { new: true }
+      );
+    } else {
+      updatedOrder = await ProductionOrder.findOneAndUpdate(
+        { _id: orderId },
+        {
+          $push: {
+            materialDemands: {
+              materialCode,
+              materialName,
+              bomQuantity: null, // Explicitly null because it is Out of BOM
+              quantity: Number(quantity),
+              unit,
+              status: 'Pending R&D'
+            }
+          }
+        },
+        { new: true }
+      );
+    }
+
+    // 2. Automatically generate the R&D Ticket
+    // Note: Ensure you have `import RDRequest from '../models/RDRequest.js'` at the top of your file
+    await RDRequest.create({
+      productionOrderId: order._id,
+      machineCode: order.machineCode,
+      machineName: order.machineName,
+      requestType: 'Material Change', // Tells R&D this is a micro-request
+      materialChangeDetails: {
+        materialCode,
+        materialName,
+        bomQuantity: originalBomQty, // ── PASSES THE FAST-LOOKUP BASELINE TO R&D ──
+        requestedQuantity: Number(quantity),
+        unit
+      },
+      company: companyId
+    });
+
+    res.json({ success: true, data: updatedOrder, message: 'Demand sent to R&D for approval.' });
   } catch (err) {
+    console.error("Error in addMaterialDemand:", err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -310,25 +497,110 @@ export const approveQC = async (req, res) => {
 
       // 🏪 Update linked Sale storeQCStatus to 'Production Completed'
       try {
-        // notes field contains sourceRefId (invoiceNumber). Extract it from the notes string.
-        const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
-        const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
+        // Strategy 1: Use direct saleId reference (most reliable — set when prod order created from Store)
+        let linkedSale = null;
+        if (order.saleId) {
+          linkedSale = await Sale.findById(order.saleId);
+        }
 
-        if (sourceRefId) {
-          const linkedSale = await Sale.findOne({
-            $or: [
-              { invoiceNumber: sourceRefId },
-              { _id: sourceRefId.match(/^[0-9a-fA-F]{24}$/) ? sourceRefId : null }
-            ]
-          });
-          if (linkedSale) {
-            linkedSale.storeQCStatus = 'Production Completed';
-            await linkedSale.save();
-            console.log(`🏪 [Production Completed] Updated storeQCStatus to 'Production Completed' for Sale ${linkedSale._id}`);
+        // Strategy 2: Fall back to notes regex (for older records without saleId)
+        if (!linkedSale) {
+          const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
+          const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
+          if (sourceRefId) {
+            linkedSale = await Sale.findOne({
+              $or: [
+                { invoiceNumber: sourceRefId },
+                { _id: /^[0-9a-fA-F]{24}$/.test(sourceRefId) ? sourceRefId : null }
+              ]
+            });
           }
+        }
+
+        if (linkedSale) {
+          linkedSale.storeQCStatus = 'Production Completed';
+          await linkedSale.save();
+          console.log(`🏪 [Production Completed] storeQCStatus='Production Completed' for Sale ${linkedSale._id}`);
+        } else {
+          console.warn(`⚠️ [Production Completed] Could not find linked Sale for ProductionOrder ${order.orderId}`);
         }
       } catch (saleUpdateErr) {
         console.error('❌ Error updating Sale storeQCStatus on production completion:', saleUpdateErr);
+      }
+
+      // 🏭 Auto-create QC Job for completed production order
+      try {
+        const existingQC = await QCJob.findOne({
+          source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+          sourceRefId: order.orderId,
+          company: order.company
+        });
+
+        if (!existingQC) {
+          const year = new Date().getFullYear();
+          const lastJob = await QCJob.findOne({
+            qcJobId: new RegExp(`^QC-${year}-`)
+          }).sort({ qcJobId: -1 }).lean();
+
+          let nextNumber = 1;
+          if (lastJob && lastJob.qcJobId) {
+            const parts = lastJob.qcJobId.split('-');
+            if (parts.length === 3) {
+              const lastNumber = parseInt(parts[2]);
+              if (!isNaN(lastNumber)) {
+                nextNumber = lastNumber + 1;
+              }
+            }
+          }
+          const qcJobId = `QC-${year}-${String(nextNumber).padStart(4, '0')}`;
+
+          let qcCategory = 'Finished Good'; // default for production
+          try {
+            const { Item } = await import('../models/Inventory.js');
+            const inventoryItem = await Item.findOne({
+              $or: [
+                { code: order.machineCode },
+                { name: order.machineName }
+              ],
+              companyId: order.company
+            });
+            if (inventoryItem && inventoryItem.category) {
+              qcCategory = inventoryItem.category;
+            }
+          } catch (itemErr) {
+            console.error('Error looking up inventory item for category:', itemErr);
+          }
+
+          const qcJob = await QCJob.create({
+            qcJobId,
+            source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+            sourceRefId: order.orderId,
+            sourceDepartment: 'Production',
+            sentBy: qcBy || 'Production Dept',
+            itemName: order.machineName,
+            itemCode: order.machineCode,
+            category: qcCategory,
+            quantity: 1,
+            unit: 'pcs',
+            receivedDate: today(),
+            status: 'Pending',
+            saleId: order.saleId,
+            company: order.company,
+            createdBy: req.user._id,
+            notes: `Automatically created from completed Production Order: ${order.orderId}`
+          });
+          console.log(`✅ QC Job ${qcJobId} automatically created for Production Order ${order.orderId}`);
+
+          try {
+            await notificationService.triggerQCNotification({
+              action: 'qc_job_created',
+              data: { qcJobId, itemName: order.machineName, jobId: qcJob._id },
+              targetCompanyId: order.company,
+            });
+          } catch (e) { console.error('QC job notification error:', e); }
+        }
+      } catch (qcCreateErr) {
+        console.error('❌ Error creating QC Job for completed production order:', qcCreateErr);
       }
     }
 
