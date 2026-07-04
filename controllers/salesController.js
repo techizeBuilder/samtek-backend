@@ -1156,6 +1156,7 @@ export const getSalespersonItems = async (req, res) => {
       limit = 20,
       search,
       type,
+      group,
       category,
       subCategory,
       lowStock,
@@ -1206,6 +1207,11 @@ export const getSalespersonItems = async (req, res) => {
       console.log(`🚫 Sales API: Overriding type filter ${type} to Product`);
     }
     // Force type to be Product regardless of query parameter
+
+    // Group filter
+    if (group) {
+      query.group = group;
+    }
 
     // Category filter
     if (category) {
