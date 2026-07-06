@@ -81,6 +81,7 @@ const ProductionOrderSchema = new mongoose.Schema({
   designVerified: { type: Boolean, default: false },
   rdRequestRaised: { type: Boolean, default: false },
   materialIssued: { type: Boolean, default: false },
+  saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', default: null },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   notes: { type: String, default: '' },

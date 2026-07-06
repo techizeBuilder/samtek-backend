@@ -4,7 +4,6 @@ const ChecklistSchema = new mongoose.Schema({
   allPartsIncluded: { type: Boolean, default: false },
   accessoriesIncluded: { type: Boolean, default: false },
   manualIncluded: { type: Boolean, default: false },
-  invoiceCopyIncluded: { type: Boolean, default: false },
   safetyPackingCompleted: { type: Boolean, default: false },
 }, { _id: false });
 

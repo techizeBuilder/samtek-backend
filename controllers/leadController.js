@@ -129,6 +129,11 @@ export const getLeads = async (req, res) => {
       paymentCheckRequested
     } = req.query;
 
+    let parsedLimit = parseInt(limit);
+    if (paymentCheckRequested === 'true' && !req.query.limit) {
+      parsedLimit = 1000;
+    }
+
     const query = { companyId: req.user.companyId };
     const andConditions = [];
 
@@ -265,6 +270,7 @@ export const getLeads = async (req, res) => {
     if (paymentCheckRequested === 'true') {
       // Payment verifications queue: oldest request first (FIFO)
       sortOptions.paymentCheckRequestedAt = 1;
+      sortOptions.createdAt = 1;
     } else if (sortBy === 'date' || sortBy === 'createdAt') {
       sortOptions.createdAt = order === 'asc' ? 1 : -1;
     } else if (sortBy === 'value') {
@@ -279,7 +285,7 @@ export const getLeads = async (req, res) => {
       .populate('observer', 'fullName username')
       .populate('history.performedBy', 'fullName username')
       .sort(sortOptions)
-      .limit(parseInt(limit));
+      .limit(parsedLimit);
 
     // Efficiently check which leads have a quotation
     const leadIds = leadsDocs.map(l => l._id);
