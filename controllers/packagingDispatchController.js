@@ -256,6 +256,98 @@ export const getReadyForPackaging = async (req, res) => {
             }
           }
         } catch (e) { console.error('Error resolving saleId for QC job sales code:', e); }
+      } else if (job.source === 'Production' || job.source === 'QC_Rejected') {
+        // Production/QC_Rejected QCJobs: sourceRefId = ProductionOrder.orderId (e.g. "PROD-2026-665217")
+        // We need to trace back to the sales orderCode via the ProductionOrder
+        try {
+          console.log(`[PackagingQueue] Resolving Production QCJob ${job.qcJobId}, sourceRefId=${job.sourceRefId}`);
+
+          // Find the ProductionOrder this QCJob was created from
+          const prodOrder = await ProductionOrder.findOne({
+            orderId: job.sourceRefId,
+            company: cid,
+          }).lean();
+
+          console.log(`[PackagingQueue] ProductionOrder found:`, prodOrder ? `orderId=${prodOrder.orderId}, machineCode=${prodOrder.machineCode}, source=${prodOrder.source}` : 'NOT FOUND');
+
+          if (prodOrder) {
+            // STRATEGY A: machineCode IS the orderCode (when auto-created from Store)
+            // orderController.js sets: machineCode: orderCode (e.g. "ORD-0043")
+            // So try to find an Order whose orderCode matches the machineCode
+            if (prodOrder.machineCode) {
+              const orderByCode = await Order.findOne({
+                orderCode: prodOrder.machineCode,
+                companyId: cid,
+              }).select('orderCode').lean();
+              console.log(`[PackagingQueue] Strategy A (machineCode="${prodOrder.machineCode}"): Order found=`, orderByCode?.orderCode || 'none');
+              if (orderByCode?.orderCode) {
+                salesOrderCode = orderByCode.orderCode;
+                orderIdVal = salesOrderCode;
+              }
+            }
+
+            // STRATEGY B: Use Sale._id extracted from notes "Ref: <saleId or invoiceNumber>"
+            if (!salesOrderCode && prodOrder.notes) {
+              const notesRefMatch = prodOrder.notes.match(/Ref:\s*(\S+)/);
+              const refId = notesRefMatch ? notesRefMatch[1] : null;
+              console.log(`[PackagingQueue] Strategy B (notes refId="${refId}")`);
+              if (refId) {
+                // refId could be sale._id (24-char hex) or invoiceNumber
+                const saleByRef = await Sale.findOne({
+                  $or: [
+                    { _id: /^[0-9a-fA-F]{24}$/.test(refId) ? refId : null },
+                    { invoiceNumber: refId },
+                  ]
+                }).select('order').lean();
+                if (saleByRef?.order) {
+                  const orderByRef = await Order.findById(saleByRef.order).select('orderCode').lean();
+                  console.log(`[PackagingQueue] Strategy B sale found, orderCode=`, orderByRef?.orderCode || 'none');
+                  if (orderByRef?.orderCode) {
+                    salesOrderCode = orderByRef.orderCode;
+                    orderIdVal = salesOrderCode;
+                  }
+                }
+              }
+            }
+
+            // STRATEGY C: Find Sale where storeQCStatus reflects production involvement + item name match (closest in time)
+            if (!salesOrderCode && prodOrder.machineName) {
+              const sales = await Sale.find({
+                companyId: cid,
+                storeQCStatus: { $in: ['Goes to Production', 'Production Completed'] },
+                'items.productName': prodOrder.machineName,
+              }).select('order createdAt').lean();
+              
+              console.log(`[PackagingQueue] Strategy C: Found ${sales.length} potential matching sales`);
+              
+              if (sales.length > 0) {
+                let closestSale = null;
+                let minDiff = Infinity;
+                const prodTime = new Date(prodOrder.createdAt).getTime();
+                
+                for (const s of sales) {
+                  const saleTime = new Date(s.createdAt).getTime();
+                  const diff = Math.abs(prodTime - saleTime);
+                  if (diff < minDiff) {
+                    minDiff = diff;
+                    closestSale = s;
+                  }
+                }
+                
+                if (closestSale && closestSale.order) {
+                  const orderByItem = await Order.findById(closestSale.order).select('orderCode').lean();
+                  console.log(`[PackagingQueue] Strategy C closest orderCode=`, orderByItem?.orderCode || 'none', `(diff: ${minDiff / 1000}s)`);
+                  if (orderByItem?.orderCode) {
+                    salesOrderCode = orderByItem.orderCode;
+                    orderIdVal = salesOrderCode;
+                  }
+                }
+              }
+            }
+
+            console.log(`[PackagingQueue] Final resolved orderIdVal="${orderIdVal}", salesOrderCode="${salesOrderCode}"`);
+          }
+        } catch (e) { console.error('Error resolving Production sourceRefId for QC job sales code:', e); }
       } else if (job.purchaseRequestId) {
         try {
           const pr = await PurchaseRequest.findById(job.purchaseRequestId).lean();
@@ -515,14 +607,13 @@ export const startPacking = async (req, res) => {
 
 export const updateChecklist = async (req, res) => {
   try {
-    const { allPartsIncluded, accessoriesIncluded, manualIncluded, invoiceCopyIncluded, safetyPackingCompleted } = req.body;
+    const { allPartsIncluded, accessoriesIncluded, manualIncluded, safetyPackingCompleted } = req.body;
     const job = await PackagingJob.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId },
       {
         'checklist.allPartsIncluded': allPartsIncluded,
         'checklist.accessoriesIncluded': accessoriesIncluded,
         'checklist.manualIncluded': manualIncluded,
-        'checklist.invoiceCopyIncluded': invoiceCopyIncluded,
         'checklist.safetyPackingCompleted': safetyPackingCompleted,
       },
       { new: true }
@@ -541,7 +632,7 @@ export const completePacking = async (req, res) => {
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     const cl = job.checklist;
-    const allDone = cl.allPartsIncluded && cl.accessoriesIncluded && cl.manualIncluded && cl.invoiceCopyIncluded && cl.safetyPackingCompleted;
+    const allDone = cl.allPartsIncluded && cl.accessoriesIncluded && cl.manualIncluded && cl.safetyPackingCompleted;
     if (!allDone) {
       return res.status(400).json({ success: false, message: 'All checklist items must be completed before marking packing as complete' });
     }

@@ -495,7 +495,7 @@ class NotificationService {
     }
 
     if (action === 'low_stock') {
-      return this.notifyRoles(['Store Head', 'Store Employee', 'Accounts Head'], {
+      return this.notifyRoles(['Store Head', 'Store Employee'], {
         title: 'Low Stock Alert',
         message: `${data?.itemName} is running low (${data?.currentStock} remaining)`,
         type: 'inventory', icon: 'alert-triangle', priority: 'urgent',
@@ -504,7 +504,7 @@ class NotificationService {
     }
 
     if (action === 'stock_received') {
-      return this.notifyRoles(['Store Head', 'Production Head', 'Superadmin'], {
+      return this.notifyRoles(['Store Head', 'Superadmin'], {
         title: 'Stock Received',
         message: `${data?.itemName} stock updated. Quantity: ${data?.quantity}`,
         type: 'store', icon: 'package', priority: 'medium',
@@ -605,7 +605,7 @@ class NotificationService {
         message: `QC Job ${data?.qcJobId} passed. Ready for dispatch.`,
         type: 'qc', icon: 'check-circle', priority: 'high',
         data, ...common
-      });
+      });``
     }
 
     if (action === 'qc_failed') {
