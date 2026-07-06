@@ -268,9 +268,9 @@ export const getLeads = async (req, res) => {
     // Sorting
     let sortOptions = {};
     if (paymentCheckRequested === 'true') {
-      // Payment verifications queue: oldest request first (FIFO)
-      sortOptions.paymentCheckRequestedAt = 1;
-      sortOptions.createdAt = 1;
+      // Payment verifications queue: newest request first (LIFO)
+      sortOptions.paymentCheckRequestedAt = -1;
+      sortOptions.createdAt = -1;
     } else if (sortBy === 'date' || sortBy === 'createdAt') {
       sortOptions.createdAt = order === 'asc' ? 1 : -1;
     } else if (sortBy === 'value') {
