@@ -228,7 +228,7 @@ export const issueMaterialToProduction = async (req, res) => {
       {
         $inc: { qty: -issueQty } // Atomically deduct
       },
-      { new: true } 
+      { new: true }
     );
 
     // If inventoryItem is null, it means it either doesn't exist, OR qty was too low.
@@ -433,17 +433,43 @@ export const startProcess = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
+
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    // ─────────────────────────────────────────────────────────────
+    // NEW GATEKEEPERS: BOM & Material Issue Validation
+    // ─────────────────────────────────────────────────────────────
+    if (!order.bomVerified) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot start process: BOM has not been verified by R&D yet.'
+      });
+    }
+
+    if (!order.materialIssued) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot start process: All required materials have not been issued yet.'
+      });
+    }
+    // ─────────────────────────────────────────────────────────────
+
     // Gate: previous step must be completed
     if (idx > 0 && order.processes[idx - 1].status !== 'Completed') {
-      return res.status(400).json({ success: false, message: `Cannot start ${PROCESS_STEPS[idx]}: ${PROCESS_STEPS[idx - 1]} not yet completed` });
+      return res.status(400).json({
+        success: false,
+        message: `Cannot start ${PROCESS_STEPS[idx]}: ${PROCESS_STEPS[idx - 1]} not yet completed`
+      });
     }
+
     order.processes[idx].status = 'In Progress';
-    order.processes[idx].startDate = today();
+    order.processes[idx].startDate = today(); // Assuming today() is defined in your file
     order.status = 'In Progress';
+
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

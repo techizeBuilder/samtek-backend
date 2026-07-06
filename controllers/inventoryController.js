@@ -43,7 +43,7 @@ const DELIVERY_CHALLAN_ORDER = [
 // Helper function to check inventory permissions
 const checkInventoryPermission = (user, action) => {
   // Research & Development Head and Unit Head have all permissions (Super Admin removed)
-  if (user.role === 'Research & Development Head' || user.role === 'Unit Head' || user.role==="Sales Head" || user.role==="Sales Employee") {
+  if (user.role === 'Research & Development Head' || user.role === 'Unit Head' || user.role === "Sales Head" || user.role === "Sales Employee") {
     return true;
   }
 
@@ -634,7 +634,10 @@ export const createItem = async (req, res) => {
     // 1. R&D Master Fields
     sanitizedData.specifications = itemData.specifications || [];
     sanitizedData.applications = itemData.applications || [];
-    sanitizedData.variants = itemData.variants || [];
+
+    // ─── FIXED: Use sanitizedData instead of raw itemData so price is protected ───
+    sanitizedData.variants = sanitizedData.variants || [];
+
     if (itemData.warranty) {
       sanitizedData.warranty = itemData.warranty;
     }
@@ -708,7 +711,7 @@ export const updateItem = async (req, res) => {
     const itemData = req.body;
 
     // Enhanced validation
-    const validation = validateItemData(itemData);
+    const validation = validateItemData(itemData, true);
     if (!validation.isValid) {
       return res.status(400).json({
         message: 'Validation failed',
@@ -739,7 +742,10 @@ export const updateItem = async (req, res) => {
     // 1. R&D Master Fields
     if (itemData.specifications !== undefined) sanitizedData.specifications = itemData.specifications;
     if (itemData.applications !== undefined) sanitizedData.applications = itemData.applications;
-    if (itemData.variants !== undefined) sanitizedData.variants = itemData.variants;
+
+    // ─── FIXED: Use sanitizedData to prevent overwriting with raw string prices ───
+    if (itemData.variants !== undefined) sanitizedData.variants = sanitizedData.variants;
+
     if (itemData.warranty !== undefined) sanitizedData.warranty = itemData.warranty;
 
     // 2. Pricing, Tax & Category Fields (Restored & Protected)
@@ -767,16 +773,6 @@ export const updateItem = async (req, res) => {
       if (item.batch && !isNaN(parseFloat(item.batch))) {
         const today = new Date().toISOString().split('T')[0];
         const companyId = req.user.companyId ? req.user.companyId.toString() : item.store;
-
-        console.log('🔧 Debug sync info:', {
-          itemBatch: item.batch,
-          itemName: item.name,
-          itemId: item._id,
-          itemStore: item.store,
-          userCompanyId: req.user.companyId,
-          finalCompanyId: companyId,
-          userRole: req.user.role
-        });
 
         if (companyId) {
           await updateProductSummaryQtyPerBatch(
@@ -822,6 +818,164 @@ export const updateItem = async (req, res) => {
       res.status(500).json({ message: 'Internal server error' });
     }
   }
+};
+
+// Enhanced validation helper function
+const validateItemData = (data, isUpdate = false) => {
+  const errors = {};
+
+  // Required fields validation
+  if (!data.name || typeof data.name !== 'string' || data.name.trim().length < 2) {
+    errors.name = 'Item name must be at least 2 characters';
+  }
+
+  if (!data.category || typeof data.category !== 'string' || data.category.trim().length === 0) {
+    errors.category = 'Category is required';
+  }
+
+  // Customer category is optional with default value
+  if (data.customerCategory && typeof data.customerCategory !== 'string') {
+    errors.customerCategory = 'Customer Category must be a valid string';
+  }
+
+  if (data.group && typeof data.group !== 'string') {
+    errors.group = 'Group must be a valid string';
+  }
+
+  if (data.quality && typeof data.quality !== 'string') {
+    errors.quality = 'Quality must be a valid string';
+  }
+
+  if (!data.unit || typeof data.unit !== 'string' || data.unit.trim().length === 0) {
+    errors.unit = 'Unit is required';
+  }
+
+  if (!data.type || typeof data.type !== 'string' || data.type.trim().length === 0) {
+    errors.type = 'Item type is required';
+  }
+
+  if (!data.importance || typeof data.importance !== 'string' || data.importance.trim().length === 0) {
+    errors.importance = 'Importance level is required';
+  }
+  if (!data.unit) {
+    errors.unit = 'Unit is required';
+  }
+
+  // Numeric validations
+  if (data.qty !== undefined && (isNaN(data.qty) || data.qty < 0)) {
+    errors.qty = 'Quantity must be a non-negative number';
+  }
+  if (data.stdCost !== undefined && (isNaN(data.stdCost) || data.stdCost < 0)) {
+    errors.stdCost = 'Standard cost must be a non-negative number';
+  }
+  if (data.purchaseCost !== undefined && (isNaN(data.purchaseCost) || data.purchaseCost < 0)) {
+    errors.purchaseCost = 'Purchase cost must be a non-negative number';
+  }
+  if (data.salePrice !== undefined && (isNaN(data.salePrice) || data.salePrice < 0)) {
+    errors.salePrice = 'Sale price must be a non-negative number';
+  }
+  if (data.mrp !== undefined && (isNaN(data.mrp) || data.mrp < 0)) {
+    errors.mrp = 'MRP must be a non-negative number';
+  }
+  if (data.gst !== undefined && (isNaN(data.gst) || data.gst < 0 || data.gst > 100)) {
+    errors.gst = 'GST must be between 0 and 100';
+  }
+  if (data.minStock !== undefined && (isNaN(data.minStock) || data.minStock < 0)) {
+    errors.minStock = 'Minimum stock must be a non-negative number';
+  }
+  if (data.leadTime !== undefined && (isNaN(data.leadTime) || data.leadTime < 0)) {
+    errors.leadTime = 'Lead time must be a non-negative number';
+  }
+
+  // ─── FIXED: Validates that variant price is never negative ───
+  if (data.variants && Array.isArray(data.variants)) {
+    data.variants.forEach((v, index) => {
+      if (v.price !== undefined && (isNaN(v.price) || v.price < 0)) {
+        errors[`variants[${index}].price`] = 'Variant price must be a non-negative number';
+      }
+    });
+  }
+
+  // Enum validations
+  const validTypes = ['Product', 'Material', 'Spares', 'Assemblies'];
+  if (data.type && !validTypes.includes(data.type)) {
+    errors.type = 'Invalid item type';
+  }
+
+  const validImportance = ['Low', 'Normal', 'High', 'Critical'];
+  if (data.importance && !validImportance.includes(data.importance)) {
+    errors.importance = 'Invalid importance level';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors
+  };
+};
+
+// Enhanced data sanitization helper
+const sanitizeItemData = (data) => {
+  const sanitized = { ...data };
+
+  // Trim string fields and ensure they exist
+  if (sanitized.name) sanitized.name = sanitized.name.trim();
+  if (sanitized.code) sanitized.code = sanitized.code.trim();
+  if (sanitized.category) sanitized.category = sanitized.category.trim();
+  if (sanitized.subCategory) sanitized.subCategory = sanitized.subCategory.trim();
+  if (sanitized.customerCategory) sanitized.customerCategory = sanitized.customerCategory.trim();
+  if (sanitized.group) sanitized.group = sanitized.group.trim();
+  if (sanitized.type) sanitized.type = sanitized.type.trim();
+  if (sanitized.importance) sanitized.importance = sanitized.importance.trim();
+  if (sanitized.batch) sanitized.batch = sanitized.batch.trim();
+  if (sanitized.quality) sanitized.quality = sanitized.quality.trim();
+  if (sanitized.unit) sanitized.unit = sanitized.unit.trim();
+  if (sanitized.store) sanitized.store = sanitized.store.trim();
+  if (sanitized.hsn) sanitized.hsn = sanitized.hsn.trim();
+  if (sanitized.description) sanitized.description = sanitized.description.trim();
+  if (sanitized.internalNotes) sanitized.internalNotes = sanitized.internalNotes.trim();
+
+  // Convert numeric fields
+  if (sanitized.qty !== undefined) sanitized.qty = Number(sanitized.qty);
+  if (sanitized.stdCost !== undefined) sanitized.stdCost = Number(sanitized.stdCost);
+  if (sanitized.purchaseCost !== undefined) sanitized.purchaseCost = Number(sanitized.purchaseCost);
+  if (sanitized.salePrice !== undefined) sanitized.salePrice = Number(sanitized.salePrice);
+  if (sanitized.mrp !== undefined) sanitized.mrp = Number(sanitized.mrp);
+  if (sanitized.gst !== undefined) sanitized.gst = Number(sanitized.gst);
+  if (sanitized.minStock !== undefined) sanitized.minStock = Number(sanitized.minStock);
+  if (sanitized.leadTime !== undefined) sanitized.leadTime = Number(sanitized.leadTime);
+  if (sanitized.order !== undefined) sanitized.order = Number(sanitized.order);
+
+  // Convert boolean fields
+  if (sanitized.internalManufacturing !== undefined) {
+    sanitized.internalManufacturing = Boolean(sanitized.internalManufacturing);
+  }
+  if (sanitized.purchase !== undefined) {
+    sanitized.purchase = Boolean(sanitized.purchase);
+  }
+
+  // Handle arrays
+  if (sanitized.tags && Array.isArray(sanitized.tags)) {
+    sanitized.tags = sanitized.tags.filter(tag => tag && tag.trim()).map(tag => tag.trim());
+  }
+  if (sanitized.customerPrices && Array.isArray(sanitized.customerPrices)) {
+    sanitized.customerPrices = sanitized.customerPrices.map(cp => ({
+      category: cp.category ? cp.category.trim() : '',
+      price: Number(cp.price) || 0
+    }));
+  }
+
+  // ─── FIXED: Sanitize Variants & Cast Price to Number ───
+  if (sanitized.variants && Array.isArray(sanitized.variants)) {
+    sanitized.variants = sanitized.variants.map(v => ({
+      name: v.name ? String(v.name).trim() : '',
+      capacity: v.capacity ? String(v.capacity).trim() : '',
+      motorPower: v.motorPower ? String(v.motorPower).trim() : '',
+      price: Number(v.price) || 0, // Guarantees price is saved correctly as a Number
+      code: v.code ? String(v.code).trim() : '',
+    }));
+  }
+
+  return sanitized;
 };
 
 export const getItemById = async (req, res) => {
@@ -933,143 +1087,7 @@ export const getItemByCode = async (req, res) => {
 
 
 
-// Enhanced validation helper function
-const validateItemData = (data, isUpdate = false) => {
-  const errors = {};
 
-  // Required fields validation
-  if (!data.name || typeof data.name !== 'string' || data.name.trim().length < 2) {
-    errors.name = 'Item name must be at least 2 characters';
-  }
-
-  if (!data.category || typeof data.category !== 'string' || data.category.trim().length === 0) {
-    errors.category = 'Category is required';
-  }
-
-  // Customer category is optional with default value
-  if (data.customerCategory && typeof data.customerCategory !== 'string') {
-    errors.customerCategory = 'Customer Category must be a valid string';
-  }
-
-  if (data.group && typeof data.group !== 'string') {
-    errors.group = 'Group must be a valid string';
-  }
-
-  if (data.quality && typeof data.quality !== 'string') {
-    errors.quality = 'Quality must be a valid string';
-  }
-
-  if (!data.unit || typeof data.unit !== 'string' || data.unit.trim().length === 0) {
-    errors.unit = 'Unit is required';
-  }
-
-  if (!data.type || typeof data.type !== 'string' || data.type.trim().length === 0) {
-    errors.type = 'Item type is required';
-  }
-
-  if (!data.importance || typeof data.importance !== 'string' || data.importance.trim().length === 0) {
-    errors.importance = 'Importance level is required';
-  }
-  if (!data.unit) {
-    errors.unit = 'Unit is required';
-  }
-
-  // Numeric validations
-  if (data.qty !== undefined && (isNaN(data.qty) || data.qty < 0)) {
-    errors.qty = 'Quantity must be a non-negative number';
-  }
-  if (data.stdCost !== undefined && (isNaN(data.stdCost) || data.stdCost < 0)) {
-    errors.stdCost = 'Standard cost must be a non-negative number';
-  }
-  if (data.purchaseCost !== undefined && (isNaN(data.purchaseCost) || data.purchaseCost < 0)) {
-    errors.purchaseCost = 'Purchase cost must be a non-negative number';
-  }
-  if (data.salePrice !== undefined && (isNaN(data.salePrice) || data.salePrice < 0)) {
-    errors.salePrice = 'Sale price must be a non-negative number';
-  }
-  if (data.mrp !== undefined && (isNaN(data.mrp) || data.mrp < 0)) {
-    errors.mrp = 'MRP must be a non-negative number';
-  }
-  if (data.gst !== undefined && (isNaN(data.gst) || data.gst < 0 || data.gst > 100)) {
-    errors.gst = 'GST must be between 0 and 100';
-  }
-  if (data.minStock !== undefined && (isNaN(data.minStock) || data.minStock < 0)) {
-    errors.minStock = 'Minimum stock must be a non-negative number';
-  }
-  if (data.leadTime !== undefined && (isNaN(data.leadTime) || data.leadTime < 0)) {
-    errors.leadTime = 'Lead time must be a non-negative number';
-  }
-
-  // Enum validations
-  const validTypes = ['Product', 'Material', 'Spares', 'Assemblies'];
-  if (data.type && !validTypes.includes(data.type)) {
-    errors.type = 'Invalid item type';
-  }
-
-  const validImportance = ['Low', 'Normal', 'High', 'Critical'];
-  if (data.importance && !validImportance.includes(data.importance)) {
-    errors.importance = 'Invalid importance level';
-  }
-
-  return {
-    isValid: Object.keys(errors).length === 0,
-    errors
-  };
-};
-
-// Enhanced data sanitization helper
-const sanitizeItemData = (data) => {
-  const sanitized = { ...data };
-
-  // Trim string fields and ensure they exist
-  if (sanitized.name) sanitized.name = sanitized.name.trim();
-  if (sanitized.code) sanitized.code = sanitized.code.trim();
-  if (sanitized.category) sanitized.category = sanitized.category.trim();
-  if (sanitized.subCategory) sanitized.subCategory = sanitized.subCategory.trim();
-  if (sanitized.customerCategory) sanitized.customerCategory = sanitized.customerCategory.trim();
-  if (sanitized.group) sanitized.group = sanitized.group.trim();
-  if (sanitized.type) sanitized.type = sanitized.type.trim();
-  if (sanitized.importance) sanitized.importance = sanitized.importance.trim();
-  if (sanitized.batch) sanitized.batch = sanitized.batch.trim();
-  if (sanitized.quality) sanitized.quality = sanitized.quality.trim();
-  if (sanitized.unit) sanitized.unit = sanitized.unit.trim();
-  if (sanitized.store) sanitized.store = sanitized.store.trim();
-  if (sanitized.hsn) sanitized.hsn = sanitized.hsn.trim();
-  if (sanitized.description) sanitized.description = sanitized.description.trim();
-  if (sanitized.internalNotes) sanitized.internalNotes = sanitized.internalNotes.trim();
-
-  // Convert numeric fields
-  if (sanitized.qty !== undefined) sanitized.qty = Number(sanitized.qty);
-  if (sanitized.stdCost !== undefined) sanitized.stdCost = Number(sanitized.stdCost);
-  if (sanitized.purchaseCost !== undefined) sanitized.purchaseCost = Number(sanitized.purchaseCost);
-  if (sanitized.salePrice !== undefined) sanitized.salePrice = Number(sanitized.salePrice);
-  if (sanitized.mrp !== undefined) sanitized.mrp = Number(sanitized.mrp);
-  if (sanitized.gst !== undefined) sanitized.gst = Number(sanitized.gst);
-  if (sanitized.minStock !== undefined) sanitized.minStock = Number(sanitized.minStock);
-  if (sanitized.leadTime !== undefined) sanitized.leadTime = Number(sanitized.leadTime);
-  if (sanitized.order !== undefined) sanitized.order = Number(sanitized.order);
-
-  // Convert boolean fields
-  if (sanitized.internalManufacturing !== undefined) {
-    sanitized.internalManufacturing = Boolean(sanitized.internalManufacturing);
-  }
-  if (sanitized.purchase !== undefined) {
-    sanitized.purchase = Boolean(sanitized.purchase);
-  }
-
-  // Handle arrays
-  if (sanitized.tags && Array.isArray(sanitized.tags)) {
-    sanitized.tags = sanitized.tags.filter(tag => tag && tag.trim()).map(tag => tag.trim());
-  }
-  if (sanitized.customerPrices && Array.isArray(sanitized.customerPrices)) {
-    sanitized.customerPrices = sanitized.customerPrices.map(cp => ({
-      category: cp.category ? cp.category.trim() : '',
-      price: Number(cp.price) || 0
-    }));
-  }
-
-  return sanitized;
-};
 
 
 
@@ -2401,7 +2419,7 @@ export const getMaterialIssueLogs = async (req, res) => {
     const pipeline = [
       { $match: matchStage },
       { $sort: { createdAt: -1 } },
-      
+
       // Step 2: Lookup user details to get the name of who issued it
       {
         $lookup: {
@@ -2419,7 +2437,7 @@ export const getMaterialIssueLogs = async (req, res) => {
       {
         $group: {
           _id: '$productionOrderId',
-          machineCode: { $first: '$machineCode' }, 
+          machineCode: { $first: '$machineCode' },
           lastIssueDate: { $max: '$createdAt' }, // the most recent issue log for this order
           logs: {
             $push: {
@@ -2462,7 +2480,7 @@ export const getMaterialIssueLogs = async (req, res) => {
     ];
 
     const results = await MaterialIssueLog.aggregate(pipeline);
-    
+
     const data = results[0].data;
     const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
     const totalPages = Math.ceil(total / limit);
