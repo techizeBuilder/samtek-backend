@@ -731,6 +731,13 @@ export const getPackedOrders = async (req, res) => {
             const paymentProofUrl = sale ? sale.paymentProofUrl : '';
             const saleId = sale ? sale._id : null;
 
+            // Fetch customer master fields for display
+            const customerMaster = await Customer.findById(order.customer?._id)
+                .select('outstandingAmount advancePayment')
+                .lean();
+            const customerOutstanding = customerMaster?.outstandingAmount || 0;
+            const customerAdvance = customerMaster?.advancePayment || 0;
+
             results.push({
                 jobId: job._id,
                 jobCode: job.jobId,
@@ -761,7 +768,17 @@ export const getPackedOrders = async (req, res) => {
                 balanceAmount,
                 paymentStatus,
                 paymentProofUrl,
-                saleId
+                saleId,
+                // Customer master financial fields
+                customerOutstanding,
+                customerAdvance,
+                // Derived display values from customer master:
+                // displayTotal = outstanding + advance
+                // displayPaid  = advance
+                // displayDue   = outstanding - advance (min 0)
+                displayTotal: customerOutstanding + customerAdvance,
+                displayPaid: customerAdvance,
+                displayDue: Math.max(0, customerOutstanding - customerAdvance)
             });
         }
 
@@ -886,6 +903,17 @@ export const getDueBillData = async (req, res) => {
         const saleDate = sale?.saleDate || order.orderDate;
         const dueDate  = sale?.dueDate || null;
 
+        // 5b. Fetch customer master financial fields
+        const customerMasterDoc = await Customer.findById(order.customer?._id)
+            .select('outstandingAmount advancePayment')
+            .lean();
+        const customerOutstanding = customerMasterDoc?.outstandingAmount || 0;
+        const customerAdvance     = customerMasterDoc?.advancePayment    || 0;
+        // Display values derived from customer master:
+        const displayTotal = customerOutstanding + customerAdvance;
+        const displayPaid  = customerAdvance;
+        const displayDue   = Math.max(0, customerOutstanding - customerAdvance);
+
         // 6. Fetch company info
         const { Company } = await import('../models/Company.js');
         const company = await Company.findById(companyId).lean();
@@ -938,6 +966,13 @@ export const getDueBillData = async (req, res) => {
                 paidAmount,
                 balanceAmount,
                 paymentStatus: sale?.paymentStatus || (advancedPaymentAmount >= totalAmount ? 'Paid' : advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'),
+
+                // Customer master financial fields (for PDF display)
+                customerOutstanding,
+                customerAdvance,
+                displayTotal,
+                displayPaid,
+                displayDue,
 
                 // Payment history
                 advancePayments,

@@ -1764,6 +1764,7 @@ const getNOCRequests = async (req, res) => {
     const Sale = (await import('../models/Sale.js')).default;
     const PackagingJob = (await import('../models/PackagingJob.js')).default;
     const LeadPayment = (await import('../models/LeadPayment.js')).default;
+    const Customer = (await import('../models/Customer.js')).default;
 
     // Find all sales with populated orders
     // Sort: 'Pakka' invoices first (so Pakka is preferred over Kachha for same order),
@@ -1851,6 +1852,17 @@ const getNOCRequests = async (req, res) => {
           effectivePaymentStatus = 'Partially Paid';
         }
 
+        // Fetch customer master financial fields
+        let customerOutstanding = 0;
+        let customerAdvance = 0;
+        if (sale.order.customer?._id) {
+          const custMaster = await Customer.findById(sale.order.customer._id)
+            .select('outstandingAmount advancePayment')
+            .lean();
+          customerOutstanding = custMaster?.outstandingAmount || 0;
+          customerAdvance = custMaster?.advancePayment || 0;
+        }
+
         nocRequests.push({
           saleId: sale._id,
           orderId: sale.order._id,
@@ -1872,7 +1884,13 @@ const getNOCRequests = async (req, res) => {
           machineName: job.machineName,
           machineCode: job.machineCode,
           serialNumber: job.serialNumber,
-          invoiceType: sale.invoiceType || 'Pakka'
+          invoiceType: sale.invoiceType || 'Pakka',
+          // Customer master financial fields
+          customerOutstanding,
+          customerAdvance,
+          displayTotal: customerOutstanding + customerAdvance,
+          displayPaid: customerAdvance,
+          displayDue: Math.max(0, customerOutstanding - customerAdvance)
         });
 
         // Mark this orderId as processed so duplicate Sale docs are skipped
