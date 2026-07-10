@@ -370,6 +370,9 @@ export const getTaskTypeEfficiency = async (req, res) => {
 // groupBy=daily (default) or groupBy=weekly
 // Uses activityLog timestamps for precise completion date
 // ==========================================
+// ==========================================
+// REPORT 4: DAILY / WEEKLY PRODUCTIVITY
+// ==========================================
 export const getProductivityTrends = async (req, res) => {
     try {
         const matchStage = buildReportQuery(req);
@@ -377,17 +380,10 @@ export const getProductivityTrends = async (req, res) => {
 
         const { groupBy = 'daily' } = req.query;
 
-        // Default range: last 30 days. Override with period or startDate/endDate.
-        let effectiveEnd = new Date(); effectiveEnd.setHours(23, 59, 59, 999);
-        let effectiveStart = new Date(effectiveEnd); effectiveStart.setDate(effectiveStart.getDate() - 29); effectiveStart.setHours(0, 0, 0, 0);
-
+        let timestampMatch = {};
         const dateRange = buildDateRange(req, 'completionDate');
         if (dateRange?.completionDate) {
-            if (dateRange.completionDate.$gte) effectiveStart = dateRange.completionDate.$gte;
-            if (dateRange.completionDate.$lte) effectiveEnd = dateRange.completionDate.$lte;
-        } else if (req.query.startDate || req.query.endDate) {
-            if (req.query.startDate) effectiveStart = new Date(req.query.startDate);
-            if (req.query.endDate) { effectiveEnd = new Date(req.query.endDate); effectiveEnd.setHours(23, 59, 59, 999); }
+            timestampMatch = dateRange.completionDate;
         }
 
         if (req.query.assignedTo) {
@@ -400,20 +396,65 @@ export const getProductivityTrends = async (req, res) => {
             ? { year: { $isoWeekYear: '$completionDate' }, week: { $isoWeek: '$completionDate' } }
             : { $dateToString: { format: '%Y-%m-%d', date: '$completionDate' } };
 
+        const activityMatch = {
+            'activityLog.action': { $regex: '^Status changed to Completed$', $options: 'i' }
+        };
+
+        if (Object.keys(timestampMatch).length > 0) {
+            activityMatch['activityLog.timestamp'] = timestampMatch;
+        }
+
         const productivityData = await Task.aggregate([
             { $match: matchStage },
             { $unwind: '$activityLog' },
-            {
-                $match: {
-                    'activityLog.action': { $regex: '^Status changed to Completed$', $options: 'i' },
-                    'activityLog.timestamp': { $gte: effectiveStart, $lte: effectiveEnd }
-                }
-            },
+            { $match: activityMatch },
             { $addFields: { completionDate: '$activityLog.timestamp' } },
+
+            { $unwind: '$assignedTo' },
+            { $lookup: { from: 'users', localField: 'assignedTo', foreignField: '_id', as: 'user' } },
+            { $unwind: '$user' },
+
+            // STAGE 1: Group by Date + Department + Employee
             {
                 $group: {
-                    _id: dateGroupFormat,
+                    _id: {
+                        date: dateGroupFormat,
+                        department: roleToDeptSwitch('$user.role'),
+                        employeeName: '$user.username'
+                    },
                     tasksCompleted: { $sum: 1 }
+                }
+            },
+
+            // STAGE 2: Group by Date + Department (Roll up employees)
+            {
+                $group: {
+                    _id: {
+                        date: '$_id.date',
+                        department: '$_id.department'
+                    },
+                    deptTotal: { $sum: '$tasksCompleted' },
+                    employees: {
+                        $push: {
+                            employeeName: '$_id.employeeName',
+                            tasksCompleted: '$tasksCompleted'
+                        }
+                    }
+                }
+            },
+
+            // STAGE 3: Group by Date only (Roll up departments)
+            {
+                $group: {
+                    _id: '$_id.date',
+                    totalCompleted: { $sum: '$deptTotal' },
+                    departments: {
+                        $push: {
+                            department: '$_id.department',
+                            deptTotal: '$deptTotal',
+                            employees: '$employees'
+                        }
+                    }
                 }
             },
             { $sort: { _id: 1 } }
@@ -422,7 +463,6 @@ export const getProductivityTrends = async (req, res) => {
         return res.status(200).json({
             success: true,
             groupBy,
-            period: { startDate: effectiveStart, endDate: effectiveEnd },
             data: productivityData
         });
     } catch (error) {
@@ -672,31 +712,89 @@ const buildProductivityData = async (req) => {
     if (!matchStage) return null;
 
     const { groupBy = 'daily' } = req.query;
-    let effectiveEnd = new Date(); effectiveEnd.setHours(23, 59, 59, 999);
-    let effectiveStart = new Date(effectiveEnd); effectiveStart.setDate(effectiveStart.getDate() - 29); effectiveStart.setHours(0, 0, 0, 0);
-    if (req.query.startDate) effectiveStart = new Date(req.query.startDate);
-    if (req.query.endDate) { effectiveEnd = new Date(req.query.endDate); effectiveEnd.setHours(23, 59, 59, 999); }
 
-    if (req.query.assignedTo) matchStage.assignedTo = new mongoose.Types.ObjectId(req.query.assignedTo);
+    // 1. Use the centralized date helper to fix the "All Time" bug
+    let timestampMatch = {};
+    const dateRange = buildDateRange(req, 'completionDate');
+    if (dateRange?.completionDate) {
+        timestampMatch = dateRange.completionDate;
+    }
+
+    if (req.query.assignedTo) {
+        matchStage.assignedTo = new mongoose.Types.ObjectId(req.query.assignedTo);
+    }
+
     matchStage.status = 'Completed';
 
     const dateGroupFormat = groupBy === 'weekly'
         ? { year: { $isoWeekYear: '$completionDate' }, week: { $isoWeek: '$completionDate' } }
         : { $dateToString: { format: '%Y-%m-%d', date: '$completionDate' } };
 
-    return { groupBy, effectiveStart, effectiveEnd, data: await Task.aggregate([
+    const activityMatch = {
+        'activityLog.action': { $regex: '^Status changed to Completed$', $options: 'i' }
+    };
+
+    if (Object.keys(timestampMatch).length > 0) {
+        activityMatch['activityLog.timestamp'] = timestampMatch;
+    }
+
+    const data = await Task.aggregate([
         { $match: matchStage },
         { $unwind: '$activityLog' },
+        { $match: activityMatch },
+        { $addFields: { completionDate: '$activityLog.timestamp' } },
+
+        { $unwind: '$assignedTo' },
+        { $lookup: { from: 'users', localField: 'assignedTo', foreignField: '_id', as: 'user' } },
+        { $unwind: '$user' },
+
+        // STAGE 1: Group by Date + Department + Employee
         {
-            $match: {
-                'activityLog.action': { $regex: '^Status changed to Completed$', $options: 'i' },
-                'activityLog.timestamp': { $gte: effectiveStart, $lte: effectiveEnd }
+            $group: {
+                _id: {
+                    date: dateGroupFormat,
+                    department: roleToDeptSwitch('$user.role'),
+                    employeeName: '$user.username'
+                },
+                tasksCompleted: { $sum: 1 }
             }
         },
-        { $addFields: { completionDate: '$activityLog.timestamp' } },
-        { $group: { _id: dateGroupFormat, tasksCompleted: { $sum: 1 } } },
+
+        // STAGE 2: Group by Date + Department
+        {
+            $group: {
+                _id: {
+                    date: '$_id.date',
+                    department: '$_id.department'
+                },
+                deptTotal: { $sum: '$tasksCompleted' },
+                employees: {
+                    $push: {
+                        employeeName: '$_id.employeeName',
+                        tasksCompleted: '$tasksCompleted'
+                    }
+                }
+            }
+        },
+
+        // STAGE 3: Group by Date only
+        {
+            $group: {
+                _id: '$_id.date',
+                totalCompleted: { $sum: '$deptTotal' },
+                departments: {
+                    $push: {
+                        department: '$_id.department',
+                        deptTotal: '$deptTotal',
+                        employees: '$employees'
+                    }
+                }
+            }
+        },
         { $sort: { _id: 1 } }
-    ]) };
+    ]);
+
+    return { groupBy, data };
 };
 
 // ==========================================
@@ -707,10 +805,24 @@ export const exportProductivityExcel = async (req, res) => {
         const result = await buildProductivityData(req);
         if (!result) return res.status(403).json({ message: 'Unauthorized' });
         const { groupBy, data } = result;
-        const rows = data.map(r => ({
-            'Period': groupBy === 'weekly' ? `Week ${r._id.week}, ${r._id.year}` : r._id,
-            'Tasks Completed': r.tasksCompleted
-        }));
+
+        // Flatten the nested data into neat spreadsheet rows
+        const rows = [];
+        data.forEach(day => {
+            const periodLabel = groupBy === 'weekly' ? `Week ${day._id.week}, ${day._id.year}` : day._id;
+
+            day.departments.forEach(dept => {
+                dept.employees.forEach(emp => {
+                    rows.push({
+                        'Date / Period': periodLabel,
+                        'Department': dept.department,
+                        'Employee Name': emp.employeeName,
+                        'Tasks Completed': emp.tasksCompleted
+                    });
+                });
+            });
+        });
+
         return sendExcel(res, rows, 'Productivity', 'Productivity_Report');
     } catch (error) {
         console.error('Productivity Excel Error:', error);
@@ -726,13 +838,29 @@ export const exportProductivityPDF = async (req, res) => {
         const result = await buildProductivityData(req);
         if (!result) return res.status(403).json({ message: 'Unauthorized' });
         const { groupBy, data } = result;
+
+        // Flatten the nested data into a PDF table
+        const rows = [];
+        data.forEach(day => {
+            const periodLabel = groupBy === 'weekly' ? `Week ${day._id.week}, ${day._id.year}` : String(day._id);
+
+            day.departments.forEach(dept => {
+                dept.employees.forEach(emp => {
+                    rows.push([
+                        periodLabel,
+                        dept.department,
+                        emp.employeeName,
+                        String(emp.tasksCompleted)
+                    ]);
+                });
+            });
+        });
+
         const tableArray = {
-            headers: ['Period', 'Tasks Completed'],
-            rows: data.map(r => [
-                groupBy === 'weekly' ? `Week ${r._id.week}, ${r._id.year}` : String(r._id),
-                String(r.tasksCompleted)
-            ])
+            headers: ['Date / Period', 'Department', 'Employee Name', 'Tasks Completed'],
+            rows
         };
+
         return await sendPDF(res, 'Productivity Report', tableArray, 'Productivity_Report');
     } catch (error) {
         console.error('Productivity PDF Error:', error);

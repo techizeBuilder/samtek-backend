@@ -13,6 +13,8 @@ import fs from 'fs';
 import path from 'path';
 
 
+
+
 const today = () => new Date().toISOString().split('T')[0];
 
 async function generateChangeId(companyId) {
@@ -874,6 +876,11 @@ export const getRDRequests = async (req, res) => {
 };
 
 
+
+
+// ─────────────────────────────────────────────────────────────
+// API 2: PROCESS R&D REQUEST (Approval / Rejection)
+// ─────────────────────────────────────────────────────────────
 export const processRDRequest = async (req, res) => {
   try {
     const { id } = req.params;
@@ -892,17 +899,37 @@ export const processRDRequest = async (req, res) => {
       await rdRequest.save();
 
       if (rdRequest.requestType === 'Material Change') {
-        // Unlock the specific material and mark it rejected
+        const order = await ProductionOrder.findById(rdRequest.productionOrderId);
+        const demand = order.materialDemands.find(m => m.materialCode === rdRequest.materialChangeDetails.materialCode);
+
+        const prevQty = rdRequest.materialChangeDetails.previousQuantity;
+
+        let revertedStatus = 'R&D Rejected';
+        let revertedQty = demand.quantity;
+
+        // If it was an existing material, we roll back the quantity and fix the status
+        if (prevQty !== null && prevQty !== undefined) {
+          revertedQty = prevQty;
+          const held = Math.max(demand.transferredQuantity || 0, demand.issuedQuantity || 0);
+
+          if (held >= revertedQty) revertedStatus = 'Issued';
+          else if ((demand.transferredQuantity || 0) > (demand.issuedQuantity || 0)) revertedStatus = 'In Transit';
+          else revertedStatus = 'Requested';
+        }
+
         await ProductionOrder.findOneAndUpdate(
           { _id: rdRequest.productionOrderId, "materialDemands.materialCode": rdRequest.materialChangeDetails.materialCode },
-          { $set: { "materialDemands.$.status": "R&D Rejected" } }
+          {
+            $set: {
+              "materialDemands.$.status": revertedStatus,
+              "materialDemands.$.quantity": revertedQty
+            }
+          }
         );
-        return res.json({ success: true, message: 'Material change rejected.' });
+        return res.json({ success: true, message: 'Material change rejected. Original quantities restored.' });
       } else {
-        // Original logic: Put the whole production order on hold
         await ProductionOrder.findByIdAndUpdate(rdRequest.productionOrderId, {
-          rdRequestRaised: false,
-          status: 'On Hold',
+          rdRequestRaised: false, status: 'On Hold',
           notes: `R&D Rejected: ${rejectReason || 'No reason provided.'}`
         });
         return res.json({ success: true, message: 'Initial BOM rejected. Order on hold.' });
@@ -916,18 +943,42 @@ export const processRDRequest = async (req, res) => {
 
       // ── WORKFLOW 1: MATERIAL CHANGE APPROVAL ──
       if (rdRequest.requestType === 'Material Change') {
-        // Unlock the specific material so Production can raise purchase/issue
-        await ProductionOrder.findOneAndUpdate(
-          { _id: rdRequest.productionOrderId, "materialDemands.materialCode": rdRequest.materialChangeDetails.materialCode },
-          { $set: { "materialDemands.$.status": "Requested" } } // Unlocked!
-        );
+        const order = await ProductionOrder.findById(rdRequest.productionOrderId);
+        const demandIndex = order.materialDemands.findIndex(m => m.materialCode === rdRequest.materialChangeDetails.materialCode);
+        const demand = order.materialDemands[demandIndex];
+
+        // 🚨 SMART STATUS ROUTING
+        // Calculate what production actually holds or is about to receive
+        const totalHeld = Math.max(demand.transferredQuantity || 0, demand.issuedQuantity || 0);
+
+        let newStatus = 'Requested';
+
+        if (totalHeld >= demand.quantity) {
+          // They already have equal to or more than the new approved quantity.
+          // Do not trigger the store. They will return excess later.
+          newStatus = 'Issued';
+        } else if ((demand.transferredQuantity || 0) > (demand.issuedQuantity || 0)) {
+          // The store already dispatched a cart, it's currently on the floor moving
+          newStatus = 'In Transit';
+        }
+
+        order.materialDemands[demandIndex].status = newStatus;
+
+        // Auto-Complete check just in case this approval was the final missing piece
+        const allIssued = order.materialDemands.every(m => m.status === 'Issued');
+        if (allIssued) {
+          order.materialIssued = true;
+        }
+
+        await order.save();
 
         rdRequest.status = 'Approved';
         await rdRequest.save();
-        return res.json({ success: true, message: 'Material change approved. Production can now request the items.' });
+        return res.json({ success: true, message: 'Material change approved and order updated.' });
       }
 
-      // ── WORKFLOW 2: INITIAL BOM APPROVAL (Your original code) ──
+      // ── WORKFLOW 2: INITIAL BOM APPROVAL ──
+      // (Your original logic remains untouched here)
       const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId });
       if (!machineProfile || machineProfile.releaseStatus !== 'Released') {
         return res.status(400).json({ success: false, message: 'Machine profile missing or not released.' });

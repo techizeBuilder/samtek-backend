@@ -9,6 +9,11 @@ import { USER_ROLES } from '../shared/schema.js';
 import notificationService from '../services/notificationService.js';
 import { initializeProductSummary, updateProductSummary } from '../services/productionSummaryService.js';
 
+import ProductionOrder from '../models/ProductionOrder.js';
+
+import StoreTransferLog from '../models/StoreTransferLog.js';
+import MaterialReturnLog from '../models/MaterialReturnLog.js';
+
 // Delivery Challan Order for Unit Head Inventory
 const DELIVERY_CHALLAN_ORDER = [
   "PM 400",
@@ -2398,109 +2403,7 @@ export const getInventoryStats = async (req, res) => {
   }
 };
 
-export const getMaterialIssueLogs = async (req, res) => {
-  try {
-    const companyId = req.user.companyId;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-    const search = req.query.search || '';
 
-    // Step 1: Base match for logs
-    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
-    if (search) {
-      matchStage.$or = [
-        { machineCode: { $regex: search, $options: 'i' } },
-        { materialCode: { $regex: search, $options: 'i' } },
-        { materialName: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    const pipeline = [
-      { $match: matchStage },
-      { $sort: { createdAt: -1 } },
-
-      // Step 2: Lookup user details to get the name of who issued it
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'issuedTo',
-          foreignField: '_id',
-          as: 'issuerData'
-        }
-      },
-      {
-        $unwind: { path: '$issuerData', preserveNullAndEmptyArrays: true }
-      },
-
-      // Step 3: Group by production order id
-      {
-        $group: {
-          _id: '$productionOrderId',
-          machineCode: { $first: '$machineCode' },
-          lastIssueDate: { $max: '$createdAt' }, // the most recent issue log for this order
-          logs: {
-            $push: {
-              _id: '$_id',
-              materialCode: '$materialCode',
-              materialName: '$materialName',
-              quantityIssued: '$quantityIssued',
-              unit: '$unit',
-              issuedTo: '$issuedTo',
-              issuedToName: { $ifNull: ['$issuerData.fullName', '$issuerData.username'] },
-              createdAt: '$createdAt'
-            }
-          }
-        }
-      },
-
-      // Step 4: Lookup the Production Order details to show at the wrapper level
-      {
-        $lookup: {
-          from: 'productionorders',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'order'
-        }
-      },
-      {
-        $unwind: { path: '$order', preserveNullAndEmptyArrays: true }
-      },
-
-      // Step 5: Sort grouped results by the last issue date (newest first)
-      { $sort: { lastIssueDate: -1 } },
-
-      // Step 6: Pagination using $facet
-      {
-        $facet: {
-          metadata: [{ $count: 'total' }],
-          data: [{ $skip: skip }, { $limit: limit }]
-        }
-      }
-    ];
-
-    const results = await MaterialIssueLog.aggregate(pipeline);
-
-    const data = results[0].data;
-    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
-    const totalPages = Math.ceil(total / limit);
-
-    res.json({
-      success: true,
-      data,
-      pagination: {
-        total,
-        page,
-        totalPages,
-        limit
-      }
-    });
-
-  } catch (error) {
-    console.error('Error fetching material issue logs:', error);
-    res.status(500).json({ success: false, message: 'Internal server error' });
-  }
-};
 
 // ─── ITEM GROUP CONTROLLERS (COMPANY-WISE) ───────────────────────
 
@@ -2658,5 +2561,534 @@ export const deleteGroup = async (req, res) => {
   } catch (error) {
     console.error('Delete group error:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ================================================================
+//   NEW: PRODUCTION - STORE MATERIAL HANDSHAKE CONTROLLERS
+// ================================================================
+
+
+
+export const getMaterialIssueLogs = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+
+    // Step 1: Optimized Base match using the new field + compound index
+    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
+    if (search) {
+      matchStage.orderId = { $regex: search, $options: 'i' }; // 👈 Index-friendly filter right at entry point
+    }
+
+    const pipeline = [
+      { $match: matchStage }, // Filters out unneeded documents immediately
+      { $sort: { createdAt: -1 } },
+
+      // Step 2: Lookup user details to get the name of who issued it
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'issuedTo',
+          foreignField: '_id',
+          as: 'issuerData'
+        }
+      },
+      {
+        $unwind: { path: '$issuerData', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 3: Group by production order id
+      {
+        $group: {
+          _id: '$productionOrderId',
+          orderId: { $first: '$orderId' }, // Keep tracking the clean string ID
+          machineCode: { $first: '$machineCode' },
+          lastIssueDate: { $max: '$createdAt' },
+          logs: {
+            $push: {
+              _id: '$_id',
+              materialCode: '$materialCode',
+              materialName: '$materialName',
+              quantityIssued: '$quantityIssued',
+              unit: '$unit',
+              issuedTo: '$issuedTo',
+              issuedToName: { $ifNull: ['$issuerData.fullName', '$issuerData.username'] },
+              createdAt: '$createdAt'
+            }
+          }
+        }
+      },
+
+      // Step 4: Lookup the Production Order details to show at the wrapper level
+      {
+        $lookup: {
+          from: 'productionorders',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'order'
+        }
+      },
+      {
+        $unwind: { path: '$order', preserveNullAndEmptyArrays: true }
+      },
+
+      { $sort: { lastIssueDate: -1 } },
+
+      // Step 5: Pagination
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limit }]
+        }
+      }
+    ];
+
+    const results = await MaterialIssueLog.aggregate(pipeline);
+
+    const data = results[0].data;
+    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        totalPages,
+        limit
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching material issue logs:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// ── 1. GET PENDING REQUESTS (Store Dashboard) ──────────────────────────
+export const getPendingRequests = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+
+    // Find all active orders that have materials with 'Requested' status
+    const pendingOrders = await ProductionOrder.find({
+      company: companyId,
+      "materialDemands.status": "Requested"
+    }).select('orderId machineCode machineName materialDemands createdAt').sort({ createdAt: -1 });
+
+    // Filter to only return the demands that are actually requested
+    const filteredOrders = pendingOrders.map(order => ({
+      _id: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      machineName: order.machineName,
+      createdAt: order.createdAt,
+      pendingMaterials: order.materialDemands.filter(m => m.status === 'Requested')
+    })).filter(o => o.pendingMaterials.length > 0);
+
+    res.json({ success: true, data: filteredOrders });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── 2. TRANSFER MATERIAL TO PRODUCTION ───────────────────────────────
+export const transferMaterialToProduction = async (req, res) => {
+  try {
+    const { materialCode, quantityToTransfer } = req.body;
+    const orderId = req.params.id;
+    const companyId = req.user.companyId;
+    const transferQty = Number(quantityToTransfer);
+
+    if (!materialCode || !transferQty || transferQty <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid material code and quantity are required.' });
+    }
+
+    // 1. ATOMIC DEDUCTION (The Store Gatekeeper)
+    // Only deduct if we have enough stock. This prevents race conditions.
+    const item = await Item.findOneAndUpdate(
+      { code: materialCode, companyId: companyId, qty: { $gte: transferQty } },
+      { $inc: { qty: -transferQty } },
+      { new: true }
+    );
+
+    if (!item) {
+      return res.status(400).json({ success: false, message: 'Insufficient stock in Store for this transfer.' });
+    }
+
+    // 2. UPDATE ORDER
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
+
+    if (demandIndex === -1) {
+      // Rollback: Add stock back
+      await Item.findOneAndUpdate({ code: materialCode, companyId: companyId }, { $inc: { qty: transferQty } });
+      return res.status(404).json({ success: false, message: 'Material not requested on this order.' });
+    }
+
+    // Update quantities
+    order.materialDemands[demandIndex].transferredQuantity = (order.materialDemands[demandIndex].transferredQuantity || 0) + transferQty;
+    order.materialDemands[demandIndex].status = 'In Transit'; // Moves to Production's "Receive" list
+
+    await order.save();
+
+    // 3. LOG TRANSFER
+    await StoreTransferLog.create({
+      productionOrderId: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      materialCode: materialCode,
+      materialName: order.materialDemands[demandIndex].materialName,
+      quantityTransferred: transferQty,
+      unit: order.materialDemands[demandIndex].unit,
+      transferredBy: req.user._id,
+      company: companyId
+    });
+
+    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+
+export const getStoreTransferLogs = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+
+    // Step 1: Optimized Base match using compound index fields
+    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
+    if (search) {
+      matchStage.orderId = { $regex: search, $options: 'i' }; // 👈 Filters out non-matching logs immediately
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      { $sort: { createdAt: -1 } },
+
+      // Step 2: Lookup user details to get the name of who transferred it
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'transferredBy',
+          foreignField: '_id',
+          as: 'transferrerData'
+        }
+      },
+      {
+        $unwind: { path: '$transferrerData', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 3: Group logs into a Production Order wrapper structure
+      {
+        $group: {
+          _id: '$productionOrderId',
+          orderId: { $first: '$orderId' }, // Custom human-friendly ID
+          machineCode: { $first: '$machineCode' },
+          lastTransferDate: { $max: '$createdAt' }, // Track most recent transfer activity
+          logs: {
+            $push: {
+              _id: '$_id',
+              materialCode: '$materialCode',
+              materialName: '$materialName',
+              quantityTransferred: '$quantityTransferred',
+              unit: '$unit',
+              transferredBy: '$transferredBy',
+              transferredByName: { $ifNull: ['$transferrerData.fullName', '$transferrerData.username'] },
+              createdAt: '$createdAt'
+            }
+          }
+        }
+      },
+
+      // Step 4: Lookup Production Order collection metadata for safety fallback
+      {
+        $lookup: {
+          from: 'productionorders',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'order'
+        }
+      },
+      {
+        $unwind: { path: '$order', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 5: Sort order groupings chronologically by latest activity
+      { $sort: { lastTransferDate: -1 } },
+
+      // Step 6: Paginate results through a safe $facet block
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limit }]
+        }
+      }
+    ];
+
+    const results = await StoreTransferLog.aggregate(pipeline);
+
+    const data = results[0].data;
+    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        totalPages,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching store transfer logs:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// ── 3. GET RETURNED MATERIAL LOGS ────────────────────────────────────
+
+
+// ── Refactored: GET RETURNED MATERIAL LOGS (Grouped by Production Order Wrapper) ──
+export const getReturnedMaterials = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+
+    // Step 1: Base filtration match stage
+    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
+    if (search) {
+      matchStage.orderId = { $regex: search, $options: 'i' };
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      { $sort: { createdAt: -1 } },
+
+      // Step 2: Resolve the profile of the worker who initiated the return
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'returnedBy',
+          foreignField: '_id',
+          as: 'runnerData'
+        }
+      },
+      {
+        $unwind: { path: '$runnerData', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 3: Group the flat return log assets under a production wrapper line
+      {
+        $group: {
+          _id: '$productionOrderId',
+          orderId: { $first: '$orderId' },
+          machineCode: { $first: '$machineCode' },
+          lastReturnDate: { $max: '$createdAt' }, // Anchors sorting based on newest activity
+          logs: {
+            $push: {
+              _id: '$_id',
+              materialCode: '$materialCode',
+              materialName: '$materialName',
+              quantityReturned: '$quantityReturned',
+              unit: '$unit',
+              returnType: '$returnType',
+              status: '$status',
+              reason: '$reason',
+              returnedBy: '$returnedBy',
+              returnedByName: { $ifNull: ['$runnerData.fullName', '$runnerData.username'] },
+              createdAt: '$createdAt'
+            }
+          }
+        }
+      },
+
+      // Step 4: Safely cross-reference the core order registry to retrieve the machineName
+      {
+        $lookup: {
+          from: 'productionorders',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'productionOrder'
+        }
+      },
+      {
+        $unwind: { path: '$productionOrder', preserveNullAndEmptyArrays: true }
+      },
+
+      // Inject the machineName field directly onto our wrapper level object
+      {
+        $addFields: {
+          machineName: { $ifNull: ['$productionOrder.machineName', 'Unknown Machine'] }
+        }
+      },
+
+      // Step 5: Order the wrapper entities by their most recent log entry timestamp
+      { $sort: { lastReturnDate: -1 } },
+
+      // Step 6: Paginate aggregate groups using safe facet windows
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limit }]
+        }
+      }
+    ];
+
+    const results = await MaterialReturnLog.aggregate(pipeline);
+
+    const data = results[0].data;
+    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        totalPages,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching returned material ledger groups:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// ── Refactored: GET PENDING RETURNS (Grouped by Production Order Wrapper) ──
+export const getPendingReturns = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+
+    // 1. Fetch all flat pending logs for this company
+    const logs = await MaterialReturnLog.find({
+      company: companyId,
+      status: 'Pending'
+    })
+      .populate('productionOrderId', 'orderId machineCode machineName')
+      .sort({ createdAt: -1 });
+
+    // 2. Reduce the flat records into an order-mapped object structure
+    const groupedOrdersMap = {};
+
+    logs.forEach((log) => {
+      // Guard clause in case a production order reference is broken or missing
+      if (!log.productionOrderId) return;
+
+      const pOrderId = log.productionOrderId._id.toString();
+
+      // If this parent production order isn't in our map yet, initialize its wrapper card
+      if (!groupedOrdersMap[pOrderId]) {
+        groupedOrdersMap[pOrderId] = {
+          _id: log.productionOrderId._id,
+          orderId: log.productionOrderId.orderId,
+          machineCode: log.productionOrderId.machineCode,
+          machineName: log.productionOrderId.machineName,
+          createdAt: log.createdAt, // Optional: tracking timing context
+          pendingMaterials: []      // Array holding the nested line-items
+        };
+      }
+
+      // Push the individual specific return log details into the nested materials layer
+      groupedOrdersMap[pOrderId].pendingMaterials.push({
+        logId: log._id, // Required to pass into req.body when clicking "Accept" or "Reject"
+        materialCode: log.materialCode,
+        materialName: log.materialName,
+        quantityReturned: log.quantityReturned,
+        unit: log.unit,
+        returnType: log.returnType || 'Excess', // 👈 Shows "Excess" vs "Defect" on the UI row
+        reason: log.reason || 'No reason provided'
+      });
+    });
+
+    // 3. Convert the mapped object values back into a standard array for frontend mapping
+    const structuredResult = Object.values(groupedOrdersMap);
+
+    res.json({
+      success: true,
+      data: structuredResult
+    });
+
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── 5. CONFIRM RETURN (Accept or Reject) ─────────────────────────────
+export const confirmReturn = async (req, res) => {
+  try {
+    const { logId, action } = req.body; // action: 'Accept' or 'Reject'
+    const companyId = req.user.companyId;
+
+    const log = await MaterialReturnLog.findById(logId);
+    if (!log || log.status !== 'Pending') {
+      return res.status(400).json({ success: false, message: 'Invalid or already processed return.' });
+    }
+
+    const order = await ProductionOrder.findById(log.productionOrderId);
+    const demand = order.materialDemands.find(m => m.materialCode === log.materialCode);
+
+    if (!demand) {
+      return res.status(404).json({ success: false, message: 'Material demand entry missing from referenced order.' });
+    }
+
+    if (action === 'Accept') {
+      // A. Update Master Inventory (The warehouse claims physical custody back)
+      await Item.findOneAndUpdate(
+        { code: log.materialCode, companyId: companyId },
+        { $inc: { qty: log.quantityReturned } }
+      );
+
+      // B. Release the reservation lock
+      demand.returnPendingQuantity = Math.max(0, (demand.returnPendingQuantity || 0) - log.quantityReturned);
+
+      // C. Deduct balances from manufacturing counts
+      demand.issuedQuantity = Math.max(0, (demand.issuedQuantity || 0) - log.quantityReturned);
+      demand.transferredQuantity = Math.max(0, (demand.transferredQuantity || 0) - log.quantityReturned);
+
+      // D. 🚨 AUTOMATED FEEDBACK LOOP
+      // If it's an Excess return after an R&D drop, issuedQuantity will match the new quantity -> 'Issued'
+      // If it's a Defect return, issuedQuantity drops below the required quantity -> switches to 'Requested'
+      if (demand.issuedQuantity >= demand.quantity) {
+        demand.status = 'Issued';
+      } else {
+        demand.status = 'Requested';
+        order.materialIssued = false; // Toggle order validation lock back off
+      }
+
+      log.status = 'Accepted';
+    }
+    else if (action === 'Reject') {
+      // Release reservation lock; items stay in production custody
+      demand.returnPendingQuantity = Math.max(0, (demand.returnPendingQuantity || 0) - log.quantityReturned);
+      log.status = 'Rejected';
+    }
+    else {
+      return res.status(400).json({ success: false, message: 'Invalid action.' });
+    }
+
+    await order.save();
+    await log.save();
+
+    res.json({ success: true, message: `Return processed as ${action}ed successfully.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };

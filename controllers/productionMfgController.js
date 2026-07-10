@@ -9,6 +9,12 @@ import mongoose from 'mongoose';
 import { Item } from '../models/Inventory.js'; // Adjust path
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
 
+import PDFDocument from 'pdfkit';
+
+
+import MaterialReturnLog from '../models/MaterialReturnLog.js';
+
+
 
 
 const today = () => new Date().toISOString().split('T')[0];
@@ -173,137 +179,100 @@ export const raiseRDRequest = async (req, res) => {
 
 
 
-export const issueMaterialToProduction = async (req, res) => {
+
+
+
+
+export const receiveMaterialInProduction = async (req, res) => {
   try {
-    const { materialCode, quantityToIssue } = req.body;
+    const { materialCode, receivedQuantity } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
 
-    const issueQty = Number(quantityToIssue);
+    const recQty = Number(receivedQuantity);
 
-    if (!materialCode || !issueQty || issueQty <= 0) {
-      return res.status(400).json({ success: false, message: 'Valid material code and quantity are required.' });
+    if (!materialCode || !recQty || recQty <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid material code and received quantity are required.' });
     }
 
-    // 2. Fetch the Order
-    const order = await ProductionOrder.findOne({
-      _id: orderId,
-      company: companyId
-    });
+    // 1. Fetch the Order
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
 
-    if (!order) {
-      return res.status(404).json({ success: false, message: 'Order not found.' });
-    }
-
-    // 3. Find the specific material demand
+    // 2. Find the specific material demand
     const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
     if (demandIndex === -1) {
       return res.status(404).json({ success: false, message: 'Material not found in this order.' });
     }
     const demand = order.materialDemands[demandIndex];
 
-    // 4. Application-Level Gatekeepers
-    if (demand.status === 'Pending R&D' || demand.status === 'R&D Rejected') {
-      return res.status(403).json({ success: false, message: 'Material is locked by R&D.' });
+    // 3. Gatekeeper: Is it in transit?
+    if (demand.status !== 'In Transit') {
+      return res.status(400).json({ success: false, message: 'No material currently in transit to receive.' });
     }
 
-    const remainingToIssue = demand.quantity - (demand.issuedQuantity || 0);
-    if (issueQty > remainingToIssue) {
+    // 4. Calculate exactly how much is sitting on the cart
+    const inTransitQty = (demand.transferredQuantity || 0) - (demand.issuedQuantity || 0);
+
+    // 🚨 NEW STRICT GATEKEEPER: Force exact receipt
+    if (recQty !== inTransitQty) {
       return res.status(400).json({
         success: false,
-        message: `Cannot issue ${issueQty}. Only ${remainingToIssue} more required for this order.`
+        message: `Partial receipts disabled. You must receive exactly the in-transit amount: ${inTransitQty} ${demand.unit}.`
       });
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // 5. ATOMIC INVENTORY DEDUCTION 
-    // ─────────────────────────────────────────────────────────────
-    // This query says: Find it ONLY if qty is Greater Than or Equal to issueQty
-    const inventoryItem = await Item.findOneAndUpdate(
-      {
-        code: materialCode,
-        companyId: companyId,
-        qty: { $gte: issueQty } // Database-level lock to prevent negative inventory
-      },
-      {
-        $inc: { qty: -issueQty } // Atomically deduct
-      },
-      { new: true }
-    );
+    // 5. UPDATE RECEIVED QUANTITY
+    const newIssuedQty = (demand.issuedQuantity || 0) + recQty;
+    order.materialDemands[demandIndex].issuedQuantity = newIssuedQty;
 
-    // If inventoryItem is null, it means it either doesn't exist, OR qty was too low.
-    if (!inventoryItem) {
-      // Let's check which one it is so we can give a helpful error message
-      const existingItem = await Item.findOne({ code: materialCode, companyId: companyId });
-
-      if (!existingItem) {
-        return res.status(404).json({ success: false, message: `Material ${materialCode} not found in Master Inventory.` });
-      } else {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock! Store only has ${existingItem.qty} available.`
-        });
-      }
+    // 6. SIMPLIFIED STATUS ROUTING
+    // Since they always receive the full cart, there is no "Scenario B". 
+    // It's either completely fulfilled, or they still need more from the store.
+    if (newIssuedQty >= demand.quantity) {
+      order.materialDemands[demandIndex].status = 'Issued';
+    } else {
+      order.materialDemands[demandIndex].status = 'Requested';
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // 6. UPDATE PRODUCTION ORDER 
-    // ─────────────────────────────────────────────────────────────
-    try {
-      const newIssuedQty = (demand.issuedQuantity || 0) + issueQty;
-      const newStatus = newIssuedQty >= demand.quantity ? 'Issued' : 'Requested';
-
-      order.materialDemands[demandIndex].issuedQuantity = newIssuedQty;
-      order.materialDemands[demandIndex].status = newStatus;
-
-      // Auto-Complete Check
-      const allIssued = order.materialDemands.every(m => m.status === 'Issued');
-      if (allIssued) {
-        order.materialIssued = true;
-      }
-
-      // Save order
-      await order.save();
-
-      // ─────────────────────────────────────────────────────────────
-      // 7. GENERATE AUDIT LOG
-      // ─────────────────────────────────────────────────────────────
-      await MaterialIssueLog.create({
-        productionOrderId: order._id,
-        machineCode: order.machineCode,
-        materialCode: demand.materialCode,
-        materialName: demand.materialName,
-        quantityIssued: issueQty,
-        unit: demand.unit,
-        issuedTo: req.user._id,
-        company: companyId
-      });
-
-      res.json({
-        success: true,
-        data: order,
-        message: `Successfully issued ${issueQty} ${demand.unit} of ${demand.materialName}.`
-      });
-    } catch (innerErr) {
-      // ─────────────────────────────────────────────────────────────
-      // MANUAL ROLLBACK (Compensating Transaction)
-      // ─────────────────────────────────────────────────────────────
-      // If saving the order or creating the log fails, we MUST refund the inventory
-      // to avoid 'ghost inventory' deductions.
-      console.error("Post-deduction failure! Refunding inventory...", innerErr);
-      await Item.findOneAndUpdate(
-        { code: materialCode, companyId: companyId },
-        { $inc: { qty: issueQty } } // ADD IT BACK
-      );
-      throw innerErr; // Rethrow to the outer catch block to send the 500 response
+    // 7. Auto-Complete Check for the whole order
+    const allIssued = order.materialDemands.every(m => m.status === 'Issued');
+    if (allIssued) {
+      order.materialIssued = true;
     }
+
+    await order.save();
+
+    // 8. GENERATE AUDIT LOG
+    await MaterialIssueLog.create({
+      productionOrderId: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      materialCode: demand.materialCode,
+      materialName: demand.materialName,
+      quantityIssued: recQty,
+      unit: demand.unit,
+      issuedTo: req.user._id,
+      company: companyId
+    });
+
+    res.json({
+      success: true,
+      data: order,
+      message: `Successfully received all ${recQty} ${demand.unit} of ${demand.materialName}.`
+    });
 
   } catch (err) {
-    console.error("Error issuing material:", err);
+    console.error("Error receiving material:", err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
+
+
+// ─────────────────────────────────────────────────────────────
+// API 1: ADD / UPDATE MATERIAL DEMAND (Production Floor)
+// ─────────────────────────────────────────────────────────────
 export const addMaterialDemand = async (req, res) => {
   try {
     const { materialCode, materialName, quantity, unit } = req.body;
@@ -315,30 +284,35 @@ export const addMaterialDemand = async (req, res) => {
     const companyId = req.user.companyId;
     const orderId = req.params.id;
 
-    // Fetch the order first to get machine details for the RD ticket
     const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     const materialExists = order.materialDemands.find(m => m.materialCode === materialCode);
 
-    // ─────────────────────────────────────────────────────────────
-    // FAST LOOKUP: Grab original BOM quantity from the snapshot
-    // ─────────────────────────────────────────────────────────────
-    const originalBomQty = materialExists && materialExists.bomQuantity !== undefined
-      ? materialExists.bomQuantity
-      : null;
+    // 🚨 ONLY BLOCK: Prevent changing demand if the physical 
+    // material is actively being moved by the store right now.
+    if (materialExists && materialExists.status === 'In Transit') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot change demand while this material is currently In Transit from the store.'
+      });
+    }
 
-    // 1. Update or Push the Material as "Pending R&D"
+    const originalBomQty = materialExists && materialExists.bomQuantity !== undefined
+      ? materialExists.bomQuantity : null;
+
+    // Capture previous quantity so we can revert if R&D rejects
+    const previousQuantity = materialExists ? materialExists.quantity : null;
+
     let updatedOrder;
     if (materialExists) {
       updatedOrder = await ProductionOrder.findOneAndUpdate(
         { _id: orderId, "materialDemands.materialCode": materialCode },
         {
           $set: {
-            "materialDemands.$.status": "Pending R&D", // Lock it!
+            "materialDemands.$.status": "Pending R&D",
             "materialDemands.$.quantity": Number(quantity),
             "materialDemands.$.unit": unit
-            // Note: We DO NOT overwrite bomQuantity here. It stays as the original baseline.
           }
         },
         { new: true }
@@ -349,12 +323,8 @@ export const addMaterialDemand = async (req, res) => {
         {
           $push: {
             materialDemands: {
-              materialCode,
-              materialName,
-              bomQuantity: null, // Explicitly null because it is Out of BOM
-              quantity: Number(quantity),
-              unit,
-              status: 'Pending R&D'
+              materialCode, materialName, bomQuantity: null,
+              quantity: Number(quantity), unit, status: 'Pending R&D'
             }
           }
         },
@@ -362,18 +332,17 @@ export const addMaterialDemand = async (req, res) => {
       );
     }
 
-    // 2. Automatically generate the R&D Ticket
-    // Note: Ensure you have `import RDRequest from '../models/RDRequest.js'` at the top of your file
     await RDRequest.create({
       productionOrderId: order._id,
       machineCode: order.machineCode,
       machineName: order.machineName,
-      requestType: 'Material Change', // Tells R&D this is a micro-request
+      requestType: 'Material Change',
       materialChangeDetails: {
         materialCode,
         materialName,
-        bomQuantity: originalBomQty, // ── PASSES THE FAST-LOOKUP BASELINE TO R&D ──
+        bomQuantity: originalBomQty,
         requestedQuantity: Number(quantity),
+        previousQuantity, // 👈 Saved for Rejection Rollbacks
         unit
       },
       company: companyId
@@ -381,8 +350,164 @@ export const addMaterialDemand = async (req, res) => {
 
     res.json({ success: true, data: updatedOrder, message: 'Demand sent to R&D for approval.' });
   } catch (err) {
-    console.error("Error in addMaterialDemand:", err);
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// controllers/productionMfgController.js
+
+export const returnMaterialToStore = async (req, res) => {
+  try {
+    // 🚨 Added returnType ('Excess' or 'Defect') from the production client interface
+    const { materialCode, returnQuantity, reason, returnType } = req.body;
+    const orderId = req.params.id;
+    const companyId = req.user.companyId;
+
+    const retQty = Number(returnQuantity);
+
+    if (!materialCode || !retQty || retQty <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid material code and return quantity are required.' });
+    }
+
+    if (!['Excess', 'Defect'].includes(returnType)) {
+      return res.status(400).json({ success: false, message: 'Invalid return type. Must be Excess or Defect.' });
+    }
+
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+
+    const demand = order.materialDemands.find(m => m.materialCode === materialCode);
+    if (!demand) return res.status(404).json({ success: false, message: 'Material not found in this order.' });
+
+    // Calculate real physical availability left on the floor
+    const availableOnFloor = (demand.issuedQuantity || 0) - (demand.returnPendingQuantity || 0);
+
+    if (retQty > availableOnFloor) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot return ${retQty}. Only have ${availableOnFloor} items available on the production floor.`
+      });
+    }
+
+    // ✅ Increment the specific quantitative lock field instead of altering demand.status
+    demand.returnPendingQuantity = (demand.returnPendingQuantity || 0) + retQty;
+    await order.save();
+
+    // Log the transaction request along with the context tag for the store panel
+    await MaterialReturnLog.create({
+      productionOrderId: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      materialCode: demand.materialCode,
+      materialName: demand.materialName,
+      quantityReturned: retQty,
+      unit: demand.unit,
+      returnedBy: req.user._id,
+      reason: reason || `${returnType} material return`,
+      returnType: returnType, // 👈 Saved directly to log database schema
+      company: companyId,
+      status: 'Pending'
+    });
+
+    res.json({
+      success: true,
+      message: `${returnType} return request for ${retQty} ${demand.unit} submitted. Awaiting Store verification.`
+    });
+
+  } catch (err) {
+    console.error("Error in returnMaterialToStore:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// download the material list
+
+export const downloadMaterialListPDF = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Find production order profile records
+    const order = await ProductionOrder.findById(id);
+    if (!order) {
+      return res.status(404).json({ message: "Production order document not found." });
+    }
+
+    // Initialize a clean, letter-sized document with structural margins
+    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+
+    // Set streaming response configurations
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=MaterialList-${order.orderId}.pdf`);
+
+    doc.pipe(res);
+
+    // ── BRAND IDENTITY HEADER ──
+    doc.fillColor('#1e293b').fontSize(22).font('Helvetica-Bold').text('SAMTEK MACHINERY', 50, 50);
+    doc.fillColor('#64748b').fontSize(9).font('Helvetica').text('Production Material Ledger & Performance Report', 50, 75);
+
+    // Horizontal visual bounding divider line
+    doc.moveTo(50, 92).lineTo(562, 92).strokeColor('#e2e8f0').lineWidth(1).stroke();
+
+    // ── METADATA PROFILE BLOCK ──
+    doc.fillColor('#0f172a').fontSize(12).font('Helvetica-Bold').text(`Production Order ID: #${order.orderId}`, 50, 115);
+
+    doc.fillColor('#334155').fontSize(9).font('Helvetica');
+    doc.text(`Machine Asset: ${order.machineCode} — ${order.machineName}`, 50, 135);
+    doc.text(`Fulfillment State: ${order.status}`, 50, 150);
+    doc.text(`Target Delivery Frame: ${order.deliveryDate}`, 50, 165);
+    doc.text(`Generated Date: ${new Date().toLocaleDateString()}`, 50, 180);
+
+    // ── MATERIAL DEMAND SUMMARY TABLE HEADER ──
+    doc.fillColor('#1e3a8a').fontSize(11).font('Helvetica-Bold').text('Completed Material Allocation Ledger', 50, 215);
+
+    const tableTop = 235;
+    doc.rect(50, tableTop, 512, 22).fill('#f8fafc');
+
+    // Draw Table Columns String Labels
+    doc.fillColor('#475569').fontSize(9).font('Helvetica-Bold');
+    doc.text('Item Code', 60, tableTop + 6, { width: 80 });
+    doc.text('Material Name', 150, tableTop + 6, { width: 160 });
+    doc.text('Req Qty', 320, tableTop + 6, { width: 50, align: 'center' });
+    doc.text('Transferred', 380, tableTop + 6, { width: 65, align: 'center' });
+    doc.text('Issued', 455, tableTop + 6, { width: 50, align: 'center' });
+    doc.text('Status', 510, tableTop + 6, { width: 45, align: 'right' });
+
+    let currentY = tableTop + 22;
+
+    // ── INTERACTION LOOP FOR PRODUCTION ORDER DEMANDS ──
+    order.materialDemands.forEach((item) => {
+      // Check for page overflow limits dynamically
+      if (currentY > 700) {
+        doc.addPage();
+        currentY = 50; // Reset height position for additional pages
+      }
+
+      // Draw border line separator frame
+      doc.moveTo(50, currentY + 22).lineTo(562, currentY + 22).strokeColor('#f1f5f9').lineWidth(1).stroke();
+
+      // Populate Item Text Strings
+      doc.fillColor('#334155').fontSize(9).font('Helvetica');
+      doc.text(item.materialCode, 60, currentY + 7, { width: 80 });
+      doc.text(item.materialName, 150, currentY + 7, { width: 160 });
+      doc.text(`${item.quantity} ${item.unit}`, 320, currentY + 7, { width: 50, align: 'center' });
+      doc.text(`${item.transferredQuantity} ${item.unit}`, 380, currentY + 7, { width: 65, align: 'center' });
+      doc.text(`${item.issuedQuantity} ${item.unit}`, 455, currentY + 7, { width: 50, align: 'center' });
+
+      // Format styling explicitly for status string layout values
+      const statusColor = item.status === 'Issued' ? '#16a34a' : '#475569';
+      doc.fillColor(statusColor).font('Helvetica-Bold');
+      doc.text(item.status, 510, currentY + 7, { width: 45, align: 'right' });
+
+      currentY += 22;
+    });
+
+    // Finalize compilation processing
+    doc.end();
+
+  } catch (error) {
+    console.error("Critical error building production ledger summary PDF file streams:", error);
+    res.status(500).json({ message: "Internal application error building asset documentation reports." });
   }
 };
 
@@ -482,8 +607,20 @@ export const markProcessComplete = async (req, res) => {
     if (idx === -1) return;
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    order.processes[idx].status = 'QC Pending';
-    order.processes[idx].endDate = today();
+    
+    const proc = order.processes[idx];
+    if (proc.step === 'Fabrication') {
+      if (!proc.subEntries || proc.subEntries.length === 0) {
+        return res.status(400).json({ success: false, message: 'At least one sub-entry must be added to Fabrication before marking it as complete.' });
+      }
+      const allDone = proc.subEntries.every(se => se.status === 'Completed' && se.qcStatus === 'Approved');
+      if (!allDone) {
+        return res.status(400).json({ success: false, message: 'All Fabrication sub-entries must be completed and QC approved before marking this process as complete.' });
+      }
+    }
+
+    proc.status = 'QC Pending';
+    proc.endDate = today();
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
@@ -651,6 +788,71 @@ export const rejectQC = async (req, res) => {
     proc.qcDate = today();
     proc.notes = reason || proc.notes;
     proc.reworks.push({ date: today(), reason: reason || '', rejectedBy: qcBy });
+    await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const addSubEntry = async (req, res) => {
+  try {
+    const idx = getStepIndex(req, res);
+    if (idx === -1) return;
+    const { parentPart, childPart, assignedMember } = req.body;
+    if (!parentPart || !childPart || !assignedMember) {
+      return res.status(400).json({ success: false, message: 'parentPart, childPart, and assignedMember are required' });
+    }
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    
+    order.processes[idx].subEntries.push({ parentPart, childPart, assignedMember });
+    await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const completeSubEntry = async (req, res) => {
+  try {
+    const idx = getStepIndex(req, res);
+    if (idx === -1) return;
+    const { subEntryId } = req.params;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    
+    const subEntry = order.processes[idx].subEntries.id(subEntryId);
+    if (!subEntry) return res.status(404).json({ success: false, message: 'Sub-entry not found' });
+    
+    subEntry.status = 'Completed';
+    await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const qcSubEntry = async (req, res) => {
+  try {
+    const idx = getStepIndex(req, res);
+    if (idx === -1) return;
+    const { subEntryId } = req.params;
+    const { qcStatus } = req.body;
+    
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    
+    const subEntry = order.processes[idx].subEntries.id(subEntryId);
+    if (!subEntry) return res.status(404).json({ success: false, message: 'Sub-entry not found' });
+    
+    subEntry.qcStatus = qcStatus || 'Approved';
+    if (subEntry.qcStatus === 'Rejected') {
+      subEntry.status = 'Pending';
+    }
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
