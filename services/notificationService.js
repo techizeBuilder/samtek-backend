@@ -468,6 +468,15 @@ class NotificationService {
         data, ...common
       });
     }
+
+    if (action === 'order_form_submitted') {
+      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+        title: '📝 Sales Order Form Submitted',
+        message: `Order Form for ${data?.orderCode || 'order'} has been submitted by ${data?.submittedBy || 'Sales'}. Ready for review.`,
+        type: 'account', icon: 'file-text', priority: 'medium',
+        data, ...common
+      });
+    }
   }
 
   // ============================================================

@@ -36,6 +36,11 @@ const adminSettingsSchema = new mongoose.Schema({
     name: { type: String, required: true }
   }],
 
+  leadRejectReasons: [{
+    label: { type: String, required: true },
+    order: { type: Number, default: 0 }
+  }],
+
   // ─── Quotation Settings ────────────────────────────────────────
   termsAndConditions: [{
     heading: { type: String, required: true },
@@ -50,6 +55,23 @@ const adminSettingsSchema = new mongoose.Schema({
 
   quotationNotes: [{
     text: { type: String, required: true }
+  }],
+
+  // Quotation numbering format — admin-configurable prefix/suffix/separator/
+  // financial-year placement used to build "Quotation No" across preview/PDF/print.
+  // Kept as a list (matches the CRUD pattern used everywhere else); the most
+  // recently added entry is treated as the active format.
+  quotationNumberSettings: [{
+    prefix: { type: String, default: '' },
+    suffix: { type: String, default: '' },
+    bifurcateWith: { type: String, enum: ['-', '/', '_', 'None'], default: '-' },
+    financialYearPosition: { type: String, enum: ['none', 'before_prefix', 'after_prefix'], default: 'none' },
+  }],
+
+  // ─── Dispatch Settings ─────────────────────────────────────────
+  dispatchChecklist: [{
+    label: { type: String, required: true },
+    order: { type: Number, default: 0 }
   }],
 
 }, { timestamps: true });

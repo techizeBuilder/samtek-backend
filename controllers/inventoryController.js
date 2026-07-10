@@ -1033,6 +1033,9 @@ const sanitizeItemData = (data) => {
   if (sanitized.batch) sanitized.batch = sanitized.batch.trim();
   if (sanitized.quality) sanitized.quality = sanitized.quality.trim();
   if (sanitized.unit) sanitized.unit = sanitized.unit.trim();
+  if (sanitized.unitType) sanitized.unitType = sanitized.unitType.trim();
+  if (sanitized.purchaseUnitType) sanitized.purchaseUnitType = sanitized.purchaseUnitType.trim();
+  if (sanitized.purchaseUnit) sanitized.purchaseUnit = sanitized.purchaseUnit.trim();
   if (sanitized.store) sanitized.store = sanitized.store.trim();
   if (sanitized.hsn) sanitized.hsn = sanitized.hsn.trim();
   if (sanitized.description) sanitized.description = sanitized.description.trim();

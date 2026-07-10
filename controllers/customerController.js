@@ -1,6 +1,8 @@
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import Sale from '../models/Sale.js';
+import Order from '../models/Order.js';
+import OrderForm from '../models/OrderForm.js';
 import * as XLSX from 'xlsx';
 import multer from 'multer';
 import { body, validationResult, query } from 'express-validator';
@@ -211,6 +213,23 @@ export const getCustomers = [
           .lean(),
         Customer.countDocuments(filter)
       ]);
+
+      // Outstanding only means anything once a Sales Order Form has actually
+      // been submitted for this customer — stamp a computed (not stored)
+      // hasOrderForm flag so the UI can show '-' instead of '0' until then.
+      const custIds = customers.map(c => c._id);
+      if (custIds.length) {
+        const orders = await Order.find({ customer: { $in: custIds } }).select('_id customer').lean();
+        const orderIds = orders.map(o => o._id);
+        const forms = orderIds.length
+          ? await OrderForm.find({ orderId: { $in: orderIds }, status: 'Submitted' }).select('orderId').lean()
+          : [];
+        const submittedOrderIds = new Set(forms.map(f => f.orderId.toString()));
+        const customersWithForm = new Set(
+          orders.filter(o => submittedOrderIds.has(o._id.toString())).map(o => o.customer.toString())
+        );
+        customers.forEach(c => { c.hasOrderForm = customersWithForm.has(c._id.toString()); });
+      }
 
       res.json({
         success: true,

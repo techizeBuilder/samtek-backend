@@ -6,19 +6,36 @@ import nodemailer from 'nodemailer';
  * Gmail ya koi bhi SMTP use kar sakte ho — .env se config hoga
  */
 const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: false,
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || "smtp.gmail.com",
+    port: parseInt(process.env.SMTP_PORT || "587"),
+    secure: false, // true only for port 465
+
     auth: {
-      user: process.env.SMTP_USER || '',
-      pass: process.env.SMTP_PASS || ''
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
     },
-    // Adding timeouts to prevent hanging
-    connectionTimeout: 10000, // 10 seconds
+
+    // Debug logs
+    logger: true,
+    debug: true,
+
+    connectionTimeout: 10000,
     greetingTimeout: 10000,
-    socketTimeout: 30000, // 30 seconds
+    socketTimeout: 30000,
   });
+
+  // Verify SMTP connection
+  transporter.verify((error, success) => {
+    if (error) {
+      console.error("❌ SMTP Verify Failed:");
+      console.error(error);
+    } else {
+      console.log("✅ SMTP Server Ready");
+    }
+  });
+
+  return transporter;
 };
 
 /**
@@ -306,10 +323,8 @@ export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantit
             </tr>
             ${notes ? `
             <tr style="border-top: 1px solid #e0e7ff;">
-              <td style="padding: 6px 0; color: #6b7280; font-size: 14px; vertical-align: top;">Additional Notes / Specs</td>
-              <td style="padding: 6px 0; color: #374151; font-size: 14px; line-height: 1.6;">
-                ${notes.replace(/\n/g, '<br/>')}
-              </td>
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Additional Notes</td>
+              <td style="padding: 6px 0; color: #374151;">${notes}</td>
             </tr>` : ''}
           </table>
         </div>

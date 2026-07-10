@@ -269,6 +269,12 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const expenseRouter = (await import('./routes/expenseRoutes.js')).default;
             const financeRouter = (await import('./routes/financeRoutes.js')).default;
             app.use('/api/orders', orderRoutes);
+            const orderFormRoutes = (await import('./routes/orderFormRoutes.js')).default;
+            app.use('/api/order-forms', orderFormRoutes);
+            console.log('Order Form routes registered at /api/order-forms');
+            const cashAccessRoutes = (await import('./routes/cashAccessRoutes.js')).default;
+            app.use('/api/cash-access', cashAccessRoutes);
+            console.log('Cash Access routes registered at /api/cash-access');
             app.use('/api/sales', salesRouter);
             app.use('/api/accounts', accountsRouter);
             app.use('/api/expenses', expenseRouter);

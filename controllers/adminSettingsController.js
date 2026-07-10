@@ -21,6 +21,25 @@ const DEFAULT_DOCUMENT_TYPES = [
   'PAN Card', 'Visiting Card'
 ].map(name => ({ name }));
 
+const DEFAULT_LEAD_REJECT_REASONS = [
+  "Payment Term Is Out Of Scope",
+  "Freight Charged Are High",
+  "Client Is Not Responding",
+  "Client Dropped His Purchase Requirement",
+  "Quoted Price Is High",
+  "Purchased From Local Vendor",
+  "Irrelevant Product Enquiry",
+  "Low/ Retail Quantity",
+  "Delivery Location Is Out Of Scope",
+  "Legal Issue",
+  "Junk Enquiry",
+  "Payment Not Received",
+  "Duplicate Leads",
+  "Quoted But Delaying Decision",
+  "Invalid Contact Number",
+  "Not Potential",
+].map((label, i) => ({ label, order: i }));
+
 const DEFAULT_TERMS = [
   { heading: 'Jurisdiction', text: 'All disputes will be settled under Ghaziabad, Uttar Pradesh jurisdiction only.' },
   { heading: 'Prices & Packing', text: 'All prices are Ex-Works Ghaziabad, excluding packing, transport, insurance, and taxes (charged at actuals)' },
@@ -52,6 +71,16 @@ const DEFAULT_NOTES = [
   { text: 'Logging & Boarding Facilities Are To Be Provided By The Customer.' },
 ];
 
+const DEFAULT_DISPATCH_CHECKLIST = [
+  'All Parts Included', 'Accessories Included', 'Manual Included', 'Safety Packing Completed'
+].map((label, i) => ({ label, order: i }));
+
+// Seeded so quotation numbering keeps working (as "SM-0022") for companies that
+// never touch this new setting — matches the old hardcoded "SM-" prefix.
+const DEFAULT_QUOTATION_NUMBER_SETTINGS = [
+  { prefix: 'SM', suffix: '', bifurcateWith: '-', financialYearPosition: 'none' },
+];
+
 // ─── Helper: get or create settings for a company ─────────────────────────────
 async function getOrCreateSettings(companyId) {
   let settings = await AdminSettings.findOne({ companyId });
@@ -66,8 +95,28 @@ async function getOrCreateSettings(companyId) {
       termsAndConditions: DEFAULT_TERMS,
       additionalCharges: DEFAULT_ADDITIONAL_CHARGES,
       quotationNotes: DEFAULT_NOTES,
+      dispatchChecklist: DEFAULT_DISPATCH_CHECKLIST,
+      leadRejectReasons: DEFAULT_LEAD_REJECT_REASONS,
+      quotationNumberSettings: DEFAULT_QUOTATION_NUMBER_SETTINGS,
     });
     await settings.save();
+  } else {
+    // Migrate existing companies (created before these fields existed) so
+    // previously-hardcoded lists still show up once, editable from here on.
+    let changed = false;
+    if (!settings.dispatchChecklist || settings.dispatchChecklist.length === 0) {
+      settings.dispatchChecklist = DEFAULT_DISPATCH_CHECKLIST;
+      changed = true;
+    }
+    if (!settings.leadRejectReasons || settings.leadRejectReasons.length === 0) {
+      settings.leadRejectReasons = DEFAULT_LEAD_REJECT_REASONS;
+      changed = true;
+    }
+    if (!settings.quotationNumberSettings || settings.quotationNumberSettings.length === 0) {
+      settings.quotationNumberSettings = DEFAULT_QUOTATION_NUMBER_SETTINGS;
+      changed = true;
+    }
+    if (changed) await settings.save();
   }
   return settings;
 }
@@ -199,3 +248,6 @@ export const documentTypesCrud = makeArrayCrud('documentTypes');
 export const termsCrud        = makeArrayCrud('termsAndConditions');
 export const chargesCrud      = makeArrayCrud('additionalCharges');
 export const notesCrud        = makeArrayCrud('quotationNotes');
+export const dispatchChecklistCrud = makeArrayCrud('dispatchChecklist');
+export const leadRejectReasonsCrud = makeArrayCrud('leadRejectReasons');
+export const quotationNumberSettingsCrud = makeArrayCrud('quotationNumberSettings');
