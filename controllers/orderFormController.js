@@ -180,6 +180,18 @@ export const upsertOrderForm = async (req, res) => {
         },
         targetCompanyId: order.companyId,
       });
+
+      // ✅ Store is notified only now (Order Form filled) — not at deal verification,
+      // because the item reaches Store only after the form is submitted.
+      // Skip re-notify on Accounts edits of an already-submitted form.
+      if (existing?.status !== 'Submitted') {
+        await notificationService.triggerStoreNotification({
+          action: 'new_order_for_store',
+          data: { orderCode: order.orderCode, orderId: order._id },
+          targetUnit: order.unit,
+          targetCompanyId: order.companyId,
+        });
+      }
     } catch (e) { console.error('Order Form submit notification error:', e); }
 
     res.json({ success: true, message: 'Order Form submitted successfully', orderForm: form });

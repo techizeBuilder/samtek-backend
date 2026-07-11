@@ -44,7 +44,7 @@ const notificationSchema = new mongoose.Schema({
       'HR-Admin', 'Manager', 'Employee', 'Company Admin',
       'Research & Development Head', 'Research Development Employee',
       'MIS Admin',
-      'Marketing',
+      'Marketing', 'Marketing Head',
       'all'
     ],
     default: 'all'

@@ -439,8 +439,10 @@ export const updatePurchaseRequestStatus = async (req, res) => {
 
       const missing = [];
       if (!serialNumber) missing.push('Serial Number');
-      if (!warrantyPeriod) missing.push('Warranty Period (months)');
-      if (!warrantyCard) missing.push('Warranty Card (image or PDF)');
+      // 0 is a valid warranty (no warranty) — only missing/negative is invalid
+      if (warrantyPeriod === undefined || warrantyPeriod === '' || Number(warrantyPeriod) < 0) missing.push('Warranty Period (months)');
+      // Warranty Card is required only when there IS a warranty (> 0 months)
+      if (Number(warrantyPeriod) > 0 && !warrantyCard) missing.push('Warranty Card (image or PDF)');
 
       if (missing.length > 0) {
         // If multer already saved a file but other fields are missing, clean it up
@@ -477,7 +479,7 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       // Save receive-specific data on the purchase request
       request.serialNumber = serialNumber;
       request.warrantyPeriod = Number(warrantyPeriod);
-      request.warrantyCardUrl = `/uploads/warranty-cards/${warrantyCard.filename}`;
+      if (warrantyCard) request.warrantyCardUrl = `/uploads/warranty-cards/${warrantyCard.filename}`;
       request.receivedAt = new Date();
     }
     // ──────────────────────────────────────────────────────────────────────────
@@ -530,8 +532,10 @@ export const updatePurchaseRequestStatus = async (req, res) => {
         if (inventoryItem) {
           inventoryItem.serialNumber = request.serialNumber;
           inventoryItem.warranty.period = request.warrantyPeriod;
-          inventoryItem.warranty.cardUrl = request.warrantyCardUrl;
-          inventoryItem.warranty.cardUploadedAt = new Date();
+          if (request.warrantyCardUrl) {
+            inventoryItem.warranty.cardUrl = request.warrantyCardUrl;
+            inventoryItem.warranty.cardUploadedAt = new Date();
+          }
           inventoryItem.receivedFromPurchaseRequest = request._id;
           await inventoryItem.save();
           console.log(`✅ Inventory item "${inventoryItem.name}" updated with serial & warranty info`);
