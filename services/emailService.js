@@ -276,7 +276,7 @@ export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, 
 /**
  * Send RFQ (Request for Quotation) Email to Vendor
  */
-export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantity, requiredByDate, bidLink, companyName, notes }) => {
+export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.log(`[EMAIL SKIPPED] No SMTP config. Would send RFQ ${rfqNo} to: ${to}`);
     return { success: true, mocked: true, message: 'No SMTP config, mock success' };
@@ -315,7 +315,7 @@ export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantit
             </tr>
             <tr style="border-top: 1px solid #e0e7ff;">
               <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Required Quantity</td>
-              <td style="padding: 6px 0; color: #111827; font-weight: bold;">${quantity} Unit(s)</td>
+              <td style="padding: 6px 0; color: #111827; font-weight: bold;">${quantity} ${quantityUnit || 'Unit(s)'}</td>
             </tr>
             <tr style="border-top: 1px solid #e0e7ff;">
               <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Required By</td>

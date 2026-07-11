@@ -117,7 +117,7 @@ export const getPurchaseRequests = async (req, res) => {
           { code: pr.itemId },
           { name: { $regex: new RegExp(`^${pr.productName}$`, 'i') } }
         ]
-      }).select('name code specifications');
+      }).select('name code specifications warranty unit unitType purchaseUnit purchaseUnitType');
 
       if (masterItem) {
         pr.item = masterItem; // Attaches to PR so the frontend UI can read it
@@ -453,6 +453,27 @@ export const updatePurchaseRequestStatus = async (req, res) => {
         });
       }
 
+      // ── Unit conversion: order was placed in a purchase unit, Store must
+      // convert the received qty back to the item's base (storage) unit ──────
+      if (request.purchaseUnit && request.purchaseQuantity) {
+        const receivedQuantity = Number(req.body.receivedQuantity);
+        const conversionFactor = Number(req.body.conversionFactor); // purchaseUnit per 1 base unit
+
+        if (!(receivedQuantity > 0) || !(conversionFactor > 0)) {
+          if (warrantyCard) {
+            try { fs.unlinkSync(warrantyCard.path); } catch (_) { }
+          }
+          return res.status(400).json({
+            success: false,
+            message: `Cannot mark as Received. Unit conversion is required: enter the Received Quantity (in ${request.purchaseUnit}) and how many ${request.purchaseUnit} equal 1 storage unit.`
+          });
+        }
+
+        request.receivedQuantity = receivedQuantity;
+        request.conversionFactor = conversionFactor;
+        request.convertedQuantity = Math.round((receivedQuantity / conversionFactor) * 1000) / 1000;
+      }
+
       // Save receive-specific data on the purchase request
       request.serialNumber = serialNumber;
       request.warrantyPeriod = Number(warrantyPeriod);
@@ -537,6 +558,7 @@ export const updatePurchaseRequestStatus = async (req, res) => {
           const qcJobId = await generateQCJobId();
 
           let qcCategory = 'Raw Material';
+          let qcBaseUnit = request.unit || 'pcs';
           try {
             const inventoryItem = await Item.findOne({
               name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
@@ -544,6 +566,9 @@ export const updatePurchaseRequestStatus = async (req, res) => {
             });
             if (inventoryItem && inventoryItem.category) {
               qcCategory = inventoryItem.category;
+            }
+            if (inventoryItem && inventoryItem.unit) {
+              qcBaseUnit = inventoryItem.unit;
             }
           } catch (invLookupErr) {
             console.error('Error looking up inventory item for QC job category:', invLookupErr);
@@ -559,8 +584,10 @@ export const updatePurchaseRequestStatus = async (req, res) => {
             itemName: request.productName,
             itemCode: request.itemId || request.requestId,
             category: qcCategory,
-            quantity: request.quantity || 1,
-            unit: request.unit || 'pcs',
+            // Converted base-unit qty when the order was placed in a purchase unit
+            // (e.g. 20 kg received ÷ 1 kg/pc = 20 pcs) — QC approval adds this qty to inventory
+            quantity: request.convertedQuantity || request.quantity || 1,
+            unit: qcBaseUnit,
             receivedDate: today(),
             status: 'Pending',
             company: request.companyId,

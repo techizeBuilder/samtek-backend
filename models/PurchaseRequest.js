@@ -93,6 +93,31 @@ const purchaseRequestSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // ── Unit-conversion purchase flow (items with a defined Purchase Unit) ──
+  purchaseUnitType: {
+    type: String,
+    default: null
+  },
+  purchaseUnit: {
+    type: String,   // unit the Purchase dept ordered in (e.g. Kilogram)
+    default: null
+  },
+  purchaseQuantity: {
+    type: Number,   // qty ordered in purchaseUnit (entered at Send RFQ)
+    default: null
+  },
+  receivedQuantity: {
+    type: Number,   // qty received in purchaseUnit (entered by Store at receive)
+    default: null
+  },
+  conversionFactor: {
+    type: Number,   // how many purchaseUnit make 1 base unit (e.g. 1 pc = 1 kg)
+    default: null
+  },
+  convertedQuantity: {
+    type: Number,   // base-unit qty sent to QC / inventory
+    default: null
+  },
   // Rejection details
   rejectedAt: {
     type: Date,
