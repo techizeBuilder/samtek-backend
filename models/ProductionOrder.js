@@ -16,6 +16,15 @@ const ReworkSchema = new mongoose.Schema({
   rejectedBy: { type: String, default: '' },
 }, { _id: false });
 
+const SubEntrySchema = new mongoose.Schema({
+  parentPart: { type: String, required: true },
+  childPart: { type: String, required: true },
+  assignedMember: { type: String, required: true },
+  status: { type: String, enum: ['Pending', 'Completed'], default: 'Pending' },
+  qcStatus: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
+  createdAt: { type: Date, default: Date.now }
+});
+
 const ProcessStepSchema = new mongoose.Schema({
   step: { type: String, required: true },
   type: { type: String, enum: ['Outsourcing', 'In-House'], required: true },
@@ -32,6 +41,7 @@ const ProcessStepSchema = new mongoose.Schema({
   qcDate: { type: String, default: null },
   notes: { type: String, default: '' },
   reworks: { type: [ReworkSchema], default: [] },
+  subEntries: { type: [SubEntrySchema], default: [] },
 }, { _id: false });
 
 const MaterialDemandSchema = new mongoose.Schema({
@@ -40,13 +50,16 @@ const MaterialDemandSchema = new mongoose.Schema({
   bomQuantity: { type: Number, default: null },
   quantity: { type: Number, required: true, min: 0 },
 
-  // ── NEW: Tracks partial or full fulfillment ──
-  issuedQuantity: { type: Number, default: 0, min: 0 },
+  // ── NEW: 2-Step Fulfillment Tracking ──
+  returnPendingQuantity: { type: Number, default: 0, min: 0 },
+  transferredQuantity: { type: Number, default: 0, min: 0 }, // Store sent it
+  issuedQuantity: { type: Number, default: 0, min: 0 },      // Production received it
 
   unit: { type: String, required: true },
   status: {
     type: String,
-    enum: ['Pending R&D', 'Requested', 'Issued', 'Pending Purchase', 'R&D Rejected'],
+    // Added 'In Transit'
+    enum: ['Pending R&D', 'Requested', 'In Transit', 'Issued', 'Pending Purchase', 'R&D Rejected', 'Pending Return'],
     default: 'Pending R&D',
   },
 });

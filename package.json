@@ -27,6 +27,7 @@
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.7",
     "pdfkit": "^0.18.0",
+    "pdfkit-table": "^0.2.11",
     "puppeteer": "^24.43.0",
     "pusher": "^5.3.3",
     "resend": "^6.14.0",

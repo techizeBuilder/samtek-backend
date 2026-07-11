@@ -19,6 +19,10 @@ const rfqSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  quantityUnit: {
+    type: String,   // unit the quantity is quoted in (purchase unit when defined)
+    default: null
+  },
   requiredByDate: {
     type: Date
   },

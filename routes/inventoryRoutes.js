@@ -39,7 +39,13 @@ import {
   importItemsFromExcel,
   exportCategoriesToExcel,
   exportCustomerCategoriesToExcel,
-  getMaterialIssueLogs
+  getMaterialIssueLogs,
+  getPendingRequests,
+  transferMaterialToProduction,
+  getReturnedMaterials,
+  getPendingReturns,
+  confirmReturn,
+  getStoreTransferLogs
 } from '../controllers/inventoryController.js';
 
 const router = express.Router();
@@ -75,7 +81,15 @@ router.delete('/inventory/groups/:id', auth, deleteGroup);
 // Utility routes
 router.get('/inventory/low-stock', auth, getLowStockItems);
 router.get('/inventory/stats', auth, getInventoryStats);
-router.get('/inventory/material-issues', auth, authorizeRoles("Store Head", "Store Employee"), getMaterialIssueLogs)
+
+// Production - Store Material Transfer Handshake Routes
+router.get('/inventory/material-issues', auth, authorizeRoles("Store Head", "Store Employee"), getMaterialIssueLogs);
+router.get('/inventory/pending-requests', auth, authorizeRoles("Store Head", "Store Employee"), getPendingRequests);
+router.post('/inventory/transfer-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferMaterialToProduction);
+router.get('/inventory/returned-materials', auth, authorizeRoles("Store Head", "Store Employee"), getReturnedMaterials);
+router.get('/inventory/pending-returns', auth, authorizeRoles("Store Head", "Store Employee"), getPendingReturns);
+router.post('/inventory/confirm-return', auth, authorizeRoles("Store Head", "Store Employee"), confirmReturn);
+router.get('/inventory/store-transfer-logs', auth, authorizeRoles("Store Head", "Store Employee"), getStoreTransferLogs);
 
 // Excel import/export routes
 router.get('/items/export', auth, exportItemsToExcel);

@@ -171,7 +171,7 @@ export const getRFQs = async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 export const createRFQ = async (req, res) => {
   try {
-    const { purchaseRequestId, requiredByDate, notes, vendorIds } = req.body;
+    const { purchaseRequestId, requiredByDate, notes, vendorIds, purchaseQuantity, purchaseUnit } = req.body;
     const companyId = req.user.companyId;
     const unit = req.user.unit;
 
@@ -286,13 +286,30 @@ export const createRFQ = async (req, res) => {
       });
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // 5b. PURCHASE UNIT ORDERING: when the master item defines a
+    // Purchase Unit, the Purchase dept orders in that unit and the
+    // Store converts back to the base unit at receiving time.
+    // ─────────────────────────────────────────────────────────────
+    const resolvedPurchaseUnit = purchaseUnit || inventoryItem?.purchaseUnit || null;
+    const resolvedPurchaseQty = Number(purchaseQuantity) > 0 ? Number(purchaseQuantity) : null;
+    if (resolvedPurchaseQty && resolvedPurchaseUnit) {
+      pr.purchaseQuantity = resolvedPurchaseQty;
+      pr.purchaseUnit = resolvedPurchaseUnit;
+      pr.purchaseUnitType = inventoryItem?.purchaseUnitType || pr.purchaseUnitType || null;
+      await pr.save();
+    }
+    const rfqQuantity = (resolvedPurchaseQty && resolvedPurchaseUnit) ? resolvedPurchaseQty : pr.quantity;
+    const rfqQuantityUnit = (resolvedPurchaseQty && resolvedPurchaseUnit) ? resolvedPurchaseUnit : (inventoryItem?.unit || null);
+
     // 6. Create RFQ
     const rfqNo = await generateRFQNo();
     const rfq = await RFQ.create({
       rfqNo,
       purchaseRequest: purchaseRequestId,
       productName: pr.productName,
-      quantity: pr.quantity,
+      quantity: rfqQuantity,
+      quantityUnit: rfqQuantityUnit,
       requiredByDate: requiredByDate ? new Date(requiredByDate) : null,
       vendors: matchedVendors.map(v => v._id),
       notes: enrichedNotes, // <-- Has user notes + specs injected
@@ -317,7 +334,7 @@ export const createRFQ = async (req, res) => {
         vendor: vendor._id,
         vendorName: vendor.supplierName,
         productName: pr.productName,
-        quantity: pr.quantity,
+        quantity: rfqQuantity,
         unitPrice: 0,
         totalPrice: 0,
         deliveryDays: 7,
@@ -336,7 +353,8 @@ export const createRFQ = async (req, res) => {
           vendorName: vendor.supplierName,
           rfqNo: rfq.rfqNo,
           productName: pr.productName,
-          quantity: pr.quantity,
+          quantity: rfqQuantity,
+          quantityUnit: rfqQuantityUnit,
           requiredByDate: requiredByDate,
           bidLink,
           companyName,
@@ -483,7 +501,9 @@ export const selectVendor = async (req, res) => {
     // inventoryItemId may be null — PO will be created with itemName only (item link added on receipt)
 
     const unitPrice = winningBid.unitPrice;
-    const totalAmount = unitPrice * pr.quantity;
+    // When ordered in a purchase unit (e.g. 20 kg for a 10-pc demand), the PO is for that qty
+    const orderQty = pr.purchaseQuantity || pr.quantity;
+    const totalAmount = unitPrice * orderQty;
     const taxAmount = totalAmount * 0.18; // 18% GST default
     const grandTotal = totalAmount + taxAmount;
 
@@ -498,11 +518,11 @@ export const selectVendor = async (req, res) => {
     // Build PO line item — only include item ref if we found one in inventory
     const poLineItem = {
       itemName: inventoryItemName,
-      quantity: pr.quantity,
+      quantity: orderQty,
       unitPrice,
       totalPrice: totalAmount,
       receivedQuantity: 0,
-      pendingQuantity: pr.quantity
+      pendingQuantity: orderQty
     };
     if (inventoryItemId) {
       poLineItem.item = inventoryItemId;
@@ -542,7 +562,7 @@ export const selectVendor = async (req, res) => {
         rfqNo: rfq.rfqNo,
         poNumber: po.purchaseOrderNumber,
         productName: pr.productName,
-        quantity: pr.quantity,
+        quantity: orderQty,
         unitPrice,
         deliveryDays: winningBid.deliveryDays,
         warrantyMonths: winningBid.warrantyMonths,

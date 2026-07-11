@@ -6,6 +6,7 @@ const MaterialIssueLogSchema = new mongoose.Schema({
         ref: 'ProductionOrder',
         required: true
     },
+    orderId: { type: String, required: true },
     machineCode: { type: String, required: true },
     materialCode: { type: String, required: true },
     materialName: { type: String, required: true },
@@ -29,6 +30,7 @@ const MaterialIssueLogSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 // Index for fast searching by store employees
+MaterialIssueLogSchema.index({ company: 1, orderId: 1, createdAt: -1 });
 MaterialIssueLogSchema.index({ company: 1, createdAt: -1 });
 MaterialIssueLogSchema.index({ company: 1, materialCode: 1 });
 MaterialIssueLogSchema.index({ productionOrderId: 1 });

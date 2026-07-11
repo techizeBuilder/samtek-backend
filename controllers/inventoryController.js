@@ -9,6 +9,11 @@ import { USER_ROLES } from '../shared/schema.js';
 import notificationService from '../services/notificationService.js';
 import { initializeProductSummary, updateProductSummary } from '../services/productionSummaryService.js';
 
+import ProductionOrder from '../models/ProductionOrder.js';
+
+import StoreTransferLog from '../models/StoreTransferLog.js';
+import MaterialReturnLog from '../models/MaterialReturnLog.js';
+
 // Delivery Challan Order for Unit Head Inventory
 const DELIVERY_CHALLAN_ORDER = [
   "PM 400",
@@ -43,7 +48,7 @@ const DELIVERY_CHALLAN_ORDER = [
 // Helper function to check inventory permissions
 const checkInventoryPermission = (user, action) => {
   // Research & Development Head and Unit Head have all permissions (Super Admin removed)
-  if (user.role === 'Research & Development Head' || user.role === 'Unit Head' || user.role==="Sales Head" || user.role==="Sales Employee") {
+  if (user.role === 'Research & Development Head' || user.role === 'Unit Head' || user.role === "Sales Head" || user.role === "Sales Employee") {
     return true;
   }
 
@@ -634,7 +639,10 @@ export const createItem = async (req, res) => {
     // 1. R&D Master Fields
     sanitizedData.specifications = itemData.specifications || [];
     sanitizedData.applications = itemData.applications || [];
-    sanitizedData.variants = itemData.variants || [];
+
+    // ─── FIXED: Use sanitizedData instead of raw itemData so price is protected ───
+    sanitizedData.variants = sanitizedData.variants || [];
+
     if (itemData.warranty) {
       sanitizedData.warranty = itemData.warranty;
     }
@@ -708,7 +716,7 @@ export const updateItem = async (req, res) => {
     const itemData = req.body;
 
     // Enhanced validation
-    const validation = validateItemData(itemData);
+    const validation = validateItemData(itemData, true);
     if (!validation.isValid) {
       return res.status(400).json({
         message: 'Validation failed',
@@ -739,7 +747,10 @@ export const updateItem = async (req, res) => {
     // 1. R&D Master Fields
     if (itemData.specifications !== undefined) sanitizedData.specifications = itemData.specifications;
     if (itemData.applications !== undefined) sanitizedData.applications = itemData.applications;
-    if (itemData.variants !== undefined) sanitizedData.variants = itemData.variants;
+
+    // ─── FIXED: Use sanitizedData to prevent overwriting with raw string prices ───
+    if (itemData.variants !== undefined) sanitizedData.variants = sanitizedData.variants;
+
     if (itemData.warranty !== undefined) sanitizedData.warranty = itemData.warranty;
 
     // 2. Pricing, Tax & Category Fields (Restored & Protected)
@@ -767,16 +778,6 @@ export const updateItem = async (req, res) => {
       if (item.batch && !isNaN(parseFloat(item.batch))) {
         const today = new Date().toISOString().split('T')[0];
         const companyId = req.user.companyId ? req.user.companyId.toString() : item.store;
-
-        console.log('🔧 Debug sync info:', {
-          itemBatch: item.batch,
-          itemName: item.name,
-          itemId: item._id,
-          itemStore: item.store,
-          userCompanyId: req.user.companyId,
-          finalCompanyId: companyId,
-          userRole: req.user.role
-        });
 
         if (companyId) {
           await updateProductSummaryQtyPerBatch(
@@ -822,6 +823,164 @@ export const updateItem = async (req, res) => {
       res.status(500).json({ message: 'Internal server error' });
     }
   }
+};
+
+// Enhanced validation helper function
+const validateItemData = (data, isUpdate = false) => {
+  const errors = {};
+
+  // Required fields validation
+  if (!data.name || typeof data.name !== 'string' || data.name.trim().length < 2) {
+    errors.name = 'Item name must be at least 2 characters';
+  }
+
+  if (!data.category || typeof data.category !== 'string' || data.category.trim().length === 0) {
+    errors.category = 'Category is required';
+  }
+
+  // Customer category is optional with default value
+  if (data.customerCategory && typeof data.customerCategory !== 'string') {
+    errors.customerCategory = 'Customer Category must be a valid string';
+  }
+
+  if (data.group && typeof data.group !== 'string') {
+    errors.group = 'Group must be a valid string';
+  }
+
+  if (data.quality && typeof data.quality !== 'string') {
+    errors.quality = 'Quality must be a valid string';
+  }
+
+  if (!data.unit || typeof data.unit !== 'string' || data.unit.trim().length === 0) {
+    errors.unit = 'Unit is required';
+  }
+
+  if (!data.type || typeof data.type !== 'string' || data.type.trim().length === 0) {
+    errors.type = 'Item type is required';
+  }
+
+  if (!data.importance || typeof data.importance !== 'string' || data.importance.trim().length === 0) {
+    errors.importance = 'Importance level is required';
+  }
+  if (!data.unit) {
+    errors.unit = 'Unit is required';
+  }
+
+  // Numeric validations
+  if (data.qty !== undefined && (isNaN(data.qty) || data.qty < 0)) {
+    errors.qty = 'Quantity must be a non-negative number';
+  }
+  if (data.stdCost !== undefined && (isNaN(data.stdCost) || data.stdCost < 0)) {
+    errors.stdCost = 'Standard cost must be a non-negative number';
+  }
+  if (data.purchaseCost !== undefined && (isNaN(data.purchaseCost) || data.purchaseCost < 0)) {
+    errors.purchaseCost = 'Purchase cost must be a non-negative number';
+  }
+  if (data.salePrice !== undefined && (isNaN(data.salePrice) || data.salePrice < 0)) {
+    errors.salePrice = 'Sale price must be a non-negative number';
+  }
+  if (data.mrp !== undefined && (isNaN(data.mrp) || data.mrp < 0)) {
+    errors.mrp = 'MRP must be a non-negative number';
+  }
+  if (data.gst !== undefined && (isNaN(data.gst) || data.gst < 0 || data.gst > 100)) {
+    errors.gst = 'GST must be between 0 and 100';
+  }
+  if (data.minStock !== undefined && (isNaN(data.minStock) || data.minStock < 0)) {
+    errors.minStock = 'Minimum stock must be a non-negative number';
+  }
+  if (data.leadTime !== undefined && (isNaN(data.leadTime) || data.leadTime < 0)) {
+    errors.leadTime = 'Lead time must be a non-negative number';
+  }
+
+  // ─── FIXED: Validates that variant price is never negative ───
+  if (data.variants && Array.isArray(data.variants)) {
+    data.variants.forEach((v, index) => {
+      if (v.price !== undefined && (isNaN(v.price) || v.price < 0)) {
+        errors[`variants[${index}].price`] = 'Variant price must be a non-negative number';
+      }
+    });
+  }
+
+  // Enum validations
+  const validTypes = ['Product', 'Material', 'Spares', 'Assemblies'];
+  if (data.type && !validTypes.includes(data.type)) {
+    errors.type = 'Invalid item type';
+  }
+
+  const validImportance = ['Low', 'Normal', 'High', 'Critical'];
+  if (data.importance && !validImportance.includes(data.importance)) {
+    errors.importance = 'Invalid importance level';
+  }
+
+  return {
+    isValid: Object.keys(errors).length === 0,
+    errors
+  };
+};
+
+// Enhanced data sanitization helper
+const sanitizeItemData = (data) => {
+  const sanitized = { ...data };
+
+  // Trim string fields and ensure they exist
+  if (sanitized.name) sanitized.name = sanitized.name.trim();
+  if (sanitized.code) sanitized.code = sanitized.code.trim();
+  if (sanitized.category) sanitized.category = sanitized.category.trim();
+  if (sanitized.subCategory) sanitized.subCategory = sanitized.subCategory.trim();
+  if (sanitized.customerCategory) sanitized.customerCategory = sanitized.customerCategory.trim();
+  if (sanitized.group) sanitized.group = sanitized.group.trim();
+  if (sanitized.type) sanitized.type = sanitized.type.trim();
+  if (sanitized.importance) sanitized.importance = sanitized.importance.trim();
+  if (sanitized.batch) sanitized.batch = sanitized.batch.trim();
+  if (sanitized.quality) sanitized.quality = sanitized.quality.trim();
+  if (sanitized.unit) sanitized.unit = sanitized.unit.trim();
+  if (sanitized.store) sanitized.store = sanitized.store.trim();
+  if (sanitized.hsn) sanitized.hsn = sanitized.hsn.trim();
+  if (sanitized.description) sanitized.description = sanitized.description.trim();
+  if (sanitized.internalNotes) sanitized.internalNotes = sanitized.internalNotes.trim();
+
+  // Convert numeric fields
+  if (sanitized.qty !== undefined) sanitized.qty = Number(sanitized.qty);
+  if (sanitized.stdCost !== undefined) sanitized.stdCost = Number(sanitized.stdCost);
+  if (sanitized.purchaseCost !== undefined) sanitized.purchaseCost = Number(sanitized.purchaseCost);
+  if (sanitized.salePrice !== undefined) sanitized.salePrice = Number(sanitized.salePrice);
+  if (sanitized.mrp !== undefined) sanitized.mrp = Number(sanitized.mrp);
+  if (sanitized.gst !== undefined) sanitized.gst = Number(sanitized.gst);
+  if (sanitized.minStock !== undefined) sanitized.minStock = Number(sanitized.minStock);
+  if (sanitized.leadTime !== undefined) sanitized.leadTime = Number(sanitized.leadTime);
+  if (sanitized.order !== undefined) sanitized.order = Number(sanitized.order);
+
+  // Convert boolean fields
+  if (sanitized.internalManufacturing !== undefined) {
+    sanitized.internalManufacturing = Boolean(sanitized.internalManufacturing);
+  }
+  if (sanitized.purchase !== undefined) {
+    sanitized.purchase = Boolean(sanitized.purchase);
+  }
+
+  // Handle arrays
+  if (sanitized.tags && Array.isArray(sanitized.tags)) {
+    sanitized.tags = sanitized.tags.filter(tag => tag && tag.trim()).map(tag => tag.trim());
+  }
+  if (sanitized.customerPrices && Array.isArray(sanitized.customerPrices)) {
+    sanitized.customerPrices = sanitized.customerPrices.map(cp => ({
+      category: cp.category ? cp.category.trim() : '',
+      price: Number(cp.price) || 0
+    }));
+  }
+
+  // ─── FIXED: Sanitize Variants & Cast Price to Number ───
+  if (sanitized.variants && Array.isArray(sanitized.variants)) {
+    sanitized.variants = sanitized.variants.map(v => ({
+      name: v.name ? String(v.name).trim() : '',
+      capacity: v.capacity ? String(v.capacity).trim() : '',
+      motorPower: v.motorPower ? String(v.motorPower).trim() : '',
+      price: Number(v.price) || 0, // Guarantees price is saved correctly as a Number
+      code: v.code ? String(v.code).trim() : '',
+    }));
+  }
+
+  return sanitized;
 };
 
 export const getItemById = async (req, res) => {
@@ -933,146 +1092,7 @@ export const getItemByCode = async (req, res) => {
 
 
 
-// Enhanced validation helper function
-const validateItemData = (data, isUpdate = false) => {
-  const errors = {};
 
-  // Required fields validation
-  if (!data.name || typeof data.name !== 'string' || data.name.trim().length < 2) {
-    errors.name = 'Item name must be at least 2 characters';
-  }
-
-  if (!data.category || typeof data.category !== 'string' || data.category.trim().length === 0) {
-    errors.category = 'Category is required';
-  }
-
-  // Customer category is optional with default value
-  if (data.customerCategory && typeof data.customerCategory !== 'string') {
-    errors.customerCategory = 'Customer Category must be a valid string';
-  }
-
-  if (data.group && typeof data.group !== 'string') {
-    errors.group = 'Group must be a valid string';
-  }
-
-  if (data.quality && typeof data.quality !== 'string') {
-    errors.quality = 'Quality must be a valid string';
-  }
-
-  if (!data.unit || typeof data.unit !== 'string' || data.unit.trim().length === 0) {
-    errors.unit = 'Unit is required';
-  }
-
-  if (!data.type || typeof data.type !== 'string' || data.type.trim().length === 0) {
-    errors.type = 'Item type is required';
-  }
-
-  if (!data.importance || typeof data.importance !== 'string' || data.importance.trim().length === 0) {
-    errors.importance = 'Importance level is required';
-  }
-  if (!data.unit) {
-    errors.unit = 'Unit is required';
-  }
-
-  // Numeric validations
-  if (data.qty !== undefined && (isNaN(data.qty) || data.qty < 0)) {
-    errors.qty = 'Quantity must be a non-negative number';
-  }
-  if (data.stdCost !== undefined && (isNaN(data.stdCost) || data.stdCost < 0)) {
-    errors.stdCost = 'Standard cost must be a non-negative number';
-  }
-  if (data.purchaseCost !== undefined && (isNaN(data.purchaseCost) || data.purchaseCost < 0)) {
-    errors.purchaseCost = 'Purchase cost must be a non-negative number';
-  }
-  if (data.salePrice !== undefined && (isNaN(data.salePrice) || data.salePrice < 0)) {
-    errors.salePrice = 'Sale price must be a non-negative number';
-  }
-  if (data.mrp !== undefined && (isNaN(data.mrp) || data.mrp < 0)) {
-    errors.mrp = 'MRP must be a non-negative number';
-  }
-  if (data.gst !== undefined && (isNaN(data.gst) || data.gst < 0 || data.gst > 100)) {
-    errors.gst = 'GST must be between 0 and 100';
-  }
-  if (data.minStock !== undefined && (isNaN(data.minStock) || data.minStock < 0)) {
-    errors.minStock = 'Minimum stock must be a non-negative number';
-  }
-  if (data.leadTime !== undefined && (isNaN(data.leadTime) || data.leadTime < 0)) {
-    errors.leadTime = 'Lead time must be a non-negative number';
-  }
-
-  // Enum validations
-  const validTypes = ['Product', 'Material', 'Spares', 'Assemblies'];
-  if (data.type && !validTypes.includes(data.type)) {
-    errors.type = 'Invalid item type';
-  }
-
-  const validImportance = ['Low', 'Normal', 'High', 'Critical'];
-  if (data.importance && !validImportance.includes(data.importance)) {
-    errors.importance = 'Invalid importance level';
-  }
-
-  return {
-    isValid: Object.keys(errors).length === 0,
-    errors
-  };
-};
-
-// Enhanced data sanitization helper
-const sanitizeItemData = (data) => {
-  const sanitized = { ...data };
-
-  // Trim string fields and ensure they exist
-  if (sanitized.name) sanitized.name = sanitized.name.trim();
-  if (sanitized.code) sanitized.code = sanitized.code.trim();
-  if (sanitized.category) sanitized.category = sanitized.category.trim();
-  if (sanitized.subCategory) sanitized.subCategory = sanitized.subCategory.trim();
-  if (sanitized.customerCategory) sanitized.customerCategory = sanitized.customerCategory.trim();
-  if (sanitized.group) sanitized.group = sanitized.group.trim();
-  if (sanitized.type) sanitized.type = sanitized.type.trim();
-  if (sanitized.importance) sanitized.importance = sanitized.importance.trim();
-  if (sanitized.batch) sanitized.batch = sanitized.batch.trim();
-  if (sanitized.quality) sanitized.quality = sanitized.quality.trim();
-  if (sanitized.unit) sanitized.unit = sanitized.unit.trim();
-  if (sanitized.unitType) sanitized.unitType = sanitized.unitType.trim();
-  if (sanitized.purchaseUnitType) sanitized.purchaseUnitType = sanitized.purchaseUnitType.trim();
-  if (sanitized.purchaseUnit) sanitized.purchaseUnit = sanitized.purchaseUnit.trim();
-  if (sanitized.store) sanitized.store = sanitized.store.trim();
-  if (sanitized.hsn) sanitized.hsn = sanitized.hsn.trim();
-  if (sanitized.description) sanitized.description = sanitized.description.trim();
-  if (sanitized.internalNotes) sanitized.internalNotes = sanitized.internalNotes.trim();
-
-  // Convert numeric fields
-  if (sanitized.qty !== undefined) sanitized.qty = Number(sanitized.qty);
-  if (sanitized.stdCost !== undefined) sanitized.stdCost = Number(sanitized.stdCost);
-  if (sanitized.purchaseCost !== undefined) sanitized.purchaseCost = Number(sanitized.purchaseCost);
-  if (sanitized.salePrice !== undefined) sanitized.salePrice = Number(sanitized.salePrice);
-  if (sanitized.mrp !== undefined) sanitized.mrp = Number(sanitized.mrp);
-  if (sanitized.gst !== undefined) sanitized.gst = Number(sanitized.gst);
-  if (sanitized.minStock !== undefined) sanitized.minStock = Number(sanitized.minStock);
-  if (sanitized.leadTime !== undefined) sanitized.leadTime = Number(sanitized.leadTime);
-  if (sanitized.order !== undefined) sanitized.order = Number(sanitized.order);
-
-  // Convert boolean fields
-  if (sanitized.internalManufacturing !== undefined) {
-    sanitized.internalManufacturing = Boolean(sanitized.internalManufacturing);
-  }
-  if (sanitized.purchase !== undefined) {
-    sanitized.purchase = Boolean(sanitized.purchase);
-  }
-
-  // Handle arrays
-  if (sanitized.tags && Array.isArray(sanitized.tags)) {
-    sanitized.tags = sanitized.tags.filter(tag => tag && tag.trim()).map(tag => tag.trim());
-  }
-  if (sanitized.customerPrices && Array.isArray(sanitized.customerPrices)) {
-    sanitized.customerPrices = sanitized.customerPrices.map(cp => ({
-      category: cp.category ? cp.category.trim() : '',
-      price: Number(cp.price) || 0
-    }));
-  }
-
-  return sanitized;
-};
 
 
 
@@ -2383,109 +2403,7 @@ export const getInventoryStats = async (req, res) => {
   }
 };
 
-export const getMaterialIssueLogs = async (req, res) => {
-  try {
-    const companyId = req.user.companyId;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-    const search = req.query.search || '';
 
-    // Step 1: Base match for logs
-    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
-    if (search) {
-      matchStage.$or = [
-        { machineCode: { $regex: search, $options: 'i' } },
-        { materialCode: { $regex: search, $options: 'i' } },
-        { materialName: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    const pipeline = [
-      { $match: matchStage },
-      { $sort: { createdAt: -1 } },
-      
-      // Step 2: Lookup user details to get the name of who issued it
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'issuedTo',
-          foreignField: '_id',
-          as: 'issuerData'
-        }
-      },
-      {
-        $unwind: { path: '$issuerData', preserveNullAndEmptyArrays: true }
-      },
-
-      // Step 3: Group by production order id
-      {
-        $group: {
-          _id: '$productionOrderId',
-          machineCode: { $first: '$machineCode' }, 
-          lastIssueDate: { $max: '$createdAt' }, // the most recent issue log for this order
-          logs: {
-            $push: {
-              _id: '$_id',
-              materialCode: '$materialCode',
-              materialName: '$materialName',
-              quantityIssued: '$quantityIssued',
-              unit: '$unit',
-              issuedTo: '$issuedTo',
-              issuedToName: { $ifNull: ['$issuerData.fullName', '$issuerData.username'] },
-              createdAt: '$createdAt'
-            }
-          }
-        }
-      },
-
-      // Step 4: Lookup the Production Order details to show at the wrapper level
-      {
-        $lookup: {
-          from: 'productionorders',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'order'
-        }
-      },
-      {
-        $unwind: { path: '$order', preserveNullAndEmptyArrays: true }
-      },
-
-      // Step 5: Sort grouped results by the last issue date (newest first)
-      { $sort: { lastIssueDate: -1 } },
-
-      // Step 6: Pagination using $facet
-      {
-        $facet: {
-          metadata: [{ $count: 'total' }],
-          data: [{ $skip: skip }, { $limit: limit }]
-        }
-      }
-    ];
-
-    const results = await MaterialIssueLog.aggregate(pipeline);
-    
-    const data = results[0].data;
-    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
-    const totalPages = Math.ceil(total / limit);
-
-    res.json({
-      success: true,
-      data,
-      pagination: {
-        total,
-        page,
-        totalPages,
-        limit
-      }
-    });
-
-  } catch (error) {
-    console.error('Error fetching material issue logs:', error);
-    res.status(500).json({ success: false, message: 'Internal server error' });
-  }
-};
 
 // ─── ITEM GROUP CONTROLLERS (COMPANY-WISE) ───────────────────────
 
@@ -2643,5 +2561,534 @@ export const deleteGroup = async (req, res) => {
   } catch (error) {
     console.error('Delete group error:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ================================================================
+//   NEW: PRODUCTION - STORE MATERIAL HANDSHAKE CONTROLLERS
+// ================================================================
+
+
+
+export const getMaterialIssueLogs = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+
+    // Step 1: Optimized Base match using the new field + compound index
+    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
+    if (search) {
+      matchStage.orderId = { $regex: search, $options: 'i' }; // 👈 Index-friendly filter right at entry point
+    }
+
+    const pipeline = [
+      { $match: matchStage }, // Filters out unneeded documents immediately
+      { $sort: { createdAt: -1 } },
+
+      // Step 2: Lookup user details to get the name of who issued it
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'issuedTo',
+          foreignField: '_id',
+          as: 'issuerData'
+        }
+      },
+      {
+        $unwind: { path: '$issuerData', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 3: Group by production order id
+      {
+        $group: {
+          _id: '$productionOrderId',
+          orderId: { $first: '$orderId' }, // Keep tracking the clean string ID
+          machineCode: { $first: '$machineCode' },
+          lastIssueDate: { $max: '$createdAt' },
+          logs: {
+            $push: {
+              _id: '$_id',
+              materialCode: '$materialCode',
+              materialName: '$materialName',
+              quantityIssued: '$quantityIssued',
+              unit: '$unit',
+              issuedTo: '$issuedTo',
+              issuedToName: { $ifNull: ['$issuerData.fullName', '$issuerData.username'] },
+              createdAt: '$createdAt'
+            }
+          }
+        }
+      },
+
+      // Step 4: Lookup the Production Order details to show at the wrapper level
+      {
+        $lookup: {
+          from: 'productionorders',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'order'
+        }
+      },
+      {
+        $unwind: { path: '$order', preserveNullAndEmptyArrays: true }
+      },
+
+      { $sort: { lastIssueDate: -1 } },
+
+      // Step 5: Pagination
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limit }]
+        }
+      }
+    ];
+
+    const results = await MaterialIssueLog.aggregate(pipeline);
+
+    const data = results[0].data;
+    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        totalPages,
+        limit
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching material issue logs:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// ── 1. GET PENDING REQUESTS (Store Dashboard) ──────────────────────────
+export const getPendingRequests = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+
+    // Find all active orders that have materials with 'Requested' status
+    const pendingOrders = await ProductionOrder.find({
+      company: companyId,
+      "materialDemands.status": "Requested"
+    }).select('orderId machineCode machineName materialDemands createdAt').sort({ createdAt: -1 });
+
+    // Filter to only return the demands that are actually requested
+    const filteredOrders = pendingOrders.map(order => ({
+      _id: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      machineName: order.machineName,
+      createdAt: order.createdAt,
+      pendingMaterials: order.materialDemands.filter(m => m.status === 'Requested')
+    })).filter(o => o.pendingMaterials.length > 0);
+
+    res.json({ success: true, data: filteredOrders });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── 2. TRANSFER MATERIAL TO PRODUCTION ───────────────────────────────
+export const transferMaterialToProduction = async (req, res) => {
+  try {
+    const { materialCode, quantityToTransfer } = req.body;
+    const orderId = req.params.id;
+    const companyId = req.user.companyId;
+    const transferQty = Number(quantityToTransfer);
+
+    if (!materialCode || !transferQty || transferQty <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid material code and quantity are required.' });
+    }
+
+    // 1. ATOMIC DEDUCTION (The Store Gatekeeper)
+    // Only deduct if we have enough stock. This prevents race conditions.
+    const item = await Item.findOneAndUpdate(
+      { code: materialCode, companyId: companyId, qty: { $gte: transferQty } },
+      { $inc: { qty: -transferQty } },
+      { new: true }
+    );
+
+    if (!item) {
+      return res.status(400).json({ success: false, message: 'Insufficient stock in Store for this transfer.' });
+    }
+
+    // 2. UPDATE ORDER
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
+
+    if (demandIndex === -1) {
+      // Rollback: Add stock back
+      await Item.findOneAndUpdate({ code: materialCode, companyId: companyId }, { $inc: { qty: transferQty } });
+      return res.status(404).json({ success: false, message: 'Material not requested on this order.' });
+    }
+
+    // Update quantities
+    order.materialDemands[demandIndex].transferredQuantity = (order.materialDemands[demandIndex].transferredQuantity || 0) + transferQty;
+    order.materialDemands[demandIndex].status = 'In Transit'; // Moves to Production's "Receive" list
+
+    await order.save();
+
+    // 3. LOG TRANSFER
+    await StoreTransferLog.create({
+      productionOrderId: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      materialCode: materialCode,
+      materialName: order.materialDemands[demandIndex].materialName,
+      quantityTransferred: transferQty,
+      unit: order.materialDemands[demandIndex].unit,
+      transferredBy: req.user._id,
+      company: companyId
+    });
+
+    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+
+export const getStoreTransferLogs = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+
+    // Step 1: Optimized Base match using compound index fields
+    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
+    if (search) {
+      matchStage.orderId = { $regex: search, $options: 'i' }; // 👈 Filters out non-matching logs immediately
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      { $sort: { createdAt: -1 } },
+
+      // Step 2: Lookup user details to get the name of who transferred it
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'transferredBy',
+          foreignField: '_id',
+          as: 'transferrerData'
+        }
+      },
+      {
+        $unwind: { path: '$transferrerData', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 3: Group logs into a Production Order wrapper structure
+      {
+        $group: {
+          _id: '$productionOrderId',
+          orderId: { $first: '$orderId' }, // Custom human-friendly ID
+          machineCode: { $first: '$machineCode' },
+          lastTransferDate: { $max: '$createdAt' }, // Track most recent transfer activity
+          logs: {
+            $push: {
+              _id: '$_id',
+              materialCode: '$materialCode',
+              materialName: '$materialName',
+              quantityTransferred: '$quantityTransferred',
+              unit: '$unit',
+              transferredBy: '$transferredBy',
+              transferredByName: { $ifNull: ['$transferrerData.fullName', '$transferrerData.username'] },
+              createdAt: '$createdAt'
+            }
+          }
+        }
+      },
+
+      // Step 4: Lookup Production Order collection metadata for safety fallback
+      {
+        $lookup: {
+          from: 'productionorders',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'order'
+        }
+      },
+      {
+        $unwind: { path: '$order', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 5: Sort order groupings chronologically by latest activity
+      { $sort: { lastTransferDate: -1 } },
+
+      // Step 6: Paginate results through a safe $facet block
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limit }]
+        }
+      }
+    ];
+
+    const results = await StoreTransferLog.aggregate(pipeline);
+
+    const data = results[0].data;
+    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        totalPages,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching store transfer logs:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// ── 3. GET RETURNED MATERIAL LOGS ────────────────────────────────────
+
+
+// ── Refactored: GET RETURNED MATERIAL LOGS (Grouped by Production Order Wrapper) ──
+export const getReturnedMaterials = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || '';
+
+    // Step 1: Base filtration match stage
+    const matchStage = { company: new mongoose.Types.ObjectId(companyId) };
+    if (search) {
+      matchStage.orderId = { $regex: search, $options: 'i' };
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      { $sort: { createdAt: -1 } },
+
+      // Step 2: Resolve the profile of the worker who initiated the return
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'returnedBy',
+          foreignField: '_id',
+          as: 'runnerData'
+        }
+      },
+      {
+        $unwind: { path: '$runnerData', preserveNullAndEmptyArrays: true }
+      },
+
+      // Step 3: Group the flat return log assets under a production wrapper line
+      {
+        $group: {
+          _id: '$productionOrderId',
+          orderId: { $first: '$orderId' },
+          machineCode: { $first: '$machineCode' },
+          lastReturnDate: { $max: '$createdAt' }, // Anchors sorting based on newest activity
+          logs: {
+            $push: {
+              _id: '$_id',
+              materialCode: '$materialCode',
+              materialName: '$materialName',
+              quantityReturned: '$quantityReturned',
+              unit: '$unit',
+              returnType: '$returnType',
+              status: '$status',
+              reason: '$reason',
+              returnedBy: '$returnedBy',
+              returnedByName: { $ifNull: ['$runnerData.fullName', '$runnerData.username'] },
+              createdAt: '$createdAt'
+            }
+          }
+        }
+      },
+
+      // Step 4: Safely cross-reference the core order registry to retrieve the machineName
+      {
+        $lookup: {
+          from: 'productionorders',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'productionOrder'
+        }
+      },
+      {
+        $unwind: { path: '$productionOrder', preserveNullAndEmptyArrays: true }
+      },
+
+      // Inject the machineName field directly onto our wrapper level object
+      {
+        $addFields: {
+          machineName: { $ifNull: ['$productionOrder.machineName', 'Unknown Machine'] }
+        }
+      },
+
+      // Step 5: Order the wrapper entities by their most recent log entry timestamp
+      { $sort: { lastReturnDate: -1 } },
+
+      // Step 6: Paginate aggregate groups using safe facet windows
+      {
+        $facet: {
+          metadata: [{ $count: 'total' }],
+          data: [{ $skip: skip }, { $limit: limit }]
+        }
+      }
+    ];
+
+    const results = await MaterialReturnLog.aggregate(pipeline);
+
+    const data = results[0].data;
+    const total = results[0].metadata[0] ? results[0].metadata[0].total : 0;
+    const totalPages = Math.ceil(total / limit);
+
+    res.json({
+      success: true,
+      data,
+      pagination: {
+        total,
+        page,
+        totalPages,
+        limit
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching returned material ledger groups:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// ── Refactored: GET PENDING RETURNS (Grouped by Production Order Wrapper) ──
+export const getPendingReturns = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+
+    // 1. Fetch all flat pending logs for this company
+    const logs = await MaterialReturnLog.find({
+      company: companyId,
+      status: 'Pending'
+    })
+      .populate('productionOrderId', 'orderId machineCode machineName')
+      .sort({ createdAt: -1 });
+
+    // 2. Reduce the flat records into an order-mapped object structure
+    const groupedOrdersMap = {};
+
+    logs.forEach((log) => {
+      // Guard clause in case a production order reference is broken or missing
+      if (!log.productionOrderId) return;
+
+      const pOrderId = log.productionOrderId._id.toString();
+
+      // If this parent production order isn't in our map yet, initialize its wrapper card
+      if (!groupedOrdersMap[pOrderId]) {
+        groupedOrdersMap[pOrderId] = {
+          _id: log.productionOrderId._id,
+          orderId: log.productionOrderId.orderId,
+          machineCode: log.productionOrderId.machineCode,
+          machineName: log.productionOrderId.machineName,
+          createdAt: log.createdAt, // Optional: tracking timing context
+          pendingMaterials: []      // Array holding the nested line-items
+        };
+      }
+
+      // Push the individual specific return log details into the nested materials layer
+      groupedOrdersMap[pOrderId].pendingMaterials.push({
+        logId: log._id, // Required to pass into req.body when clicking "Accept" or "Reject"
+        materialCode: log.materialCode,
+        materialName: log.materialName,
+        quantityReturned: log.quantityReturned,
+        unit: log.unit,
+        returnType: log.returnType || 'Excess', // 👈 Shows "Excess" vs "Defect" on the UI row
+        reason: log.reason || 'No reason provided'
+      });
+    });
+
+    // 3. Convert the mapped object values back into a standard array for frontend mapping
+    const structuredResult = Object.values(groupedOrdersMap);
+
+    res.json({
+      success: true,
+      data: structuredResult
+    });
+
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── 5. CONFIRM RETURN (Accept or Reject) ─────────────────────────────
+export const confirmReturn = async (req, res) => {
+  try {
+    const { logId, action } = req.body; // action: 'Accept' or 'Reject'
+    const companyId = req.user.companyId;
+
+    const log = await MaterialReturnLog.findById(logId);
+    if (!log || log.status !== 'Pending') {
+      return res.status(400).json({ success: false, message: 'Invalid or already processed return.' });
+    }
+
+    const order = await ProductionOrder.findById(log.productionOrderId);
+    const demand = order.materialDemands.find(m => m.materialCode === log.materialCode);
+
+    if (!demand) {
+      return res.status(404).json({ success: false, message: 'Material demand entry missing from referenced order.' });
+    }
+
+    if (action === 'Accept') {
+      // A. Update Master Inventory (The warehouse claims physical custody back)
+      await Item.findOneAndUpdate(
+        { code: log.materialCode, companyId: companyId },
+        { $inc: { qty: log.quantityReturned } }
+      );
+
+      // B. Release the reservation lock
+      demand.returnPendingQuantity = Math.max(0, (demand.returnPendingQuantity || 0) - log.quantityReturned);
+
+      // C. Deduct balances from manufacturing counts
+      demand.issuedQuantity = Math.max(0, (demand.issuedQuantity || 0) - log.quantityReturned);
+      demand.transferredQuantity = Math.max(0, (demand.transferredQuantity || 0) - log.quantityReturned);
+
+      // D. 🚨 AUTOMATED FEEDBACK LOOP
+      // If it's an Excess return after an R&D drop, issuedQuantity will match the new quantity -> 'Issued'
+      // If it's a Defect return, issuedQuantity drops below the required quantity -> switches to 'Requested'
+      if (demand.issuedQuantity >= demand.quantity) {
+        demand.status = 'Issued';
+      } else {
+        demand.status = 'Requested';
+        order.materialIssued = false; // Toggle order validation lock back off
+      }
+
+      log.status = 'Accepted';
+    }
+    else if (action === 'Reject') {
+      // Release reservation lock; items stay in production custody
+      demand.returnPendingQuantity = Math.max(0, (demand.returnPendingQuantity || 0) - log.quantityReturned);
+      log.status = 'Rejected';
+    }
+    else {
+      return res.status(400).json({ success: false, message: 'Invalid action.' });
+    }
+
+    await order.save();
+    await log.save();
+
+    res.json({ success: true, message: `Return processed as ${action}ed successfully.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };

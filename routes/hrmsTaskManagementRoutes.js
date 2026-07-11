@@ -2,6 +2,7 @@ import express from "express";
 import { taskUpload } from "../middleware/taskUpload.js";
 import { authenticateToken, authorizeRoles } from "../middleware/auth.js";
 
+// Import standard task controllers
 import {
   createTask,
   getAllTasks,
@@ -11,6 +12,22 @@ import {
   addComment,
   getTaskById
 } from "../controllers/hrmsTaskManagement.js";
+
+// 🔥 Import report controllers
+import {
+  getEmployeePerformance,
+  getOverdueTasks,
+  getTaskTypeEfficiency,
+  getProductivityTrends,
+  exportEmployeeReportExcel,
+  exportEmployeeReportPDF,
+  exportOverdueReportExcel,
+  exportOverdueReportPDF,
+  exportTaskTypeEfficiencyExcel,
+  exportTaskTypeEfficiencyPDF,
+  exportProductivityExcel,
+  exportProductivityPDF
+} from "../controllers/TaskReportController.js";
 
 const router = express.Router();
 
@@ -30,7 +47,7 @@ router.use(authenticateToken);
 // Both Top Admins and Dept Heads need to be able to create tasks
 router.post("/create", authorizeRoles(...TOP_ADMINS, ...DEPT_HEADS), taskUpload.single("file"), createTask);
 
-// Only Top Admins should be allowed to completely delete a task
+// Only Top Admins and Dept Heads should be allowed to delete a task
 router.delete("/delete/:taskId", authorizeRoles(...TOP_ADMINS, ...DEPT_HEADS), deleteTask);
 
 
@@ -42,5 +59,32 @@ router.get("/dashboard", getDashboardStats);
 router.get("/task/:taskId", getTaskById);
 router.put("/update/:taskId", updateTask);
 router.post("/comment/:taskId", addComment);
+
+
+// --- 5. 📊 REPORT & EXPORT ROUTES (Protected by the Controller) ---
+// These rely on the `buildReportQuery` gatekeeper inside `reportController.js` to block standard employees 
+// and apply the correct Department locks for Dept Heads vs Top Admins.
+
+// JSON Data Endpoints (For UI Dashboards/Charts)
+router.get("/reports/employee-wise", getEmployeePerformance);
+router.get("/reports/overdue", getOverdueTasks);
+router.get("/reports/task-efficiency", getTaskTypeEfficiency);
+router.get("/reports/productivity", getProductivityTrends);
+
+// File Export Endpoints - Employee Performance
+router.get("/reports/export/employee-wise/excel", exportEmployeeReportExcel);
+router.get("/reports/export/employee-wise/pdf", exportEmployeeReportPDF);
+
+// File Export Endpoints - Overdue Report
+router.get("/reports/export/overdue/excel", exportOverdueReportExcel);
+router.get("/reports/export/overdue/pdf", exportOverdueReportPDF);
+
+// File Export Endpoints - Task Type Efficiency
+router.get("/reports/export/task-efficiency/excel", exportTaskTypeEfficiencyExcel);
+router.get("/reports/export/task-efficiency/pdf", exportTaskTypeEfficiencyPDF);
+
+// File Export Endpoints - Productivity
+router.get("/reports/export/productivity/excel", exportProductivityExcel);
+router.get("/reports/export/productivity/pdf", exportProductivityPDF);
 
 export default router;

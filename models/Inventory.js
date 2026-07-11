@@ -20,17 +20,6 @@ const itemSchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true,
-    enum: [
-      'Purchase Machine',
-      'Manufacturing Machine',
-      'Raw Material',
-      'Tool',
-      'Asset',
-      'Sheet Metal Material (Job Work)',
-      'Machining Material (Job Work)',
-      'Child Part Material (Sub-Assembly Parts)',
-      'Assembly Material (Bought-Out Fitting Items)'
-    ]
   },
   subCategory: {
     type: String,
