@@ -835,18 +835,19 @@ const verifyServiceOrder = async (req, res) => {
     // 🔔 Notifications after verification
     try {
       if (status === 'verified' || status === 'Confirm') {
-        // ✅ Only notify Store team — they will check inventory & decide further routing
-        await notificationService.triggerStoreNotification({
-          action: 'new_order_for_store',
-          data: {
-            orderCode: order.orderCode,
-            orderId: order._id,
-            customerName: order.customer?.name || '',
-            message: 'Deal verified. Please check inventory and order type to proceed.',
-          },
-          targetUnit: order.unit,
-          targetCompanyId: order.companyId,
-        });
+        // ✅ Store is NOT notified here — it gets notified when the Order Form is
+        // submitted (see orderFormController.upsertOrderForm), because the item
+        // reaches Store only after the form is filled.
+        // Notify the salesperson to fill the Order Form now.
+        if (order.salesPerson) {
+          await notificationService.createNotification({
+            title: 'Deal Verified - Fill Order Form',
+            message: `Order ${order.orderCode} has been verified. Please fill the Sales Order Form to send it to Store.`,
+            type: 'lead', icon: 'check-circle', priority: 'high',
+            targetUserId: order.salesPerson,
+            data: { leadId: order.leadId?._id || order.leadId, orderCode: order.orderCode },
+          });
+        }
       } else {
         // ❌ Notify Sales Head that deal was rejected by service
         await notificationService.triggerSalesNotification({

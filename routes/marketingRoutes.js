@@ -6,6 +6,10 @@ import {
   getCategories, createCategory, updateCategory, deleteCategory,
   getReports, getAuditLogs, getNotifications,
 } from '../controllers/marketingController.js';
+import {
+  createRequest, getMyRequests, getAllRequests,
+  getMatchingAssets, approveRequest, rejectRequest,
+} from '../controllers/marketingRequestController.js';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -26,6 +30,14 @@ router.get('/categories', getCategories);
 router.post('/categories', createCategory);
 router.put('/categories/:id', updateCategory);
 router.delete('/categories/:id', deleteCategory);
+
+// Content Requests (Sales ↔ Marketing)
+router.post('/requests', createRequest);
+router.get('/requests/my', getMyRequests);
+router.get('/requests', getAllRequests);
+router.get('/requests/:id/matching-assets', getMatchingAssets);
+router.post('/requests/:id/approve', approveRequest);
+router.post('/requests/:id/reject', rejectRequest);
 
 // Reports, Audit, Notifications
 router.get('/reports', getReports);

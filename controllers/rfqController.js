@@ -299,8 +299,11 @@ export const createRFQ = async (req, res) => {
       pr.purchaseUnitType = inventoryItem?.purchaseUnitType || pr.purchaseUnitType || null;
       await pr.save();
     }
+    // Vendor sees the Purchase Unit when defined; otherwise the item's Base Unit
     const rfqQuantity = (resolvedPurchaseQty && resolvedPurchaseUnit) ? resolvedPurchaseQty : pr.quantity;
-    const rfqQuantityUnit = (resolvedPurchaseQty && resolvedPurchaseUnit) ? resolvedPurchaseUnit : (inventoryItem?.unit || null);
+    const rfqQuantityUnit = (resolvedPurchaseQty && resolvedPurchaseUnit)
+      ? resolvedPurchaseUnit
+      : (inventoryItem?.unit || pr.unit || null);
 
     // 6. Create RFQ
     const rfqNo = await generateRFQNo();
@@ -619,7 +622,7 @@ export const getBidByToken = async (req, res) => {
   try {
     const bid = await VendorBid.findOne({ bidToken: req.params.token })
       .populate('vendor', 'supplierName email phone')
-      .populate('rfq', 'rfqNo productName quantity requiredByDate notes status');
+      .populate('rfq', 'rfqNo productName quantity quantityUnit requiredByDate notes status');
 
     if (!bid) {
       return res.status(404).json({ success: false, message: 'Invalid or expired bid link' });
@@ -646,6 +649,7 @@ export const getBidByToken = async (req, res) => {
         rfqNo: bid.rfq.rfqNo,
         productName: bid.productName,
         quantity: bid.quantity,
+        quantityUnit: bid.rfq.quantityUnit || null,
         requiredByDate: bid.rfq.requiredByDate,
         notes: bid.rfq.notes,
         vendorName: bid.vendor.supplierName,
