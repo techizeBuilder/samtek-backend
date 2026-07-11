@@ -1051,9 +1051,13 @@ const getOrderTracking = async (req, res) => {
 
     // 🔄 NEW: Also fetch Orders with status='pending_service_approval' (from Lead-to-Order flow),
     // 'pending', and 'approved' (service-verified orders that have NO Sale/Invoice yet)
-    const orderQuery = { 
-      ...query, 
-      status: { $in: ['pending_service_approval', 'pending', 'approved'] }
+    // 📝 GATE: Store cannot see an order until its Sales Order Form has been submitted
+    // (see OrderForm model / orderFormController.js) — orderFormCompleted flips back to
+    // false if Accounts returns the form to the salesperson for correction.
+    const orderQuery = {
+      ...query,
+      status: { $in: ['pending_service_approval', 'pending', 'approved'] },
+      orderFormCompleted: true
     };
     const pendingOrders = await Order.find(orderQuery)
       .populate('customer', 'name mobile outstandingAmount')
@@ -1199,6 +1203,15 @@ const updateOrderStoreInfo = async (req, res) => {
     const order = await Order.findById(orderId).populate('customer').populate('products.product');
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    // 📝 GATE: defense-in-depth against stale frontend cache / direct API calls —
+    // getOrderTracking already excludes these from the list, this blocks the action too.
+    if (!order.orderFormCompleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'This order cannot be processed by Store until the Sales Order Form has been submitted.'
+      });
     }
 
     // 🔄 NEW UNIFIED FLOW: Check if Sale exists, if not create temp Sale for consistency
@@ -2089,9 +2102,21 @@ const getDealVerifications = async (req, res) => {
 
     const totalPages = Math.ceil(totalOrders / limitNum);
 
+    // 📝 Stamp Order Form status (Not Filled / Submitted / Returned) onto each order,
+    // same batched-lookup pattern used for Lead.hasQuotation in leadController.getLeads.
+    const OrderForm = (await import('../models/OrderForm.js')).default;
+    const forms = await OrderForm.find({ orderId: { $in: dealOrders.map(o => o._id) } })
+      .select('orderId status')
+      .lean();
+    const formStatusMap = new Map(forms.map(f => [f.orderId.toString(), f.status]));
+    const ordersWithFormStatus = dealOrders.map(o => ({
+      ...o.toObject(),
+      orderFormStatus: formStatusMap.get(o._id.toString()) || null
+    }));
+
     return res.json({
       success: true,
-      orders: dealOrders,
+      orders: ordersWithFormStatus,
       pagination: {
         currentPage: pageNum,
         totalPages,

@@ -103,6 +103,27 @@ const companySchema = new mongoose.Schema({
     trim: true,
     default: null
   },
+  // 6-digit password set by the Company Admin, required as the first factor
+  // before an Accounts user can view a customer's Cash Amount. Stored AES
+  // encrypted (not hashed) so the Company Admin can view it back — see
+  // utils/cashCrypto.js. select:false so it's never returned by default.
+  cashPasswordEnc: {
+    type: String,
+    default: null,
+    select: false
+  },
+  // Social / contact links — multiple entries allowed, each has a type and value
+  socialLinks: [
+    {
+      type: {
+        type: String,
+        enum: ['website', 'email', 'facebook', 'instagram', 'linkedin', 'twitter', 'youtube', 'other'],
+        required: true
+      },
+      label: { type: String, trim: true },  // optional custom label
+      url: { type: String, trim: true, required: true }
+    }
+  ],
   isActive: {
     type: Boolean,
     default: true

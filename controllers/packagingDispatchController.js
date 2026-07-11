@@ -2,6 +2,7 @@ import PackagingJob from '../models/PackagingJob.js';
 import DispatchOrder from '../models/DispatchOrder.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import QCJob from '../models/QCJob.js';
+import AdminSettings from '../models/AdminSettings.js';
 import notificationService from '../services/notificationService.js';
 import Sale from '../models/Sale.js';
 
@@ -607,18 +608,14 @@ export const startPacking = async (req, res) => {
 
 export const updateChecklist = async (req, res) => {
   try {
-    const { allPartsIncluded, accessoriesIncluded, manualIncluded, safetyPackingCompleted } = req.body;
-    const job = await PackagingJob.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      {
-        'checklist.allPartsIncluded': allPartsIncluded,
-        'checklist.accessoriesIncluded': accessoriesIncluded,
-        'checklist.manualIncluded': manualIncluded,
-        'checklist.safetyPackingCompleted': safetyPackingCompleted,
-      },
-      { new: true }
-    );
+    // Checklist items are admin-defined (Admin Settings > General > Dispatch > Manage
+    // Checklist), so keys are dynamic — merge whatever the client sends into the
+    // existing checklist object instead of destructuring fixed field names.
+    const job = await PackagingJob.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
+    job.checklist = { ...(job.checklist || {}), ...req.body };
+    job.markModified('checklist');
+    await job.save();
     res.json({ success: true, data: job });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -631,8 +628,10 @@ export const completePacking = async (req, res) => {
     const job = await PackagingJob.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
-    const cl = job.checklist;
-    const allDone = cl.allPartsIncluded && cl.accessoriesIncluded && cl.manualIncluded && cl.safetyPackingCompleted;
+    const settings = await AdminSettings.findOne({ companyId: req.user.companyId });
+    const checklistItems = settings?.dispatchChecklist || [];
+    const cl = job.checklist || {};
+    const allDone = checklistItems.every(item => cl[item._id.toString()]);
     if (!allDone) {
       return res.status(400).json({ success: false, message: 'All checklist items must be completed before marking packing as complete' });
     }

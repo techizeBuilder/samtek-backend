@@ -292,9 +292,17 @@ export const getLeads = async (req, res) => {
     const quotes = await Lead.find({ _id: { $in: leadIds }, quotation: { $exists: true, $ne: "" } }).select('_id');
     const quoteSet = new Set(quotes.map(q => q._id.toString()));
 
+    // Efficiently check Order Form status per lead (Not Filled / Submitted / Returned) —
+    // drives the "Fill Order Form" button on the Leads page. No field stored on Lead
+    // itself; computed here the same way hasQuotation is, to avoid a second source of truth.
+    const OrderForm = (await import('../models/OrderForm.js')).default;
+    const forms = await OrderForm.find({ leadId: { $in: leadIds } }).select('leadId status');
+    const formStatusMap = new Map(forms.map(f => [f.leadId.toString(), f.status]));
+
     const leads = leadsDocs.map(l => {
       const doc = l.toObject();
       doc.hasQuotation = quoteSet.has(doc._id.toString());
+      doc.orderFormStatus = formStatusMap.get(doc._id.toString()) || null;
       return doc;
     });
 
@@ -341,6 +349,13 @@ export const updateLead = async (req, res) => {
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
     const updates = req.body;
+
+    // Deal Won requires Accounts-verified payment (full or partial) — same rule as markLeadAsWon
+    const wantsWon = (updates.status === 'Won' && lead.status !== 'Won') ||
+                     (updates.stage === 'Deal Won' && lead.stage !== 'Deal Won');
+    if (wantsWon && lead.paymentCheckStatus !== 'Paid' && lead.paymentCheckStatus !== 'Partially Paid') {
+      return res.status(400).json({ success: false, message: 'Deal cannot be won until payment is verified by Accounts (partial payment is also accepted).' });
+    }
 
     // Log history if status changed
     if (updates.status && updates.status !== lead.status) {
@@ -505,14 +520,6 @@ export const markLeadAsWon = async (req, res) => {
     }
 
     const totalAmount = orderProducts.reduce((sum, p) => sum + (p.total || 0), 0);
-    const baseDealValue = lead.dealValue || totalAmount || 0;
-
-    // Use the actual quotation final amount (Net Amount from sent quotation PDF) for outstanding.
-    // This includes items + additional charges + GST as shown in the quotation.
-    // Fall back to dealValue * 1.18 only if no quotation final amount was saved.
-    const quotationNetAmount = lead.quotationFinalAmount || 0;
-    const outstandingBase = quotationNetAmount > 0 ? quotationNetAmount : Math.round(baseDealValue * 1.18);
-    console.log(`[Deal Won] Outstanding base: ₹${outstandingBase} (quotationFinalAmount: ₹${quotationNetAmount}, dealValue fallback: ₹${Math.round(baseDealValue * 1.18)})`);
 
     let customer = await Customer.findOne({
       companyId: companyId,
@@ -537,14 +544,16 @@ export const markLeadAsWon = async (req, res) => {
         salesContact: salesPersonId,
         active: 'Yes',
         advancePayment: lead.advancedPaymentAmount || 0,
-        // Outstanding = quotation Net Amount (already includes all charges + GST) - advance paid
-        outstandingAmount: Math.max(0, outstandingBase - (lead.advancedPaymentAmount || 0))
+        // Outstanding starts at 0 — it's populated once the salesperson
+        // submits the Sales Order Form (see orderFormController.js:
+        // upsertOrderForm), using the Order Form's Bill Amount minus this
+        // lead's advance payment, not the quotation amount.
+        outstandingAmount: 0
       });
       await customer.save();
     } else {
-      // Existing customer — add this deal's outstanding
-      const newDealOutstanding = Math.max(0, outstandingBase - (lead.advancedPaymentAmount || 0));
-      customer.outstandingAmount = (customer.outstandingAmount || 0) + newDealOutstanding;
+      // Existing customer — advance payment is still tracked at Deal Won time;
+      // Outstanding itself is populated later, at Order Form submission.
       if (lead.advancedPaymentAmount > 0) {
         customer.advancePayment = (customer.advancePayment || 0) + lead.advancedPaymentAmount;
       }

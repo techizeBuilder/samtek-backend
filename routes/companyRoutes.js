@@ -66,6 +66,63 @@ router.put('/:id/stamp', stampUpload.single('stamp'), async (req, res) => {
   }
 });
 
+// Cash Password — 6-digit, AES-encrypted (reversible so the Company Admin can
+// view it back), one per company. Required first factor before Accounts can
+// view a customer's Cash Amount (see cashAccessController.js). Only that
+// company's own Company Admin (or Superadmin) may set/view it.
+const assertCashPasswordAccess = (req, res) => {
+  const isSuperadmin = req.user.role === 'Superadmin' || req.user.role === 'Super Admin';
+  if (!isSuperadmin && req.user.companyId?.toString() !== req.params.id) {
+    res.status(403).json({ success: false, message: 'Access denied.' });
+    return false;
+  }
+  if (!isSuperadmin && req.user.role !== 'Company Admin') {
+    res.status(403).json({ success: false, message: 'Only the Company Admin can manage the Cash Password.' });
+    return false;
+  }
+  return true;
+};
+
+router.put('/:id/cash-password', async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!/^\d{6}$/.test(password || '')) {
+      return res.status(400).json({ success: false, message: 'Cash Password must be exactly 6 digits.' });
+    }
+    if (!assertCashPasswordAccess(req, res)) return;
+
+    const { Company } = await import('../models/Company.js');
+    const { encryptCashPassword } = await import('../utils/cashCrypto.js');
+    const company = await Company.findByIdAndUpdate(
+      req.params.id,
+      { cashPasswordEnc: encryptCashPassword(password) },
+      { new: true }
+    );
+    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    res.json({ success: true, message: 'Cash Password saved successfully' });
+  } catch (err) {
+    console.error('Cash Password save error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/:id/cash-password', async (req, res) => {
+  try {
+    if (!assertCashPasswordAccess(req, res)) return;
+
+    const { Company } = await import('../models/Company.js');
+    const { decryptCashPassword } = await import('../utils/cashCrypto.js');
+    const company = await Company.findById(req.params.id).select('+cashPasswordEnc');
+    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+
+    const password = decryptCashPassword(company.cashPasswordEnc);
+    res.json({ success: true, isSet: !!password, password: password || null });
+  } catch (err) {
+    console.error('Cash Password fetch error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Company routes
 router.get('/dropdown', getCompaniesDropdown);
 router.get('/stats', getCompanyStats);

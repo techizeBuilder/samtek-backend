@@ -207,6 +207,13 @@ const orderSchema = new mongoose.Schema({
       backupGenerator: { checked: false, value: '', verified: false },
       operatorErrorClause: { checked: false, verified: false }
     }
+  },
+  // 📝 ORDER FORM GATE — Store cannot see/act on this order until the sales
+  // Order Form (OrderForm model) has been submitted for it. Flipped false again
+  // if Accounts returns the form to the salesperson for correction.
+  orderFormCompleted: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true
@@ -220,6 +227,7 @@ orderSchema.index({ unit: 1 });
 orderSchema.index({ orderDate: -1 });
 orderSchema.index({ status: 1 });
 orderSchema.index({ priority: 1 });
+orderSchema.index({ orderFormCompleted: 1 });
 
 // Update status history when status changes
 orderSchema.pre('save', async function () {

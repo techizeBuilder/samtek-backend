@@ -10,6 +10,9 @@ import {
   termsCrud,
   chargesCrud,
   notesCrud,
+  dispatchChecklistCrud,
+  leadRejectReasonsCrud,
+  quotationNumberSettingsCrud,
 } from '../controllers/adminSettingsController.js';
 
 const router = express.Router();
@@ -48,6 +51,12 @@ router.post('/document-types', documentTypesCrud.add);
 router.put('/document-types/:id', documentTypesCrud.update);
 router.delete('/document-types/:id', documentTypesCrud.remove);
 
+// ─── Lead Reject Reasons ──────────────────────────────────────────────────────
+router.get('/lead-reject-reasons', leadRejectReasonsCrud.list);
+router.post('/lead-reject-reasons', leadRejectReasonsCrud.add);
+router.put('/lead-reject-reasons/:id', leadRejectReasonsCrud.update);
+router.delete('/lead-reject-reasons/:id', leadRejectReasonsCrud.remove);
+
 // ─── Terms & Conditions ───────────────────────────────────────────────────────
 router.get('/terms', termsCrud.list);
 router.post('/terms', termsCrud.add);
@@ -65,5 +74,17 @@ router.get('/notes', notesCrud.list);
 router.post('/notes', notesCrud.add);
 router.put('/notes/:id', notesCrud.update);
 router.delete('/notes/:id', notesCrud.remove);
+
+// ─── Dispatch Checklist ───────────────────────────────────────────────────────
+router.get('/dispatch-checklist', dispatchChecklistCrud.list);
+router.post('/dispatch-checklist', dispatchChecklistCrud.add);
+router.put('/dispatch-checklist/:id', dispatchChecklistCrud.update);
+router.delete('/dispatch-checklist/:id', dispatchChecklistCrud.remove);
+
+// ─── Quotation Number Settings ────────────────────────────────────────────────
+router.get('/quotation-number-settings', quotationNumberSettingsCrud.list);
+router.post('/quotation-number-settings', quotationNumberSettingsCrud.add);
+router.put('/quotation-number-settings/:id', quotationNumberSettingsCrud.update);
+router.delete('/quotation-number-settings/:id', quotationNumberSettingsCrud.remove);
 
 export default router;

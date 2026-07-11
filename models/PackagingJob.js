@@ -1,12 +1,5 @@
 import mongoose from 'mongoose';
 
-const ChecklistSchema = new mongoose.Schema({
-  allPartsIncluded: { type: Boolean, default: false },
-  accessoriesIncluded: { type: Boolean, default: false },
-  manualIncluded: { type: Boolean, default: false },
-  safetyPackingCompleted: { type: Boolean, default: false },
-}, { _id: false });
-
 const PackagingJobSchema = new mongoose.Schema({
   jobId: { type: String },  // uniqueness enforced via compound index: { company, jobId }
   productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', required: false },
@@ -20,7 +13,9 @@ const PackagingJobSchema = new mongoose.Schema({
     enum: ['Wooden Packing', 'Bubble Wrap', 'Loose Dispatch'],
     default: 'Wooden Packing',
   },
-  checklist: { type: ChecklistSchema, default: () => ({}) },
+  // Keyed by the admin-defined dispatch checklist item's _id (from AdminSettings.dispatchChecklist)
+  // → Boolean, so checklist items can be added/edited/removed from Admin Settings freely.
+  checklist: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
   packingStartTime: { type: String, default: null },
   packingCompleteTime: { type: String, default: null },
   photoProofUrl: { type: String, default: '' },

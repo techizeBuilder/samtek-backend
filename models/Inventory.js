@@ -100,6 +100,14 @@ const itemSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  purchaseUnitType: {
+    type: String,
+    trim: true
+  },
+  purchaseUnit: {
+    type: String,
+    trim: true
+  },
   description: {
     type: String,
     trim: true

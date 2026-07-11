@@ -36,6 +36,11 @@ const leadSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // Snapshot of the last generated quotation's line items / additional charges
+  // (Quotation.jsx has no other backend persistence — see generatePDF/handlePrint/
+  // handleSendEmail). Used to auto-fill the Sales Order Form's item table.
+  quotationItems: { type: mongoose.Schema.Types.Mixed, default: [] },
+  quotationCharges: { type: mongoose.Schema.Types.Mixed, default: [] },
   productRequired: {
     type: String,
     required: true
