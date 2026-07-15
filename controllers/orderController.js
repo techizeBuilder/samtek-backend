@@ -1899,12 +1899,16 @@ const getNOCRequests = async (req, res) => {
           machineCode: job.machineCode,
           serialNumber: job.serialNumber,
           invoiceType: sale.invoiceType || 'Pakka',
-          // Customer master financial fields
+          // Customer master reference fields (kept for info display)
           customerOutstanding,
           customerAdvance,
-          displayTotal: customerOutstanding + customerAdvance,
-          displayPaid: customerAdvance,
-          displayDue: Math.max(0, customerOutstanding - customerAdvance)
+          // ORDER-WISE display values — this NOC row belongs to ONE order, so
+          // Total/Paid/Due are that order's own figures (not customer-level):
+          // Total = order invoice total, Paid = advance + receipts against this
+          // order, Due = what's left on this order
+          displayTotal: effectiveTotalAmount,
+          displayPaid: effectivePaidAmount,
+          displayDue: effectiveBalance
         });
 
         // Mark this orderId as processed so duplicate Sale docs are skipped
@@ -1930,11 +1934,164 @@ const approveNOC = async (req, res) => {
 
     sale.gatePass = sale.gatePass || {};
     sale.gatePass.nocStatus = 'Approved';
+    sale.gatePass.nocApprovedAt = new Date();
     await sale.save();
 
     res.json({ success: true, message: 'NOC Approved successfully' });
   } catch (error) {
     console.error('Error in approveNOC:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Get full NOC details for the NOC Certificate PDF — order → store → production →
+// QC → packing flow timeline + customer-master financials. Fetched on-demand
+// only when the PDF is generated (no extra load on the NOC list API).
+const getNOCDetails = async (req, res) => {
+  try {
+    const { saleId } = req.params;
+    const Sale = (await import('../models/Sale.js')).default;
+    const PackagingJob = (await import('../models/PackagingJob.js')).default;
+    const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
+    const QCJob = (await import('../models/QCJob.js')).default;
+    const Customer = (await import('../models/Customer.js')).default;
+
+    const sale = await Sale.findOne({ _id: saleId, companyId: req.user.companyId })
+      .populate({ path: 'order', populate: { path: 'customer' } });
+    if (!sale || !sale.order) return res.status(404).json({ success: false, message: 'Sale/Order not found' });
+
+    const order = sale.order;
+
+    // Packaging job (same matching logic as the NOC list)
+    let job = await PackagingJob.findOne({
+      $or: [{ orderId: order.orderCode }, { saleId: sale._id }],
+      status: { $in: ['Packed', 'Dispatched'] },
+      company: req.user.companyId
+    }).populate('qcJobId').populate('productionOrderId');
+
+    // Production order — via packaging job link or direct sale link
+    let prodOrder = job?.productionOrderId || null;
+    if (!prodOrder) {
+      prodOrder = await ProductionOrder.findOne({ saleId: sale._id, company: req.user.companyId })
+        .sort({ createdAt: -1 }).lean();
+      if (!job && prodOrder) {
+        job = await PackagingJob.findOne({
+          productionOrderId: prodOrder._id,
+          status: { $in: ['Packed', 'Dispatched'] },
+          company: req.user.companyId
+        }).populate('qcJobId');
+      }
+    }
+
+    // QC job — via packaging job link, sale link, or production order ref
+    let qcJob = job?.qcJobId || null;
+    if (!qcJob) {
+      const qcFilters = [{ saleId: sale._id }];
+      if (prodOrder?.orderId) qcFilters.push({ source: 'Production', sourceRefId: prodOrder.orderId });
+      qcJob = await QCJob.findOne({ $or: qcFilters, company: req.user.companyId })
+        .sort({ createdAt: -1 }).lean();
+    }
+
+    // Order approval date from statusHistory (fallback: sale createdAt = store received)
+    const approvedHist = (order.statusHistory || []).find(h =>
+      String(h.status || '').toLowerCase().includes('approve'));
+
+    // Some legacy fields hold non-date strings (e.g. "14:30") — pick the first parseable date
+    const validDate = (...cands) => cands.find(d => d && !isNaN(new Date(d).getTime())) || null;
+
+    // ── Item flow timeline (order → store → production → QC → packing → NOC) ──
+    const timeline = [
+      {
+        step: 'Order Received',
+        date: order.createdAt,
+        detail: `Order ${order.orderCode} placed${order.customer?.name ? ` by ${order.customer.name}` : ''}`
+      },
+      {
+        step: 'Approved & Sent to Store',
+        date: approvedHist?.updatedAt || sale.createdAt,
+        detail: 'Order approved and forwarded to Store for processing'
+      },
+      prodOrder && {
+        step: 'Production Started',
+        date: prodOrder.createdAt,
+        detail: `Production order ${prodOrder.orderId || ''} created${prodOrder.machineName ? ` for ${prodOrder.machineName}` : ''}`
+      },
+      prodOrder && prodOrder.status === 'Completed' && {
+        step: 'Production Completed',
+        date: prodOrder.updatedAt,
+        detail: 'All production processes completed'
+      },
+      qcJob && {
+        step: 'QC Approved',
+        date: qcJob.status === 'Approved' ? validDate(qcJob.inspectionEndDate, qcJob.updatedAt) : null,
+        detail: qcJob.status === 'Approved'
+          ? `Quality check passed${qcJob.inspector ? ` (Inspector: ${qcJob.inspector})` : ''} — ${qcJob.qcJobId || ''}`
+          : `QC status: ${qcJob.status}`
+      },
+      job && {
+        step: 'Packed / Ready for Dispatch',
+        date: validDate(job.packingCompleteTime, job.updatedAt),
+        detail: `Packing completed (${job.packingType || 'Standard'})${job.serialNumber ? ` — SN: ${job.serialNumber}` : ''}`
+      },
+      sale.gatePass?.nocStatus === 'Approved' && {
+        step: 'NOC Approved by Accounts',
+        date: sale.gatePass?.nocApprovedAt || null,
+        detail: 'Accounts team issued No Objection for dispatch'
+      },
+      sale.gatePass?.status === 'Generated' && {
+        step: 'Gate Pass Generated',
+        date: sale.gatePass?.generatedAt || null,
+        detail: `Vehicle: ${sale.gatePass?.vehicleNumber || 'N/A'}, Driver: ${sale.gatePass?.driverName || 'N/A'}`
+      }
+    ].filter(Boolean);
+
+    // Customer master reference fields (info only)
+    const custMaster = order.customer?._id
+      ? await Customer.findById(order.customer._id).select('outstandingAmount advancePayment address city state').lean()
+      : null;
+    const customerOutstanding = custMaster?.outstandingAmount || 0;
+    const customerAdvance = custMaster?.advancePayment || 0;
+
+    // ORDER-WISE financials — the NOC belongs to this one order
+    const LeadPayment = (await import('../models/LeadPayment.js')).default;
+    let orderAdvance = sale.advancedPaymentAmount || 0;
+    if (!orderAdvance && order.leadId) {
+      const lps = await LeadPayment.find({ leadId: order.leadId, status: 'Verified', companyId: req.user.companyId })
+        .select('amount').lean();
+      orderAdvance = lps.reduce((s, p) => s + (p.amount || 0), 0);
+    }
+    const orderTotal = (sale.totalAmount && sale.totalAmount > 0)
+      ? sale.totalAmount
+      : Math.round((order.totalAmount || 0) * 1.18);
+    const orderPaid = (sale.paidAmount || 0) + orderAdvance;
+    const orderDue = Math.max(0, orderTotal - orderPaid);
+
+    res.json({
+      success: true,
+      data: {
+        orderCode: order.orderCode,
+        orderDate: order.createdAt,
+        customerName: order.customer?.name || 'N/A',
+        customerMobile: order.customer?.mobile || 'N/A',
+        customerEmail: order.customer?.email || '',
+        customerAddress: [custMaster?.address, custMaster?.city, custMaster?.state].filter(Boolean).join(', '),
+        machineName: job?.machineName || prodOrder?.machineName || 'N/A',
+        machineCode: job?.machineCode || prodOrder?.machineCode || 'N/A',
+        serialNumber: job?.serialNumber || 'N/A',
+        invoiceType: sale.invoiceType || 'Pakka',
+        nocStatus: sale.gatePass?.nocStatus || 'Pending',
+        nocApprovedAt: sale.gatePass?.nocApprovedAt || null,
+        timeline,
+        customerOutstanding,
+        customerAdvance,
+        // Order-wise: this order's own Total / Paid (advance + receipts) / Due
+        displayTotal: orderTotal,
+        displayPaid: orderPaid,
+        displayDue: orderDue
+      }
+    });
+  } catch (error) {
+    console.error('Error in getNOCDetails:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -2092,7 +2249,7 @@ const getDealVerifications = async (req, res) => {
     const [dealOrders, totalOrders] = await Promise.all([
       Order.find(filter)
         .populate('customer', 'name email mobile address city state contactPerson category')
-        .populate('products.product', 'name salePrice purchaseCost mrp brand category subCategory image')
+        .populate('products.product', 'name salePrice purchaseCost mrp brand category subCategory image warranty')
         .populate('salesPerson', 'username fullName email role companyId')
         .populate('leadId', 'leadCode dealValue')
         .sort(sort)
@@ -2240,6 +2397,7 @@ export {
   approveSaleOrder,
   getNOCRequests,
   approveNOC,
+  getNOCDetails,
   checkInventoryForItem,
   getDealVerifications,
   repairStoreQCStatus,

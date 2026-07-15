@@ -13,6 +13,7 @@ import {
   dispatchChecklistCrud,
   leadRejectReasonsCrud,
   quotationNumberSettingsCrud,
+  hrmsDocumentTypesCrud,
 } from '../controllers/adminSettingsController.js';
 
 const router = express.Router();
@@ -86,5 +87,11 @@ router.get('/quotation-number-settings', quotationNumberSettingsCrud.list);
 router.post('/quotation-number-settings', quotationNumberSettingsCrud.add);
 router.put('/quotation-number-settings/:id', quotationNumberSettingsCrud.update);
 router.delete('/quotation-number-settings/:id', quotationNumberSettingsCrud.remove);
+
+// ─── HRMS: Upload Document Settings ───────────────────────────────────────────
+router.get('/hrms-document-types', hrmsDocumentTypesCrud.list);
+router.post('/hrms-document-types', hrmsDocumentTypesCrud.add);
+router.put('/hrms-document-types/:id', hrmsDocumentTypesCrud.update);
+router.delete('/hrms-document-types/:id', hrmsDocumentTypesCrud.remove);
 
 export default router;

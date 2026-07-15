@@ -1,5 +1,10 @@
 import mongoose from 'mongoose';
 
+const TechnicianSchema = new mongoose.Schema({
+  technicianId: { type: String, default: '' },
+  technicianName: { type: String, default: '' }
+}, { _id: false });
+
 const DispatchOrderSchema = new mongoose.Schema({
   dispatchId: { type: String },  // uniqueness enforced via compound index: { company, dispatchId }
   packagingJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'PackagingJob', required: true },
@@ -68,7 +73,11 @@ const DispatchOrderSchema = new mongoose.Schema({
   installation: {
     status: { type: String, enum: ['Pending', 'Scheduled', 'Completed'], default: 'Pending' },
     scheduledDate: { type: Date },
+    // Comma-joined names, kept for backward compatibility with older records
+    // and any code that still reads a single technician string.
     technicianName: { type: String, default: '' },
+    // Multiple technicians can now be assigned to one installation.
+    technicians: { type: [TechnicianSchema], default: [] },
     remarks: { type: String, default: '' }
   },
   feedback: {

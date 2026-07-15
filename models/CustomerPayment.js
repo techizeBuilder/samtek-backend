@@ -6,6 +6,17 @@ const customerPaymentSchema = new mongoose.Schema({
         ref: 'Customer',
         required: true
     },
+    // Order-wise payment tracking — which order this receipt is against.
+    // null = general/unallocated receipt (FIFO across all invoices)
+    order: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Order',
+        default: null
+    },
+    orderCode: {
+        type: String,
+        default: ''
+    },
     paymentDate: {
         type: Date,
         required: true,

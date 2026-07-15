@@ -727,7 +727,7 @@ export const createDispatchOrder = async (req, res) => {
       packagingJobId, orderId, machineCode, machineName, serialNumber,
       customerName, customerContact, deliveryAddress,
       transportType, plannedDispatchDate, expectedDeliveryDate,
-      invoiceNumber, packingListNotes, notes,
+      packingListNotes, notes,
     } = req.body;
 
     if (!packagingJobId || !orderId) {
@@ -737,6 +737,29 @@ export const createDispatchOrder = async (req, res) => {
     // Verify packaging job is in Packed state
     const job = await PackagingJob.findOne({ _id: packagingJobId, company: req.user.companyId, status: 'Packed' });
     if (!job) return res.status(400).json({ success: false, message: 'Packaging job not found or not yet Packed' });
+
+    // No dispatch without an invoice: job.orderId holds the sales orderCode —
+    // resolve it to an Order and require at least one Sale (Pakka or Kachha)
+    // already generated. The invoice number is taken from that Sale, never
+    // trusted from the client, so it can't be typed in manually.
+    const Order = (await import('../models/Order.js')).default;
+    let resolvedInvoiceNumber = '';
+    if (job.orderId) {
+      const linkedOrder = await Order.findOne({ orderCode: job.orderId, companyId: req.user.companyId }).select('_id').lean();
+      if (linkedOrder) {
+        const linkedSale = await Sale.findOne({ order: linkedOrder._id, companyId: req.user.companyId })
+          .sort({ createdAt: -1 })
+          .select('invoiceNumber')
+          .lean();
+        resolvedInvoiceNumber = linkedSale?.invoiceNumber || '';
+      }
+    }
+    if (!resolvedInvoiceNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invoice not generated for this order. Accounts must generate the invoice (Pakka/Kachha) before dispatch can be planned.'
+      });
+    }
 
     const dispatchId = await generateDispatchId(req.user.companyId);
     const trackingId = generateTrackingId();
@@ -757,7 +780,7 @@ export const createDispatchOrder = async (req, res) => {
       plannedDispatchDate: plannedDispatchDate || null,
       expectedDeliveryDate: expectedDeliveryDate || null,
       trackingId,
-      invoiceNumber: invoiceNumber || '',
+      invoiceNumber: resolvedInvoiceNumber,
       packingListNotes: packingListNotes || '',
       notes: notes || '',
       company: req.user.companyId,

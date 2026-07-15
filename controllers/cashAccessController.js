@@ -81,7 +81,10 @@ export const verifyPassword = async (req, res) => {
       });
     } catch (e) {
       console.error('Failed to send Cash Access OTP email:', e);
-      return res.status(500).json({ success: false, message: 'Password verified, but the OTP email could not be sent. Please try again.' });
+      return res.status(500).json({
+        success: false,
+        message: `Password verified, but the OTP email could not be sent${e?.message ? ` (${e.message})` : ''}. Please try again.`
+      });
     }
 
     res.json({ success: true, requestId: request._id, message: `OTP sent to Company Admin (${admin.email})` });

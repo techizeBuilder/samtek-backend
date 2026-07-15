@@ -120,8 +120,10 @@ export const scheduleMeeting = async (req, res) => {
     const lead = await Lead.findOne({ _id: leadId, companyId: req.user.companyId });
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
-    // Check if meeting already exists for this lead — update it
-    let meeting = await Meeting.findOne({ leadId, companyId: req.user.companyId });
+    // Update the lead's PENDING meeting if one exists; Done meetings are
+    // history — once the last meeting is Done, a fresh one gets created.
+    // ($ne matches legacy meetings that predate the status field too)
+    let meeting = await Meeting.findOne({ leadId, companyId: req.user.companyId, status: { $ne: 'Done' } });
     const isUpdate = !!meeting;
 
     const meetingData = {
@@ -205,16 +207,88 @@ export const scheduleMeeting = async (req, res) => {
 };
 
 /**
- * Get Meeting for a Lead (one meeting per lead)
+ * Get the lead's PENDING meeting (drives the Schedule/Update Meeting modal —
+ * once the last meeting is Done this returns null, so the modal creates a new one)
  */
 export const getMeeting = async (req, res) => {
   try {
     const { id: leadId } = req.params;
-    const meeting = await Meeting.findOne({ leadId, companyId: req.user.companyId })
+    const meeting = await Meeting.findOne({ leadId, companyId: req.user.companyId, status: { $ne: 'Done' } })
       .populate('assignedTo', 'fullName username email');
     res.json({ success: true, meeting: meeting || null });
   } catch (error) {
     console.error('Error fetching meeting:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+/**
+ * Get ALL meetings of a Lead (Meeting Attempts modal — pending + done history).
+ * Fetched on-demand only when the modal opens, so the leads list API stays light.
+ */
+export const getMeetings = async (req, res) => {
+  try {
+    const { id: leadId } = req.params;
+    const meetings = await Meeting.find({ leadId, companyId: req.user.companyId })
+      .populate('assignedTo', 'fullName username')
+      .populate('completedBy', 'fullName username')
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, meetings });
+  } catch (error) {
+    console.error('Error fetching meetings:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+/**
+ * Complete a meeting (Meeting Attempt) — saves the attempt notes and marks the
+ * meeting Done, after which a new meeting can be scheduled for the lead.
+ */
+export const completeMeeting = async (req, res) => {
+  try {
+    const { id: leadId, meetingId } = req.params;
+    const { attemptNote } = req.body;
+
+    if (!attemptNote || !attemptNote.trim()) {
+      return res.status(400).json({ success: false, message: 'Meeting notes are required to mark the meeting as done' });
+    }
+
+    const meeting = await Meeting.findOne({ _id: meetingId, leadId, companyId: req.user.companyId });
+    if (!meeting) return res.status(404).json({ success: false, message: 'Meeting not found' });
+    if (meeting.status === 'Done') {
+      return res.status(400).json({ success: false, message: 'This meeting is already marked as done' });
+    }
+
+    meeting.status = 'Done';
+    meeting.attemptNote = attemptNote.trim();
+    meeting.completedAt = new Date();
+    meeting.completedBy = req.user._id;
+    await meeting.save();
+
+    // Lead history entry (best-effort — never blocks the completion)
+    try {
+      const lead = await Lead.findById(leadId);
+      if (lead) {
+        lead.history = lead.history || [];
+        lead.history.push({
+          action: 'Meeting Done',
+          notes: `Meeting of ${new Date(meeting.meetingDate).toLocaleDateString('en-IN')} at ${meeting.startTime} marked done. Notes: "${attemptNote.trim()}"`,
+          performedBy: req.user._id,
+          timestamp: new Date()
+        });
+        await lead.save();
+      }
+    } catch (e) {
+      console.error('Meeting-done lead history update failed (non-fatal):', e.message);
+    }
+
+    await meeting.populate('assignedTo', 'fullName username');
+    await meeting.populate('completedBy', 'fullName username');
+
+    res.json({ success: true, message: 'Meeting marked as done', meeting });
+  } catch (error) {
+    console.error('Error completing meeting:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };

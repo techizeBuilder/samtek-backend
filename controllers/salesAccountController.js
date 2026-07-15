@@ -54,14 +54,60 @@ export const createSalesInvoice = async (req, res) => {
             throw new Error('Customer is inactive or not found');
         }
 
-        // Determine actual tax and total based on invoiceType
         const isKachha = invoiceType === 'Kachha';
-        const finalTaxAmount = isKachha ? 0 : taxAmount;
-        const finalTotalAmount = isKachha ? subtotal : totalAmount;
 
-        // 3a. Fetch advanced payment for linked lead (if order has leadId)
-        let advancedPaymentAmount = 0;
+        // 3. Order-linked bills are built from the ORDER FORM (source of
+        // truth), never from client-sent amounts. Additional charges are
+        // already folded into the items' Bill Amounts by sales, so nothing
+        // is added separately; GST rides on top of the Bill Amount.
+        //   Pakka  = Σ billAmount + Σ gstAmount
+        //   Kachha = Σ billAmount + Σ gstAmount + Σ cashAmount
+        let finalItems = items || [];
+        let finalSubtotal = subtotal;
+        let finalTaxAmount = isKachha ? 0 : taxAmount;
+        let finalTotalAmount = isKachha ? subtotal : totalAmount;
+        let formAdvance = 0;
+
         if (orderId) {
+            const OrderForm = (await import('../models/OrderForm.js')).default;
+            const form = await OrderForm.findOne({ orderId, status: 'Submitted' }).lean();
+            if (!form) {
+                throw new Error('Order Form is not submitted for this order — bill Order Form ke amounts se banta hai.');
+            }
+
+            const rows = form.items || [];
+            const billSum = rows.reduce((s, it) => s + (it.billAmount || 0), 0);
+            const gstSum = rows.reduce((s, it) => s + (it.gstAmount || 0), 0);
+            const cashSum = rows.reduce((s, it) => s + (it.cashAmount || 0), 0);
+
+            finalSubtotal = isKachha ? billSum + cashSum : billSum;
+            finalTaxAmount = gstSum;
+            finalTotalAmount = finalSubtotal + gstSum;
+
+            // Each item line carries its full share (bill + GST, + cash for
+            // Kachha) because the printed bill sums rate × qty with no
+            // separate GST line — the items must add up to the invoice total.
+            finalItems = rows.filter(it => !it.hiddenCharge).map(it => {
+                const qty = it.qty || 1;
+                const lineTotal = (it.billAmount || 0) + (it.gstAmount || 0) + (isKachha ? (it.cashAmount || 0) : 0);
+                return {
+                    productName: it.itemName || 'Item',
+                    quantity: qty,
+                    unitPrice: Math.round((lineTotal / qty) * 100) / 100,
+                    totalPrice: lineTotal,
+                    tax: 0
+                };
+            });
+
+            if (form.paymentType === 'Advance Payment') {
+                formAdvance = form.receivedAmount || 0;
+            }
+        }
+
+        // 3a. Advance — Order Form's Payment section first, else verified
+        // lead payments (older forms without an amount)
+        let advancedPaymentAmount = formAdvance;
+        if (!advancedPaymentAmount && orderId) {
             const Order = (await import('../models/Order.js')).default;
             const LeadPayment = (await import('../models/LeadPayment.js')).default;
             const linkedOrder = await Order.findById(orderId).select('leadId').lean();
@@ -75,24 +121,23 @@ export const createSalesInvoice = async (req, res) => {
             }
         }
 
-        // Net payable after deducting advanced payment
-        const netPayable = Math.max(0, finalTotalAmount - advancedPaymentAmount);
-
-        // 3. Create Sale Record
+        // 3b. Create Sale Record — paidAmount stays 0: the pre-save hook
+        // already deducts advancedPaymentAmount while computing the balance,
+        // so mirroring the advance into paidAmount double-counted it.
         const sale = new Sale({
             invoiceNumber: finalInvoiceNo, // If null, pre-save hook will generate
             order: orderId,
             customer: customerId,
             saleDate: saleDate || new Date(),
             dueDate: dueDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-            items: items.map(item => ({
+            items: finalItems.map(item => ({
                 productName: item.productName || item.itemName,
                 quantity: item.quantity,
                 unitPrice: item.unitPrice,
                 totalPrice: item.totalPrice,
-                tax: isKachha ? 0 : (item.gstPercent || item.tax || 0)
+                tax: item.gstPercent || item.tax || 0
             })),
-            subtotal,
+            subtotal: finalSubtotal,
             taxAmount: finalTaxAmount,
             totalAmount: finalTotalAmount,
             tdsAmount: tdsAmount || 0,
@@ -100,8 +145,7 @@ export const createSalesInvoice = async (req, res) => {
             gstType: gstType || 'CGST_SGST',
             invoiceType: invoiceType || 'Pakka',
             advancedPaymentAmount,
-            paidAmount: advancedPaymentAmount, // advanced already paid
-            balanceAmount: netPayable,
+            paidAmount: 0,
             unit,
             companyId,
             createdBy: req.user._id,
@@ -138,7 +182,7 @@ export const createSalesInvoice = async (req, res) => {
         if (receivableAccount && salesAccount && gstAccount) {
             const entries = [
                 { account: receivableAccount._id, debit: finalTotalAmount, credit: 0 },
-                { account: salesAccount._id, debit: 0, credit: subtotal },
+                { account: salesAccount._id, debit: 0, credit: finalSubtotal },
                 { account: gstAccount._id, debit: 0, credit: finalTaxAmount }
             ];
 
@@ -151,7 +195,7 @@ export const createSalesInvoice = async (req, res) => {
                 transactionNumber: `TXN-SLE-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
                 description: `${invoiceType || 'Sales'} Invoice: ${sale.invoiceNumber} to ${customer.name}${tdsAmount > 0 ? ' (Includes TDS Deduction)' : ''}`,
                 reference: sale.invoiceNumber,
-                totalAmount: subtotal + finalTaxAmount,
+                totalAmount: finalSubtotal + finalTaxAmount,
                 unit,
                 relatedDocument: 'Sale',
                 relatedDocumentId: sale._id,
@@ -162,7 +206,7 @@ export const createSalesInvoice = async (req, res) => {
 
             // Update account balances
             receivableAccount.balance += finalTotalAmount;
-            salesAccount.balance += subtotal;
+            salesAccount.balance += finalSubtotal;
             gstAccount.balance += finalTaxAmount;
             if (tdsAmount > 0 && tdsReceivableAccount) {
                 tdsReceivableAccount.balance += tdsAmount;
@@ -174,8 +218,9 @@ export const createSalesInvoice = async (req, res) => {
             await gstAccount.save();
         }
 
-        // 5. Update Inventory (Reduction)
-        for (const item of items) {
+        // 5. Update Inventory (Reduction) — only manual invoices carry
+        // inventory item ids; order-form items don't touch stock here
+        for (const item of (items || [])) {
             if (item.item) { // item._id from Inventory
                 await Item.findByIdAndUpdate(item.item, {
                     $inc: { qty: -Number(item.quantity) }
@@ -183,14 +228,9 @@ export const createSalesInvoice = async (req, res) => {
             }
         }
 
-        // 6. Update Customer Outstanding Amount (net of advanced payment)
-        await Customer.findByIdAndUpdate(customerId, {
-            $inc: {
-                outstandingAmount: netPayable,
-                // Deduct from advancePayment balance if advanced was used
-                advancePayment: -advancedPaymentAmount
-            }
-        });
+        // NOTE: Customer Master is intentionally NOT touched here. Customer
+        // outstanding/advance is driven by the Order Form alone — invoices
+        // must never reflect into the Customer Master balances.
 
         res.status(201).json({ success: true, data: sale });
     } catch (error) {
@@ -769,16 +809,16 @@ export const getPackedOrders = async (req, res) => {
                 paymentStatus,
                 paymentProofUrl,
                 saleId,
-                // Customer master financial fields
+                // Customer master reference fields (kept for info display)
                 customerOutstanding,
                 customerAdvance,
-                // Derived display values from customer master:
-                // displayTotal = outstanding + advance
-                // displayPaid  = advance
-                // displayDue   = outstanding - advance (min 0)
-                displayTotal: customerOutstanding + customerAdvance,
-                displayPaid: customerAdvance,
-                displayDue: Math.max(0, customerOutstanding - customerAdvance)
+                // ORDER-WISE display values — this packed job belongs to ONE
+                // order, so Total/Paid/Due are that order's own figures:
+                // Total = order invoice total, Paid = advance + receipts
+                // against this order, Due = what's left on this order
+                displayTotal: totalAmount,
+                displayPaid: (sale ? (sale.paidAmount || 0) : 0) + advancedPaymentAmount,
+                displayDue: Math.max(0, totalAmount - ((sale ? (sale.paidAmount || 0) : 0) + advancedPaymentAmount))
             });
         }
 
@@ -875,12 +915,14 @@ export const getDueBillData = async (req, res) => {
             }
         }
 
-        // 4. Post-invoice payments received (CustomerPayment records)
+        // 4. Post-invoice payments received (CustomerPayment records) —
+        // order-wise: this order's receipts + legacy/general (unlinked) ones
         let postInvoicePayments = [];
         if (order.customer?._id) {
             const custPays = await CustomerPayment.find({
                 customer: order.customer._id,
-                companyId
+                companyId,
+                $or: [{ order: order._id }, { order: null }]
             }).sort({ paymentDate: 1 }).lean();
 
             postInvoicePayments = custPays.map(p => ({
@@ -888,7 +930,8 @@ export const getDueBillData = async (req, res) => {
                 amount: p.amount,
                 mode: p.paymentMode,
                 referenceNo: p.referenceNo || '',
-                notes: p.notes || ''
+                notes: p.notes || '',
+                orderCode: p.orderCode || ''
             }));
         }
 
@@ -903,16 +946,18 @@ export const getDueBillData = async (req, res) => {
         const saleDate = sale?.saleDate || order.orderDate;
         const dueDate  = sale?.dueDate || null;
 
-        // 5b. Fetch customer master financial fields
+        // 5b. Customer master reference fields (kept for info display)
         const customerMasterDoc = await Customer.findById(order.customer?._id)
             .select('outstandingAmount advancePayment')
             .lean();
         const customerOutstanding = customerMasterDoc?.outstandingAmount || 0;
         const customerAdvance     = customerMasterDoc?.advancePayment    || 0;
-        // Display values derived from customer master:
-        const displayTotal = customerOutstanding + customerAdvance;
-        const displayPaid  = customerAdvance;
-        const displayDue   = Math.max(0, customerOutstanding - customerAdvance);
+        // ORDER-WISE display values — the due bill belongs to ONE order:
+        // Total = this order's invoice total, Paid = advance + receipts
+        // against this order, Due = what's left on this order
+        const displayTotal = totalAmount;
+        const displayPaid  = advancedPaymentAmount + paidAmount;
+        const displayDue   = Math.max(0, totalAmount - advancedPaymentAmount - paidAmount);
 
         // 6. Fetch company info
         const { Company } = await import('../models/Company.js');

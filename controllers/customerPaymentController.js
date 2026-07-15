@@ -9,15 +9,24 @@ import Customer from '../models/Customer.js';
  */
 export const createCustomerPayment = async (req, res) => {
     try {
-        const { customerId, paymentDate, amount, paymentMode, referenceNo, notes, accountId } = req.body;
+        const { customerId, paymentDate, amount, paymentMode, referenceNo, notes, accountId, orderId } = req.body;
         const companyId = req.user.companyId;
         const unit = req.user.unit;
 
-        console.log('💳 Processing customer payment (Standalone Mode):', { customerId, amount, paymentMode, unit, accountId });
+        console.log('💳 Processing customer payment (Standalone Mode):', { customerId, amount, paymentMode, unit, accountId, orderId });
+
+        // Resolve order (order-wise payment tracking) — optional
+        let linkedOrder = null;
+        if (orderId) {
+            const Order = (await import('../models/Order.js')).default;
+            linkedOrder = await Order.findOne({ _id: orderId, companyId }).select('orderCode customer').lean();
+        }
 
         // 1. Create Payment record
         const paymentData = {
             customer: customerId,
+            order: linkedOrder?._id || null,
+            orderCode: linkedOrder?.orderCode || '',
             paymentDate: paymentDate || new Date(),
             amount,
             paymentMode,
@@ -32,23 +41,44 @@ export const createCustomerPayment = async (req, res) => {
         const payment = new CustomerPayment(paymentData);
         await payment.save();
 
-        // 2. Update Invoices (FIFO logic)
+        // 2. Update Invoices — order-targeted first, then FIFO for the remainder.
+        // If an order is selected, that order's invoices get paid first so
+        // order-wise Paid/Due tracking stays accurate.
         let remainingAmount = amount;
-        const unpaidInvoices = await Sale.find({
-            customer: customerId,
-            balanceAmount: { $gt: 0 }
-        }).sort({ saleDate: 1 });
 
-        console.log(`📄 Found ${unpaidInvoices.length} unpaid invoices for customer`);
+        if (linkedOrder) {
+            const orderInvoices = await Sale.find({
+                customer: customerId,
+                order: linkedOrder._id,
+                balanceAmount: { $gt: 0 }
+            }).sort({ saleDate: 1 });
+            for (const inv of orderInvoices) {
+                if (remainingAmount <= 0) break;
+                const payToThis = Math.min(inv.balanceAmount, remainingAmount);
+                inv.paidAmount += payToThis;
+                inv.balanceAmount -= payToThis;
+                remainingAmount -= payToThis;
+                await inv.save();
+            }
+        }
 
-        for (const inv of unpaidInvoices) {
-            if (remainingAmount <= 0) break;
-            const payToThis = Math.min(inv.balanceAmount, remainingAmount);
-            inv.paidAmount += payToThis;
-            inv.balanceAmount -= payToThis;
-            remainingAmount -= payToThis;
+        if (remainingAmount > 0) {
+            const unpaidInvoices = await Sale.find({
+                customer: customerId,
+                balanceAmount: { $gt: 0 }
+            }).sort({ saleDate: 1 });
 
-            await inv.save();
+            console.log(`📄 Found ${unpaidInvoices.length} unpaid invoices for customer (FIFO remainder)`);
+
+            for (const inv of unpaidInvoices) {
+                if (remainingAmount <= 0) break;
+                const payToThis = Math.min(inv.balanceAmount, remainingAmount);
+                inv.paidAmount += payToThis;
+                inv.balanceAmount -= payToThis;
+                remainingAmount -= payToThis;
+
+                await inv.save();
+            }
         }
 
         // 3. Ledger Posting
@@ -128,6 +158,7 @@ export const getCustomerPayments = async (req, res) => {
 
         const payments = await CustomerPayment.find(query)
             .populate('customer', 'name')
+            .populate('order', 'orderCode')
             .sort({ paymentDate: -1 })
             .skip((page - 1) * limit)
             .limit(parseInt(limit));

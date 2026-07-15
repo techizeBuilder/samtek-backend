@@ -53,6 +53,27 @@ const meetingSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Meeting Attempt lifecycle — stays 'Scheduled' until the salesman logs
+  // attempt notes (Meeting Attempts button), then becomes 'Done'. A lead can
+  // accumulate many Done meetings over time; only one Scheduled at a time.
+  status: {
+    type: String,
+    enum: ['Scheduled', 'Done'],
+    default: 'Scheduled'
+  },
+  attemptNote: {
+    type: String,
+    default: ''
+  },
+  completedAt: {
+    type: Date,
+    default: null
+  },
+  completedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -61,7 +82,7 @@ const meetingSchema = new mongoose.Schema({
   timestamps: true
 });
 
-meetingSchema.index({ leadId: 1 });
+meetingSchema.index({ leadId: 1, status: 1 });
 meetingSchema.index({ companyId: 1 });
 
 export default mongoose.model('Meeting', meetingSchema);

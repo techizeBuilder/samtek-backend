@@ -112,16 +112,16 @@ export const upsertOrderForm = async (req, res) => {
       return acc;
     }, { qty: 0, billAmount: 0, gstAmount: 0, quotationAmount: 0, cashAmount: 0, discountAmount: 0 });
 
-    // Outstanding = this form's Bill Amount minus the originating lead's own
-    // advance payment (not the customer's cumulative advance across other
-    // deals). Tracked as a delta against the form's *previous* contribution
-    // so resubmission never double-counts.
+    // Outstanding = this form's Bill Amount + GST Amount minus the
+    // originating lead's own advance payment (not the customer's cumulative
+    // advance across other deals). Tracked as a delta against the form's
+    // *previous* contribution so resubmission never double-counts.
     let advancePaid = 0;
     if (order.leadId) {
       const lead = await Lead.findById(order.leadId).select('advancedPaymentAmount');
       advancePaid = lead?.advancedPaymentAmount || 0;
     }
-    const newContribution = Math.max(0, totals.billAmount - advancePaid);
+    const newContribution = Math.max(0, totals.billAmount + totals.gstAmount - advancePaid);
     const previousContribution = existing?.outstandingContribution || 0;
 
     const payload = {

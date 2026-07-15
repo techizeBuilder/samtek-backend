@@ -2,6 +2,7 @@ import Sale from '../models/Sale.js';
 import Return from '../models/Return.js';
 import Expense from '../models/Expense.js';
 import { Partner } from '../models/Partner.js';
+import OrderForm from '../models/OrderForm.js';
 import mongoose from 'mongoose';
 import { USER_ROLES } from '../shared/schema.js';
 
@@ -47,19 +48,46 @@ export const getFinanceSummary = async (req, res) => {
 
         const dateQuery = { $gte: start, $lte: finalEnd };
 
-        // Aggregate Sales (Revenue)
+        // Aggregate Sales (Revenue) — Pakka (formal/GST) invoices only.
+        // The Financial Summary's default profit figure must reflect the
+        // company's official billed book, not the informal/Kachha side.
         // In Sale.js, it's 'saleDate' or 'createdAt'
         const salesPromise = Sale.aggregate([
             {
                 $match: {
                     ...query,
-                    saleDate: dateQuery
+                    saleDate: dateQuery,
+                    invoiceType: 'Pakka'
                 }
             },
             {
                 $group: {
                     _id: null,
                     total: { $sum: '$totalAmount' }
+                }
+            }
+        ]);
+
+        // Aggregate Kachha (cash/informal) revenue from the Sales Order Form —
+        // Billing Amount + GST Amount + Cash Amount, exactly as recorded by
+        // Accounts when the deal was billed. Used only for the double-click
+        // "flip" on the Financial Summary profit figure.
+        const kacchaQuery = {};
+        if (query.companyId) kacchaQuery.companyId = query.companyId;
+        const kacchaPromise = OrderForm.aggregate([
+            {
+                $match: {
+                    ...kacchaQuery,
+                    status: 'Submitted',
+                    createdAt: dateQuery
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    billAmount: { $sum: '$totals.billAmount' },
+                    gstAmount: { $sum: '$totals.gstAmount' },
+                    cashAmount: { $sum: '$totals.cashAmount' }
                 }
             }
         ]);
@@ -100,10 +128,11 @@ export const getFinanceSummary = async (req, res) => {
 
         const partnersPromise = Partner.find({ companyId: req.user.companyId, isActive: true }).lean();
 
-        const [salesResult, returnsResult, expensesResult, partners] = await Promise.all([
+        const [salesResult, returnsResult, expensesResult, kacchaResult, partners] = await Promise.all([
             salesPromise,
             returnsPromise,
             expensesPromise,
+            kacchaPromise,
             partnersPromise
         ]);
 
@@ -113,6 +142,15 @@ export const getFinanceSummary = async (req, res) => {
         const totalExpenses = expensesResult[0]?.total || 0;
         const netProfit = netSales - totalExpenses;
 
+        // Kaccha (cash-side) profit: Billing Amount + GST Amount + Cash Amount
+        // from the Sales Order Form, minus the same shared returns/expenses.
+        const kacchaBillAmount = kacchaResult[0]?.billAmount || 0;
+        const kacchaGstAmount = kacchaResult[0]?.gstAmount || 0;
+        const kacchaCashAmount = kacchaResult[0]?.cashAmount || 0;
+        const kacchaRevenue = kacchaBillAmount + kacchaGstAmount + kacchaCashAmount;
+        const kacchaNetSales = kacchaRevenue - totalReturns;
+        const kacchaProfit = kacchaNetSales - totalExpenses;
+
         res.json({
             success: true,
             summary: {
@@ -121,6 +159,12 @@ export const getFinanceSummary = async (req, res) => {
                 netSales,
                 totalExpenses,
                 netProfit,
+                kacchaBillAmount,
+                kacchaGstAmount,
+                kacchaCashAmount,
+                kacchaRevenue,
+                kacchaNetSales,
+                kacchaProfit,
                 period: {
                     start,
                     end: finalEnd

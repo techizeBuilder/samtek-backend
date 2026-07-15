@@ -7,10 +7,16 @@ const userDocumentSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    required: false
+  },
+  // Free-form key matching AdminSettings.hrmsDocumentTypes[].key — no longer
+  // a fixed enum since the document type list is admin-configurable.
   type: {
     type: String,
-    required: true,
-    enum: ["AADHAAR", "PAN", "MARKSHEET_12", "PASSBOOK"]
+    required: true
   },
   fileUrl: {
     type: String,
@@ -20,6 +26,19 @@ const userDocumentSchema = new mongoose.Schema({
     type: String,
     enum: ["UPLOADED", "VERIFIED", "REJECTED"],
     default: "UPLOADED"
+  },
+  verifiedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  verifiedAt: {
+    type: Date,
+    default: null
+  },
+  remarks: {
+    type: String,
+    default: ''
   }
 }, {
   timestamps: true

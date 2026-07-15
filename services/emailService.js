@@ -39,6 +39,57 @@ const createTransporter = () => {
 };
 
 /**
+ * Send Cash Access OTP Email to the Company Admin.
+ * Second factor for viewing a customer's Cash Amount (see cashAccessController).
+ * NOTE: unlike the other senders below, this THROWS on failure — the caller
+ * must know the OTP never reached the admin (no silent {success:false}).
+ */
+export const sendOtpEmail = async ({ to, otp, requestedByName, customerName }) => {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    throw new Error('SMTP is not configured (SMTP_USER / SMTP_PASS missing in .env)');
+  }
+
+  const transporter = createTransporter();
+  const subject = `🔐 Cash Access OTP: ${otp} — approval requested`;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: #b91c1c; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">🔐 Cash Access Request</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">One-Time Password required</p>
+      </div>
+
+      <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 16px;">Dear Company Admin,</p>
+        <p style="color: #6b7280; line-height: 1.6;">
+          <strong>${requestedByName || 'An Accounts user'}</strong> has entered the correct Cash Password and is
+          requesting to view the <strong>Cash Amount</strong> of customer <strong>${customerName || 'N/A'}</strong>.
+        </p>
+
+        <div style="background: #fef2f2; border: 2px dashed #b91c1c; border-radius: 10px; padding: 22px; margin: 24px 0; text-align: center;">
+          <p style="color: #6b7280; font-size: 13px; margin: 0 0 8px;">Share this OTP with them ONLY if you approve:</p>
+          <p style="color: #b91c1c; font-size: 34px; font-weight: bold; letter-spacing: 10px; margin: 0;">${otp}</p>
+          <p style="color: #9ca3af; font-size: 12px; margin: 10px 0 0;">Valid for 10 minutes</p>
+        </div>
+
+        <p style="color: #6b7280; font-size: 13px;">
+          If you did not expect this request, do NOT share the OTP — the cash amount stays hidden without it.
+        </p>
+      </div>
+    </div>
+  `;
+
+  const result = await transporter.sendMail({
+    from: `"Cash Access Security" <${process.env.SMTP_USER}>`,
+    to,
+    subject,
+    html
+  });
+  console.log(`✅ Cash Access OTP email sent to ${to}. MessageId: ${result.messageId}`);
+  return { success: true, messageId: result.messageId };
+};
+
+/**
  * Send Payment Reminder Email to Customer
  */
 export const sendPaymentReminderEmail = async ({ to, customerName, invoiceNo, totalAmount, paidAmount, balanceAmount, dueDate, companyName, daysOverdue }) => {
