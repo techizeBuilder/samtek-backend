@@ -18,6 +18,12 @@ import {
   updateCategory,
   deleteCategory,
 
+  // Unit Type routes
+  getUnitTypes,
+  createUnitType,
+  updateUnitType,
+  deleteUnitType,
+
   // Customer category routes
   getCustomerCategories,
   createCustomerCategory,
@@ -45,13 +51,19 @@ import {
   getReturnedMaterials,
   getPendingReturns,
   confirmReturn,
-  getStoreTransferLogs
+  getStoreTransferLogs,
+  bulkTransferOrderMaterials,
+  getDefectiveInventory,
+  repairDefectiveInventory,
+  scrapDefectiveInventory,
+  getVariantsByItemCode
 } from '../controllers/inventoryController.js';
 
 const router = express.Router();
 
 // Item routes (temporarily remove permission check for Sales order creation)
 router.get('/items/by-code', auth, getItemByCode);
+router.get('/items/variants-prefill', auth, getVariantsByItemCode);
 router.get('/items', auth, getItems);
 router.get('/items/:id', auth, getItemById);
 router.post('/items', auth, createItem);
@@ -72,11 +84,22 @@ router.post('/customer-categories', auth, createCustomerCategory);
 router.put('/customer-categories/:id', auth, updateCustomerCategory);
 router.delete('/customer-categories/:id', auth, deleteCustomerCategory);
 
+// Defective inventory routes
+router.get('/inventory/defective', auth, authorizeRoles('Store Head', 'Store Employee'), getDefectiveInventory);
+router.post('/inventory/defective/repair/:id', auth, authorizeRoles('Store Head', 'Store Employee'), repairDefectiveInventory);
+router.post('/inventory/defective/scrap/:id', auth, authorizeRoles('Store Head', 'Store Employee'), scrapDefectiveInventory);
+
 // Group routes
 router.get('/inventory/groups', auth, getGroups);
 router.post('/inventory/groups', auth, createGroup);
 router.put('/inventory/groups/:id', auth, updateGroup);
 router.delete('/inventory/groups/:id', auth, deleteGroup);
+
+// Unit type routes
+router.get('/inventory/unit-types', auth, getUnitTypes);
+router.post('/inventory/unit-types', auth, createUnitType);
+router.put('/inventory/unit-types/:id', auth, updateUnitType);
+router.delete('/inventory/unit-types/:id', auth, deleteUnitType);
 
 // Utility routes
 router.get('/inventory/low-stock', auth, getLowStockItems);
@@ -86,6 +109,7 @@ router.get('/inventory/stats', auth, getInventoryStats);
 router.get('/inventory/material-issues', auth, authorizeRoles("Store Head", "Store Employee"), getMaterialIssueLogs);
 router.get('/inventory/pending-requests', auth, authorizeRoles("Store Head", "Store Employee"), getPendingRequests);
 router.post('/inventory/transfer-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferMaterialToProduction);
+router.post('/inventory/bulk-transfer/:id', auth, authorizeRoles("Store Head", "Store Employee"), bulkTransferOrderMaterials);
 router.get('/inventory/returned-materials', auth, authorizeRoles("Store Head", "Store Employee"), getReturnedMaterials);
 router.get('/inventory/pending-returns', auth, authorizeRoles("Store Head", "Store Employee"), getPendingReturns);
 router.post('/inventory/confirm-return', auth, authorizeRoles("Store Head", "Store Employee"), confirmReturn);

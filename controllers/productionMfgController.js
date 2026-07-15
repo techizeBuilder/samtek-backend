@@ -800,14 +800,14 @@ export const addSubEntry = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
-    const { parentPart, childPart, assignedMember } = req.body;
+    const { parentPart, childPart, assignedMember, fabricationType } = req.body;
     if (!parentPart || !childPart || !assignedMember) {
       return res.status(400).json({ success: false, message: 'parentPart, childPart, and assignedMember are required' });
     }
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     
-    order.processes[idx].subEntries.push({ parentPart, childPart, assignedMember });
+    order.processes[idx].subEntries.push({ parentPart, childPart, assignedMember, fabricationType: fabricationType || 'Other' });
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });

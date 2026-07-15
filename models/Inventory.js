@@ -200,14 +200,6 @@ const itemSchema = new mongoose.Schema({
       type: String,
       trim: true
     },
-    capacity: {
-      type: String,
-      trim: true
-    },
-    motorPower: {
-      type: String,
-      trim: true
-    },
     price: {
       type: Number,
       min: 0
@@ -216,10 +208,11 @@ const itemSchema = new mongoose.Schema({
       type: String,
       trim: true
     },
-    specifications: {
-      type: Map,
-      of: String
-    }
+    // 💥 Clean dynamic key-value array for unlimited custom columns/fields
+    attributes: [{
+      label: { type: String, trim: true }, // e.g., "Chamber Size", "Phase Type", "Color"
+      value: { type: String, trim: true }  // e.g., "400mm", "3-Phase", "Red"
+    }]
   }],
   // NEW: Product applications (for flour mill, etc.)
   applications: [{
@@ -351,7 +344,33 @@ const groupSchema = new mongoose.Schema({
 
 groupSchema.index({ name: 1, companyId: 1 }, { unique: true });
 
+const unitTypeSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  description: {
+    type: String,
+    trim: true
+  },
+  units: [{
+    type: String,
+    trim: true
+  }],
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    required: true
+  }
+}, {
+  timestamps: true
+});
+
+unitTypeSchema.index({ name: 1, companyId: 1 }, { unique: true });
+
 export const Item = mongoose.model('Item', itemSchema);
 export const Category = mongoose.model('Category', categorySchema);
 export const CustomerCategory = mongoose.model('CustomerCategory', customerCategorySchema);
 export const Group = mongoose.model('Group', groupSchema);
+export const UnitType = mongoose.model('UnitType', unitTypeSchema);

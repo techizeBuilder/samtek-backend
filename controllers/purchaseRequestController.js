@@ -1,4 +1,5 @@
 import PurchaseRequest from '../models/PurchaseRequest.js';
+import StagedPurchase from '../models/StagedPurchase.js';
 import Sale from '../models/Sale.js';
 import Order from '../models/Order.js';
 import QCJob from '../models/QCJob.js';
@@ -133,9 +134,128 @@ export const getPurchaseRequests = async (req, res) => {
   }
 };
 
+// GET /api/purchase-requests/staged
+export const getStagedPurchaseRequests = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
 
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: 'User company is not configured' });
+    }
 
+    // Fetch all staged items for this company, sorted by newest first
+    const stagedItems = await StagedPurchase.find({ companyId }).sort({ createdAt: -1 });
 
+    res.status(200).json({
+      success: true,
+      data: stagedItems
+    });
+  } catch (error) {
+    console.error('Error fetching staged purchase requests:', error);
+    res.status(500).json({ success: false, message: 'Server Error fetching staged items.' });
+  }
+};
+
+// POST /api/purchase-requests/bulk-purchase
+export const createBulkPurchaseRequests = async (req, res) => {
+  try {
+    const { items, stagedIds } = req.body;
+    const companyId = req.user.companyId;
+
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: 'User company is not configured' });
+    }
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: 'No procurement items provided.' });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 1. GLOBAL BULK R&D COMPLIANCE CHECK (On Consolidated List)
+    // ─────────────────────────────────────────────────────────────
+    const validationErrors = [];
+    for (const item of items) {
+      const searchCriteria = [{ name: { $regex: new RegExp(`^${item.productName.trim()}$`, 'i') } }];
+      if (item.materialCode) searchCriteria.push({ code: item.materialCode });
+      if (item.itemId && item.itemId.toString().match(/^[0-9a-fA-F]{24}$/)) {
+        searchCriteria.push({ _id: item.itemId });
+      }
+
+      const masterItem = await Item.findOne({ companyId, $or: searchCriteria });
+      if (!masterItem) {
+        validationErrors.push(`Product "${item.productName}" does not exist in Master Inventory.`);
+        continue;
+      }
+      if (masterItem.purchase === false) {
+        validationErrors.push(`"${masterItem.name}" is flagged for Internal Manufacturing only.`);
+        continue;
+      }
+    }
+
+    if (validationErrors.length > 0) {
+      return res.status(400).json({ success: false, message: 'R&D Restriction Failure', errors: validationErrors });
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 2. GENERATE COMBINED COMPLIANT REQUEST RECORDS
+    // ─────────────────────────────────────────────────────────────
+    const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
+    const createdRequests = [];
+
+    for (const item of items) {
+      const resolvedSource = item.source || (isStoreUser ? 'Store' : 'Production');
+      const resolvedStoreApproved = resolvedSource === 'Store';
+      const requestId = await generateUniqueRequestId();
+
+      const newRequest = await PurchaseRequest.create({
+        requestId,
+        productName: item.productName,
+        quantity: Number(item.quantity),
+        requestFromDepartment: isStoreUser ? 'Store' : 'Production',
+        priority: item.priority || 'Medium',
+        companyId,
+        storeOrderId: null, // Left null because this represents a consolidated cross-order buy
+        itemId: item.itemId || null,
+        source: resolvedSource,
+        storeApproved: resolvedStoreApproved,
+        unit: item.unit || null,
+        materialCode: item.materialCode || null
+      });
+
+      createdRequests.push(newRequest);
+
+      try {
+        await notificationService.triggerStoreNotification({
+          action: 'purchase_request_created',
+          data: { requestId: newRequest.requestId, productName: newRequest.productName, priority: newRequest.priority },
+          targetCompanyId: companyId,
+        });
+      } catch (e) {
+        console.error(`Bulk notification dispatch error:`, e.message);
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 3. PURGE SPENT STAGING REQS FROM OTHER COLLECTION BY REQ IDS
+    // ─────────────────────────────────────────────────────────────
+    if (stagedIds && Array.isArray(stagedIds) && stagedIds.length > 0) {
+      await StagedPurchase.deleteMany({
+        companyId,
+        _id: { $in: stagedIds }
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully generated ${createdRequests.length} clean combined purchase requests. Staging table cleared.`,
+      data: createdRequests
+    });
+
+  } catch (error) {
+    console.error('Error handling bulk purchase creation:', error);
+    res.status(500).json({ success: false, message: 'Server Error handling bulk purchase creation.' });
+  }
+};
 
 // Create a new purchase request
 export const createPurchaseRequest = async (req, res) => {

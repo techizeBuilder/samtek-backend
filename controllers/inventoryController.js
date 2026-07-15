@@ -1,4 +1,4 @@
-import { Item, Category, CustomerCategory, Group } from '../models/Inventory.js';
+import { Item, Category, CustomerCategory, Group, UnitType } from '../models/Inventory.js';
 import { Company } from '../models/Company.js';
 import ProductDailySummary from '../models/ProductDailySummary.js';
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
@@ -7,9 +7,12 @@ import multer from 'multer';
 import mongoose from 'mongoose';
 import { USER_ROLES } from '../shared/schema.js';
 import notificationService from '../services/notificationService.js';
+import StagedPurchase from '../models/StagedPurchase.js';
 import { initializeProductSummary, updateProductSummary } from '../services/productionSummaryService.js';
 
 import ProductionOrder from '../models/ProductionOrder.js';
+
+import DefectiveInventory from '../models/DefectiveMaterial.js';
 
 import StoreTransferLog from '../models/StoreTransferLog.js';
 import MaterialReturnLog from '../models/MaterialReturnLog.js';
@@ -533,6 +536,53 @@ export const getItems = async (req, res) => {
   }
 };
 
+
+
+
+
+
+// ── 1. HIGH-PERFORMANCE VARIANT AUTOFILL LOOKUP ──
+// Pulls pristine variants and dynamic attributes for a specific item code without internal DB tracking IDs.
+export const getVariantsByItemCode = async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!code || code.trim() === '') {
+      return res.status(400).json({ success: false, message: 'Item code is required for lookup.' });
+    }
+
+    const query = { code: code.trim() };
+    if (req.user.companyId) {
+      query.companyId = req.user.companyId;
+    }
+
+    const templateItem = await Item.findOne(query)
+      .select('variants')
+      .lean();
+
+    if (!templateItem) {
+      return res.status(404).json({
+        success: false,
+        message: `No item found with code: ${code}`
+      });
+    }
+
+    // Clean subdocument IDs out of variants and attributes arrays for clean frontend adoption
+    const cleanedVariants = (templateItem.variants || []).map(({ _id, attributes, ...rest }) => ({
+      ...rest,
+      attributes: (attributes || []).map(({ _id, ...attrRest }) => attrRest)
+    }));
+
+    res.json({
+      success: true,
+      variants: cleanedVariants
+    });
+  } catch (error) {
+    console.error('Fetch variant template error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error fetching variant specifications.' });
+  }
+};
+
+// ── 2. CREATE ITEM CONTROLLER ──
 export const createItem = async (req, res) => {
   try {
     if (!checkInventoryPermission(req.user, 'add')) {
@@ -640,7 +690,6 @@ export const createItem = async (req, res) => {
     sanitizedData.specifications = itemData.specifications || [];
     sanitizedData.applications = itemData.applications || [];
 
-    // ─── FIXED: Use sanitizedData instead of raw itemData so price is protected ───
     sanitizedData.variants = sanitizedData.variants || [];
 
     if (itemData.warranty) {
@@ -697,7 +746,7 @@ export const createItem = async (req, res) => {
   }
 };
 
-
+// ── 3. UPDATE ITEM CONTROLLER ──
 export const updateItem = async (req, res) => {
   try {
     console.log('🔧 UPDATE ITEM - Debug user info:', {
@@ -748,7 +797,6 @@ export const updateItem = async (req, res) => {
     if (itemData.specifications !== undefined) sanitizedData.specifications = itemData.specifications;
     if (itemData.applications !== undefined) sanitizedData.applications = itemData.applications;
 
-    // ─── FIXED: Use sanitizedData to prevent overwriting with raw string prices ───
     if (itemData.variants !== undefined) sanitizedData.variants = sanitizedData.variants;
 
     if (itemData.warranty !== undefined) sanitizedData.warranty = itemData.warranty;
@@ -825,7 +873,7 @@ export const updateItem = async (req, res) => {
   }
 };
 
-// Enhanced validation helper function
+// ── 4. ENHANCED VALIDATION HELPER FUNCTION ──
 const validateItemData = (data, isUpdate = false) => {
   const errors = {};
 
@@ -838,7 +886,6 @@ const validateItemData = (data, isUpdate = false) => {
     errors.category = 'Category is required';
   }
 
-  // Customer category is optional with default value
   if (data.customerCategory && typeof data.customerCategory !== 'string') {
     errors.customerCategory = 'Customer Category must be a valid string';
   }
@@ -861,9 +908,6 @@ const validateItemData = (data, isUpdate = false) => {
 
   if (!data.importance || typeof data.importance !== 'string' || data.importance.trim().length === 0) {
     errors.importance = 'Importance level is required';
-  }
-  if (!data.unit) {
-    errors.unit = 'Unit is required';
   }
 
   // Numeric validations
@@ -892,11 +936,20 @@ const validateItemData = (data, isUpdate = false) => {
     errors.leadTime = 'Lead time must be a non-negative number';
   }
 
-  // ─── FIXED: Validates that variant price is never negative ───
+  // Variant validation logic completely focused on the dynamic attributes array
   if (data.variants && Array.isArray(data.variants)) {
     data.variants.forEach((v, index) => {
       if (v.price !== undefined && (isNaN(v.price) || v.price < 0)) {
         errors[`variants[${index}].price`] = 'Variant price must be a non-negative number';
+      }
+
+      // Ensures runtime custom configurations contain valid label structures
+      if (v.attributes && Array.isArray(v.attributes)) {
+        v.attributes.forEach((attr, attrIdx) => {
+          if (!attr.label || attr.label.trim() === '') {
+            errors[`variants[${index}].attributes[${attrIdx}].label`] = 'Dynamic field name is required';
+          }
+        });
       }
     });
   }
@@ -918,7 +971,7 @@ const validateItemData = (data, isUpdate = false) => {
   };
 };
 
-// Enhanced data sanitization helper
+// ── 5. ENHANCED DATA SANITIZATION HELPER ──
 const sanitizeItemData = (data) => {
   const sanitized = { ...data };
 
@@ -969,14 +1022,16 @@ const sanitizeItemData = (data) => {
     }));
   }
 
-  // ─── FIXED: Sanitize Variants & Cast Price to Number ───
+  // Sanitizes the variant array structure with nested attribute entries cleanly
   if (sanitized.variants && Array.isArray(sanitized.variants)) {
     sanitized.variants = sanitized.variants.map(v => ({
       name: v.name ? String(v.name).trim() : '',
-      capacity: v.capacity ? String(v.capacity).trim() : '',
-      motorPower: v.motorPower ? String(v.motorPower).trim() : '',
-      price: Number(v.price) || 0, // Guarantees price is saved correctly as a Number
+      price: Number(v.price) || 0,
       code: v.code ? String(v.code).trim() : '',
+      attributes: Array.isArray(v.attributes) ? v.attributes.map(attr => ({
+        label: attr.label ? String(attr.label).trim() : '',
+        value: attr.value ? String(attr.value).trim() : ''
+      })) : []
     }));
   }
 
@@ -1455,6 +1510,193 @@ export const deleteCategory = async (req, res) => {
     res.json({ message: 'Category deleted successfully' });
   } catch (error) {
     console.error('Delete category error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ─── UNIT TYPE MANAGEMENT (COMPANY-WISE) ─────────────────────────────────
+
+export const getUnitTypes = async (req, res) => {
+  try {
+    console.log('🔍 GetUnitTypes called by:', req.user?.role);
+
+    if (!checkInventoryPermission(req.user, 'view')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const companyId = req.user.companyId;
+    if (!companyId) {
+      return res.status(400).json({ message: 'Access denied. User does not belong to a company.' });
+    }
+
+    let unitTypes = await UnitType.find({ companyId }).sort({ name: 1 });
+
+    // Auto-seed default units if none exist for this company
+    if (unitTypes.length === 0) {
+      console.log(`🌱 Seeding default unit types for company ${companyId}...`);
+      const seedData = [
+        { name: 'Length Unit', units: ['Millimeter', 'Centimeter', 'Meter', 'Kilometer', 'Inch', 'Feet'], companyId },
+        { name: 'Area Unit', units: ['Millimeter Square', 'Centimeter Square', 'Meter Square', 'Inch Square', 'Foot Square'], companyId },
+        { name: 'Volume Unit', units: ['Centimeter Cube', 'Meter Cube', 'Liter', 'Inch Cube', 'Foot Cube'], companyId },
+        { name: 'Mass Unit', units: ['Gram', 'Kilogram', 'Tonne'], companyId },
+        { name: 'Count Unit', units: ['NOS', 'Pieces'], companyId }
+      ];
+      await UnitType.insertMany(seedData);
+      unitTypes = await UnitType.find({ companyId }).sort({ name: 1 });
+    }
+
+    // Add product count specifically for this company
+    const unitTypesWithCount = await Promise.all(
+      unitTypes.map(async (ut) => {
+        const count = await Item.countDocuments({
+          companyId,
+          $or: [
+            { unitType: ut.name },
+            { purchaseUnitType: ut.name }
+          ]
+        });
+        const utObj = ut.toObject();
+        utObj.productCount = count;
+        return utObj;
+      })
+    );
+
+    console.log(`✅ Returning ${unitTypesWithCount.length} unit types for company ${companyId}`);
+    res.json({ unitTypes: unitTypesWithCount });
+  } catch (error) {
+    console.error('❌ Get unit types error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+export const createUnitType = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'add')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { name, description, units = [] } = req.body;
+    const companyId = req.user.companyId;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ success: false, message: 'Unit type name is required' });
+    }
+
+    // Check if unit type already exists IN THIS COMPANY
+    const existingUnitType = await UnitType.findOne({ name: name.trim(), companyId });
+    if (existingUnitType) {
+      return res.status(400).json({ success: false, message: 'Unit type name already exists in your company.' });
+    }
+
+    // Filter out empty units
+    const validUnits = units.filter(u => u && u.trim() !== '');
+
+    const unitTypeData = {
+      name: name.trim(),
+      description: description ? description.trim() : '',
+      units: validUnits,
+      companyId
+    };
+
+    const unitType = await UnitType.create(unitTypeData);
+    console.log('Unit type created successfully:', unitType.name);
+
+    res.status(201).json({
+      success: true,
+      message: 'Unit type created successfully',
+      unitType
+    });
+  } catch (error) {
+    console.error('Create unit type error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+export const updateUnitType = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'edit')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { id } = req.params;
+    const { name, description, units = [] } = req.body;
+    const companyId = req.user.companyId;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ success: false, message: 'Unit type name is required' });
+    }
+
+    // Prevent renaming to an existing unit type IN THIS COMPANY
+    const existingUnitType = await UnitType.findOne({ name: name.trim(), companyId, _id: { $ne: id } });
+    if (existingUnitType) {
+      return res.status(400).json({ success: false, message: 'Unit type name already exists in your company.' });
+    }
+
+    const validUnits = units.filter(u => u && u.trim() !== '');
+
+    const updateData = {
+      name: name.trim(),
+      description: description ? description.trim() : '',
+      units: validUnits
+    };
+
+    // Strict update: Must match both ID and Company ID
+    const unitType = await UnitType.findOneAndUpdate(
+      { _id: id, companyId },
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    if (!unitType) {
+      return res.status(404).json({ success: false, message: 'Unit type not found or access denied.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Unit type updated successfully',
+      unitType
+    });
+  } catch (error) {
+    console.error('Update unit type error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+export const deleteUnitType = async (req, res) => {
+  try {
+    if (!checkInventoryPermission(req.user, 'delete')) {
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    }
+
+    const { id } = req.params;
+    const companyId = req.user.companyId;
+
+    // Verify unit type belongs to this company
+    const unitType = await UnitType.findOne({ _id: id, companyId });
+    if (!unitType) {
+      return res.status(404).json({ message: 'Unit type not found or access denied.' });
+    }
+
+    // Check if unit type is being used by any items IN THIS COMPANY
+    const itemsUsingUnitType = await Item.countDocuments({
+      companyId: companyId,
+      $or: [
+        { unitType: unitType.name },
+        { purchaseUnitType: unitType.name }
+      ]
+    });
+
+    if (itemsUsingUnitType > 0) {
+      return res.status(400).json({
+        message: `Cannot delete unit type. ${itemsUsingUnitType} items in your inventory are using this unit type.`
+      });
+    }
+
+    await UnitType.findByIdAndDelete(id);
+
+    res.json({ message: 'Unit type deleted successfully' });
+  } catch (error) {
+    console.error('Delete unit type error:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };
@@ -2756,6 +2998,128 @@ export const transferMaterialToProduction = async (req, res) => {
   }
 };
 
+// POST /api/inventory/bulk-transfer/:id
+export const bulkTransferOrderMaterials = async (req, res) => {
+  try {
+    const orderId = req.params.id;
+    const companyId = req.user.companyId;
+
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Production order not found.' });
+    }
+
+    const shortfalls = [];
+    let orderUpdated = false;
+
+    for (let demand of order.materialDemands) {
+      if (demand.status !== 'Requested') continue;
+
+      const neededQty = demand.quantity - (demand.transferredQuantity || 0);
+      if (neededQty <= 0) continue;
+
+      const storeItem = await Item.findOne({ code: demand.materialCode, companyId: companyId });
+      const availableStock = storeItem ? Math.max(0, storeItem.qty) : 0;
+
+      // PATH 1: Stock is completely empty (This is what hit your "metal sheet" item)
+      if (availableStock === 0) {
+        shortfalls.push({
+          companyId,
+          productName: demand.materialName,
+          quantity: neededQty,
+          materialCode: demand.materialCode,
+          itemId: storeItem ? storeItem._id : null,
+          unit: demand.unit,
+          storeOrderId: order._id,
+          stagedBy: req.user.username, // ✨ FIX 1: Added here
+          priority: order.priority === 'Urgent' ? 'High' : 'Medium',
+          source: 'Store'
+        });
+        continue;
+      }
+
+      const transferQty = Math.min(neededQty, availableStock);
+
+      const deductedItem = await Item.findOneAndUpdate(
+        { code: demand.materialCode, companyId: companyId, qty: { $gte: transferQty } },
+        { $inc: { qty: -transferQty } },
+        { new: true }
+      );
+
+      // PATH 2: Database concurrency race condition fallback
+      if (!deductedItem) {
+        shortfalls.push({
+          companyId,
+          productName: demand.materialName,
+          quantity: neededQty,
+          materialCode: demand.materialCode,
+          itemId: storeItem ? storeItem._id : null,
+          unit: demand.unit,
+          storeOrderId: order._id,
+          stagedBy: req.user.username, // ✨ FIX 2: Added here
+          priority: order.priority === 'Urgent' ? 'High' : 'Medium',
+          source: 'Store'
+        });
+        continue;
+      }
+
+      demand.transferredQuantity = (demand.transferredQuantity || 0) + transferQty;
+      demand.status = 'In Transit';
+      orderUpdated = true;
+
+      await StoreTransferLog.create({
+        productionOrderId: order._id,
+        orderId: order.orderId,
+        machineCode: order.machineCode,
+        materialCode: demand.materialCode,
+        materialName: demand.materialName,
+        quantityTransferred: transferQty,
+        unit: demand.unit,
+        transferredBy: req.user._id,
+        company: companyId
+      });
+
+      // PATH 3: Partial stock available, remainder needs to be purchased
+      if (transferQty < neededQty) {
+        shortfalls.push({
+          companyId,
+          productName: demand.materialName,
+          quantity: neededQty - transferQty,
+          materialCode: demand.materialCode,
+          itemId: deductedItem._id,
+          unit: demand.unit,
+          storeOrderId: order._id,
+          stagedBy: req.user.username, // ✅ Already matched your schema string format here!
+          priority: order.priority === 'Urgent' ? 'High' : 'Medium',
+          source: 'Store'
+        });
+      }
+    }
+
+    if (orderUpdated) {
+      await order.save();
+    }
+
+    // Clear old staging snapshots for this order
+    await StagedPurchase.deleteMany({ companyId, storeOrderId: order._id });
+
+    // Write fresh shortfalls
+    if (shortfalls.length > 0) {
+      await StagedPurchase.insertMany(shortfalls);
+    }
+
+    res.json({
+      success: true,
+      message: 'Bulk transfer operation executed completely and queue updated.',
+      shortfallsCount: shortfalls.length
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+
 
 
 export const getStoreTransferLogs = async (req, res) => {
@@ -3034,7 +3398,7 @@ export const getPendingReturns = async (req, res) => {
 // ── 5. CONFIRM RETURN (Accept or Reject) ─────────────────────────────
 export const confirmReturn = async (req, res) => {
   try {
-    const { logId, action } = req.body; // action: 'Accept' or 'Reject'
+    const { logId, action } = req.body;
     const companyId = req.user.companyId;
 
     const log = await MaterialReturnLog.findById(logId);
@@ -3050,11 +3414,30 @@ export const confirmReturn = async (req, res) => {
     }
 
     if (action === 'Accept') {
-      // A. Update Master Inventory (The warehouse claims physical custody back)
-      await Item.findOneAndUpdate(
-        { code: log.materialCode, companyId: companyId },
-        { $inc: { qty: log.quantityReturned } }
-      );
+
+      if (log.returnType === 'Defect') {
+
+        // 🎯 AUTOMATIC INITIALIZATION OR UPDATE (UPSERT)
+        // This checks if the item exists. If NOT, it creates it. If YES, it updates it.
+        await DefectiveInventory.findOneAndUpdate(
+          { materialCode: log.materialCode, companyId: companyId },
+          {
+            $inc: { quantity: log.quantityReturned }, // Adds to the grouped total
+            $setOnInsert: {
+              materialName: log.materialName,
+              unit: log.unit
+            } // Only sets these fields on the very first creation
+          },
+          { upsert: true, new: true }
+        );
+
+      } else {
+        // If it's 'Excess', route back to main warehouse stock
+        await Item.findOneAndUpdate(
+          { code: log.materialCode, companyId: companyId },
+          { $inc: { qty: log.quantityReturned } }
+        );
+      }
 
       // B. Release the reservation lock
       demand.returnPendingQuantity = Math.max(0, (demand.returnPendingQuantity || 0) - log.quantityReturned);
@@ -3063,20 +3446,17 @@ export const confirmReturn = async (req, res) => {
       demand.issuedQuantity = Math.max(0, (demand.issuedQuantity || 0) - log.quantityReturned);
       demand.transferredQuantity = Math.max(0, (demand.transferredQuantity || 0) - log.quantityReturned);
 
-      // D. 🚨 AUTOMATED FEEDBACK LOOP
-      // If it's an Excess return after an R&D drop, issuedQuantity will match the new quantity -> 'Issued'
-      // If it's a Defect return, issuedQuantity drops below the required quantity -> switches to 'Requested'
+      // D. AUTOMATED FEEDBACK LOOP
       if (demand.issuedQuantity >= demand.quantity) {
         demand.status = 'Issued';
       } else {
         demand.status = 'Requested';
-        order.materialIssued = false; // Toggle order validation lock back off
+        order.materialIssued = false;
       }
 
       log.status = 'Accepted';
     }
     else if (action === 'Reject') {
-      // Release reservation lock; items stay in production custody
       demand.returnPendingQuantity = Math.max(0, (demand.returnPendingQuantity || 0) - log.quantityReturned);
       log.status = 'Rejected';
     }
@@ -3088,6 +3468,148 @@ export const confirmReturn = async (req, res) => {
     await log.save();
 
     res.json({ success: true, message: `Return processed as ${action}ed successfully.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+// ── 1. GET ALL ACTIVE DEFECTIVE INVENTORY (Hides 0 quantity items) ──
+export const getDefectiveInventory = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const { search, page = 1, limit = 10 } = req.query;
+
+    // Only show items that currently have a defective balance > 0
+    let query = { companyId, quantity: { $gt: 0 } };
+
+    if (search) {
+      query.$or = [
+        { materialCode: { $regex: search, $options: 'i' } },
+        { materialName: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const skipIdx = (Number(page) - 1) * Number(limit);
+
+    const [items, totalCount] = await Promise.all([
+      DefectiveInventory.find(query)
+        .sort({ updatedAt: -1 })
+        .skip(skipIdx)
+        .limit(Number(limit)),
+      DefectiveInventory.countDocuments(query)
+    ]);
+
+    res.json({
+      success: true,
+      data: items,
+      pagination: {
+        totalRecords: totalCount,
+        currentPage: Number(page),
+        totalPages: Math.ceil(totalCount / Number(limit))
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+
+// ── 1. SECURE REPAIR CONTROLLER ──
+export const repairDefectiveInventory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quantityToRepair } = req.body;
+    const companyId = req.user.companyId;
+
+    const amtToProcess = Number(quantityToRepair);
+    // Basic structural validation
+    if (isNaN(amtToProcess) || amtToProcess <= 0) {
+      return res.status(400).json({ success: false, message: 'Quantity must be a positive number.' });
+    }
+
+    // 🎯 ATOMIC CHECK & DEDUCTION
+    // We only update IF the document matches the ID, the company, AND has enough quantity.
+    const defectiveItem = await DefectiveInventory.findOneAndUpdate(
+      {
+        _id: id,
+        companyId,
+        quantity: { $gte: amtToProcess } // 🛡️ Database-level guardrail against exceeding stock
+      },
+      {
+        $inc: { quantity: -amtToProcess } // Atomically subtract the quantity
+      },
+      {
+        new: true, // Return the updated document
+        runValidators: true
+      }
+    );
+
+    // If no document matched, it means either it doesn't exist, belongs to another company, or stock is insufficient
+    if (!defectiveItem) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action rejected. Item not found or requested quantity exceeds available defective stock.'
+      });
+    }
+
+    // Step B: Safely move that quantity into the main active inventory pool
+    await Item.findOneAndUpdate(
+      { code: defectiveItem.materialCode, companyId },
+      { $inc: { qty: amtToProcess } },
+      { upsert: true }
+    );
+
+    res.json({
+      success: true,
+      message: `Successfully repaired ${amtToProcess} units. New defective balance: ${defectiveItem.quantity}.`
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── 2. SECURE SCRAP CONTROLLER ──
+export const scrapDefectiveInventory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quantityToScrap } = req.body;
+    const companyId = req.user.companyId;
+
+    const amtToScrap = Number(quantityToScrap);
+    // Basic structural validation
+    if (isNaN(amtToScrap) || amtToScrap <= 0) {
+      return res.status(400).json({ success: false, message: 'Quantity must be a positive number.' });
+    }
+
+    // 🎯 ATOMIC CHECK & DEDUCTION
+    const defectiveItem = await DefectiveInventory.findOneAndUpdate(
+      {
+        _id: id,
+        companyId,
+        quantity: { $gte: amtToScrap } // 🛡️ Database-level guardrail
+      },
+      {
+        $inc: { quantity: -amtToScrap }
+      },
+      {
+        new: true,
+        runValidators: true
+      }
+    );
+
+    if (!defectiveItem) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action rejected. Item not found or requested quantity exceeds available defective stock.'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully scrapped ${amtToScrap} units. New defective balance: ${defectiveItem.quantity}.`
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

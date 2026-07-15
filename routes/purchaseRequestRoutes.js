@@ -5,7 +5,9 @@ import {
   updatePurchaseRequestStatus,
   storeApproveRequest,
   storeRejectRequest,
-  checkInventoryForPR
+  checkInventoryForPR,
+  createBulkPurchaseRequests,
+  getStagedPurchaseRequests
 } from '../controllers/purchaseRequestController.js';
 import { authenticateToken as authenticateUser } from '../middleware/auth.js';
 import { warrantyUpload } from '../middleware/warrantyUpload.js';
@@ -15,7 +17,9 @@ const router = express.Router();
 router.use(authenticateUser);
 
 router.get('/', getPurchaseRequests);
+router.get('/staged', getStagedPurchaseRequests);
 router.post('/', createPurchaseRequest);
+router.post('/bulk-purchase', createBulkPurchaseRequests);
 
 // Receive endpoint uses multipart/form-data so file (warrantyCard) can be uploaded
 router.patch('/:id/status', warrantyUpload.single('warrantyCard'), updatePurchaseRequestStatus);

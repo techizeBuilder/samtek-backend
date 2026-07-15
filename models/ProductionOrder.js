@@ -20,6 +20,7 @@ const SubEntrySchema = new mongoose.Schema({
   parentPart: { type: String, required: true },
   childPart: { type: String, required: true },
   assignedMember: { type: String, required: true },
+  fabricationType: { type: String, default: 'Other' },
   status: { type: String, enum: ['Pending', 'Completed'], default: 'Pending' },
   qcStatus: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
   createdAt: { type: Date, default: Date.now }
