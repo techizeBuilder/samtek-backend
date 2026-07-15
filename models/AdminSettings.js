@@ -74,6 +74,17 @@ const adminSettingsSchema = new mongoose.Schema({
     order: { type: Number, default: 0 }
   }],
 
+  // ─── HRMS: Upload Document Settings ─────────────────────────────
+  // The list of documents an HRMS employee is required to upload on their
+  // "Documents" profile tab. Admin-configurable — replaces what used to be
+  // a hardcoded 4-item list in the frontend.
+  hrmsDocumentTypes: [{
+    key: { type: String, required: true },       // stable identifier stored on UserDocument.type
+    label: { type: String, required: true },      // display name
+    description: { type: String, default: '' },
+    order: { type: Number, default: 0 }
+  }],
+
 }, { timestamps: true });
 
 export default mongoose.model('AdminSettings', adminSettingsSchema);

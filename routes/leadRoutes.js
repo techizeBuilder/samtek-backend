@@ -25,7 +25,7 @@ import {
   getCallLogs,
   clickToCall
 } from '../controllers/leadController.js';
-import { scheduleMeeting, getMeeting } from '../controllers/meetingController.js';
+import { scheduleMeeting, getMeeting, getMeetings, completeMeeting } from '../controllers/meetingController.js';
 import { leadDocumentUpload } from '../middleware/leadDocumentUpload.js';
 
 const router = express.Router();
@@ -72,6 +72,8 @@ router.get('/:id/call-logs',              getCallLogs);
 router.post('/:id/meeting',              scheduleMeeting);
 router.put('/:id/meeting',               scheduleMeeting);
 router.get('/:id/meeting',               getMeeting);
+router.get('/:id/meetings',              getMeetings);
+router.put('/:id/meeting/:meetingId/complete', completeMeeting);
 
 export default router;
 

@@ -81,6 +81,16 @@ const DEFAULT_QUOTATION_NUMBER_SETTINGS = [
   { prefix: 'SM', suffix: '', bifurcateWith: '-', financialYearPosition: 'none' },
 ];
 
+// Matches the document types that used to be hardcoded on the HRMS employee
+// "Documents" tab — keys line up with existing UserDocument.type values so
+// previously-uploaded documents keep matching correctly.
+const DEFAULT_HRMS_DOCUMENT_TYPES = [
+  { key: 'AADHAAR', label: 'Aadhaar Card', description: 'Front & back scan of Aadhaar card' },
+  { key: 'PAN', label: 'PAN Card', description: 'Scanned copy of PAN card' },
+  { key: 'MARKSHEET_12', label: '12th Marksheet', description: 'Class 12 / senior secondary marksheet' },
+  { key: 'PASSBOOK', label: 'Bank Passbook', description: 'First page of bank passbook / cancelled cheque' },
+].map((d, i) => ({ ...d, order: i }));
+
 // ─── Helper: get or create settings for a company ─────────────────────────────
 async function getOrCreateSettings(companyId) {
   let settings = await AdminSettings.findOne({ companyId });
@@ -98,6 +108,7 @@ async function getOrCreateSettings(companyId) {
       dispatchChecklist: DEFAULT_DISPATCH_CHECKLIST,
       leadRejectReasons: DEFAULT_LEAD_REJECT_REASONS,
       quotationNumberSettings: DEFAULT_QUOTATION_NUMBER_SETTINGS,
+      hrmsDocumentTypes: DEFAULT_HRMS_DOCUMENT_TYPES,
     });
     await settings.save();
   } else {
@@ -114,6 +125,10 @@ async function getOrCreateSettings(companyId) {
     }
     if (!settings.quotationNumberSettings || settings.quotationNumberSettings.length === 0) {
       settings.quotationNumberSettings = DEFAULT_QUOTATION_NUMBER_SETTINGS;
+      changed = true;
+    }
+    if (!settings.hrmsDocumentTypes || settings.hrmsDocumentTypes.length === 0) {
+      settings.hrmsDocumentTypes = DEFAULT_HRMS_DOCUMENT_TYPES;
       changed = true;
     }
     if (changed) await settings.save();
@@ -251,3 +266,4 @@ export const notesCrud        = makeArrayCrud('quotationNotes');
 export const dispatchChecklistCrud = makeArrayCrud('dispatchChecklist');
 export const leadRejectReasonsCrud = makeArrayCrud('leadRejectReasons');
 export const quotationNumberSettingsCrud = makeArrayCrud('quotationNumberSettings');
+export const hrmsDocumentTypesCrud = makeArrayCrud('hrmsDocumentTypes');

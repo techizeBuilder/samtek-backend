@@ -5,6 +5,24 @@ import Supplier from '../models/Supplier.js';
 import { Item } from '../models/Inventory.js';
 import { Transaction, Account } from '../models/Account.js';
 import mongoose from 'mongoose';
+import { recalculateItemPricing } from '../services/itemPricingService.js';
+
+// Recalculates purchase-derived cost/MRP/Sale Price for every Item referenced
+// on a newly recorded Purchase Invoice — the most reliable "price actually
+// paid" data point (its item ref is required, unlike Purchase.items.item).
+async function recalcPricingForInvoiceItems(invoice) {
+    for (const line of invoice.items || []) {
+        if (!line.item) continue;
+        try {
+            const item = await Item.findById(line.item);
+            if (item && item.purchase && !item.internalManufacturing) {
+                await recalculateItemPricing(item);
+            }
+        } catch (e) {
+            console.error('❌ Error recalculating item pricing from purchase invoice:', e);
+        }
+    }
+}
 
 /**
  * Create a new Purchase Invoice and auto-post to ledger
@@ -53,6 +71,7 @@ export const createPurchaseInvoice = async (req, res) => {
             notes
         });
         await invoice.save();
+        recalcPricingForInvoiceItems(invoice).catch(e => console.error('❌ Pricing recalc error (createPurchaseInvoice):', e));
 
         // 4. Auto Journal Posting
         const purchaseAccount = await Account.findOne({ accountName: 'Purchase Account', unit });
@@ -1034,6 +1053,7 @@ export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
 
         await invoice.save();
         console.log(`✅ [Auto Invoice] Purchase Invoice ${invoiceNo} recorded successfully.`);
+        recalcPricingForInvoiceItems(invoice).catch(e => console.error('❌ Pricing recalc error (createAutoPurchaseInvoice):', e));
 
         // 7. Auto Journal Posting to General Ledger
         const purchaseAccount = await Account.findOne({ accountName: 'Purchase Account', unit });

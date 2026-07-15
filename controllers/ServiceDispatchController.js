@@ -51,7 +51,7 @@ export const updateCustomerConfirmation = async (req, res) => {
 export const updateInstallationSchedule = async (req, res) => {
     try {
         const { id } = req.params;
-        const { status, scheduledDate, technicianName, remarks } = req.body;
+        const { status, scheduledDate, technicianName, technicians, remarks } = req.body;
 
         // Fetch existing order
         const existingOrder = await DispatchOrder.findOne({ _id: id, company: req.user.companyId });
@@ -60,10 +60,23 @@ export const updateInstallationSchedule = async (req, res) => {
         const wasNotCompleted = existingOrder.installation?.status !== 'Completed';
         const isNowCompleted = status === 'Completed';
 
+        // Multiple technicians can be assigned; technicianName stays a
+        // comma-joined string so older code paths (WhatsApp/email text,
+        // feedback lookup) keep working unchanged.
+        const cleanTechnicians = Array.isArray(technicians)
+            ? technicians
+                .map(t => ({ technicianId: t.technicianId || '', technicianName: t.technicianName || '' }))
+                .filter(t => t.technicianName)
+            : [];
+        const joinedTechnicianName = cleanTechnicians.length
+            ? cleanTechnicians.map(t => t.technicianName).join(', ')
+            : (technicianName || '');
+
         const updateFields = {
             'installation.status': status,
             'installation.scheduledDate': scheduledDate ? new Date(scheduledDate) : null,
-            'installation.technicianName': technicianName || '',
+            'installation.technicianName': joinedTechnicianName,
+            'installation.technicians': cleanTechnicians,
             'installation.remarks': remarks || ''
         };
 
@@ -131,7 +144,7 @@ export const updateInstallationSchedule = async (req, res) => {
                     name: order.customerName || 'Customer',
                     data: {
                         machineName: order.machineName,
-                        technicianName: technicianName || '',
+                        technicianName: joinedTechnicianName,
                         link: feedbackLink
                     }
                 });

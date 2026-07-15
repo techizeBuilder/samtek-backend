@@ -7,6 +7,7 @@ import {
   updateDocument,
   getUserDocuments,
   getAllDocuments,
+  setDocumentStatus,
 } from "../controllers/documentController.js";
 
 const documentRouter = Router();
@@ -31,5 +32,8 @@ documentRouter.get("/user/:userId", getUserDocuments);
 
 // GET /api/documents/all  — fetch all documents (SuperAdmin / Admin)
 documentRouter.get("/all", getAllDocuments);
+
+// PATCH /api/documents/:docId/status  — HR-Admin verifies/rejects a document
+documentRouter.patch("/:docId/status", setDocumentStatus);
 
 export default documentRouter;

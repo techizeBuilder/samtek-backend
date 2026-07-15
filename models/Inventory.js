@@ -92,6 +92,26 @@ const itemSchema = new mongoose.Schema({
     min: 0,
     default: 0
   },
+  // Tracks whether stdCost/purchaseCost/salePrice/mrp are still R&D's manual
+  // guess, or have been auto-computed from a real BOM roll-up / purchase
+  // price. See server/services/itemPricingService.js.
+  costSource: {
+    type: String,
+    enum: ['Manual', 'BOM', 'Purchase'],
+    default: 'Manual'
+  },
+  costResolvedAt: {
+    type: Date,
+    default: null
+  },
+  // Human-readable reason costSource is still 'Manual' despite
+  // internalManufacturing/purchase being set (e.g. missing BOM material
+  // link, machine not built yet) — surfaced in the Add/Edit Item form.
+  costResolutionIssue: {
+    type: String,
+    trim: true,
+    default: null
+  },
   internalManufacturing: {
     type: Boolean,
     default: false

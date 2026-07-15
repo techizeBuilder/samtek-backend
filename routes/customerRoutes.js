@@ -13,7 +13,8 @@ import {
   validateCustomerQuery,
   getSalespeople,
   getCustomerDropdownList,
-  getCustomersBySalesperson
+  getCustomersBySalesperson,
+  getCustomerOrderFinancials
 } from '../controllers/customerController.js';
 import { resetCustomerCollectionRoute } from '../utils/resetCustomerCollection.js';
 import { inspectDatabaseRoute } from '../utils/inspectDatabase.js';
@@ -34,6 +35,9 @@ router.get('/customers/recalc-balances', auth, recalculateCustomerBalances);
 router.get('/customers/dropdown/list', auth, getCustomerDropdownList);
 router.get('/customers/salespeople', auth, getSalespeople);
 router.get('/customers/salesperson/:salespersonId', auth, getCustomersBySalesperson);
+
+// Order-wise financial breakdown (must be before /:id route)
+router.get('/customers/:id/order-financials', auth, getCustomerOrderFinancials);
 
 // Customer CRUD routes
 router.get('/customers', auth, getCustomers);

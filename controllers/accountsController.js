@@ -1946,6 +1946,12 @@ export const getLedgerRecords = async (req, res) => {
         displayDescription = displayDescription.replace(/Salesman Settlement \(.*?\): /i, 'Salesman: ');
       }
 
+      // Bank/Cash accounts display passbook-style: money IN (customer receipt)
+      // shows under Credit, money OUT under Debit — matching bank statements.
+      // Book-keeping entries and balance math stay untouched; only the two
+      // display columns are swapped for these accounts.
+      const passbookView = !!account.isBankOrCash;
+
       return {
         _id: txn._id,
         date: txn.date,
@@ -1953,8 +1959,8 @@ export const getLedgerRecords = async (req, res) => {
         voucherNo: txn.reference || txn.transactionNumber,
         ledger: contraLedgerLabel,
         description: displayDescription,
-        debit: myEntry.debit,
-        credit: myEntry.credit,
+        debit: passbookView ? myEntry.credit : myEntry.debit,
+        credit: passbookView ? myEntry.debit : myEntry.credit,
         balance: rowBalance,
         relatedDocument: txn.relatedDocument,
         relatedDocumentId: txn.relatedDocumentId,

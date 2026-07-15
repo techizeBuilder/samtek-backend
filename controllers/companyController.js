@@ -9,6 +9,7 @@ import ProductionBatch from '../models/ProductionBatch.js';
 import { Item } from '../models/Inventory.js';
 import DispatchOrder from '../models/DispatchOrder.js';
 import ServiceTicket from '../models/ComplaintServiceModel.js';
+import { reapplyCompanyPricingFormula } from '../services/itemPricingService.js';
 
 // Helper function to check company permissions
 const checkCompanyPermission = (user, action) => {
@@ -415,6 +416,10 @@ export const updateCompany = async (req, res) => {
     }
 
     console.log('Company updated successfully:', company._id);
+
+    if (updateData.profitPercent !== undefined || updateData.discountPercent !== undefined) {
+      reapplyCompanyPricingFormula(id).catch(e => console.error('❌ Pricing reapply error:', e));
+    }
 
     res.json({
       success: true,

@@ -870,3 +870,128 @@ export const getCustomersBySalesperson = async (req, res) => {
     });
   }
 };
+
+// ─── Order-wise financials for one customer ─────────────────────────────────
+// GET /api/customers/:id/order-financials
+// A customer can have multiple orders — this breaks Total / Advance / Paid /
+// Due down PER ORDER so Accounts can see which order the money belongs to.
+// Fetched on-demand (modal / payment form), so list APIs stay light.
+export const getCustomerOrderFinancials = async (req, res) => {
+  try {
+    const { id: customerId } = req.params;
+    const companyId = req.user.companyId;
+
+    const customer = await Customer.findOne({ _id: customerId, companyId })
+      .select('name customerCode outstandingAmount advancePayment')
+      .lean();
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+
+    const orders = await Order.find({ customer: customerId, companyId })
+      .select('orderCode createdAt leadId totalAmount products status')
+      .populate('products.product', 'name')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Order Form is the source of truth here (same as the customer's
+    // outstanding): Total = form items' Bill Amount, Advance = form's
+    // Payment section. Orders without a Submitted form are not listed.
+    const forms = await OrderForm.find({
+      orderId: { $in: orders.map(o => o._id) },
+      status: 'Submitted'
+    }).select('orderId items totals receivedAmount paymentType').lean();
+    const formByOrder = new Map(forms.map(f => [f.orderId.toString(), f]));
+
+    const CustomerPayment = (await import('../models/CustomerPayment.js')).default;
+    const LeadPayment = (await import('../models/LeadPayment.js')).default;
+
+    const orderRows = [];
+    let ordersWithoutForm = 0;
+    for (const order of orders) {
+      const form = formByOrder.get(order._id.toString());
+      if (!form) { ordersWithoutForm++; continue; }
+
+      const formItems = (form.items || []).filter(it => !it.hiddenCharge);
+      // Total = Bill Amount + GST Amount (GST is charged on top of the bill,
+      // same as the Order Form's own "Bill Amt + GST" figure)
+      const billSum = form.totals?.billAmount
+        ?? formItems.reduce((s, it) => s + (it.billAmount || 0), 0);
+      const gstSum = form.totals?.gstAmount
+        ?? formItems.reduce((s, it) => s + (it.gstAmount || 0), 0);
+      const total = billSum + gstSum;
+
+      // Sale/invoice for this order — Pakka preferred (dual-billing safe)
+      const sales = await Sale.find({ order: order._id, companyId })
+        .select('totalAmount paidAmount balanceAmount advancedPaymentAmount invoiceType paymentStatus')
+        .lean();
+      const sale = sales.find(s => s.invoiceType === 'Pakka') || sales[0] || null;
+
+      // Advance = Order Form ke Payment section ka Advance Payment;
+      // fallback to invoice/lead payments for older forms with no amount
+      let advance = form.paymentType === 'Advance Payment' ? (form.receivedAmount || 0) : 0;
+      if (!advance) advance = sale?.advancedPaymentAmount || 0;
+      if (!advance && order.leadId) {
+        const lps = await LeadPayment.find({ leadId: order.leadId, status: 'Verified', companyId })
+          .select('amount').lean();
+        advance = lps.reduce((s, p) => s + (p.amount || 0), 0);
+      }
+
+      // Receipts recorded against this order (order-wise payments)
+      const orderPayments = await CustomerPayment.find({ customer: customerId, order: order._id, companyId })
+        .select('amount paymentDate paymentMode referenceNo').lean();
+      const receiptsSum = orderPayments.reduce((s, p) => s + (p.amount || 0), 0);
+
+      // Paid (receipts) — invoice allocation is authoritative; if no invoice yet,
+      // fall back to the receipts recorded directly against the order
+      const paidReceipts = sale ? (sale.paidAmount || 0) : receiptsSum;
+      const due = Math.max(0, total - advance - paidReceipts);
+
+      orderRows.push({
+        orderId: order._id,
+        orderCode: order.orderCode,
+        orderDate: order.createdAt,
+        productName: formItems.map(it => it.itemName).filter(Boolean).join(', ')
+          || order.products?.map(p => p.product?.name).filter(Boolean).join(', ') || '',
+        items: formItems.map(it => ({
+          itemName: it.itemName || '',
+          specification: it.specification || '',
+          qty: it.qty || 0,
+          // Item price shown to Accounts = Bill Amount + its GST share
+          billAmount: (it.billAmount || 0) + (it.gstAmount || 0)
+        })),
+        total,
+        advance,
+        paid: paidReceipts,
+        due,
+        paymentStatus: due <= 0 ? 'Paid' : (advance + paidReceipts) > 0 ? 'Partially Paid' : 'Pending',
+        payments: orderPayments
+      });
+    }
+
+    // Receipts not linked to any order (general / FIFO)
+    const unallocatedPayments = await CustomerPayment.find({ customer: customerId, order: null, companyId })
+      .select('amount paymentDate paymentMode referenceNo').lean();
+
+    res.json({
+      success: true,
+      data: {
+        customer: {
+          _id: customer._id,
+          name: customer.name,
+          customerCode: customer.customerCode,
+          outstandingAmount: customer.outstandingAmount || 0,
+          advancePayment: customer.advancePayment || 0
+        },
+        orders: orderRows,
+        ordersWithoutForm,
+        unallocated: {
+          count: unallocatedPayments.length,
+          total: unallocatedPayments.reduce((s, p) => s + (p.amount || 0), 0),
+          payments: unallocatedPayments
+        }
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error fetching customer order financials:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

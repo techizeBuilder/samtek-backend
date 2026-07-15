@@ -198,7 +198,7 @@ export const createUser = async (req, res) => {
     const {
       username, email, password, fullName, role, unit, companyId, branchId, departmentId, designationId, permissions, isActive,
       mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId,
-      isTrainee, ivrNumber,
+      isTrainee, ivrNumber, address,
       technicianSkills, serviceZone // 🔥 NEW: Added Technician Fields
     } = req.body;
 
@@ -299,6 +299,7 @@ export const createUser = async (req, res) => {
       reportingManager: reportingManager || managerId || null,
       employeeType: employeeType || employmentType || '',
       ivrNumber: ivrNumber || '',
+      address: address || '',
 
       // 🔥 INJECT TECHNICIAN FIELDS
       // Only attach these if the user is actually a Complaint Management Employee
@@ -339,7 +340,7 @@ export const updateUser = async (req, res) => {
     console.log('Update user request:', id, req.body);
     const {
       username, email, password, fullName, role, unit, companyId, branchId, departmentId, designationId, permissions, isActive,
-      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId
+      mobile, gender, dob, joiningDate, reportingManager, managerId, employeeType, employmentType, employeeId, address
     } = req.body;
 
     // Check if user exists
@@ -412,6 +413,7 @@ export const updateUser = async (req, res) => {
     if (employeeType !== undefined || employmentType !== undefined) {
       updateData.employeeType = employeeType || employmentType || '';
     }
+    if (address !== undefined) updateData.address = address;
 
     // Profile Picture
     if (req.file) {

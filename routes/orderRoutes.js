@@ -19,6 +19,7 @@ import {
   approveSaleOrder,
   getNOCRequests,
   approveNOC,
+  getNOCDetails,
   checkInventoryForItem,
   getDealVerifications,
   repairStoreQCStatus,
@@ -34,6 +35,7 @@ router.get('/deal-verifications', getDealVerifications);
 // NOC Request & Gate Pass Generation Flow
 router.get('/noc-requests', getNOCRequests);
 router.post('/approve-noc/:saleId', approveNOC);
+router.get('/noc-details/:saleId', getNOCDetails);
 
 router.get('/get-tracking', getOrderTracking);
 router.get('/check-existing', checkExistingOrder);

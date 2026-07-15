@@ -39,6 +39,10 @@ const RDMachineSchema = new mongoose.Schema({
 
   isDiscontinued: { type: Boolean, default: false },
   rejectionNote: { type: String, default: '' },
+  // Set the first time a ProductionOrder for this machine reaches
+  // 'Completed'. Until then, the linked Item's cost/MRP/Sale Price stays
+  // whatever R&D entered manually — see itemPricingService.js.
+  firstBuiltAt: { type: Date, default: null },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });

@@ -136,6 +136,7 @@ const saleSchema = new mongoose.Schema({
   // Gate Pass & NOC Information
   gatePass: {
     nocStatus: { type: String, enum: ['Pending', 'Approved'], default: 'Pending' },
+    nocApprovedAt: { type: Date, default: null },
     gatePassNumber: { type: String },
     generatedAt: { type: Date },
     generatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
