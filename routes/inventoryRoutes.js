@@ -1,6 +1,7 @@
 import express from 'express';
 import { authenticateToken as auth, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
+import { itemUpload } from '../middleware/itemUpload.js';
 import {
   // Item routes
   getItems,
@@ -11,6 +12,9 @@ import {
   deleteItem,
   bulkDeleteItems,
   adjustStock,
+  uploadItemImage,
+  uploadItemBrochure,
+  deleteItemMedia,
 
   // Category routes
   getCategories,
@@ -67,6 +71,9 @@ router.get('/items/variants-prefill', auth, getVariantsByItemCode);
 router.get('/items', auth, getItems);
 router.get('/items/:id', auth, getItemById);
 router.post('/items', auth, createItem);
+router.post('/items/upload-image', auth, itemUpload.single('image'), uploadItemImage);
+router.post('/items/upload-brochure', auth, itemUpload.single('brochure'), uploadItemBrochure);
+router.post('/items/media/delete', auth, deleteItemMedia);
 router.post('/items/bulk-delete', auth, bulkDeleteItems);
 router.put('/items/:id', auth, updateItem);
 router.delete('/items/:id', auth, deleteItem);

@@ -4,7 +4,7 @@ import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
   getMachines, createMachine, updateMachine,
   updateDesignStatus, updateReleaseStatus, discontinueMachine, reactivateMachine,
-  getBOMs, getBOMForMachine, createBOM, addMaterial, updateMaterial, deleteMaterial,
+  getBOMs, getBOMForMachine, getBOMByMachineCode, createBOM, addMaterial, updateMaterial, deleteMaterial,
   lockBOM, discontinueMaterial, reactivateMaterial,
   getPrototypes, createPrototype, updatePrototype,
   getChangeRequests, createChangeRequest, resolveChangeRequest,
@@ -16,6 +16,9 @@ import {
   getRDRequestReviewData,
   getDropdownOptions,
   addDropdownOption,
+  getCustomFieldTemplates,
+  saveCustomFieldTemplate,
+  deleteCustomFieldTemplate,
 } from '../controllers/rdController.js';
 
 const router = express.Router();
@@ -33,6 +36,7 @@ router.put('/machines/:id/reactivate', reactivateMachine);
 // ── BOMs ─────────────────────────────────────────────────────────────────────
 router.get('/boms', getBOMs);
 router.get('/boms/machine/:machineId', getBOMForMachine);
+router.get('/boms/by-code/:code', getBOMByMachineCode);
 router.post('/boms', createBOM);
 router.post('/boms/:id/materials', addMaterial);
 router.put('/boms/:id/materials/:materialId', updateMaterial);
@@ -81,5 +85,10 @@ router.get('/production-rnd-requests/:id/review', getRDRequestReviewData);
 // New Routes for Dynamic Dropdowns
 router.get('/master-options', getDropdownOptions);
 router.post('/master-options', addDropdownOption);
+
+// ── Custom Field Templates ───────────────────────────────────────────────────
+router.get('/custom-field-templates', getCustomFieldTemplates);
+router.post('/custom-field-templates', saveCustomFieldTemplate);
+router.delete('/custom-field-templates/:id', deleteCustomFieldTemplate);
 
 export default router;

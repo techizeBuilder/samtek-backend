@@ -5,6 +5,8 @@ import MaterialIssueLog from '../models/MaterialIssueLog.js';
 import * as XLSX from 'xlsx';
 import multer from 'multer';
 import mongoose from 'mongoose';
+import fs from 'fs';
+import path from 'path';
 import { USER_ROLES } from '../shared/schema.js';
 import notificationService from '../services/notificationService.js';
 import StagedPurchase from '../models/StagedPurchase.js';
@@ -204,6 +206,7 @@ export const getItems = async (req, res) => {
       subCategory,
       store,
       location,
+      group,
       lowStock,
       quantity, // Add quantity filter
       sortBy = 'name',
@@ -318,6 +321,11 @@ export const getItems = async (req, res) => {
     // Subcategory filter
     if (subCategory) {
       query.subCategory = subCategory;
+    }
+
+    // Group filter
+    if (group) {
+      query.group = group;
     }
 
     // Store filter (for Super Admin to filter by specific store/company)
@@ -583,6 +591,66 @@ export const getVariantsByItemCode = async (req, res) => {
 };
 
 // ── 2. CREATE ITEM CONTROLLER ──
+// ── Item media uploads ──────────────────────────────────────────────────────
+// Standalone endpoints (decoupled from createItem/updateItem's JSON body) so the
+// form can upload a file and get back a URL string before the item is saved —
+// same convention as createSalespersonItem in salesController.js.
+
+// Deletes a previously uploaded item image/brochure from disk, given its stored URL
+// (e.g. "/uploads/items/images/product-123.jpg"). Best-effort — never throws, since
+// a missing file (already cleaned up, or never existed) shouldn't fail the caller.
+// Restricted to the items upload folder to prevent path traversal via a crafted URL.
+const deleteUploadedItemFile = (fileUrl) => {
+  if (!fileUrl || typeof fileUrl !== 'string') return;
+  if (!fileUrl.startsWith('/uploads/items/')) return;
+  try {
+    const filePath = path.join(process.cwd(), fileUrl.replace(/^\//, ''));
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (error) {
+    console.error('Failed to delete uploaded item file:', fileUrl, error.message);
+  }
+};
+
+// Lets the frontend explicitly clean up a file it just uploaded but never ended up
+// saving to an item — e.g. the user cancels the Add/Edit Item dialog, or replaces
+// their own not-yet-saved image/brochure with a different file before submitting.
+export const deleteItemMedia = async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) {
+      return res.status(400).json({ success: false, message: 'url is required' });
+    }
+    deleteUploadedItemFile(url);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Failed to delete file' });
+  }
+};
+
+export const uploadItemImage = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No image file provided' });
+    }
+    res.json({ success: true, url: `/uploads/items/images/${req.file.filename}` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Failed to upload image' });
+  }
+};
+
+export const uploadItemBrochure = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No brochure file provided' });
+    }
+    res.json({ success: true, url: `/uploads/items/brochures/${req.file.filename}` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message || 'Failed to upload brochure' });
+  }
+};
+
 export const createItem = async (req, res) => {
   try {
     if (!checkInventoryPermission(req.user, 'add')) {
@@ -706,6 +774,14 @@ export const createItem = async (req, res) => {
     if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
     if (itemData.group !== undefined) sanitizedData.group = itemData.group;
 
+    // 3. Media & Notes — image/brochureUrl are uploaded separately (see uploadItemImage/
+    // uploadItemBrochure) and arrive here as plain URL strings; videoUrl is never uploaded,
+    // just a pasted link (e.g. YouTube); otherInfo is a free-text note.
+    if (itemData.image !== undefined) sanitizedData.image = itemData.image || null;
+    if (itemData.brochureUrl !== undefined) sanitizedData.brochureUrl = itemData.brochureUrl || null;
+    if (itemData.videoUrl !== undefined) sanitizedData.videoUrl = itemData.videoUrl || null;
+    if (itemData.otherInfo !== undefined) sanitizedData.otherInfo = itemData.otherInfo;
+
     const item = await Item.create(sanitizedData);
     console.log('✅ R&D Master Item created successfully:', item.code);
 
@@ -787,6 +863,10 @@ export const updateItem = async (req, res) => {
       }
     }
 
+    // Capture the item's current media URLs before overwriting, so a replaced
+    // image/brochure can be cleaned up from disk once the update succeeds.
+    const previousMedia = await Item.findById(id).select('image brochureUrl').lean();
+
     // Sanitize and prepare data
     const sanitizedData = sanitizeItemData(itemData);
 
@@ -811,6 +891,12 @@ export const updateItem = async (req, res) => {
     if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
     if (itemData.group !== undefined) sanitizedData.group = itemData.group;
 
+    // 3. Media & Notes (see createItem for the upload flow this feeds from)
+    if (itemData.image !== undefined) sanitizedData.image = itemData.image || null;
+    if (itemData.brochureUrl !== undefined) sanitizedData.brochureUrl = itemData.brochureUrl || null;
+    if (itemData.videoUrl !== undefined) sanitizedData.videoUrl = itemData.videoUrl || null;
+    if (itemData.otherInfo !== undefined) sanitizedData.otherInfo = itemData.otherInfo;
+
     const item = await Item.findByIdAndUpdate(
       id,
       sanitizedData,
@@ -819,6 +905,14 @@ export const updateItem = async (req, res) => {
 
     if (!item) {
       return res.status(404).json({ message: 'Item not found' });
+    }
+
+    // Media was replaced with a different file/URL — the old one is now orphaned, clean it up
+    if (previousMedia?.image && previousMedia.image !== item.image) {
+      deleteUploadedItemFile(previousMedia.image);
+    }
+    if (previousMedia?.brochureUrl && previousMedia.brochureUrl !== item.brochureUrl) {
+      deleteUploadedItemFile(previousMedia.brochureUrl);
     }
 
     // Sync qtyPerBatch if batch field was updated
@@ -1169,6 +1263,11 @@ export const deleteItem = async (req, res) => {
     // Delete the item
     await Item.findByIdAndDelete(id);
 
+    // Clean up the item's uploaded media so it doesn't sit orphaned on disk
+    deleteUploadedItemFile(item.image);
+    deleteUploadedItemFile(item.brochureUrl);
+    deleteUploadedItemFile(item.warranty?.cardUrl);
+
     // Clean up production summary entries for this item
     try {
       const deleteResult = await ProductDailySummary.deleteMany({
@@ -1232,6 +1331,13 @@ export const bulkDeleteItems = async (req, res) => {
 
     // Perform bulk deletion
     const deleteResult = await Item.deleteMany({ _id: { $in: existingIds } });
+
+    // Clean up each deleted item's uploaded media so it doesn't sit orphaned on disk
+    existingItems.forEach(item => {
+      deleteUploadedItemFile(item.image);
+      deleteUploadedItemFile(item.brochureUrl);
+      deleteUploadedItemFile(item.warranty?.cardUrl);
+    });
 
     // Clean up production summary entries for deleted items
     try {

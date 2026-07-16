@@ -8,6 +8,7 @@ import RDDocument from '../models/RDDocument.js';
 import RDRequest from '../models/RDRequest.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
+import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
@@ -30,9 +31,6 @@ async function generateChangeId(companyId) {
 }
 
 // ─── MACHINES ─────────────────────────────────────────────────────────────────
-
-import RDMachine from '../models/RDMachine.js';
-import RDDocument from '../models/RDDocument.js';
 
 export const getMachines = async (req, res) => {
   try {
@@ -87,8 +85,8 @@ export const createMachine = async (req, res) => {
     const {
       code, name, description,
       category, pType, pSourceType,
-      brand, machineType,
-      specifications
+      brand, machineType, metrology,
+      specifications, customFields, forwardToNextPhase
     } = req.body;
 
     // Strict validation for required fields
@@ -107,8 +105,11 @@ export const createMachine = async (req, res) => {
       pType,
       pSourceType,
       brand: brand || '',
+      metrology: metrology || '',
       machineType: machineType || 'Standard',
       specifications: specifications || [],
+      customFields: customFields || [],
+      forwardToNextPhase: !!forwardToNextPhase,
       company: req.user.companyId,
       createdBy: req.user._id,
     });
@@ -142,11 +143,16 @@ export const getDropdownOptions = async (req, res) => {
   try {
     const options = await RDMasterOption.find({ company: req.user.companyId }).lean();
 
-    // Group them for the frontend so they are easy to use in different selects
+    // Group them for the frontend, keeping parentValue so cascading selects can filter.
+    // Category depends on P-Type; P-SourceType depends on Category. Metrology and MaterialType
+    // (used by BOM Management) are standalone, unrelated to the Product Master cascade.
+    const toOption = (o) => ({ value: o.value, parentValue: o.parentValue || null });
     const groupedOptions = {
-      Category: options.filter(o => o.field === 'Category').map(o => o.value),
-      PType: options.filter(o => o.field === 'P-Type').map(o => o.value),
-      PSourceType: options.filter(o => o.field === 'P-SourceType').map(o => o.value),
+      PType: options.filter(o => o.field === 'P-Type').map(toOption),
+      Category: options.filter(o => o.field === 'Category').map(toOption),
+      PSourceType: options.filter(o => o.field === 'P-SourceType').map(toOption),
+      Metrology: options.filter(o => o.field === 'Metrology').map(toOption),
+      MaterialType: options.filter(o => o.field === 'MaterialType').map(toOption),
     };
 
     res.json({ success: true, data: groupedOptions });
@@ -159,18 +165,22 @@ export const getDropdownOptions = async (req, res) => {
 // ─── 3. ADD NEW DROPDOWN OPTION (Call this when user clicks the "+" icon) ──────
 export const addDropdownOption = async (req, res) => {
   try {
-    const { field, value } = req.body;
+    const { field, value, parentValue } = req.body;
 
-    if (!['Category', 'P-Type', 'P-SourceType'].includes(field)) {
+    if (!['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType'].includes(field)) {
       return res.status(400).json({ success: false, message: 'Invalid field type.' });
     }
     if (!value || value.trim() === '') {
       return res.status(400).json({ success: false, message: 'Option value cannot be empty.' });
     }
+    if (['Category', 'P-SourceType'].includes(field) && (!parentValue || !parentValue.trim())) {
+      return res.status(400).json({ success: false, message: `Select the parent ${field === 'Category' ? 'P-Type' : 'Category'} before adding this option.` });
+    }
 
     const newOption = await RDMasterOption.create({
       field,
       value: value.trim(),
+      parentValue: parentValue ? parentValue.trim() : null,
       company: req.user.companyId
     });
 
@@ -179,6 +189,53 @@ export const addDropdownOption = async (req, res) => {
     if (err.code === 11000) {
       return res.status(400).json({ success: false, message: 'This option already exists.' });
     }
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── CUSTOM FIELD TEMPLATES (per P-Type + Category + P-SourceType combo) ───────
+
+export const getCustomFieldTemplates = async (req, res) => {
+  try {
+    const templates = await RDCustomFieldTemplate.find({ company: req.user.companyId }).lean();
+    res.json({ success: true, data: templates });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const saveCustomFieldTemplate = async (req, res) => {
+  try {
+    const { pType, category, pSourceType, groups } = req.body;
+    if (!pType || !category || !pSourceType) {
+      return res.status(400).json({ success: false, message: 'pType, category and pSourceType are required.' });
+    }
+
+    const cleanGroups = (groups || [])
+      .map(g => ({
+        label: (g.label || '').trim(),
+        fields: (g.fields || []).map(f => ({ name: (f.name || '').trim() })).filter(f => f.name)
+      }))
+      .filter(g => g.label && g.fields.length > 0);
+
+    const template = await RDCustomFieldTemplate.findOneAndUpdate(
+      { company: req.user.companyId, pType, category, pSourceType },
+      { groups: cleanGroups, createdBy: req.user._id },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    res.status(201).json({ success: true, data: template });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const deleteCustomFieldTemplate = async (req, res) => {
+  try {
+    const template = await RDCustomFieldTemplate.findOneAndDelete({ _id: req.params.id, company: req.user.companyId });
+    if (!template) return res.status(404).json({ success: false, message: 'Template not found' });
+    res.json({ success: true, data: template });
+  } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -265,6 +322,27 @@ export const getBOMForMachine = async (req, res) => {
   }
 };
 
+// ─── Cross-department lookup: get a machine's BOM by its Product Code ─────────
+// Used by Production (Order Management) to show the full R&D BOM entry — including
+// hierarchy, material type, and the Product Master snapshot — for a material demand,
+// without needing the internal RDMachine ObjectId.
+export const getBOMByMachineCode = async (req, res) => {
+  try {
+    const { code } = req.params;
+    const companyId = req.user.companyId;
+
+    const machine = await RDMachine.findOne({ code, company: companyId }).lean();
+    if (!machine) {
+      return res.json({ success: true, data: { machine: null, bom: null } });
+    }
+
+    const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();
+    res.json({ success: true, data: { machine, bom: bom || null } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 
 // ─── CREATE BOM (WITH SOURCE TYPE VALIDATION) ─────────────────────────────────
 export const createBOM = async (req, res) => {
@@ -303,7 +381,10 @@ export const createBOM = async (req, res) => {
 export const addMaterial = async (req, res) => {
   try {
     // 1. Extract 'code' alongside the new fields
-    const { code, childPart, subChildPart, item, itemType, quantity, unit } = req.body;
+    const {
+      code, childPart, subChildPart, item, itemType, quantity, unit,
+      category, pSourceType, brand, description, metrology, specifications, customFields
+    } = req.body;
 
     // 2. Validate that 'code' is present
     if (!code || !item || !itemType || !quantity || !unit) {
@@ -325,7 +406,15 @@ export const addMaterial = async (req, res) => {
             item,
             itemType,
             quantity: Number(quantity),
-            unit
+            unit,
+            // Product Master snapshot, captured client-side when the code matched
+            category: category || '',
+            pSourceType: pSourceType || '',
+            brand: brand || '',
+            description: description || '',
+            metrology: metrology || '',
+            specifications: specifications || [],
+            customFields: customFields || [],
           }
         }
       },

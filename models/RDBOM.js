@@ -5,14 +5,23 @@ const MaterialSchema = new mongoose.Schema({
   childPart: { type: String, default: '' },
   subChildPart: { type: String, default: '' },
   item: { type: String, required: true, trim: true }, // Replaces 'name'
-  itemType: {
-    type: String,
-    enum: ['Fabricated Item', 'Assembly Item', 'Job Work', 'Laser Cutting', 'Coating'],
-    required: true
-  },
+  // Independent BOM-only classification (RDMasterOption field "MaterialType") —
+  // not derived from Product Master's P-Type.
+  itemType: { type: String, required: true, trim: true },
   quantity: { type: Number, required: true, min: 0 },
   unit: { type: String, required: true },
   isDiscontinued: { type: Boolean, default: false },
+
+  // Snapshot of extra Product Master data captured when the material code matched an
+  // RDMachine entry at add/edit time. Kept as a snapshot (not a live populate) so a locked
+  // BOM stays stable even if the underlying Product Master record changes later.
+  category: { type: String, default: '' },
+  pSourceType: { type: String, default: '' },
+  brand: { type: String, default: '' },
+  description: { type: String, default: '' },
+  metrology: { type: String, default: '' },
+  specifications: [{ key: String, value: String }],
+  customFields: [{ groupLabel: String, fieldName: String, value: String }],
 });
 
 const RDBOMSchema = new mongoose.Schema({

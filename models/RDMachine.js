@@ -13,12 +13,24 @@ const RDMachineSchema = new mongoose.Schema({
 
   // Other Text Fields
   brand: { type: String, default: '' },
+  metrology: { type: String, default: '', trim: true },
 
   // Dynamic Key-Value Specifications
   specifications: [{
     key: { type: String, trim: true },
     value: { type: String, trim: true }
   }],
+
+  // Dynamic Custom Fields (parent label -> sub-field name -> value),
+  // shaped per the RDCustomFieldTemplate matching pType+category+pSourceType
+  customFields: [{
+    groupLabel: { type: String, trim: true },
+    fieldName: { type: String, trim: true },
+    value: { type: String, trim: true, default: '' }
+  }],
+
+  // Manual gate: only machines forwarded here show up in Design Approval / Prototype
+  forwardToNextPhase: { type: Boolean, default: false },
 
   // Status Fields
   designStatus: {
