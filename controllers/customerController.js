@@ -8,6 +8,7 @@ import multer from 'multer';
 import { body, validationResult, query } from 'express-validator';
 import notificationService from '../services/notificationService.js';
 import mongoose from 'mongoose';
+import { computeOrderFinancials } from '../utils/orderFinancials.js';
 
 
 // Configure multer for file upload
@@ -911,13 +912,6 @@ export const getCustomerOrderFinancials = async (req, res) => {
       if (!form) { ordersWithoutForm++; continue; }
 
       const formItems = (form.items || []).filter(it => !it.hiddenCharge);
-      // Total = Bill Amount + GST Amount (GST is charged on top of the bill,
-      // same as the Order Form's own "Bill Amt + GST" figure)
-      const billSum = form.totals?.billAmount
-        ?? formItems.reduce((s, it) => s + (it.billAmount || 0), 0);
-      const gstSum = form.totals?.gstAmount
-        ?? formItems.reduce((s, it) => s + (it.gstAmount || 0), 0);
-      const total = billSum + gstSum;
 
       // Sale/invoice for this order — real Pakka bill preferred, then real
       // Kachha, then anything (never a Store-created placeholder ahead of a
@@ -930,25 +924,18 @@ export const getCustomerOrderFinancials = async (req, res) => {
         || sales[0]
         || null;
 
-      // Advance = Order Form ke Payment section ka Advance Payment;
-      // fallback to invoice/lead payments for older forms with no amount
-      let advance = form.paymentType === 'Advance Payment' ? (form.receivedAmount || 0) : 0;
-      if (!advance) advance = sale?.advancedPaymentAmount || 0;
-      if (!advance && order.leadId) {
-        const lps = await LeadPayment.find({ leadId: order.leadId, status: 'Verified', companyId })
+      let leadPayments = [];
+      if (order.leadId) {
+        leadPayments = await LeadPayment.find({ leadId: order.leadId, status: 'Verified', companyId })
           .select('amount').lean();
-        advance = lps.reduce((s, p) => s + (p.amount || 0), 0);
       }
 
       // Receipts recorded against this order (order-wise payments)
       const orderPayments = await CustomerPayment.find({ customer: customerId, order: order._id, companyId })
         .select('amount paymentDate paymentMode referenceNo').lean();
-      const receiptsSum = orderPayments.reduce((s, p) => s + (p.amount || 0), 0);
 
-      // Paid (receipts) — invoice allocation is authoritative; if no invoice yet,
-      // fall back to the receipts recorded directly against the order
-      const paidReceipts = sale ? (sale.paidAmount || 0) : receiptsSum;
-      const due = Math.max(0, total - advance - paidReceipts);
+      const { total, advance, paid: paidReceipts, due, paymentStatus } =
+        computeOrderFinancials({ form, sale, orderPayments, leadPayments });
 
       orderRows.push({
         orderId: order._id,
@@ -967,7 +954,7 @@ export const getCustomerOrderFinancials = async (req, res) => {
         advance,
         paid: paidReceipts,
         due,
-        paymentStatus: due <= 0 ? 'Paid' : (advance + paidReceipts) > 0 ? 'Partially Paid' : 'Pending',
+        paymentStatus,
         payments: orderPayments
       });
     }

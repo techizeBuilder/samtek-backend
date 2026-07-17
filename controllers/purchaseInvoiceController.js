@@ -1031,8 +1031,10 @@ export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
             }];
         }
 
-        const gstAmount = Math.round(subtotal * 0.18);
-        const totalAmount = subtotal + gstAmount;
+        // Vendor's bid price (copied verbatim from the PO items above) is used
+        // as-is — GST is never added on top of it internally.
+        const gstAmount = 0;
+        const totalAmount = subtotal;
 
         // 6. Create Invoice
         const invoice = new PurchaseInvoice({

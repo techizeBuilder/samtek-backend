@@ -5,6 +5,7 @@ import { Transaction, Account } from '../models/Account.js';
 import mongoose from 'mongoose';
 import { generateStandardizedInvoicePDF } from '../utils/invoicePdf.js';
 import { Company } from '../models/Company.js';
+import { computeOrderFinancials } from '../utils/orderFinancials.js';
 
 /**
  * Create a new Sales Invoice and auto-post to ledger
@@ -815,19 +816,36 @@ export const getPackedOrders = async (req, res) => {
             resolved.push({ job, order, sale });
         }
 
-        // Batch-fetch Customer master + LeadPayment data for every resolved
-        // job in one query each, instead of one query per job.
+        // Batch-fetch Customer master + LeadPayment + Order Form + order-linked
+        // CustomerPayment data for every resolved job in one query each,
+        // instead of one query per job.
+        const OrderForm = (await import('../models/OrderForm.js')).default;
+        const CustomerPayment = (await import('../models/CustomerPayment.js')).default;
+
         const custIds = [...new Set(resolved.map(r => r.order.customer?._id?.toString()).filter(Boolean))];
         const leadIds = [...new Set(resolved.map(r => r.order.leadId?.toString()).filter(Boolean))];
-        const [custMasters, leadPays] = await Promise.all([
+        const orderIds = resolved.map(r => r.order._id);
+        const [custMasters, leadPays, forms, orderPays] = await Promise.all([
             custIds.length ? Customer.find({ _id: { $in: custIds } }).select('outstandingAmount advancePayment').lean() : [],
-            leadIds.length ? LeadPayment.find({ leadId: { $in: leadIds }, status: 'Verified', companyId }).select('leadId amount').lean() : []
+            leadIds.length ? LeadPayment.find({ leadId: { $in: leadIds }, status: 'Verified', companyId }).select('leadId amount').lean() : [],
+            orderIds.length ? OrderForm.find({ orderId: { $in: orderIds }, status: 'Submitted' }).select('orderId items totals receivedAmount paymentType').lean() : [],
+            orderIds.length ? CustomerPayment.find({ order: { $in: orderIds }, companyId }).select('order amount').lean() : []
         ]);
         const custMasterById = new Map(custMasters.map(c => [c._id.toString(), c]));
         const leadPaySumById = new Map();
+        const leadPaysByLeadId = new Map();
         leadPays.forEach(p => {
             const key = p.leadId.toString();
             leadPaySumById.set(key, (leadPaySumById.get(key) || 0) + (p.amount || 0));
+            if (!leadPaysByLeadId.has(key)) leadPaysByLeadId.set(key, []);
+            leadPaysByLeadId.get(key).push(p);
+        });
+        const formByOrderId = new Map(forms.map(f => [f.orderId.toString(), f]));
+        const orderPaysByOrderId = new Map();
+        orderPays.forEach(p => {
+            const key = p.order.toString();
+            if (!orderPaysByOrderId.has(key)) orderPaysByOrderId.set(key, []);
+            orderPaysByOrderId.get(key).push(p);
         });
 
         const results = [];
@@ -838,25 +856,35 @@ export const getPackedOrders = async (req, res) => {
             // saleId indirection, but it must never be treated as a real
             // invoice for financial display/"already invoiced" purposes.
             const realSale = sale && !sale.isPlaceholder ? sale : null;
+            const form = formByOrderId.get(order._id.toString()) || null;
 
-            // Look up verified lead advance payments whenever we don't already
-            // have a trusted figure — this is needed MORE, not less, when
-            // there's no real invoice yet (realSale null), since that's
-            // exactly when nothing else reflects payments already collected.
-            let advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
-            if (!advancedPaymentAmount && order.leadId) {
-                advancedPaymentAmount = leadPaySumById.get(order.leadId.toString()) || 0;
+            let totalAmount, paidAmount, advancedPaymentAmount, balanceAmount, paymentStatus;
+
+            if (form) {
+                // Order Form is authoritative — identical formula to Customer
+                // Master's order-financials breakdown, so the two never drift.
+                const orderPayments = orderPaysByOrderId.get(order._id.toString()) || [];
+                const leadPayments = order.leadId ? (leadPaysByLeadId.get(order.leadId.toString()) || []) : [];
+                const fin = computeOrderFinancials({ form, sale: realSale, orderPayments, leadPayments });
+                totalAmount = fin.total;
+                advancedPaymentAmount = fin.advance;
+                paidAmount = fin.advance + fin.paid;
+                balanceAmount = fin.due;
+                paymentStatus = fin.paymentStatus;
+            } else {
+                // No Order Form yet (legacy order) — fall back to invoice/order value.
+                advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
+                if (!advancedPaymentAmount && order.leadId) {
+                    advancedPaymentAmount = leadPaySumById.get(order.leadId.toString()) || 0;
+                }
+                totalAmount = realSale
+                  ? realSale.totalAmount
+                  : Math.round((order.totalAmount || 0) * 1.18); // No invoice yet → add 18% GST to order value
+                paidAmount = realSale ? ((realSale.paidAmount || 0) + advancedPaymentAmount) : advancedPaymentAmount;
+                balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+                paymentStatus = realSale ? realSale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
             }
 
-            const totalAmount = realSale
-              ? realSale.totalAmount
-              : Math.round((order.totalAmount || 0) * 1.18); // No invoice yet → add 18% GST to order value
-            // "Paid" must include the advance regardless of whether a real
-            // invoice exists — realSale.paidAmount alone only tracks receipts
-            // taken AFTER invoicing, same formula as getNOCRequests uses.
-            const paidAmount = realSale ? ((realSale.paidAmount || 0) + advancedPaymentAmount) : advancedPaymentAmount;
-            const balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
-            const paymentStatus = realSale ? realSale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
             const paymentProofUrl = realSale ? realSale.paymentProofUrl : '';
             const saleId = realSale ? realSale._id : null;
 
@@ -904,8 +932,8 @@ export const getPackedOrders = async (req, res) => {
                 // Total = order invoice total, Paid = advance + receipts
                 // against this order, Due = what's left on this order
                 displayTotal: totalAmount,
-                displayPaid: (realSale ? (realSale.paidAmount || 0) : 0) + advancedPaymentAmount,
-                displayDue: Math.max(0, totalAmount - ((realSale ? (realSale.paidAmount || 0) : 0) + advancedPaymentAmount))
+                displayPaid: paidAmount,
+                displayDue: balanceAmount
             });
         }
 
@@ -937,6 +965,7 @@ export const getDueBillData = async (req, res) => {
         const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
         const QCJob        = (await import('../models/QCJob.js')).default;
         const CustomerPayment = (await import('../models/CustomerPayment.js')).default;
+        const OrderForm    = (await import('../models/OrderForm.js')).default;
 
         // 1. Find the packaging job
         const job = await PackagingJob.findOne({ _id: jobId, company: companyId });
@@ -992,33 +1021,35 @@ export const getDueBillData = async (req, res) => {
         // never be treated as a real invoice for the bill's amounts/GST.
         const realSale = sale && !sale.isPlaceholder ? sale : null;
 
-        // 3. Build advance payment history (with dates)
-        let advancePayments = [];
-        let advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
+        // 3. Order Form — authoritative for Total/Advance/Paid/Due, same
+        // formula as Customer Master's order-financials breakdown, so the
+        // Due Bill and Customer Master → Orders view never disagree.
+        const form = await OrderForm.findOne({ orderId: order._id, status: 'Submitted' })
+            .select('items totals receivedAmount paymentType').lean();
 
+        // 4. Build advance payment history (with dates)
+        let advancePayments = [];
+        let leadPayments = [];
         if (order.leadId) {
-            const leadPays = await LeadPayment.find({
+            leadPayments = await LeadPayment.find({
                 leadId: order.leadId,
                 status: 'Verified',
                 companyId
             }).sort({ paymentDate: 1 }).lean();
 
-            advancePayments = leadPays.map(p => ({
+            advancePayments = leadPayments.map(p => ({
                 date: p.paymentDate,
                 amount: p.amount,
                 mode: p.paymentMethod,
                 transactionId: p.transactionId || '',
                 remarks: p.remarks || ''
             }));
-
-            if (!advancedPaymentAmount && leadPays.length > 0) {
-                advancedPaymentAmount = leadPays.reduce((s, p) => s + (p.amount || 0), 0);
-            }
         }
 
-        // 4. Post-invoice payments received (CustomerPayment records) —
+        // 5. Post-invoice payments received (CustomerPayment records) —
         // order-wise: this order's receipts + legacy/general (unlinked) ones
         let postInvoicePayments = [];
+        let orderPayments = [];
         if (order.customer?._id) {
             const custPays = await CustomerPayment.find({
                 customer: order.customer._id,
@@ -1034,20 +1065,40 @@ export const getDueBillData = async (req, res) => {
                 notes: p.notes || '',
                 orderCode: p.orderCode || ''
             }));
+            orderPayments = custPays.filter(p => p.order && p.order.toString() === order._id.toString());
         }
 
-        // 5. Amounts — keyed off realSale (never the Store placeholder)
-        const subtotal   = realSale ? realSale.subtotal   : (order.totalAmount || 0);
-        const taxAmount  = realSale ? realSale.taxAmount  : Math.round((order.totalAmount || 0) * 0.18);
-        const totalAmount = realSale ? realSale.totalAmount : (subtotal + taxAmount);
-        const paidAmount = realSale ? (realSale.paidAmount || 0) : 0;
-        const balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+        // 6. Amounts — Order Form is authoritative when submitted (never the
+        // original quotation's Order.totalAmount); fall back to the
+        // invoice/order value only for legacy orders with no form on file.
+        let subtotal, taxAmount, totalAmount, advancedPaymentAmount, paidAmount, balanceAmount, paymentStatus;
+        if (form) {
+            const fin = computeOrderFinancials({ form, sale: realSale, orderPayments, leadPayments });
+            subtotal = fin.subtotal;
+            taxAmount = fin.gst;
+            totalAmount = fin.total;
+            advancedPaymentAmount = fin.advance;
+            paidAmount = fin.paid;
+            balanceAmount = fin.due;
+            paymentStatus = fin.paymentStatus;
+        } else {
+            advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
+            if (!advancedPaymentAmount && leadPayments.length > 0) {
+                advancedPaymentAmount = leadPayments.reduce((s, p) => s + (p.amount || 0), 0);
+            }
+            subtotal = realSale ? realSale.subtotal : (order.totalAmount || 0);
+            taxAmount = realSale ? realSale.taxAmount : Math.round((order.totalAmount || 0) * 0.18);
+            totalAmount = realSale ? realSale.totalAmount : (subtotal + taxAmount);
+            paidAmount = realSale ? (realSale.paidAmount || 0) : 0;
+            balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+            paymentStatus = realSale?.paymentStatus || (advancedPaymentAmount >= totalAmount ? 'Paid' : advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending');
+        }
         const gstType = realSale?.gstType || 'CGST_SGST';
         const invoiceNumber = realSale?.invoiceNumber || null;
         const saleDate = realSale?.saleDate || order.orderDate;
         const dueDate  = realSale?.dueDate || null;
 
-        // 5b. Customer master reference fields (kept for info display)
+        // 6b. Customer master reference fields (kept for info display)
         const customerMasterDoc = await Customer.findById(order.customer?._id)
             .select('outstandingAmount advancePayment')
             .lean();
@@ -1058,7 +1109,7 @@ export const getDueBillData = async (req, res) => {
         // against this order, Due = what's left on this order
         const displayTotal = totalAmount;
         const displayPaid  = advancedPaymentAmount + paidAmount;
-        const displayDue   = Math.max(0, totalAmount - advancedPaymentAmount - paidAmount);
+        const displayDue   = balanceAmount;
 
         // 6. Fetch company info
         const { Company } = await import('../models/Company.js');
@@ -1121,7 +1172,7 @@ export const getDueBillData = async (req, res) => {
                 advancedPaymentAmount,
                 paidAmount,
                 balanceAmount,
-                paymentStatus: realSale?.paymentStatus || (advancedPaymentAmount >= totalAmount ? 'Paid' : advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'),
+                paymentStatus,
 
                 // Customer master financial fields (for PDF display)
                 customerOutstanding,

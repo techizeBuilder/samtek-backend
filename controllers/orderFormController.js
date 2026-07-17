@@ -102,6 +102,22 @@ export const upsertOrderForm = async (req, res) => {
       hiddenCharge: !!it.hiddenCharge,
     })) : [];
 
+    // Received Amount (advance payment) and Bill Amount are what make the
+    // Order Form actionable for Accounts — without them there's nothing to
+    // reconcile against the order, so both are mandatory on submit.
+    if (!(Number(receivedAmount) > 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Received Amount (Advance Payment) is required and must be greater than 0.'
+      });
+    }
+    if (cleanItems.filter(it => !it.hiddenCharge).some(it => !(it.billAmount > 0))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bill Amount is required for every item row.'
+      });
+    }
+
     const totals = cleanItems.reduce((acc, it) => {
       acc.qty += it.qty;
       acc.billAmount += it.billAmount;
