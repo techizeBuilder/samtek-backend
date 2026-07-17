@@ -507,8 +507,10 @@ export const selectVendor = async (req, res) => {
     // When ordered in a purchase unit (e.g. 20 kg for a 10-pc demand), the PO is for that qty
     const orderQty = pr.purchaseQuantity || pr.quantity;
     const totalAmount = unitPrice * orderQty;
-    const taxAmount = totalAmount * 0.18; // 18% GST default
-    const grandTotal = totalAmount + taxAmount;
+    // Vendor's bid price is used as-is on the PO — GST is never added on top
+    // of it internally, since the vendor already quoted their final price.
+    const taxAmount = 0;
+    const grandTotal = totalAmount;
 
     // Resolve delivery address from company
     const company = await Company.findById(companyId);
