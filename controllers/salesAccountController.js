@@ -24,9 +24,13 @@ export const createSalesInvoice = async (req, res) => {
         }
 
         // 1. Logic for Order-linked Invoices (Dual Billing Support)
+        // Placeholder Sales (Store's internal auto-created record, see
+        // orderController.js updateOrderStoreInfo) are never real invoices —
+        // excluded here so they can't block generation or leak their
+        // throwaway TEMP- number into a real Kachha/Pakka bill.
         let finalInvoiceNo = invoiceNo;
         if (orderId) {
-            const existingInvoices = await Sale.find({ order: orderId, companyId });
+            const existingInvoices = await Sale.find({ order: orderId, companyId, isPlaceholder: { $ne: true } });
 
             // Check if this specific type already exists
             const sameType = existingInvoices.find(inv => inv.invoiceType === (invoiceType || 'Pakka'));
@@ -34,7 +38,7 @@ export const createSalesInvoice = async (req, res) => {
                 throw new Error(`${invoiceType || 'Pakka'} bill is already generated for this order.`);
             }
 
-            // If any invoice exists for this order, reuse its number
+            // If a real invoice already exists for this order, reuse its number
             if (existingInvoices.length > 0) {
                 finalInvoiceNo = existingInvoices[0].invoiceNumber;
             }
@@ -259,13 +263,16 @@ export const getSalesInvoices = async (req, res) => {
             .populate('companyId', 'name unitName address city state locationPin email mobile gst')
             .sort({ saleDate: -1 })
             .skip((page - 1) * limit)
-            .limit(parseInt(limit));
+            .limit(parseInt(limit))
+            .lean();
 
         const total = await Sale.countDocuments(query);
 
-        // Fetch approved orders that are NOT yet invoiced
+        // Fetch approved orders that are NOT yet invoiced. Placeholder Sales
+        // (Store's internal auto-created record — see updateOrderStoreInfo)
+        // are never real invoices and must not count as "already invoiced".
         const Order = (await import('../models/Order.js')).default;
-        const invoicedOrderIds = await Sale.find({ companyId: req.user.companyId }).distinct('order');
+        const invoicedOrderIds = await Sale.find({ companyId: req.user.companyId, isPlaceholder: { $ne: true } }).distinct('order');
 
         const pendingOrdersQuery = {
             companyId: req.user.companyId,
@@ -279,10 +286,38 @@ export const getSalesInvoices = async (req, res) => {
             .populate('products.product', 'name price brand unit')
             .sort({ orderDate: -1 });
 
+        // This list is filtered to one invoiceType (`type` query param) at a
+        // time, so an order with BOTH a Kachha and Pakka bill only ever shows
+        // one row here. Attach the other type's Sale (if any) as
+        // `siblingInvoice` so the frontend can offer a choice at
+        // print/download time instead of guessing which one the user wants.
+        const orderIds = [...new Set(invoices.map(inv => inv.order?.toString()).filter(Boolean))];
+        const siblingCandidates = orderIds.length
+            ? await Sale.find({ order: { $in: orderIds }, isPlaceholder: { $ne: true } })
+                .select('order invoiceType invoiceNumber')
+                .lean()
+            : [];
+        const salesByOrder = {};
+        siblingCandidates.forEach(s => {
+            const key = s.order?.toString();
+            if (!key) return;
+            (salesByOrder[key] ||= []).push(s);
+        });
+        const invoicesWithSibling = invoices.map(inv => {
+            const orderKey = inv.order?.toString();
+            const sibling = (salesByOrder[orderKey] || []).find(
+                s => s._id.toString() !== inv._id.toString() && s.invoiceType !== inv.invoiceType
+            );
+            return {
+                ...inv,
+                siblingInvoice: sibling ? { _id: sibling._id, invoiceType: sibling.invoiceType, invoiceNumber: sibling.invoiceNumber } : null
+            };
+        });
+
         res.json({
             success: true,
             data: {
-                invoices,
+                invoices: invoicesWithSibling,
                 pendingOrders,
                 pagination: { total, page: parseInt(page), limit: parseInt(limit) }
             }
@@ -312,7 +347,7 @@ export const getPendingAccountOrders = async (req, res) => {
 
         // Enrich with invoicing status + advanced payment from linked lead
         const ordersWithInvoices = await Promise.all(orders.map(async (order) => {
-            const invoices = await Sale.find({ order: order._id }).select('invoiceType');
+            const invoices = await Sale.find({ order: order._id, isPlaceholder: { $ne: true } }).select('invoiceType');
 
             // Fetch verified advanced payments for the linked lead (if any)
             let advancedPaymentAmount = 0;
@@ -699,21 +734,48 @@ export const getPackedOrders = async (req, res) => {
             company: companyId
         }).sort({ updatedAt: -1 });
 
-        const results = [];
+        const LeadPayment = (await import('../models/LeadPayment.js')).default;
 
+        // ── Batch pre-fetch the PRIMARY lookup (order by orderCode) for every
+        // job in one query, instead of one Order.findOne per job (N+1). The
+        // rare fallback chains (productionOrderId/qcJobId/prodByOrderId —
+        // only hit when a job has no matching orderCode) stay per-job below
+        // since they only run for a handful of edge-case jobs, not all of them.
+        const orderCodes = [...new Set(packedJobs.map(j => j.orderId).filter(Boolean))];
+        const ordersByCode = new Map();
+        if (orderCodes.length) {
+            const primaryOrders = await Order.find({ orderCode: { $in: orderCodes }, companyId })
+                .select('-quotation').populate('customer').populate('products.product');
+            primaryOrders.forEach(o => ordersByCode.set(o.orderCode, o));
+        }
+
+        // Batch-fetch every Sale for those primary-matched orders in one query
+        // (same preference logic as getNOCRequests, just resolved from a map).
+        const primaryOrderIds = [...ordersByCode.values()].map(o => o._id);
+        const salesByOrderId = new Map();
+        if (primaryOrderIds.length) {
+            const primarySales = await Sale.find({ order: { $in: primaryOrderIds }, companyId }).sort({ createdAt: -1 });
+            primarySales.forEach(s => {
+                const key = s.order.toString();
+                if (!salesByOrderId.has(key)) salesByOrderId.set(key, []);
+                salesByOrderId.get(key).push(s);
+            });
+        }
+        const pickPreferredSale = (orderSales) =>
+            orderSales.find(s => !s.isPlaceholder && s.invoiceType === 'Pakka')
+                || orderSales.find(s => !s.isPlaceholder)
+                || orderSales[0]
+                || null;
+
+        // Resolve order+sale for every job (batched map for the common case,
+        // original sequential fallback chain for the rare unmatched ones).
+        const resolved = [];
         for (const job of packedJobs) {
-            let order = null;
+            let order = ordersByCode.get(job.orderId) || null;
             let sale = null;
 
-            // Primary lookup: find Order by orderCode matching job.orderId (standard sales flow)
-            order = await Order.findOne({
-                orderCode: job.orderId,
-                companyId
-            }).populate('customer').populate('products.product');
-
             if (order) {
-                // Found order via orderCode — find the linked Sale
-                sale = await Sale.findOne({ order: order._id, companyId });
+                sale = pickPreferredSale(salesByOrderId.get(order._id.toString()) || []);
             } else {
                 // Fallback: packaging job was created from a ProductionOrder or QCJob
                 // Try to find the Sale directly via saleId on those source records
@@ -722,7 +784,7 @@ export const getPackedOrders = async (req, res) => {
                     if (prodOrder?.saleId) {
                         sale = await Sale.findOne({ _id: prodOrder.saleId, companyId });
                         if (sale?.order) {
-                            order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                            order = await Order.findById(sale.order).select('-quotation').populate('customer').populate('products.product');
                         }
                     }
                 }
@@ -731,7 +793,7 @@ export const getPackedOrders = async (req, res) => {
                     if (qcJob?.saleId) {
                         sale = await Sale.findOne({ _id: qcJob.saleId, companyId });
                         if (sale?.order) {
-                            order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                            order = await Order.findById(sale.order).select('-quotation').populate('customer').populate('products.product');
                         }
                     }
                 }
@@ -742,7 +804,7 @@ export const getPackedOrders = async (req, res) => {
                     if (prodByOrderId?.saleId) {
                         sale = await Sale.findOne({ _id: prodByOrderId.saleId, companyId });
                         if (sale?.order) {
-                            order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                            order = await Order.findById(sale.order).select('-quotation').populate('customer').populate('products.product');
                         }
                     }
                 }
@@ -750,31 +812,56 @@ export const getPackedOrders = async (req, res) => {
 
             // If still no order found, skip this job (no associated sales order exists)
             if (!order) continue;
+            resolved.push({ job, order, sale });
+        }
 
-            let advancedPaymentAmount = sale?.advancedPaymentAmount || 0;
-            if (sale && !advancedPaymentAmount && order.leadId) {
-                const LeadPayment = (await import('../models/LeadPayment.js')).default;
-                const leadPayments = await LeadPayment.find({
-                    leadId: order.leadId,
-                    status: 'Verified',
-                    companyId
-                }).select('amount').lean();
-                advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+        // Batch-fetch Customer master + LeadPayment data for every resolved
+        // job in one query each, instead of one query per job.
+        const custIds = [...new Set(resolved.map(r => r.order.customer?._id?.toString()).filter(Boolean))];
+        const leadIds = [...new Set(resolved.map(r => r.order.leadId?.toString()).filter(Boolean))];
+        const [custMasters, leadPays] = await Promise.all([
+            custIds.length ? Customer.find({ _id: { $in: custIds } }).select('outstandingAmount advancePayment').lean() : [],
+            leadIds.length ? LeadPayment.find({ leadId: { $in: leadIds }, status: 'Verified', companyId }).select('leadId amount').lean() : []
+        ]);
+        const custMasterById = new Map(custMasters.map(c => [c._id.toString(), c]));
+        const leadPaySumById = new Map();
+        leadPays.forEach(p => {
+            const key = p.leadId.toString();
+            leadPaySumById.set(key, (leadPaySumById.get(key) || 0) + (p.amount || 0));
+        });
+
+        const results = [];
+
+        for (const { job, order, sale } of resolved) {
+            // `sale` above may have resolved to Store's internal placeholder
+            // (isPlaceholder: true) — that's fine for locating `order` via
+            // saleId indirection, but it must never be treated as a real
+            // invoice for financial display/"already invoiced" purposes.
+            const realSale = sale && !sale.isPlaceholder ? sale : null;
+
+            // Look up verified lead advance payments whenever we don't already
+            // have a trusted figure — this is needed MORE, not less, when
+            // there's no real invoice yet (realSale null), since that's
+            // exactly when nothing else reflects payments already collected.
+            let advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
+            if (!advancedPaymentAmount && order.leadId) {
+                advancedPaymentAmount = leadPaySumById.get(order.leadId.toString()) || 0;
             }
 
-            const totalAmount = sale
-              ? sale.totalAmount
+            const totalAmount = realSale
+              ? realSale.totalAmount
               : Math.round((order.totalAmount || 0) * 1.18); // No invoice yet → add 18% GST to order value
-            const paidAmount = sale ? (sale.paidAmount || 0) : advancedPaymentAmount;
-            const balanceAmount = sale ? sale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
-            const paymentStatus = sale ? sale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
-            const paymentProofUrl = sale ? sale.paymentProofUrl : '';
-            const saleId = sale ? sale._id : null;
+            // "Paid" must include the advance regardless of whether a real
+            // invoice exists — realSale.paidAmount alone only tracks receipts
+            // taken AFTER invoicing, same formula as getNOCRequests uses.
+            const paidAmount = realSale ? ((realSale.paidAmount || 0) + advancedPaymentAmount) : advancedPaymentAmount;
+            const balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+            const paymentStatus = realSale ? realSale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
+            const paymentProofUrl = realSale ? realSale.paymentProofUrl : '';
+            const saleId = realSale ? realSale._id : null;
 
             // Fetch customer master fields for display
-            const customerMaster = await Customer.findById(order.customer?._id)
-                .select('outstandingAmount advancePayment')
-                .lean();
+            const customerMaster = custMasterById.get(order.customer?._id?.toString());
             const customerOutstanding = customerMaster?.outstandingAmount || 0;
             const customerAdvance = customerMaster?.advancePayment || 0;
 
@@ -817,8 +904,8 @@ export const getPackedOrders = async (req, res) => {
                 // Total = order invoice total, Paid = advance + receipts
                 // against this order, Due = what's left on this order
                 displayTotal: totalAmount,
-                displayPaid: (sale ? (sale.paidAmount || 0) : 0) + advancedPaymentAmount,
-                displayDue: Math.max(0, totalAmount - ((sale ? (sale.paidAmount || 0) : 0) + advancedPaymentAmount))
+                displayPaid: (realSale ? (realSale.paidAmount || 0) : 0) + advancedPaymentAmount,
+                displayDue: Math.max(0, totalAmount - ((realSale ? (realSale.paidAmount || 0) : 0) + advancedPaymentAmount))
             });
         }
 
@@ -860,40 +947,54 @@ export const getDueBillData = async (req, res) => {
         let sale  = null;
 
         order = await Order.findOne({ orderCode: job.orderId, companyId })
+            .select('-quotation')
             .populate('customer')
             .populate('products.product');
 
         if (order) {
-            sale = await Sale.findOne({ order: order._id, companyId });
+            // An order can have multiple Sale docs (Store's placeholder, plus
+            // a real Kachha and/or Pakka once Accounts generates them).
+            // Prefer a real Pakka bill, then a real Kachha bill, then
+            // anything — same preference order as getPackedOrders/getNOCRequests.
+            const orderSales = await Sale.find({ order: order._id, companyId }).sort({ createdAt: -1 });
+            sale = orderSales.find(s => !s.isPlaceholder && s.invoiceType === 'Pakka')
+                || orderSales.find(s => !s.isPlaceholder)
+                || orderSales[0]
+                || null;
         } else {
             if (job.productionOrderId) {
                 const po = await ProductionOrder.findById(job.productionOrderId).select('saleId').lean();
                 if (po?.saleId) {
                     sale = await Sale.findOne({ _id: po.saleId, companyId });
-                    if (sale?.order) order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                    if (sale?.order) order = await Order.findById(sale.order).select('-quotation').populate('customer').populate('products.product');
                 }
             }
             if (!sale && job.qcJobId) {
                 const qj = await QCJob.findById(job.qcJobId).select('saleId').lean();
                 if (qj?.saleId) {
                     sale = await Sale.findOne({ _id: qj.saleId, companyId });
-                    if (sale?.order) order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                    if (sale?.order) order = await Order.findById(sale.order).select('-quotation').populate('customer').populate('products.product');
                 }
             }
             if (!sale) {
                 const po2 = await ProductionOrder.findOne({ orderId: job.orderId, company: companyId }).select('saleId').lean();
                 if (po2?.saleId) {
                     sale = await Sale.findOne({ _id: po2.saleId, companyId });
-                    if (sale?.order) order = await Order.findById(sale.order).populate('customer').populate('products.product');
+                    if (sale?.order) order = await Order.findById(sale.order).select('-quotation').populate('customer').populate('products.product');
                 }
             }
         }
 
         if (!order) return res.status(404).json({ success: false, message: 'Order not found for this job' });
 
+        // `sale` above may have resolved to Store's internal placeholder
+        // (isPlaceholder: true) — fine for locating `order`, but it must
+        // never be treated as a real invoice for the bill's amounts/GST.
+        const realSale = sale && !sale.isPlaceholder ? sale : null;
+
         // 3. Build advance payment history (with dates)
         let advancePayments = [];
-        let advancedPaymentAmount = sale?.advancedPaymentAmount || 0;
+        let advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
 
         if (order.leadId) {
             const leadPays = await LeadPayment.find({
@@ -935,16 +1036,16 @@ export const getDueBillData = async (req, res) => {
             }));
         }
 
-        // 5. Amounts
-        const subtotal   = sale ? sale.subtotal   : (order.totalAmount || 0);
-        const taxAmount  = sale ? sale.taxAmount  : Math.round((order.totalAmount || 0) * 0.18);
-        const totalAmount = sale ? sale.totalAmount : (subtotal + taxAmount);
-        const paidAmount = sale ? (sale.paidAmount || 0) : 0;
-        const balanceAmount = sale ? sale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
-        const gstType = sale?.gstType || 'CGST_SGST';
-        const invoiceNumber = sale?.invoiceNumber || null;
-        const saleDate = sale?.saleDate || order.orderDate;
-        const dueDate  = sale?.dueDate || null;
+        // 5. Amounts — keyed off realSale (never the Store placeholder)
+        const subtotal   = realSale ? realSale.subtotal   : (order.totalAmount || 0);
+        const taxAmount  = realSale ? realSale.taxAmount  : Math.round((order.totalAmount || 0) * 0.18);
+        const totalAmount = realSale ? realSale.totalAmount : (subtotal + taxAmount);
+        const paidAmount = realSale ? (realSale.paidAmount || 0) : 0;
+        const balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+        const gstType = realSale?.gstType || 'CGST_SGST';
+        const invoiceNumber = realSale?.invoiceNumber || null;
+        const saleDate = realSale?.saleDate || order.orderDate;
+        const dueDate  = realSale?.dueDate || null;
 
         // 5b. Customer master reference fields (kept for info display)
         const customerMasterDoc = await Customer.findById(order.customer?._id)
@@ -993,8 +1094,18 @@ export const getDueBillData = async (req, res) => {
                     gstin: order.customer?.gstin || order.customer?.gst || ''
                 },
 
-                // Items
-                items: order.products.map(p => ({
+                // Items — prefer the real invoice's own item breakdown (built
+                // from the Order Form's Bill+GST amounts at invoice-generation
+                // time, so it's already GST-inclusive and matches the totals
+                // above exactly). Only fall back to the raw quoted Order
+                // products when no real invoice has been generated yet.
+                items: (realSale?.items?.length ? realSale.items : null)?.map(it => ({
+                    productName: it.productName || 'Item',
+                    quantity: it.quantity,
+                    unitPrice: it.unitPrice,
+                    total: it.totalPrice,
+                    tax: it.tax || 0
+                })) || order.products.map(p => ({
                     productName: p.product?.name || 'Unknown Item',
                     quantity: p.quantity,
                     unitPrice: p.price,
@@ -1010,7 +1121,7 @@ export const getDueBillData = async (req, res) => {
                 advancedPaymentAmount,
                 paidAmount,
                 balanceAmount,
-                paymentStatus: sale?.paymentStatus || (advancedPaymentAmount >= totalAmount ? 'Paid' : advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'),
+                paymentStatus: realSale?.paymentStatus || (advancedPaymentAmount >= totalAmount ? 'Paid' : advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'),
 
                 // Customer master financial fields (for PDF display)
                 customerOutstanding,

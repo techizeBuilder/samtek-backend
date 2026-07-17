@@ -694,9 +694,22 @@ async function createRejectedProductionOrder(qcJob, user) {
 
     const rejectedOrderId = `REJ-${year}-${String(nextNumber).padStart(4, '0')}`;
 
+    // Resolve the real sales Order this rejected item traces back to, via the
+    // saleId carried forward from the original Production Order → QC Job chain.
+    let orderCode = null;
+    if (qcJob.saleId) {
+      try {
+        const sourceSale = await Sale.findById(qcJob.saleId).populate('order', 'orderCode');
+        orderCode = sourceSale?.order?.orderCode || null;
+      } catch (saleErr) {
+        console.error('Error resolving orderCode for rejected production order:', saleErr);
+      }
+    }
+
     // Create production order for rejected item
     const productionOrder = await ProductionOrder.create({
       orderId: rejectedOrderId,
+      orderCode,
       machineCode: qcJob.itemCode || `REJ-${qcJob.qcJobId}`,
       machineName: qcJob.itemName,
       priority: 'Urgent', // Rejected items get urgent priority

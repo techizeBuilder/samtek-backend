@@ -42,6 +42,14 @@ const saleSchema = new mongoose.Schema({
     ref: 'Customer',
     required: true
   },
+  // Auto-created internally (by Store's order-info update) purely to give
+  // Store/QC/Production automation a Sale record to key off of before
+  // Accounts has actually generated a real invoice. Never a real Kachha/Pakka
+  // bill — must be excluded from every "is this order invoiced" check.
+  isPlaceholder: {
+    type: Boolean,
+    default: false
+  },
   items: [saleItemSchema],
   subtotal: {
     type: Number,

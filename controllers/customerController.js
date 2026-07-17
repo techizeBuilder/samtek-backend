@@ -919,11 +919,16 @@ export const getCustomerOrderFinancials = async (req, res) => {
         ?? formItems.reduce((s, it) => s + (it.gstAmount || 0), 0);
       const total = billSum + gstSum;
 
-      // Sale/invoice for this order — Pakka preferred (dual-billing safe)
+      // Sale/invoice for this order — real Pakka bill preferred, then real
+      // Kachha, then anything (never a Store-created placeholder ahead of a
+      // real invoice) — same preference chain as getPackedOrders/getDueBillData/getNOCRequests.
       const sales = await Sale.find({ order: order._id, companyId })
-        .select('totalAmount paidAmount balanceAmount advancedPaymentAmount invoiceType paymentStatus')
+        .select('totalAmount paidAmount balanceAmount advancedPaymentAmount invoiceType paymentStatus isPlaceholder items')
         .lean();
-      const sale = sales.find(s => s.invoiceType === 'Pakka') || sales[0] || null;
+      const sale = sales.find(s => !s.isPlaceholder && s.invoiceType === 'Pakka')
+        || sales.find(s => !s.isPlaceholder)
+        || sales[0]
+        || null;
 
       // Advance = Order Form ke Payment section ka Advance Payment;
       // fallback to invoice/lead payments for older forms with no amount
