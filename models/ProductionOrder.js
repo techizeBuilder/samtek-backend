@@ -67,6 +67,10 @@ const MaterialDemandSchema = new mongoose.Schema({
 
 const ProductionOrderSchema = new mongoose.Schema({
   orderId: { type: String, unique: true },
+  // The real sales Order's orderCode (e.g. "ORD-0066") this run was generated
+  // from — resolved via saleId → Sale.order at creation time. Null for
+  // manually-created/Stock entries that aren't tied to a customer order.
+  orderCode: { type: String, default: null, trim: true },
   machineCode: { type: String, required: true, trim: true },
   machineName: { type: String, required: true, trim: true },
   priority: { type: String, enum: ['Urgent', 'Normal'], default: 'Normal' },

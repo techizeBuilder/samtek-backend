@@ -1234,6 +1234,7 @@ const updateOrderStoreInfo = async (req, res) => {
 
       sale = new Sale({
         invoiceNumber,
+        isPlaceholder: true, // internal linkage only — not a real invoice, must never surface as one
         order: order._id,
         customer: order.customer._id,
         items: saleItems,
@@ -1401,6 +1402,7 @@ const updateOrderStoreInfo = async (req, res) => {
 
           await ProductionOrder.create({
             orderId: prodOrderId,
+            orderCode: order.orderCode,
             machineCode: orderCode,
             machineName: machineName,
             priority: order.priority === 'High' ? 'Urgent' : 'Normal',
@@ -1647,6 +1649,7 @@ const updateSaleStoreInfo = async (req, res) => {
 
           await ProductionOrder.create({
             orderId: prodOrderId,
+            orderCode: sale.order?.orderCode || null,
             machineCode: orderCode,
             machineName: machineName,
             priority: sale.order?.priority === 'High' ? 'Urgent' : 'Normal',
@@ -1779,6 +1782,7 @@ const getNOCRequests = async (req, res) => {
     const PackagingJob = (await import('../models/PackagingJob.js')).default;
     const LeadPayment = (await import('../models/LeadPayment.js')).default;
     const Customer = (await import('../models/Customer.js')).default;
+    const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
 
     // Find all sales with populated orders
     // Sort: 'Pakka' invoices first (so Pakka is preferred over Kachha for same order),
@@ -1786,6 +1790,7 @@ const getNOCRequests = async (req, res) => {
     const sales = await Sale.find({ companyId: req.user.companyId })
       .populate({
         path: 'order',
+        select: '-quotation', // excludes a base64-embedded PDF — was making this query take 50+ seconds
         populate: { path: 'customer' }
       })
       .sort({ invoiceType: 1, createdAt: -1 }); // 'Kachha' < 'Pakka' alphabetically, so Pakka comes last - we reverse below
@@ -1796,6 +1801,68 @@ const getNOCRequests = async (req, res) => {
       if (a.invoiceType !== 'Pakka' && b.invoiceType === 'Pakka') return 1;
       return new Date(b.createdAt) - new Date(a.createdAt);
     });
+
+    // ── Batch pre-fetch everything the loop below needs, instead of issuing
+    // several sequential queries PER sale (N+1). Same data, same lookups —
+    // just fetched once up front and read from in-memory maps in the loop.
+    const companyId = req.user.companyId;
+    const orderCodes = [...new Set(sales.map(s => s.order?.orderCode).filter(Boolean))];
+    const saleIds = sales.map(s => s._id);
+
+    const [directJobs, linkedProdOrders] = await Promise.all([
+      PackagingJob.find({
+        company: companyId,
+        status: 'Packed',
+        $or: [{ orderId: { $in: orderCodes } }, { saleId: { $in: saleIds } }]
+      }).lean(),
+      ProductionOrder.find({ saleId: { $in: saleIds }, company: companyId }).select('_id saleId').lean()
+    ]);
+
+    const jobByOrderCode = new Map();
+    const jobBySaleId = new Map();
+    directJobs.forEach(j => {
+      if (j.orderId && !jobByOrderCode.has(j.orderId)) jobByOrderCode.set(j.orderId, j);
+      if (j.saleId) {
+        const key = j.saleId.toString();
+        if (!jobBySaleId.has(key)) jobBySaleId.set(key, j);
+      }
+    });
+
+    const prodOrderIdsBySaleId = new Map();
+    linkedProdOrders.forEach(po => {
+      const key = po.saleId.toString();
+      if (!prodOrderIdsBySaleId.has(key)) prodOrderIdsBySaleId.set(key, []);
+      prodOrderIdsBySaleId.get(key).push(po._id);
+    });
+
+    const allProdOrderIds = linkedProdOrders.map(po => po._id);
+    const jobsByProdOrder = allProdOrderIds.length
+      ? await PackagingJob.find({ productionOrderId: { $in: allProdOrderIds }, status: 'Packed', company: companyId }).lean()
+      : [];
+    const jobByProdOrderId = new Map();
+    jobsByProdOrder.forEach(j => {
+      const key = j.productionOrderId?.toString();
+      if (key && !jobByProdOrderId.has(key)) jobByProdOrderId.set(key, j);
+    });
+
+    const leadIds = [...new Set(sales.map(s => s.order?.leadId?.toString()).filter(Boolean))];
+    const customerIds = [...new Set(sales.map(s => s.order?.customer?._id?.toString()).filter(Boolean))];
+
+    const [allLeadPayments, allCustomerMasters] = await Promise.all([
+      leadIds.length
+        ? LeadPayment.find({ leadId: { $in: leadIds }, status: 'Verified', companyId }).select('leadId amount').lean()
+        : [],
+      customerIds.length
+        ? Customer.find({ _id: { $in: customerIds } }).select('outstandingAmount advancePayment').lean()
+        : []
+    ]);
+
+    const leadPaymentSumByLeadId = new Map();
+    allLeadPayments.forEach(p => {
+      const key = p.leadId.toString();
+      leadPaymentSumByLeadId.set(key, (leadPaymentSumByLeadId.get(key) || 0) + (p.amount || 0));
+    });
+    const customerMasterById = new Map(allCustomerMasters.map(c => [c._id.toString(), c]));
 
     const nocRequests = [];
     // Track processed orderIds to prevent duplicate NOC entries
@@ -1815,26 +1882,14 @@ const getNOCRequests = async (req, res) => {
 
       // Check for packaging job via orderCode or saleId/sale ref
       // Also try matching via the productionOrder that links to this sale
-      let job = await PackagingJob.findOne({
-        $or: [
-            { orderId: sale.order.orderCode },
-            { saleId: sale._id }
-        ],
-        status: 'Packed',
-        company: req.user.companyId
-      });
+      let job = jobByOrderCode.get(sale.order.orderCode) || jobBySaleId.get(sale._id.toString()) || null;
 
       // Fallback: find via productionOrderId → if that prodOrder links to this sale
       if (!job) {
-        const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
-        const linkedProdOrders = await ProductionOrder.find({ saleId: sale._id, company: req.user.companyId }).select('_id').lean();
-        if (linkedProdOrders.length > 0) {
-          const prodOrderIds = linkedProdOrders.map(p => p._id);
-          job = await PackagingJob.findOne({
-            productionOrderId: { $in: prodOrderIds },
-            status: 'Packed',
-            company: req.user.companyId
-          });
+        const prodOrderIds = prodOrderIdsBySaleId.get(sale._id.toString()) || [];
+        for (const poId of prodOrderIds) {
+          const j = jobByProdOrderId.get(poId.toString());
+          if (j) { job = j; break; }
         }
       }
 
@@ -1842,12 +1897,7 @@ const getNOCRequests = async (req, res) => {
         // Fetch advanced payment from linked lead (if any)
         let advancedPaymentAmount = sale.advancedPaymentAmount || 0;
         if (!advancedPaymentAmount && sale.order.leadId) {
-          const leadPayments = await LeadPayment.find({
-            leadId: sale.order.leadId,
-            status: 'Verified',
-            companyId: req.user.companyId
-          }).select('amount').lean();
-          advancedPaymentAmount = leadPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+          advancedPaymentAmount = leadPaymentSumByLeadId.get(sale.order.leadId.toString()) || 0;
         }
 
         const effectivePaidAmount = (sale.paidAmount || 0) + advancedPaymentAmount;
@@ -1870,9 +1920,7 @@ const getNOCRequests = async (req, res) => {
         let customerOutstanding = 0;
         let customerAdvance = 0;
         if (sale.order.customer?._id) {
-          const custMaster = await Customer.findById(sale.order.customer._id)
-            .select('outstandingAmount advancePayment')
-            .lean();
+          const custMaster = customerMasterById.get(sale.order.customer._id.toString());
           customerOutstanding = custMaster?.outstandingAmount || 0;
           customerAdvance = custMaster?.advancePayment || 0;
         }
@@ -1957,7 +2005,7 @@ const getNOCDetails = async (req, res) => {
     const Customer = (await import('../models/Customer.js')).default;
 
     const sale = await Sale.findOne({ _id: saleId, companyId: req.user.companyId })
-      .populate({ path: 'order', populate: { path: 'customer' } });
+      .populate({ path: 'order', select: '-quotation', populate: { path: 'customer' } });
     if (!sale || !sale.order) return res.status(404).json({ success: false, message: 'Sale/Order not found' });
 
     const order = sale.order;
