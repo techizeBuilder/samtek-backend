@@ -7,6 +7,7 @@ const stagedPurchaseSchema = new mongoose.Schema({
     materialCode: String,
     quantity: Number,
     unit: String,
+    productionOrderId: String,
     storeOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder' },
     itemId: mongoose.Schema.Types.ObjectId,
     stagedBy: String // Tracks who added it

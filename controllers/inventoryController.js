@@ -3136,6 +3136,7 @@ export const bulkTransferOrderMaterials = async (req, res) => {
           materialCode: demand.materialCode,
           itemId: storeItem ? storeItem._id : null,
           unit: demand.unit,
+          productionOrderId: order.orderId,
           storeOrderId: order._id,
           stagedBy: req.user.username, // ✨ FIX 1: Added here
           priority: order.priority === 'Urgent' ? 'High' : 'Medium',
@@ -3161,6 +3162,7 @@ export const bulkTransferOrderMaterials = async (req, res) => {
           materialCode: demand.materialCode,
           itemId: storeItem ? storeItem._id : null,
           unit: demand.unit,
+          productionOrderId: order.orderId,
           storeOrderId: order._id,
           stagedBy: req.user.username, // ✨ FIX 2: Added here
           priority: order.priority === 'Urgent' ? 'High' : 'Medium',
@@ -3194,6 +3196,7 @@ export const bulkTransferOrderMaterials = async (req, res) => {
           materialCode: demand.materialCode,
           itemId: deductedItem._id,
           unit: demand.unit,
+          productionOrderId: order.orderId,
           storeOrderId: order._id,
           stagedBy: req.user.username, // ✅ Already matched your schema string format here!
           priority: order.priority === 'Urgent' ? 'High' : 'Medium',
