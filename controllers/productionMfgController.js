@@ -848,8 +848,11 @@ export const completeSubEntry = async (req, res) => {
     
     const subEntry = order.processes[idx].subEntries.id(subEntryId);
     if (!subEntry) return res.status(404).json({ success: false, message: 'Sub-entry not found' });
-    
+
     subEntry.status = 'Completed';
+    // Re-submitting (whether first time or after a rejection) always re-enters the QC
+    // queue — mirrors markProcessComplete setting the parent step back to 'QC Pending'.
+    subEntry.qcStatus = 'Pending';
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
@@ -863,17 +866,18 @@ export const qcSubEntry = async (req, res) => {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
     const { subEntryId } = req.params;
-    const { qcStatus } = req.body;
-    
+    const { qcStatus, qcBy, reason } = req.body;
+
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    
+
     const subEntry = order.processes[idx].subEntries.id(subEntryId);
     if (!subEntry) return res.status(404).json({ success: false, message: 'Sub-entry not found' });
-    
+
     subEntry.qcStatus = qcStatus || 'Approved';
     if (subEntry.qcStatus === 'Rejected') {
       subEntry.status = 'Pending';
+      subEntry.reworks.push({ date: today(), reason: reason || '', rejectedBy: qcBy || '' });
     }
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
