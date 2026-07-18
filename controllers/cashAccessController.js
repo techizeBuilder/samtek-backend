@@ -156,13 +156,17 @@ export const viewCash = async (req, res) => {
     const orders = await Order.find({ customer: customer._id }).select('_id orderCode');
     const orderIds = orders.map(o => o._id);
     const forms = orderIds.length
-      ? await OrderForm.find({ orderId: { $in: orderIds }, status: 'Submitted' }).select('orderId totals.cashAmount')
+      ? await OrderForm.find({ orderId: { $in: orderIds }, status: 'Submitted' })
+        .select('orderId totals.cashAmount cashReceived cashReceivedAt')
       : [];
 
     const orderCodeById = new Map(orders.map(o => [o._id.toString(), o.orderCode]));
     const breakdown = forms.map(f => ({
+      orderId: f.orderId,
       orderCode: orderCodeById.get(f.orderId.toString()) || 'N/A',
       cashAmount: f.totals?.cashAmount || 0,
+      cashReceived: f.cashReceived || false,
+      cashReceivedAt: f.cashReceivedAt || null,
     }));
     const totalCash = breakdown.reduce((sum, b) => sum + b.cashAmount, 0);
 
@@ -175,6 +179,46 @@ export const viewCash = async (req, res) => {
     });
   } catch (error) {
     console.error('Cash Access view error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ─── POST /api/cash-access/:requestId/mark-received ────────────────────────
+// Marks one order's Cash Amount as physically received/reconciled by
+// Accounts. Reuses the OTP-verified CashAccessRequest so this can only be
+// done from within an already-authenticated cash-access session.
+export const markCashReceived = async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { orderId } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(requestId) || !mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({ success: false, message: 'Invalid request' });
+    }
+
+    const request = await CashAccessRequest.findById(requestId);
+    if (!request || request.requestedBy.toString() !== req.user._id.toString()) {
+      return res.status(404).json({ success: false, message: 'Access request not found' });
+    }
+    if (request.status !== 'verified') {
+      return res.status(403).json({ success: false, message: 'OTP not verified for this request' });
+    }
+
+    const order = await Order.findById(orderId).select('customer');
+    if (!order || order.customer.toString() !== request.customerId.toString()) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const orderForm = await OrderForm.findOne({ orderId, status: 'Submitted' });
+    if (!orderForm) return res.status(404).json({ success: false, message: 'Order form not found' });
+
+    orderForm.cashReceived = true;
+    orderForm.cashReceivedAt = new Date();
+    orderForm.cashReceivedBy = req.user._id;
+    await orderForm.save();
+
+    res.json({ success: true, cashReceivedAt: orderForm.cashReceivedAt });
+  } catch (error) {
+    console.error('Cash Access mark-received error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

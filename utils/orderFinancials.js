@@ -27,5 +27,12 @@ export function computeOrderFinancials({ form, sale, orderPayments = [], leadPay
   const due = Math.max(0, total - advance - paid);
   const paymentStatus = due <= 0 ? 'Paid' : (advance + paid) > 0 ? 'Partially Paid' : 'Pending';
 
-  return { total, subtotal, gst, advance, paid, due, paymentStatus };
+  // Additional Charges — folded silently into the Order Form's Quotation
+  // Amount as hiddenCharge rows (see OrderFormModal). Purely informational:
+  // never added into subtotal/total/due above.
+  const additionalCharges = (form?.items || [])
+    .filter(it => it.hiddenCharge)
+    .reduce((s, it) => s + (it.quotationAmount || 0), 0);
+
+  return { total, subtotal, gst, advance, paid, due, paymentStatus, additionalCharges };
 }

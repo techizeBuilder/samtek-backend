@@ -5,6 +5,7 @@ import Sale from '../models/Sale.js';
 import notificationService from '../services/notificationService.js';
 import RDMachine from '../models/RDMachine.js'; // Import R&D models
 import RDQualityParam from '../models/RDQualityParam.js';
+import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
 
 
 
@@ -96,7 +97,11 @@ export const getQCJobs = async (req, res) => {
     if (source) filter.source = source;
     if (category) filter.category = category;
     const jobs = await QCJob.find(filter).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, data: jobs });
+    const jobsWithOrderCode = await Promise.all(jobs.map(async (job) => ({
+      ...job,
+      orderCode: await resolveSalesOrderCodeForQCJob(job, req.user.companyId),
+    })));
+    res.json({ success: true, data: jobsWithOrderCode });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -106,7 +111,8 @@ export const getQCJob = async (req, res) => {
   try {
     const job = await QCJob.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
     if (!job) return res.status(404).json({ success: false, message: 'QC job not found' });
-    res.json({ success: true, data: job });
+    const orderCode = await resolveSalesOrderCodeForQCJob(job, req.user.companyId);
+    res.json({ success: true, data: { ...job, orderCode } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

@@ -1071,7 +1071,7 @@ export const getDueBillData = async (req, res) => {
         // 6. Amounts — Order Form is authoritative when submitted (never the
         // original quotation's Order.totalAmount); fall back to the
         // invoice/order value only for legacy orders with no form on file.
-        let subtotal, taxAmount, totalAmount, advancedPaymentAmount, paidAmount, balanceAmount, paymentStatus;
+        let subtotal, taxAmount, totalAmount, advancedPaymentAmount, paidAmount, balanceAmount, paymentStatus, additionalCharges = 0;
         if (form) {
             const fin = computeOrderFinancials({ form, sale: realSale, orderPayments, leadPayments });
             subtotal = fin.subtotal;
@@ -1081,6 +1081,7 @@ export const getDueBillData = async (req, res) => {
             paidAmount = fin.paid;
             balanceAmount = fin.due;
             paymentStatus = fin.paymentStatus;
+            additionalCharges = fin.additionalCharges;
         } else {
             advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
             if (!advancedPaymentAmount && leadPayments.length > 0) {
@@ -1173,6 +1174,7 @@ export const getDueBillData = async (req, res) => {
                 paidAmount,
                 balanceAmount,
                 paymentStatus,
+                additionalCharges,
 
                 // Customer master financial fields (for PDF display)
                 customerOutstanding,

@@ -5,6 +5,7 @@ import QCJob from '../models/QCJob.js';
 import AdminSettings from '../models/AdminSettings.js';
 import notificationService from '../services/notificationService.js';
 import Sale from '../models/Sale.js';
+import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
 
 const now = () => new Date().toISOString();
 
@@ -235,143 +236,12 @@ export const getReadyForPackaging = async (req, res) => {
     // Remove nulls (non-machine Purchase items filtered out)
     const filteredQcJobs = qcJobs.filter(Boolean);
 
-    const Order = (await import('../models/Order.js')).default;
-    const Sale = (await import('../models/Sale.js')).default;
-    const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
-
     // Map QCJobs to the format expected by the frontend packaging queue page
     // and resolve sales order code for proper tracking
     const qcMapped = await Promise.all(filteredQcJobs.map(async (job) => {
-      let salesOrderCode = null;
-      let orderIdVal = job.itemCode || job.qcJobId || 'Store Order';
-      let machineCodeVal = job.sourceRefId || 'N/A';
-
-      if (job.saleId) {
-        try {
-          const sale = await Sale.findById(job.saleId).select('order').lean();
-          if (sale?.order) {
-            const salesOrder = await Order.findById(sale.order).select('orderCode').lean();
-            salesOrderCode = salesOrder?.orderCode || null;
-            if (salesOrderCode) {
-              orderIdVal = salesOrderCode;
-            }
-          }
-        } catch (e) { console.error('Error resolving saleId for QC job sales code:', e); }
-      } else if (job.source === 'Production' || job.source === 'QC_Rejected') {
-        // Production/QC_Rejected QCJobs: sourceRefId = ProductionOrder.orderId (e.g. "PROD-2026-665217")
-        // We need to trace back to the sales orderCode via the ProductionOrder
-        try {
-          console.log(`[PackagingQueue] Resolving Production QCJob ${job.qcJobId}, sourceRefId=${job.sourceRefId}`);
-
-          // Find the ProductionOrder this QCJob was created from
-          const prodOrder = await ProductionOrder.findOne({
-            orderId: job.sourceRefId,
-            company: cid,
-          }).lean();
-
-          console.log(`[PackagingQueue] ProductionOrder found:`, prodOrder ? `orderId=${prodOrder.orderId}, machineCode=${prodOrder.machineCode}, source=${prodOrder.source}` : 'NOT FOUND');
-
-          if (prodOrder) {
-            // STRATEGY A: machineCode IS the orderCode (when auto-created from Store)
-            // orderController.js sets: machineCode: orderCode (e.g. "ORD-0043")
-            // So try to find an Order whose orderCode matches the machineCode
-            if (prodOrder.machineCode) {
-              const orderByCode = await Order.findOne({
-                orderCode: prodOrder.machineCode,
-                companyId: cid,
-              }).select('orderCode').lean();
-              console.log(`[PackagingQueue] Strategy A (machineCode="${prodOrder.machineCode}"): Order found=`, orderByCode?.orderCode || 'none');
-              if (orderByCode?.orderCode) {
-                salesOrderCode = orderByCode.orderCode;
-                orderIdVal = salesOrderCode;
-              }
-            }
-
-            // STRATEGY B: Use Sale._id extracted from notes "Ref: <saleId or invoiceNumber>"
-            if (!salesOrderCode && prodOrder.notes) {
-              const notesRefMatch = prodOrder.notes.match(/Ref:\s*(\S+)/);
-              const refId = notesRefMatch ? notesRefMatch[1] : null;
-              console.log(`[PackagingQueue] Strategy B (notes refId="${refId}")`);
-              if (refId) {
-                // refId could be sale._id (24-char hex) or invoiceNumber
-                const saleByRef = await Sale.findOne({
-                  $or: [
-                    { _id: /^[0-9a-fA-F]{24}$/.test(refId) ? refId : null },
-                    { invoiceNumber: refId },
-                  ]
-                }).select('order').lean();
-                if (saleByRef?.order) {
-                  const orderByRef = await Order.findById(saleByRef.order).select('orderCode').lean();
-                  console.log(`[PackagingQueue] Strategy B sale found, orderCode=`, orderByRef?.orderCode || 'none');
-                  if (orderByRef?.orderCode) {
-                    salesOrderCode = orderByRef.orderCode;
-                    orderIdVal = salesOrderCode;
-                  }
-                }
-              }
-            }
-
-            // STRATEGY C: Find Sale where storeQCStatus reflects production involvement + item name match (closest in time)
-            if (!salesOrderCode && prodOrder.machineName) {
-              const sales = await Sale.find({
-                companyId: cid,
-                storeQCStatus: { $in: ['Goes to Production', 'Production Completed'] },
-                'items.productName': prodOrder.machineName,
-              }).select('order createdAt').lean();
-              
-              console.log(`[PackagingQueue] Strategy C: Found ${sales.length} potential matching sales`);
-              
-              if (sales.length > 0) {
-                let closestSale = null;
-                let minDiff = Infinity;
-                const prodTime = new Date(prodOrder.createdAt).getTime();
-                
-                for (const s of sales) {
-                  const saleTime = new Date(s.createdAt).getTime();
-                  const diff = Math.abs(prodTime - saleTime);
-                  if (diff < minDiff) {
-                    minDiff = diff;
-                    closestSale = s;
-                  }
-                }
-                
-                if (closestSale && closestSale.order) {
-                  const orderByItem = await Order.findById(closestSale.order).select('orderCode').lean();
-                  console.log(`[PackagingQueue] Strategy C closest orderCode=`, orderByItem?.orderCode || 'none', `(diff: ${minDiff / 1000}s)`);
-                  if (orderByItem?.orderCode) {
-                    salesOrderCode = orderByItem.orderCode;
-                    orderIdVal = salesOrderCode;
-                  }
-                }
-              }
-            }
-
-            console.log(`[PackagingQueue] Final resolved orderIdVal="${orderIdVal}", salesOrderCode="${salesOrderCode}"`);
-          }
-        } catch (e) { console.error('Error resolving Production sourceRefId for QC job sales code:', e); }
-      } else if (job.purchaseRequestId) {
-        try {
-          const pr = await PurchaseRequest.findById(job.purchaseRequestId).lean();
-          if (pr && pr.storeOrderId) {
-            // Find linked order
-            const salesOrder = await Order.findById(pr.storeOrderId).select('orderCode').lean();
-            salesOrderCode = salesOrder?.orderCode || null;
-            if (salesOrderCode) {
-              orderIdVal = salesOrderCode;
-            } else {
-              // Try check if storeOrderId is a Sale ID
-              const sale = await Sale.findById(pr.storeOrderId).select('order').lean();
-              if (sale?.order) {
-                const salesOrder2 = await Order.findById(sale.order).select('orderCode').lean();
-                salesOrderCode = salesOrder2?.orderCode || null;
-                if (salesOrderCode) {
-                  orderIdVal = salesOrderCode;
-                }
-              }
-            }
-          }
-        } catch (e) { console.error('Error resolving purchaseRequestId for QC job sales code:', e); }
-      }
+      const salesOrderCode = await resolveSalesOrderCodeForQCJob(job, cid);
+      const orderIdVal = salesOrderCode || job.itemCode || job.qcJobId || 'Store Order';
+      const machineCodeVal = job.sourceRefId || 'N/A';
 
       return {
         _id: job._id,

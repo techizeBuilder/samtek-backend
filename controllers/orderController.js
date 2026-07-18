@@ -10,6 +10,7 @@ import mongoose from 'mongoose';
 import QCJob from '../models/QCJob.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
+import { computeOrderFinancials } from '../utils/orderFinancials.js';
 
 // Generate a unique requestId safely (avoids E11000 duplicate key errors)
 async function generateUniqueRequestId() {
@@ -2100,19 +2101,43 @@ const getNOCDetails = async (req, res) => {
     const customerOutstanding = custMaster?.outstandingAmount || 0;
     const customerAdvance = custMaster?.advancePayment || 0;
 
-    // ORDER-WISE financials — the NOC belongs to this one order
+    // ORDER-WISE financials — same source of truth as Customer Master's
+    // order-financials breakdown, Packed Orders and the Due Bill PDF
+    // (computeOrderFinancials), so the NOC never disagrees with what
+    // Accounts already sees elsewhere — a payment recorded after the
+    // invoice was generated (the common case) must still show as Paid here.
+    const OrderForm = (await import('../models/OrderForm.js')).default;
+    const CustomerPayment = (await import('../models/CustomerPayment.js')).default;
     const LeadPayment = (await import('../models/LeadPayment.js')).default;
-    let orderAdvance = sale.advancedPaymentAmount || 0;
-    if (!orderAdvance && order.leadId) {
-      const lps = await LeadPayment.find({ leadId: order.leadId, status: 'Verified', companyId: req.user.companyId })
+
+    let leadPayments = [];
+    if (order.leadId) {
+      leadPayments = await LeadPayment.find({ leadId: order.leadId, status: 'Verified', companyId: req.user.companyId })
         .select('amount').lean();
-      orderAdvance = lps.reduce((s, p) => s + (p.amount || 0), 0);
     }
-    const orderTotal = (sale.totalAmount && sale.totalAmount > 0)
-      ? sale.totalAmount
-      : Math.round((order.totalAmount || 0) * 1.18);
-    const orderPaid = (sale.paidAmount || 0) + orderAdvance;
-    const orderDue = Math.max(0, orderTotal - orderPaid);
+
+    let orderTotal, orderPaid, orderDue;
+    const form = await OrderForm.findOne({ orderId: order._id, status: 'Submitted' })
+      .select('items totals receivedAmount paymentType').lean();
+    if (form) {
+      const orderPayments = await CustomerPayment.find({ order: order._id, companyId: req.user.companyId })
+        .select('amount').lean();
+      const fin = computeOrderFinancials({ form, sale, orderPayments, leadPayments });
+      orderTotal = fin.total;
+      orderPaid = fin.advance + fin.paid;
+      orderDue = fin.due;
+    } else {
+      // Legacy fallback for orders with no Order Form on file
+      let orderAdvance = sale.advancedPaymentAmount || 0;
+      if (!orderAdvance && leadPayments.length) {
+        orderAdvance = leadPayments.reduce((s, p) => s + (p.amount || 0), 0);
+      }
+      orderTotal = (sale.totalAmount && sale.totalAmount > 0)
+        ? sale.totalAmount
+        : Math.round((order.totalAmount || 0) * 1.18);
+      orderPaid = (sale.paidAmount || 0) + orderAdvance;
+      orderDue = Math.max(0, orderTotal - orderPaid);
+    }
 
     res.json({
       success: true,
