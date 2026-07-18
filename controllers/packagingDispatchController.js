@@ -689,6 +689,23 @@ export const createDispatchOrder = async (req, res) => {
 
 export const executeDispatch = async (req, res) => {
   try {
+    // Delivery documents are now captured at dispatch time (moved from confirmDelivery)
+    const files = req.files || {};
+    const nocFile = files.noc?.[0];
+    const ewayBillFile = files.ewayBill?.[0];
+    const invoiceFile = files.invoice?.[0];
+
+    if (!nocFile || !ewayBillFile || !invoiceFile) {
+      const missing = [];
+      if (!nocFile) missing.push('NOC');
+      if (!ewayBillFile) missing.push('E-Way Bill');
+      if (!invoiceFile) missing.push('Invoice');
+      return res.status(400).json({
+        success: false,
+        message: `Missing required documents: ${missing.join(', ')}. All three documents must be uploaded to execute the dispatch.`,
+      });
+    }
+
     const { vehicleNumber, driverName, driverContact, transportCompanyName, notes } = req.body;
     const dispatch = await DispatchOrder.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, status: 'Ready' },
@@ -700,6 +717,9 @@ export const executeDispatch = async (req, res) => {
         notes: notes || '',
         status: 'Dispatched',
         actualDispatchDate: new Date().toISOString().split('T')[0],
+        'deliveryDocs.noc': nocFile.path.replace(/\\/g, '/'),
+        'deliveryDocs.ewayBill': ewayBillFile.path.replace(/\\/g, '/'),
+        'deliveryDocs.invoice': invoiceFile.path.replace(/\\/g, '/'),
       },
       { new: true }
     );
@@ -736,34 +756,18 @@ export const markInTransit = async (req, res) => {
 
 export const confirmDelivery = async (req, res) => {
   try {
-    // Validate that all 3 documents are uploaded
-    const files = req.files || {};
-    const nocFile = files.noc?.[0];
-    const ewayBillFile = files.ewayBill?.[0];
-    const invoiceFile = files.invoice?.[0];
-
-    if (!nocFile || !ewayBillFile || !invoiceFile) {
-      const missing = [];
-      if (!nocFile) missing.push('NOC');
-      if (!ewayBillFile) missing.push('E-Way Bill');
-      if (!invoiceFile) missing.push('Invoice');
-      return res.status(400).json({
-        success: false,
-        message: `Missing required documents: ${missing.join(', ')}. All three documents must be uploaded to confirm delivery.`,
-      });
-    }
-
+    // Delivery documents are validated/captured at executeDispatch time now. Confirming
+    // delivery also absorbs the old separate "close" step — goes straight to 'Closed' so
+    // it moves directly into Dispatch History instead of lingering in an interim 'Delivered'
+    // state waiting for a manual close action.
     const { deliveryOTPVerified } = req.body;
 
     const dispatch = await DispatchOrder.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, status: { $in: ['Dispatched', 'In Transit'] } },
       {
-        status: 'Delivered',
+        status: 'Closed',
         actualDeliveryDate: new Date().toISOString().split('T')[0],
         deliveryOTPVerified: !!deliveryOTPVerified,
-        'deliveryDocs.noc': nocFile.path.replace(/\\/g, '/'),
-        'deliveryDocs.ewayBill': ewayBillFile.path.replace(/\\/g, '/'),
-        'deliveryDocs.invoice': invoiceFile.path.replace(/\\/g, '/'),
       },
       { new: true }
     );

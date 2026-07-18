@@ -40,9 +40,9 @@ router.put('/jobs/:id/complete', completePacking);
 router.get('/dispatch-orders', getDispatchOrders);
 router.post('/dispatch-orders', createDispatchOrder);
 router.put('/dispatch-orders/:id', updateDispatchOrder);
-router.put('/dispatch-orders/:id/execute', executeDispatch);
+router.put('/dispatch-orders/:id/execute', deliveryDocsMiddleware, executeDispatch);
 router.put('/dispatch-orders/:id/in-transit', markInTransit);
-router.put('/dispatch-orders/:id/deliver', deliveryDocsMiddleware, confirmDelivery);
+router.put('/dispatch-orders/:id/deliver', confirmDelivery);
 router.put('/dispatch-orders/:id/close', closeDispatch);
 
 export default router;

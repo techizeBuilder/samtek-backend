@@ -23,6 +23,7 @@ const SubEntrySchema = new mongoose.Schema({
   fabricationType: { type: String, default: 'Other' },
   status: { type: String, enum: ['Pending', 'Completed'], default: 'Pending' },
   qcStatus: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
+  reworks: { type: [ReworkSchema], default: [] },
   createdAt: { type: Date, default: Date.now }
 });
 
