@@ -848,94 +848,127 @@ export const getPackedOrders = async (req, res) => {
             orderPaysByOrderId.get(key).push(p);
         });
 
-        const results = [];
+        // One entity per ORDER, not per packaging job — an order with 8 packed
+        // machines used to produce 8 near-identical rows here (same customer,
+        // same financials, different machine/SN). Accounts only needs to act
+        // on this once per order; the individual machines/serials are kept in
+        // `packedJobs` for traceability, not as separate rows.
+        const groupsByOrder = new Map();
 
         for (const { job, order, sale } of resolved) {
-            // `sale` above may have resolved to Store's internal placeholder
-            // (isPlaceholder: true) — that's fine for locating `order` via
-            // saleId indirection, but it must never be treated as a real
-            // invoice for financial display/"already invoiced" purposes.
-            const realSale = sale && !sale.isPlaceholder ? sale : null;
-            const form = formByOrderId.get(order._id.toString()) || null;
+            const orderKey = order._id.toString();
 
-            let totalAmount, paidAmount, advancedPaymentAmount, balanceAmount, paymentStatus;
+            if (!groupsByOrder.has(orderKey)) {
+                // `sale` above may have resolved to Store's internal placeholder
+                // (isPlaceholder: true) — that's fine for locating `order` via
+                // saleId indirection, but it must never be treated as a real
+                // invoice for financial display/"already invoiced" purposes.
+                const realSale = sale && !sale.isPlaceholder ? sale : null;
+                const form = formByOrderId.get(orderKey) || null;
 
-            if (form) {
-                // Order Form is authoritative — identical formula to Customer
-                // Master's order-financials breakdown, so the two never drift.
-                const orderPayments = orderPaysByOrderId.get(order._id.toString()) || [];
-                const leadPayments = order.leadId ? (leadPaysByLeadId.get(order.leadId.toString()) || []) : [];
-                const fin = computeOrderFinancials({ form, sale: realSale, orderPayments, leadPayments });
-                totalAmount = fin.total;
-                advancedPaymentAmount = fin.advance;
-                paidAmount = fin.advance + fin.paid;
-                balanceAmount = fin.due;
-                paymentStatus = fin.paymentStatus;
-            } else {
-                // No Order Form yet (legacy order) — fall back to invoice/order value.
-                advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
-                if (!advancedPaymentAmount && order.leadId) {
-                    advancedPaymentAmount = leadPaySumById.get(order.leadId.toString()) || 0;
+                let totalAmount, paidAmount, advancedPaymentAmount, balanceAmount, paymentStatus;
+
+                if (form) {
+                    // Order Form is authoritative — identical formula to Customer
+                    // Master's order-financials breakdown, so the two never drift.
+                    const orderPayments = orderPaysByOrderId.get(orderKey) || [];
+                    const leadPayments = order.leadId ? (leadPaysByLeadId.get(order.leadId.toString()) || []) : [];
+                    const fin = computeOrderFinancials({ form, sale: realSale, orderPayments, leadPayments });
+                    totalAmount = fin.total;
+                    advancedPaymentAmount = fin.advance;
+                    paidAmount = fin.advance + fin.paid;
+                    balanceAmount = fin.due;
+                    paymentStatus = fin.paymentStatus;
+                } else {
+                    // No Order Form yet (legacy order) — fall back to invoice/order value.
+                    advancedPaymentAmount = realSale?.advancedPaymentAmount || 0;
+                    if (!advancedPaymentAmount && order.leadId) {
+                        advancedPaymentAmount = leadPaySumById.get(order.leadId.toString()) || 0;
+                    }
+                    totalAmount = realSale
+                      ? realSale.totalAmount
+                      : Math.round((order.totalAmount || 0) * 1.18); // No invoice yet → add 18% GST to order value
+                    paidAmount = realSale ? ((realSale.paidAmount || 0) + advancedPaymentAmount) : advancedPaymentAmount;
+                    balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
+                    paymentStatus = realSale ? realSale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
                 }
-                totalAmount = realSale
-                  ? realSale.totalAmount
-                  : Math.round((order.totalAmount || 0) * 1.18); // No invoice yet → add 18% GST to order value
-                paidAmount = realSale ? ((realSale.paidAmount || 0) + advancedPaymentAmount) : advancedPaymentAmount;
-                balanceAmount = realSale ? realSale.balanceAmount : Math.max(0, totalAmount - advancedPaymentAmount);
-                paymentStatus = realSale ? realSale.paymentStatus : (advancedPaymentAmount >= totalAmount ? 'Paid' : (advancedPaymentAmount > 0 ? 'Partially Paid' : 'Pending'));
+
+                const paymentProofUrl = realSale ? realSale.paymentProofUrl : '';
+                const saleId = realSale ? realSale._id : null;
+
+                // Fetch customer master fields for display
+                const customerMaster = custMasterById.get(order.customer?._id?.toString());
+                const customerOutstanding = customerMaster?.outstandingAmount || 0;
+                const customerAdvance = customerMaster?.advancePayment || 0;
+
+                groupsByOrder.set(orderKey, {
+                    // Representative job — kept so endpoints that only need ANY
+                    // one job of this order to resolve order-level data (due-bill,
+                    // upload-proof) keep working unchanged. Full per-machine list
+                    // is in `packedJobs` below.
+                    jobId: job._id,
+                    jobCode: job.jobId,
+                    orderId: order._id,
+                    orderCode: order.orderCode,
+                    packedDate: job.packingCompleteTime || job.updatedAt,
+                    machineName: job.machineName,
+                    machineCode: job.machineCode,
+                    serialNumber: job.serialNumber,
+                    packedJobs: [],
+                    customer: {
+                        id: order.customer?._id,
+                        name: order.customer?.name || 'N/A',
+                        mobile: order.customer?.mobile || 'N/A',
+                        email: order.customer?.email || 'N/A',
+                        address: order.customer?.address1 || 'N/A',
+                        city: order.customer?.city || 'N/A',
+                        state: order.customer?.state || 'N/A'
+                    },
+                    itemsPacked: order.products.map(p => ({
+                        productName: p.product?.name || 'Unknown Item',
+                        quantity: p.quantity,
+                        price: p.price,
+                        total: p.total
+                    })),
+                    totalAmount,
+                    paidAmount,
+                    advancedPaymentAmount,
+                    balanceAmount,
+                    paymentStatus,
+                    paymentProofUrl,
+                    saleId,
+                    // Customer master reference fields (kept for info display)
+                    customerOutstanding,
+                    customerAdvance,
+                    // ORDER-WISE display values — this row belongs to ONE order,
+                    // so Total/Paid/Due are that order's own figures:
+                    // Total = order invoice total, Paid = advance + receipts
+                    // against this order, Due = what's left on this order
+                    displayTotal: totalAmount,
+                    displayPaid: paidAmount,
+                    displayDue: balanceAmount
+                });
             }
 
-            const paymentProofUrl = realSale ? realSale.paymentProofUrl : '';
-            const saleId = realSale ? realSale._id : null;
-
-            // Fetch customer master fields for display
-            const customerMaster = custMasterById.get(order.customer?._id?.toString());
-            const customerOutstanding = customerMaster?.outstandingAmount || 0;
-            const customerAdvance = customerMaster?.advancePayment || 0;
-
-            results.push({
+            const group = groupsByOrder.get(orderKey);
+            group.packedJobs.push({
                 jobId: job._id,
                 jobCode: job.jobId,
-                orderId: order._id,
-                orderCode: order.orderCode,
-                packedDate: job.packingCompleteTime || job.updatedAt,
                 machineName: job.machineName,
                 machineCode: job.machineCode,
                 serialNumber: job.serialNumber,
-                customer: {
-                    id: order.customer?._id,
-                    name: order.customer?.name || 'N/A',
-                    mobile: order.customer?.mobile || 'N/A',
-                    email: order.customer?.email || 'N/A',
-                    address: order.customer?.address1 || 'N/A',
-                    city: order.customer?.city || 'N/A',
-                    state: order.customer?.state || 'N/A'
-                },
-                itemsPacked: order.products.map(p => ({
-                    productName: p.product?.name || 'Unknown Item',
-                    quantity: p.quantity,
-                    price: p.price,
-                    total: p.total
-                })),
-                totalAmount,
-                paidAmount,
-                advancedPaymentAmount,
-                balanceAmount,
-                paymentStatus,
-                paymentProofUrl,
-                saleId,
-                // Customer master reference fields (kept for info display)
-                customerOutstanding,
-                customerAdvance,
-                // ORDER-WISE display values — this packed job belongs to ONE
-                // order, so Total/Paid/Due are that order's own figures:
-                // Total = order invoice total, Paid = advance + receipts
-                // against this order, Due = what's left on this order
-                displayTotal: totalAmount,
-                displayPaid: paidAmount,
-                displayDue: balanceAmount
+                quantity: job.quantity || 1,
+                packingType: job.packingType || ''
             });
+            // Order's displayed packedDate = the LATEST of its jobs — that's
+            // when it actually became fully packed and payment-ready.
+            const jobDate = job.packingCompleteTime || job.updatedAt;
+            if (jobDate && (!group.packedDate || new Date(jobDate) > new Date(group.packedDate))) {
+                group.packedDate = jobDate;
+            }
         }
+
+        const results = Array.from(groupsByOrder.values());
 
         res.json({ success: true, data: results });
     } catch (error) {

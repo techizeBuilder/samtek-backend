@@ -17,11 +17,14 @@ import {
     updateTechnicianProfile
 } from "../controllers/ComplaintServiceController.js";
 
-import { 
-    getDispatchedOrders, 
-    updateCustomerConfirmation, 
-    updateInstallationSchedule, 
+import {
+    getDispatchedOrders,
+    updateCustomerConfirmation,
+    updateInstallationSchedule,
     updateFeedbackAndRatings,
+    bulkUpdateCustomerConfirmation,
+    bulkUpdateInstallationSchedule,
+    bulkUpdateFeedbackAndRatings,
     getFeedbackByToken,
     submitFeedbackByToken
 } from "../controllers/ServiceDispatchController.js";
@@ -74,6 +77,17 @@ router.put(
 
 // --- 4. DISPATCH ORDERS FOR SERVICE ---
 router.get('/dispatched-orders', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), getDispatchedOrders);
+
+// Bulk (whole-order) variants — MUST be registered before the `:id` routes
+// below, since `/dispatched-orders/bulk/...` would otherwise be matched by
+// `/dispatched-orders/:id/...` with id="bulk". One order's machines travel
+// and get serviced together, so Complaint Management acts on all of them in
+// one call instead of repeating the same confirmation/schedule/feedback once
+// per machine.
+router.put('/dispatched-orders/bulk/customer-confirmation', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), bulkUpdateCustomerConfirmation);
+router.put('/dispatched-orders/bulk/installation-schedule', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), bulkUpdateInstallationSchedule);
+router.put('/dispatched-orders/bulk/feedback', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), bulkUpdateFeedbackAndRatings);
+
 router.put('/dispatched-orders/:id/customer-confirmation', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateCustomerConfirmation);
 router.put('/dispatched-orders/:id/installation-schedule', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateInstallationSchedule);
 router.put('/dispatched-orders/:id/feedback', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateFeedbackAndRatings);

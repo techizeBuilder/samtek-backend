@@ -1,4 +1,4 @@
-import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP } from '../models/ProductionOrder.js';
+import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP, buildProcessSteps } from '../models/ProductionOrder.js';
 import ProductionTeam from '../models/ProductionTeam.js';
 import Sale from '../models/Sale.js';
 import QCJob from '../models/QCJob.js';
@@ -40,6 +40,7 @@ export const getOrders = async (req, res) => {
       company: companyId
     })
       .populate('processes.assignedTeam', 'name supervisor members')
+      .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -540,16 +541,54 @@ function getStepIndex(req, res) {
   return idx;
 }
 
+// Which physical unit (1-based) a process-execution call targets. Defaults
+// to 1 so every existing caller that never sends `unit` keeps operating on
+// the order's original `processes` field exactly as before.
+function getUnitNumber(req) {
+  const raw = req.query.unit ?? req.body?.unit;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
+// Resolves the process-steps array to mutate for a given unit number.
+// Unit 1 = order.processes (unchanged legacy path). Units 2..N live in
+// order.extraUnits[0..N-2], lazily created here the first time a multi-unit
+// order's process tab is actually touched. Returns null for an out-of-range
+// unit number (caller should respond 400).
+function getUnitProcesses(order, unitNumber) {
+  if (unitNumber <= 1) return order.processes;
+  const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
+  if (unitNumber > buildQty) return null;
+  while (order.extraUnits.length < buildQty - 1) {
+    order.extraUnits.push({ processes: buildProcessSteps() });
+  }
+  return order.extraUnits[unitNumber - 2].processes;
+}
+
+// True once every step of every unit (the main `processes` plus all
+// `extraUnits`) is Completed. For orderQuantity === 1 orders, extraUnits is
+// always [], so this is identical to the original "all processes complete"
+// check.
+function allUnitsCompleted(order) {
+  const mainDone = order.processes.every(p => p.status === 'Completed');
+  const extraDone = order.extraUnits.every(u => u.processes.every(p => p.status === 'Completed'));
+  return mainDone && extraDone;
+}
+
 export const assignTeam = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
     const { teamId } = req.body;
+    const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    order.processes[idx].assignedTeam = teamId || null;
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    procs[idx].assignedTeam = teamId || null;
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -560,6 +599,7 @@ export const startProcess = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
+    const unitNumber = getUnitNumber(req);
 
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
@@ -582,20 +622,24 @@ export const startProcess = async (req, res) => {
     }
     // ─────────────────────────────────────────────────────────────
 
-    // Gate: previous step must be completed
-    if (idx > 0 && order.processes[idx - 1].status !== 'Completed') {
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+
+    // Gate: previous step (of this same unit) must be completed
+    if (idx > 0 && procs[idx - 1].status !== 'Completed') {
       return res.status(400).json({
         success: false,
         message: `Cannot start ${PROCESS_STEPS[idx]}: ${PROCESS_STEPS[idx - 1]} not yet completed`
       });
     }
 
-    order.processes[idx].status = 'In Progress';
-    order.processes[idx].startDate = today(); // Assuming today() is defined in your file
+    procs[idx].status = 'In Progress';
+    procs[idx].startDate = today(); // Assuming today() is defined in your file
     order.status = 'In Progress';
 
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
 
     res.json({ success: true, data: order });
   } catch (err) {
@@ -607,10 +651,14 @@ export const markProcessComplete = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
+    const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    
-    const proc = order.processes[idx];
+
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+
+    const proc = procs[idx];
     if (proc.step === 'Fabrication') {
       if (!proc.subEntries || proc.subEntries.length === 0) {
         return res.status(400).json({ success: false, message: 'At least one sub-entry must be added to Fabrication before marking it as complete.' });
@@ -625,6 +673,7 @@ export const markProcessComplete = async (req, res) => {
     proc.endDate = today();
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -637,18 +686,24 @@ export const approveQC = async (req, res) => {
     if (idx === -1) return;
     const { qcBy } = req.body;
     if (!qcBy) return res.status(400).json({ success: false, message: 'qcBy is required' });
+    const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    order.processes[idx].status = 'Completed';
-    order.processes[idx].qcStatus = 'Approved';
-    order.processes[idx].qcBy = qcBy;
-    order.processes[idx].qcDate = today();
-    // Check if all processes completed
-    if (order.processes.every(p => p.status === 'Completed')) {
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    procs[idx].status = 'Completed';
+    procs[idx].qcStatus = 'Approved';
+    procs[idx].qcBy = qcBy;
+    procs[idx].qcDate = today();
+    // Order is only fully Completed once every step of every unit (main +
+    // extraUnits) is done — for single-quantity orders this is identical to
+    // the original "all processes complete" check.
+    if (allUnitsCompleted(order)) {
       order.status = 'Completed';
     }
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
 
     // 🔔 Notify Packing/Dispatch when all processes are done
     if (order.status === 'Completed') {
@@ -806,9 +861,12 @@ export const rejectQC = async (req, res) => {
     if (idx === -1) return;
     const { qcBy, reason } = req.body;
     if (!qcBy) return res.status(400).json({ success: false, message: 'qcBy is required' });
+    const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    const proc = order.processes[idx];
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    const proc = procs[idx];
     proc.status = 'In Progress';
     proc.qcStatus = 'Rejected';
     proc.qcBy = qcBy;
@@ -817,6 +875,7 @@ export const rejectQC = async (req, res) => {
     proc.reworks.push({ date: today(), reason: reason || '', rejectedBy: qcBy });
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -831,12 +890,16 @@ export const addSubEntry = async (req, res) => {
     if (!parentPart || !childPart || !assignedMember) {
       return res.status(400).json({ success: false, message: 'parentPart, childPart, and assignedMember are required' });
     }
+    const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    
-    order.processes[idx].subEntries.push({ parentPart, childPart, assignedMember, fabricationType: fabricationType || 'Other' });
+
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    procs[idx].subEntries.push({ parentPart, childPart, assignedMember, fabricationType: fabricationType || 'Other' });
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -848,10 +911,13 @@ export const completeSubEntry = async (req, res) => {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
     const { subEntryId } = req.params;
+    const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    
-    const subEntry = order.processes[idx].subEntries.id(subEntryId);
+
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    const subEntry = procs[idx].subEntries.id(subEntryId);
     if (!subEntry) return res.status(404).json({ success: false, message: 'Sub-entry not found' });
 
     subEntry.status = 'Completed';
@@ -860,6 +926,7 @@ export const completeSubEntry = async (req, res) => {
     subEntry.qcStatus = 'Pending';
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -872,11 +939,14 @@ export const qcSubEntry = async (req, res) => {
     if (idx === -1) return;
     const { subEntryId } = req.params;
     const { qcStatus, qcBy, reason } = req.body;
+    const unitNumber = getUnitNumber(req);
 
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    const subEntry = order.processes[idx].subEntries.id(subEntryId);
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    const subEntry = procs[idx].subEntries.id(subEntryId);
     if (!subEntry) return res.status(404).json({ success: false, message: 'Sub-entry not found' });
 
     subEntry.qcStatus = qcStatus || 'Approved';
@@ -886,6 +956,7 @@ export const qcSubEntry = async (req, res) => {
     }
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -897,9 +968,12 @@ export const updateProcessNotes = async (req, res) => {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
     const { notes } = req.body;
+    const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    order.processes[idx].notes = notes || '';
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    procs[idx].notes = notes || '';
     await order.save();
     res.json({ success: true, data: order });
   } catch (err) {

@@ -46,6 +46,36 @@ const ProcessStepSchema = new mongoose.Schema({
   subEntries: { type: [SubEntrySchema], default: [] },
 }, { _id: false });
 
+// Builds a fresh set of process steps — same shape used both for the
+// top-level `processes` default (Unit 1) and for each entry in `extraUnits`
+// (Units 2..N of a multi-quantity order).
+function buildProcessSteps() {
+  return PROCESS_STEPS.map(step => ({
+    step,
+    type: PROCESS_TYPE_MAP[step],
+    status: 'Pending',
+    assignedTeam: null,
+    startDate: null,
+    endDate: null,
+    qcStatus: 'Pending',
+    qcBy: null,
+    qcDate: null,
+    notes: '',
+    reworks: [],
+    subEntries: [],
+  }));
+}
+
+// One extra physical unit's process pipeline, for orders with orderQuantity
+// > 1. Unit 1 always lives in the top-level `processes` field below — this
+// keeps every existing single-quantity order (the overwhelming majority)
+// byte-for-byte unaffected by the multi-unit feature. Units 2..N are stored
+// here, index 0 = Unit 2, index 1 = Unit 3, etc., and are created lazily by
+// the controller the first time that unit's process tab is actually used.
+const ExtraUnitSchema = new mongoose.Schema({
+  processes: { type: [ProcessStepSchema], default: buildProcessSteps },
+}, { _id: false });
+
 const MaterialDemandSchema = new mongoose.Schema({
   materialCode: { type: String, required: true, trim: true },
   materialName: { type: String, required: true, trim: true },
@@ -111,21 +141,12 @@ const ProductionOrderSchema = new mongoose.Schema({
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   notes: { type: String, default: '' },
   processes: {
-    type: [ProcessStepSchema], default: () => PROCESS_STEPS.map(step => ({
-      step,
-      type: PROCESS_TYPE_MAP[step],
-      status: 'Pending',
-      assignedTeam: null,
-      startDate: null,
-      endDate: null,
-      qcStatus: 'Pending',
-      qcBy: null,
-      qcDate: null,
-      notes: '',
-      reworks: [],
-    }))
+    type: [ProcessStepSchema], default: buildProcessSteps
   },
   materialDemands: { type: [MaterialDemandSchema], default: [] },
+  // Units 2..N of this order's process pipeline — see ExtraUnitSchema above.
+  // Stays empty for orderQuantity === 1 orders.
+  extraUnits: { type: [ExtraUnitSchema], default: [] },
   // NEW: Store the snapshot of the design URLs
   designDocuments: [{
     name: { type: String },
@@ -138,5 +159,5 @@ ProductionOrderSchema.index({ company: 1, status: 1 });
 ProductionOrderSchema.index({ company: 1, priority: 1 });
 ProductionOrderSchema.index({ company: 1, createdAt: -1 });
 
-export { PROCESS_STEPS, PROCESS_TYPE_MAP };
+export { PROCESS_STEPS, PROCESS_TYPE_MAP, buildProcessSteps };
 export default mongoose.model('ProductionOrder', ProductionOrderSchema);

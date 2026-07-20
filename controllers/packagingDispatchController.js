@@ -724,19 +724,33 @@ export const getDispatchOrders = async (req, res) => {
 export const createDispatchOrder = async (req, res) => {
   try {
     const {
-      packagingJobId, orderId, machineCode, machineName, serialNumber,
+      packagingJobId, packagingJobIds, orderId, machineCode, machineName, serialNumber,
       customerName, customerContact, deliveryAddress,
       transportType, plannedDispatchDate, expectedDeliveryDate,
       packingListNotes, notes,
     } = req.body;
 
-    if (!packagingJobId || !orderId) {
-      return res.status(400).json({ success: false, message: 'packagingJobId and orderId are required' });
+    // The whole order dispatches as one wrapper action: the caller may send
+    // `packagingJobIds` (every packed machine of the order) to create all
+    // their DispatchOrder records in one request, or the legacy single
+    // `packagingJobId` for a one-off job. Each machine still gets its own
+    // DispatchOrder underneath (needed for serial-number-level tracking in
+    // Active Dispatches / Dispatch History) — only the planning action itself
+    // is now one entity.
+    const jobIds = Array.isArray(packagingJobIds) && packagingJobIds.length
+      ? [...new Set(packagingJobIds)]
+      : (packagingJobId ? [packagingJobId] : []);
+
+    if (!jobIds.length || !orderId) {
+      return res.status(400).json({ success: false, message: 'packagingJobId(s) and orderId are required' });
     }
 
-    // Verify packaging job is in Packed state
-    const job = await PackagingJob.findOne({ _id: packagingJobId, company: req.user.companyId, status: 'Packed' });
-    if (!job) return res.status(400).json({ success: false, message: 'Packaging job not found or not yet Packed' });
+    // Verify every packaging job is in Packed state
+    const jobs = await PackagingJob.find({ _id: { $in: jobIds }, company: req.user.companyId, status: 'Packed' });
+    if (jobs.length !== jobIds.length) {
+      return res.status(400).json({ success: false, message: 'One or more packaging jobs were not found or are not yet Packed' });
+    }
+    const job = jobs[0]; // representative job — all siblings share the same orderId
 
     // 🚧 MULTI-ITEM GATE: the whole order dispatches together. Block dispatch
     // planning until (a) every item of the order is QC-approved, and (b) every
@@ -801,47 +815,63 @@ export const createDispatchOrder = async (req, res) => {
       });
     }
 
-    const dispatchId = await generateDispatchId(req.user.companyId);
-    const trackingId = generateTrackingId();
+    // Body-level machineCode/machineName/serialNumber overrides only make
+    // sense for a single specific job — with several jobs each keeps its own.
+    const useOverrides = jobs.length === 1;
 
-    const dispatch = await DispatchOrder.create({
-      dispatchId,
-      packagingJobId,
-      productionOrderId: job.productionOrderId || undefined,
-      qcJobId: job.qcJobId || undefined,
-      orderId,
-      machineCode: machineCode || job.machineCode,
-      machineName: machineName || job.machineName,
-      serialNumber: serialNumber || job.serialNumber,
-      saleItemId: job.saleItemId || null,
-      quantity: job.quantity || 1,
-      customerName: customerName || '',
-      customerContact: customerContact || '',
-      deliveryAddress: deliveryAddress || '',
-      transportType: transportType || 'Transport Company',
-      plannedDispatchDate: plannedDispatchDate || null,
-      expectedDeliveryDate: expectedDeliveryDate || null,
-      trackingId,
-      invoiceNumber: resolvedInvoiceNumber,
-      packingListNotes: packingListNotes || '',
-      notes: notes || '',
-      company: req.user.companyId,
-      createdBy: req.user._id,
-    });
+    const dispatches = [];
+    for (const j of jobs) {
+      const dispatchId = await generateDispatchId(req.user.companyId);
+      const trackingId = generateTrackingId();
 
-    // Mark packaging job as Dispatched
-    await PackagingJob.findByIdAndUpdate(packagingJobId, { status: 'Dispatched' });
+      const dispatch = await DispatchOrder.create({
+        dispatchId,
+        packagingJobId: j._id,
+        productionOrderId: j.productionOrderId || undefined,
+        qcJobId: j.qcJobId || undefined,
+        orderId,
+        machineCode: (useOverrides && machineCode) || j.machineCode,
+        machineName: (useOverrides && machineName) || j.machineName,
+        serialNumber: (useOverrides && serialNumber) || j.serialNumber,
+        saleItemId: j.saleItemId || null,
+        quantity: j.quantity || 1,
+        customerName: customerName || '',
+        customerContact: customerContact || '',
+        deliveryAddress: deliveryAddress || '',
+        transportType: transportType || 'Transport Company',
+        plannedDispatchDate: plannedDispatchDate || null,
+        expectedDeliveryDate: expectedDeliveryDate || null,
+        trackingId,
+        invoiceNumber: resolvedInvoiceNumber,
+        packingListNotes: packingListNotes || '',
+        notes: notes || '',
+        company: req.user.companyId,
+        createdBy: req.user._id,
+      });
 
-    // 🔔 Notify Dispatch Head & Employee that dispatch order is created
+      // Mark packaging job as Dispatched
+      await PackagingJob.findByIdAndUpdate(j._id, { status: 'Dispatched' });
+      dispatches.push(dispatch);
+    }
+
+    // 🔔 Notify Dispatch Head & Employee that dispatch order(s) are created —
+    // one summary notification for the whole order, not one per machine.
     try {
+      const first = dispatches[0];
       await notificationService.triggerDispatchNotification({
         action: 'ready_for_dispatch',
-        data: { orderCode: dispatch.orderId, dcno: dispatch.dispatchId, customerName: dispatch.customerName, dispatchOrderId: dispatch._id },
-        targetCompanyId: dispatch.company,
+        data: {
+          orderCode: first.orderId,
+          dcno: dispatches.map(d => d.dispatchId).join(', '),
+          customerName: first.customerName,
+          dispatchOrderId: first._id,
+          machineCount: dispatches.length,
+        },
+        targetCompanyId: first.company,
       });
     } catch (e) { console.error('Ready for dispatch notification error:', e); }
 
-    res.status(201).json({ success: true, data: dispatch });
+    res.status(201).json({ success: true, data: dispatches.length === 1 ? dispatches[0] : dispatches });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -866,35 +896,63 @@ export const executeDispatch = async (req, res) => {
       });
     }
 
-    const { vehicleNumber, driverName, driverContact, transportCompanyName, notes } = req.body;
+    const { vehicleNumber, driverName, driverContact, transportCompanyName, notes, siblingIds } = req.body;
+    const sharedFields = {
+      vehicleNumber: vehicleNumber || '',
+      driverName: driverName || '',
+      driverContact: driverContact || '',
+      transportCompanyName: transportCompanyName || '',
+      notes: notes || '',
+      status: 'Dispatched',
+      actualDispatchDate: new Date().toISOString().split('T')[0],
+      'deliveryDocs.noc': nocFile.path.replace(/\\/g, '/'),
+      'deliveryDocs.ewayBill': ewayBillFile.path.replace(/\\/g, '/'),
+      'deliveryDocs.invoice': invoiceFile.path.replace(/\\/g, '/'),
+    };
+
     const dispatch = await DispatchOrder.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, status: 'Ready' },
-      {
-        vehicleNumber: vehicleNumber || '',
-        driverName: driverName || '',
-        driverContact: driverContact || '',
-        transportCompanyName: transportCompanyName || '',
-        notes: notes || '',
-        status: 'Dispatched',
-        actualDispatchDate: new Date().toISOString().split('T')[0],
-        'deliveryDocs.noc': nocFile.path.replace(/\\/g, '/'),
-        'deliveryDocs.ewayBill': ewayBillFile.path.replace(/\\/g, '/'),
-        'deliveryDocs.invoice': invoiceFile.path.replace(/\\/g, '/'),
-      },
+      sharedFields,
       { new: true }
     );
     if (!dispatch) return res.status(404).json({ success: false, message: 'Dispatch order not found or not in Ready state' });
+
+    // The rest of this order's machines (if any) share the SAME uploaded
+    // documents — one NOC/E-Way Bill/Invoice set covers the whole truckload,
+    // so those DispatchOrder records just get pointed at the file paths
+    // already saved above instead of the browser re-uploading the same
+    // files once per machine.
+    let siblingCount = 0;
+    let parsedSiblingIds = [];
+    if (siblingIds) {
+      try {
+        parsedSiblingIds = JSON.parse(siblingIds);
+      } catch (_) { parsedSiblingIds = []; }
+    }
+    if (Array.isArray(parsedSiblingIds) && parsedSiblingIds.length) {
+      const result = await DispatchOrder.updateMany(
+        { _id: { $in: parsedSiblingIds }, company: req.user.companyId, status: 'Ready' },
+        { $set: sharedFields }
+      );
+      siblingCount = result.modifiedCount || 0;
+    }
 
     // 🔔 Notify Sales & Accounts that order is dispatched
     try {
       await notificationService.triggerDispatchNotification({
         action: 'dispatched',
-        data: { orderCode: dispatch.orderId, dispatchId: dispatch.dispatchId, customerName: dispatch.customerName, dispatchOrderId: dispatch._id },
+        data: {
+          orderCode: dispatch.orderId,
+          dispatchId: dispatch.dispatchId,
+          customerName: dispatch.customerName,
+          dispatchOrderId: dispatch._id,
+          machineCount: siblingCount + 1,
+        },
         targetCompanyId: dispatch.company,
       });
     } catch (e) { console.error('Dispatch notification error:', e); }
 
-    res.json({ success: true, data: dispatch });
+    res.json({ success: true, data: dispatch, siblingsUpdated: siblingCount });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
