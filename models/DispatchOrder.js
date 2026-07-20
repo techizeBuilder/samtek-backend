@@ -14,6 +14,11 @@ const DispatchOrderSchema = new mongoose.Schema({
   machineCode: { type: String, required: true, trim: true },
   machineName: { type: String, required: true, trim: true },
   serialNumber: { type: String, required: true },
+  // Which specific Sale item (Sale.items._id) this dispatch line covers, and
+  // how many units it carries (non-machine items dispatch as one line with
+  // quantity = item qty; machines are one line per unit). Null/1 on legacy.
+  saleItemId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  quantity: { type: Number, default: 1, min: 1 },
 
   // Customer / destination
   customerName: { type: String, default: '' },

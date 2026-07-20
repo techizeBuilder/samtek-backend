@@ -4,6 +4,7 @@ import Order from '../models/Order.js';
 import Lead from '../models/Lead.js';
 import Customer from '../models/Customer.js';
 import notificationService from '../services/notificationService.js';
+import { syncOrderItemsFromForm } from '../services/storeFlowService.js';
 
 const isSuperadmin = (role) => role === 'Superadmin' || role === 'Super Admin';
 const isAccountsRole = (role) => ['Accounts', 'Accounts Head', 'Account Employee'].includes(role) || isSuperadmin(role);
@@ -179,6 +180,17 @@ export const upsertOrderForm = async (req, res) => {
 
     order.orderFormCompleted = true;
     await order.save();
+
+    // 🔄 The Order Form's item table is the source of truth for the order's
+    // items — sync them into Order.products and the Sale scoreboard so the
+    // whole downstream flow (Store → QC/Production/Purchase → Dispatch)
+    // processes every item with its quantity, not just the lead's one item.
+    try {
+      const syncResult = await syncOrderItemsFromForm(order, cleanItems);
+      console.log(`🔄 [OrderForm] Item sync for ${order.orderCode}:`, syncResult);
+    } catch (syncErr) {
+      console.error('❌ Error syncing Order Form items into Order/Sale:', syncErr);
+    }
 
     if (newContribution !== previousContribution) {
       await Customer.findByIdAndUpdate(order.customer, {

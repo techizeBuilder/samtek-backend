@@ -6,6 +6,11 @@ import AdminSettings from '../models/AdminSettings.js';
 import notificationService from '../services/notificationService.js';
 import Sale from '../models/Sale.js';
 import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
+import { getOrderItemsReadiness } from '../services/storeFlowService.js';
+
+// Categories whose physical units each get their own packaging job + serial
+// number. Anything else (accessories/materials) packs as one job with qty.
+const PER_UNIT_CATEGORIES = ['purchase machine', 'manufacturing machine', 'finished good'];
 
 const now = () => new Date().toISOString();
 
@@ -238,10 +243,41 @@ export const getReadyForPackaging = async (req, res) => {
 
     // Map QCJobs to the format expected by the frontend packaging queue page
     // and resolve sales order code for proper tracking
+    const readinessCache = new Map(); // orderCode → readiness (avoid repeat lookups)
     const qcMapped = await Promise.all(filteredQcJobs.map(async (job) => {
       const salesOrderCode = await resolveSalesOrderCodeForQCJob(job, cid);
       const orderIdVal = salesOrderCode || job.itemCode || job.qcJobId || 'Store Order';
       const machineCodeVal = job.sourceRefId || 'N/A';
+
+      // 🚧 Multi-item readiness: the create button is locked until every item
+      // of the order is QC-approved
+      let readiness = null;
+      if (salesOrderCode) {
+        if (readinessCache.has(salesOrderCode)) {
+          readiness = readinessCache.get(salesOrderCode);
+        } else {
+          try {
+            const r = await getOrderItemsReadiness(salesOrderCode, cid);
+            readiness = r.found ? {
+              orderCode: r.orderCode,
+              allReady: r.allReady,
+              readyCount: r.readyCount,
+              totalCount: r.totalCount,
+              items: r.items.map(i => ({ name: i.name, qty: i.qty, status: i.status, ready: i.ready }))
+            } : null;
+          } catch (e) {
+            console.error('Readiness lookup failed for', salesOrderCode, e.message);
+          }
+          readinessCache.set(salesOrderCode, readiness);
+        }
+      }
+
+      // How many packaging job units does this entry represent, and how many exist?
+      const isPerUnit = job.source === 'Production'
+        || PER_UNIT_CATEGORIES.includes((job.category || '').toLowerCase().trim());
+      const qty = Math.max(1, Number(job.quantity) || 1);
+      const unitsTotal = isPerUnit ? qty : 1;
+      const unitsCreated = await PackagingJob.countDocuments({ qcJobId: job._id, company: cid });
 
       return {
         _id: job._id,
@@ -250,6 +286,11 @@ export const getReadyForPackaging = async (req, res) => {
         salesOrderCode: salesOrderCode,
         machineCode: machineCodeVal,
         machineName: job.itemName || 'Store Item',
+        quantity: qty,
+        unitsTotal,
+        unitsCreated,
+        saleItemId: job.saleItemId || null,
+        readiness,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
         processes: [
@@ -356,102 +397,164 @@ export const createPackagingJob = async (req, res) => {
       }
     }
 
+    // ── Multi-item: work out how many physical units this source packs ──
+    // Machines pack one job per unit (each with its own serial number);
+    // non-machine items pack as a single job carrying the quantity.
+    let sourceUnits = 1;       // number of packaging jobs to create in total
+    let jobQuantity = 1;       // quantity stamped on each job
+    let sourceSaleItemId = null;
+
+    let srcProdOrder = null;
+    let srcQcJob = null;
     if (actualProdOrderId) {
-      const existing = await PackagingJob.findOne({ productionOrderId: actualProdOrderId, company: req.user.companyId });
-      if (existing) return res.status(400).json({ success: false, message: 'Packaging job already exists for this order' });
+      srcProdOrder = await ProductionOrder.findById(actualProdOrderId)
+        .select('saleId saleItemId orderQuantity').lean();
+      sourceUnits = Math.max(1, Number(srcProdOrder?.orderQuantity) || 1);
+      sourceSaleItemId = srcProdOrder?.saleItemId || null;
     } else if (actualQcJobId) {
-      const existing = await PackagingJob.findOne({ qcJobId: actualQcJobId, company: req.user.companyId });
-      if (existing) return res.status(400).json({ success: false, message: 'Packaging job already exists for this QC Job' });
+      srcQcJob = await QCJob.findById(actualQcJobId)
+        .select('saleId purchaseRequestId saleItemId quantity category').lean();
+      sourceSaleItemId = srcQcJob?.saleItemId || null;
+      const qty = Math.max(1, Number(srcQcJob?.quantity) || 1);
+      const isPerUnit = PER_UNIT_CATEGORIES.includes((srcQcJob?.category || '').toLowerCase().trim());
+      if (isPerUnit) {
+        sourceUnits = qty;      // N machines → N jobs, 1 unit each
+      } else {
+        sourceUnits = 1;        // 1 job carrying the full qty
+        jobQuantity = qty;
+      }
+    }
+
+    // Duplicate protection (replaces the old unique index): allow up to
+    // sourceUnits jobs per source, then refuse.
+    const dupFilter = actualProdOrderId
+      ? { productionOrderId: actualProdOrderId, company: req.user.companyId }
+      : { qcJobId: actualQcJobId, company: req.user.companyId };
+    const existingCount = await PackagingJob.countDocuments(dupFilter);
+    if (existingCount >= sourceUnits) {
+      return res.status(400).json({
+        success: false,
+        message: sourceUnits > 1
+          ? `All ${sourceUnits} packaging jobs already exist for this order item`
+          : 'Packaging job already exists for this order'
+      });
     }
 
     // Resolve the actual sales Order.orderCode to store in orderId field
     // This is critical: Accounts pages (NOC Request, Packed Orders) match on Order.orderCode
     // so PackagingJob.orderId MUST be the sales orderCode (e.g. "ORD-2024-XXX-001"), not the MFG ID
     let resolvedOrderId = orderId;
-    if (actualProdOrderId) {
-      try {
-        const Order = (await import('../models/Order.js')).default;
-        const prodOrder = await ProductionOrder.findById(actualProdOrderId).select('saleId').lean();
-        if (prodOrder?.saleId) {
-          const linkedSale = await Sale.findById(prodOrder.saleId).select('order').lean();
-          if (linkedSale?.order) {
-            const salesOrder = await Order.findById(linkedSale.order).select('orderCode').lean();
-            if (salesOrder?.orderCode) {
-              resolvedOrderId = salesOrder.orderCode;
+    try {
+      const Order = (await import('../models/Order.js')).default;
+      if (srcProdOrder?.saleId) {
+        const linkedSale = await Sale.findById(srcProdOrder.saleId).select('order').lean();
+        if (linkedSale?.order) {
+          const salesOrder = await Order.findById(linkedSale.order).select('orderCode').lean();
+          if (salesOrder?.orderCode) resolvedOrderId = salesOrder.orderCode;
+        }
+      } else if (srcQcJob?.saleId) {
+        const linkedSale = await Sale.findById(srcQcJob.saleId).select('order').lean();
+        if (linkedSale?.order) {
+          const salesOrder = await Order.findById(linkedSale.order).select('orderCode').lean();
+          if (salesOrder?.orderCode) resolvedOrderId = salesOrder.orderCode;
+        }
+      } else if (srcQcJob?.purchaseRequestId) {
+        const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+        const pr = await PurchaseRequest.findById(srcQcJob.purchaseRequestId).lean();
+        if (pr && pr.storeOrderId) {
+          const salesOrder = await Order.findById(pr.storeOrderId).select('orderCode').lean();
+          if (salesOrder?.orderCode) {
+            resolvedOrderId = salesOrder.orderCode;
+          } else {
+            const sale = await Sale.findById(pr.storeOrderId).select('order').lean();
+            if (sale?.order) {
+              const salesOrder2 = await Order.findById(sale.order).select('orderCode').lean();
+              if (salesOrder2?.orderCode) resolvedOrderId = salesOrder2.orderCode;
             }
           }
         }
-      } catch (resolveErr) {
-        console.warn('Could not resolve salesOrderCode for packaging job, using provided orderId:', resolveErr.message);
+        if (!sourceSaleItemId && pr?.saleItemId) sourceSaleItemId = pr.saleItemId;
       }
-    } else if (actualQcJobId) {
-      try {
-        const Order = (await import('../models/Order.js')).default;
-        const Sale = (await import('../models/Sale.js')).default;
-        const qcJob = await QCJob.findById(actualQcJobId).select('saleId purchaseRequestId').lean();
-        if (qcJob?.saleId) {
-          const linkedSale = await Sale.findById(qcJob.saleId).select('order').lean();
-          if (linkedSale?.order) {
-            const salesOrder = await Order.findById(linkedSale.order).select('orderCode').lean();
-            if (salesOrder?.orderCode) {
-              resolvedOrderId = salesOrder.orderCode;
-            }
-          }
-        } else if (qcJob?.purchaseRequestId) {
-          const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
-          const pr = await PurchaseRequest.findById(qcJob.purchaseRequestId).lean();
-          if (pr && pr.storeOrderId) {
-            const salesOrder = await Order.findById(pr.storeOrderId).select('orderCode').lean();
-            if (salesOrder?.orderCode) {
-              resolvedOrderId = salesOrder.orderCode;
-            } else {
-              const sale = await Sale.findById(pr.storeOrderId).select('order').lean();
-              if (sale?.order) {
-                const salesOrder2 = await Order.findById(sale.order).select('orderCode').lean();
-                if (salesOrder2?.orderCode) {
-                  resolvedOrderId = salesOrder2.orderCode;
-                }
-              }
-            }
-          }
-        }
-      } catch (resolveErr) {
-        console.warn('Could not resolve salesOrderCode for QC packaging job, using provided orderId:', resolveErr.message);
-      }
+    } catch (resolveErr) {
+      console.warn('Could not resolve salesOrderCode for packaging job, using provided orderId:', resolveErr.message);
     }
 
-    const jobId = await generateJobId(req.user.companyId);
-    const serialNumber = await generateSerialNumber(req.user.companyId);
-
-    const jobData = {
-      jobId,
-      orderId: resolvedOrderId,   // ← sales orderCode (e.g. "ORD-..."), resolved above
-      machineCode,
-      machineName,
-      serialNumber,
-      packingType: packingType || 'Wooden Packing',
-      notes: notes || '',
-      company: req.user.companyId,
-      createdBy: req.user._id,
-    };
-
-    // Only set these fields if they have actual values — never set to null/undefined
-    // to avoid triggering the unique partial index on productionOrderId
-    if (actualProdOrderId) jobData.productionOrderId = actualProdOrderId;
-    if (actualQcJobId) jobData.qcJobId = actualQcJobId;
-
-    const job = await PackagingJob.create(jobData);
-
-    // 🔔 Notify Packing Head & Employee about new job
+    // 🚧 MULTI-ITEM GATE: packing for an order may only start once EVERY item
+    // of that order is QC-approved (ready). Until then no packaging job can
+    // be created — the queue shows what is still pending.
     try {
+      const readiness = await getOrderItemsReadiness(resolvedOrderId, req.user.companyId);
+      if (readiness.found && !readiness.allReady) {
+        const pendingList = readiness.items
+          .filter(i => !i.ready)
+          .map(i => `${i.name} ×${i.qty} — ${i.status}`);
+        return res.status(400).json({
+          success: false,
+          code: 'ORDER_NOT_READY',
+          message: `Packing blocked: order ${resolvedOrderId} has ${readiness.totalCount - readiness.readyCount} of ${readiness.totalCount} item(s) not yet QC-approved. Pending: ${pendingList.join('; ')}`,
+          readiness: {
+            orderCode: readiness.orderCode,
+            readyCount: readiness.readyCount,
+            totalCount: readiness.totalCount,
+            items: readiness.items
+          }
+        });
+      }
+    } catch (gateErr) {
+      console.error('Error checking order readiness for packaging gate:', gateErr);
+    }
+
+    // Create the remaining unit jobs (machines: one per unit with its own
+    // serial; non-machines: a single job carrying the quantity)
+    const unitsToCreate = sourceUnits - existingCount;
+    const createdJobs = [];
+    for (let u = 0; u < unitsToCreate; u++) {
+      const jobId = await generateJobId(req.user.companyId);
+      const serialNumber = await generateSerialNumber(req.user.companyId);
+
+      const jobData = {
+        jobId,
+        orderId: resolvedOrderId,   // ← sales orderCode (e.g. "ORD-..."), resolved above
+        machineCode,
+        machineName,
+        serialNumber,
+        unitIndex: existingCount + u + 1,
+        quantity: jobQuantity,
+        saleItemId: sourceSaleItemId || null,
+        packingType: packingType || 'Wooden Packing',
+        notes: notes || '',
+        company: req.user.companyId,
+        createdBy: req.user._id,
+      };
+      if (actualProdOrderId) jobData.productionOrderId = actualProdOrderId;
+      if (actualQcJobId) jobData.qcJobId = actualQcJobId;
+
+      const job = await PackagingJob.create(jobData);
+      createdJobs.push(job);
+    }
+
+    // 🔔 Notify Packing Head & Employee about new job(s)
+    try {
+      const first = createdJobs[0];
       await notificationService.triggerPackingNotification({
         action: 'ready_for_packing',
-        data: { jobId: job._id, batchNo: job.jobId, orderCode: job.orderId, machineName: job.machineName },
-        targetCompanyId: job.company,
+        data: {
+          jobId: first._id,
+          batchNo: createdJobs.length > 1 ? `${first.jobId} (+${createdJobs.length - 1} more)` : first.jobId,
+          orderCode: first.orderId,
+          machineName: first.machineName
+        },
+        targetCompanyId: first.company,
       });
     } catch (e) { console.error('Ready for packing notification error:', e); }
 
-    res.status(201).json({ success: true, data: job });
+    res.status(201).json({
+      success: true,
+      data: createdJobs[0],
+      jobs: createdJobs,
+      unitsCreated: createdJobs.length,
+      unitsTotal: sourceUnits
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -560,19 +663,35 @@ export const getDispatchOrders = async (req, res) => {
     if (status) filter.status = status;
     const orders = await DispatchOrder.find(filter).sort({ createdAt: -1 }).lean();
 
-    // Enrich each order with gate pass data from Sale model (if gate pass was generated)
+    // Enrich each order with gate pass data from Sale model (if gate pass was
+    // generated) + the order's full item list (multi-item: dispatch screens
+    // show exactly which items travel together under this order)
     const Sale = (await import('../models/Sale.js')).default;
     const Order = (await import('../models/Order.js')).default;
+    const itemsCache = new Map(); // orderCode → orderItems summary
 
     const enriched = await Promise.all(orders.map(async (order) => {
       if (!order.orderId) return order;
       try {
+        let orderItems = null;
+        if (itemsCache.has(order.orderId)) {
+          orderItems = itemsCache.get(order.orderId);
+        } else {
+          try {
+            const r = await getOrderItemsReadiness(order.orderId, req.user.companyId);
+            orderItems = r.found
+              ? r.items.map(i => ({ name: i.name, qty: i.qty, status: i.status, ready: i.ready }))
+              : null;
+          } catch (e) { orderItems = null; }
+          itemsCache.set(order.orderId, orderItems);
+        }
+
         // Find the Order document by orderCode
         const matchedOrder = await Order.findOne({
           orderCode: order.orderId,
           companyId: req.user.companyId
         }).select('_id').lean();
-        if (!matchedOrder) return order;
+        if (!matchedOrder) return { ...order, orderItems };
 
         // Find the Sale linked to this order that has a Generated gate pass
         const matchedSale = await Sale.findOne({
@@ -580,10 +699,11 @@ export const getDispatchOrders = async (req, res) => {
           companyId: req.user.companyId,
           'gatePass.status': 'Generated'
         }).select('gatePass').lean();
-        if (!matchedSale?.gatePass) return order;
+        if (!matchedSale?.gatePass) return { ...order, orderItems };
 
         return {
           ...order,
+          orderItems,
           gatePassVehicleNumber: matchedSale.gatePass.vehicleNumber || '',
           gatePassDriverName: matchedSale.gatePass.driverName || '',
           gatePassContactNumber: matchedSale.gatePass.contactNumber || '',
@@ -617,6 +737,44 @@ export const createDispatchOrder = async (req, res) => {
     // Verify packaging job is in Packed state
     const job = await PackagingJob.findOne({ _id: packagingJobId, company: req.user.companyId, status: 'Packed' });
     if (!job) return res.status(400).json({ success: false, message: 'Packaging job not found or not yet Packed' });
+
+    // 🚧 MULTI-ITEM GATE: the whole order dispatches together. Block dispatch
+    // planning until (a) every item of the order is QC-approved, and (b) every
+    // packaging job of the order is Packed (none still Pending/In Progress).
+    try {
+      const readiness = await getOrderItemsReadiness(job.orderId, req.user.companyId);
+      if (readiness.found && !readiness.allReady) {
+        const pendingList = readiness.items
+          .filter(i => !i.ready)
+          .map(i => `${i.name} ×${i.qty} — ${i.status}`);
+        return res.status(400).json({
+          success: false,
+          code: 'ORDER_NOT_READY',
+          message: `Dispatch blocked: order ${job.orderId} still has item(s) not ready: ${pendingList.join('; ')}. The full order dispatches together.`,
+          readiness: {
+            orderCode: readiness.orderCode,
+            readyCount: readiness.readyCount,
+            totalCount: readiness.totalCount,
+            items: readiness.items
+          }
+        });
+      }
+
+      const unpackedJobs = await PackagingJob.find({
+        company: req.user.companyId,
+        orderId: job.orderId,
+        status: { $in: ['Pending', 'In Progress'] }
+      }).select('jobId machineName status').lean();
+      if (unpackedJobs.length > 0) {
+        return res.status(400).json({
+          success: false,
+          code: 'ORDER_NOT_FULLY_PACKED',
+          message: `Dispatch blocked: ${unpackedJobs.length} packaging job(s) of order ${job.orderId} are not Packed yet: ${unpackedJobs.map(j => `${j.jobId} (${j.machineName} — ${j.status})`).join('; ')}`
+        });
+      }
+    } catch (gateErr) {
+      console.error('Error checking order readiness for dispatch gate:', gateErr);
+    }
 
     // No dispatch without an invoice: job.orderId holds the sales orderCode —
     // resolve it to an Order and require at least one REAL Sale (Pakka or
@@ -655,6 +813,8 @@ export const createDispatchOrder = async (req, res) => {
       machineCode: machineCode || job.machineCode,
       machineName: machineName || job.machineName,
       serialNumber: serialNumber || job.serialNumber,
+      saleItemId: job.saleItemId || null,
+      quantity: job.quantity || 1,
       customerName: customerName || '',
       customerContact: customerContact || '',
       deliveryAddress: deliveryAddress || '',

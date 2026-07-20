@@ -683,9 +683,11 @@ export const approveQC = async (req, res) => {
         }
 
         if (linkedSale) {
-          linkedSale.storeQCStatus = 'Production Completed';
-          await linkedSale.save();
-          console.log(`🏪 [Production Completed] storeQCStatus='Production Completed' for Sale ${linkedSale._id}`);
+          // Multi-item: only this Production Order's item flips to
+          // 'Production Completed' (sale-level fallback for legacy orders)
+          const { setSaleItemStatus } = await import('../services/storeFlowService.js');
+          const perItem = await setSaleItemStatus(linkedSale, order.saleItemId, 'Production Completed');
+          console.log(`🏪 [Production Completed] 'Production Completed' for Sale ${linkedSale._id}${perItem ? ` (item ${order.saleItemId})` : ' (sale-level)'}`);
         } else {
           console.warn(`⚠️ [Production Completed] Could not find linked Sale for ProductionOrder ${order.orderId}`);
         }
@@ -765,11 +767,14 @@ export const approveQC = async (req, res) => {
             itemName: order.machineName,
             itemCode: order.machineCode,
             category: qcCategory,
-            quantity: 1,
+            // Multi-qty: QC inspects the full produced quantity of this run
+            quantity: order.orderQuantity || 1,
             unit: 'pcs',
             receivedDate: today(),
             status: 'Pending',
             saleId: order.saleId,
+            saleItemId: order.saleItemId || null,
+            orderCode: order.orderCode || '',
             company: order.company,
             createdBy: req.user._id,
             notes: `Automatically created from completed Production Order: ${order.orderId}`

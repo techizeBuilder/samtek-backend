@@ -11,6 +11,11 @@ import QCJob from '../models/QCJob.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import { computeOrderFinancials } from '../utils/orderFinancials.js';
+import {
+  ensureSaleForOrder,
+  applyStoreDecisionToItem,
+  getOrderItemsReadiness
+} from '../services/storeFlowService.js';
 
 // Generate a unique requestId safely (avoids E11000 duplicate key errors)
 async function generateUniqueRequestId() {
@@ -1046,6 +1051,10 @@ const getOrderTracking = async (req, res) => {
         productType: sale.productType || null,
         isAvailableInInventory: sale.isAvailableInInventory || null,
         storeQCStatus: sale.storeQCStatus || null,
+        // Per-item scoreboard (multi-item flow) — each entry carries its own
+        // productType / isAvailableInInventory / storeQCStatus / itemRef
+        saleId: sale._id,
+        saleItems: sale.items || [],
         orderStatus: order.status || 'pending',
         source: 'sale'
       };
@@ -1094,6 +1103,10 @@ const getOrderTracking = async (req, res) => {
         productType: orderSale?.productType || null,
         isAvailableInInventory: orderSale?.isAvailableInInventory || null,
         storeQCStatus: orderSale?.storeQCStatus || null,
+        // Per-item scoreboard (empty until Store first touches the order —
+        // the frontend then falls back to order.products for the item list)
+        saleId: orderSale?._id || null,
+        saleItems: orderSale?.items || [],
         orderStatus: order.status, // 🔄 NEW: Include actual status (pending_service_approval/pending)
         serviceVerification: order.serviceVerification || { status: 'pending' }, // 🔄 NEW: Service verification info
         leadId: order.leadId?._id || null, // 📋 NEW: Lead reference
@@ -1194,13 +1207,19 @@ const generateGatePass = async (req, res) => {
   }
 };
 
-// Update Store Info for an Order (when no Sale exists yet)
+// Update Store Info for an Order — multi-item: routes each order item
+// independently through the per-item automation (QC / Production / Purchase).
+// Accepted bodies:
+//   { items: [{ saleItemId? | itemRefId? | productName?,
+//               productType?, isAvailableInInventory?, autoCheck? }] }
+//   { autoCheck: true }                       → auto-check & route ALL items
+//   { productType, isAvailableInInventory }   → legacy: apply to ALL items
 const updateOrderStoreInfo = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { productType, isAvailableInInventory } = req.body;
+    const { productType, isAvailableInInventory, items: itemDecisions, autoCheck } = req.body;
 
-    console.log(`🏪 Store Info Update - Order ID: ${orderId}, ProductType: ${productType}, Available: ${isAvailableInInventory}`);
+    console.log(`🏪 Store Info Update - Order ID: ${orderId}, body:`, JSON.stringify(req.body));
 
     const order = await Order.findById(orderId).populate('customer').populate('products.product');
     if (!order) {
@@ -1216,265 +1235,107 @@ const updateOrderStoreInfo = async (req, res) => {
       });
     }
 
-    // 🔄 NEW UNIFIED FLOW: Check if Sale exists, if not create temp Sale for consistency
-    let sale = await Sale.findOne({ order: orderId });
-    let isNewSale = false;
-    
-    if (!sale) {
-      // Create a temporary Sale record to maintain workflow consistency
-      const invoiceNumber = `TEMP-${order.orderCode}-${Date.now()}`;
-      
-      // Convert order products to sale items format
-      const saleItems = order.products.map(product => ({
-        productName: product.product?.name || 'Unknown Product',
-        quantity: product.quantity,
-        unitPrice: product.price,
-        totalPrice: product.total,
-        tax: 0
-      }));
+    const { sale, isNewSale } = await ensureSaleForOrder(order, req.user);
 
-      sale = new Sale({
-        invoiceNumber,
-        isPlaceholder: true, // internal linkage only — not a real invoice, must never surface as one
-        order: order._id,
-        customer: order.customer._id,
-        items: saleItems,
-        subtotal: order.totalAmount,
-        taxAmount: 0,
-        totalAmount: order.totalAmount,
-        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
-        unit: order.unit,
-        companyId: order.companyId || req.user.companyId, // Ensure company ID is set
-        createdBy: req.user._id,
-        notes: `Auto-created from Order ${order.orderCode} for store management`,
-        invoiceType: 'Kachha', // Temporary invoice
-        paymentStatus: 'Pending' // Will be updated when accounts approve
-      });
+    const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
+    const validAvailability = ['Available', 'Not Available'];
+    if (productType && !validTypes.includes(productType)) {
+      return res.status(400).json({ success: false, message: 'Invalid product type' });
+    }
+    if (isAvailableInInventory && !validAvailability.includes(isAvailableInInventory)) {
+      return res.status(400).json({ success: false, message: 'Invalid inventory status' });
+    }
 
-      await sale.save();
-      isNewSale = true;
-      console.log(`📋 Created temporary Sale record ${sale._id} for Order ${orderId}`);
+    // Build the per-item decision list
+    const saleItems = (sale.items || []).filter(it => (it.quantity || 0) > 0);
+    if (!saleItems.length) {
+      return res.status(400).json({ success: false, message: 'This order has no items to process.' });
+    }
+    const decisions = []; // [{ saleItem, decision }]
+
+    if (Array.isArray(itemDecisions) && itemDecisions.length > 0) {
+      for (const d of itemDecisions) {
+        if (d.productType && !validTypes.includes(d.productType)) {
+          return res.status(400).json({ success: false, message: 'Invalid product type for item' });
+        }
+        if (d.isAvailableInInventory && !validAvailability.includes(d.isAvailableInInventory)) {
+          return res.status(400).json({ success: false, message: 'Invalid inventory status for item' });
+        }
+        let target = null;
+        if (d.saleItemId) target = sale.items.id(d.saleItemId);
+        if (!target && d.itemRefId) {
+          target = saleItems.find(it => it.itemRef && it.itemRef.toString() === String(d.itemRefId));
+        }
+        if (!target && d.productName) {
+          target = saleItems.find(it =>
+            (it.productName || '').trim().toLowerCase() === String(d.productName).trim().toLowerCase());
+        }
+        if (!target) {
+          return res.status(400).json({
+            success: false,
+            message: `Item not found on this order: ${d.productName || d.saleItemId || d.itemRefId}`
+          });
+        }
+        decisions.push({
+          saleItem: target,
+          decision: d.autoCheck
+            ? { autoCheck: true }
+            : { productType: d.productType, isAvailableInInventory: d.isAvailableInInventory }
+        });
+      }
     } else {
-      console.log(`📋 Using existing Sale record ${sale._id} for Order ${orderId}`);
-      // Check if we need to fix "Unknown Product" in existing sale items
-      const hasUnknown = sale.items && sale.items.some(item => item.productName === 'Unknown Product');
-      if (hasUnknown && order.products && order.products.length > 0) {
-        console.log(`🛠️ Fixing "Unknown Product" in existing Sale items for Order ${orderId}`);
-        sale.items = order.products.map(product => ({
-          productName: product.product?.name || 'Unknown Product',
-          quantity: product.quantity,
-          unitPrice: product.price,
-          totalPrice: product.total,
-          tax: 0
-        }));
-        await sale.save();
+      // Whole-order call: auto-check every item, or apply the single legacy
+      // decision to every item (keeps the old frontend working unchanged)
+      const LOCKED_STATUSES = ['Goes to QC', 'Approved from QC', 'Goes to Production', 'Production Completed', 'Goes to Purchase'];
+      const wholeDecision = autoCheck ? { autoCheck: true } : { productType, isAvailableInInventory };
+      for (const it of saleItems) {
+        // Auto-check must never disturb an item already routed or QC-approved
+        if (autoCheck && LOCKED_STATUSES.includes(it.storeQCStatus)) continue;
+        decisions.push({ saleItem: it, decision: wholeDecision });
       }
     }
 
-    // 🔄 UPDATE STORE INFO: Same validation as existing flow
-    if (productType !== undefined) {
-      if (productType === '' || productType === null) {
-        sale.productType = null;
-      } else {
-        const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
-        if (!validTypes.includes(productType)) {
-          return res.status(400).json({ success: false, message: 'Invalid product type' });
-        }
-        sale.productType = productType;
-      }
-    }
-
-    if (isAvailableInInventory !== undefined) {
-      if (isAvailableInInventory === '' || isAvailableInInventory === null) {
-        sale.isAvailableInInventory = null;
-      } else {
-        const validAvailability = ['Available', 'Not Available'];
-        if (!validAvailability.includes(isAvailableInInventory)) {
-          return res.status(400).json({ success: false, message: 'Invalid inventory status' });
-        }
-        sale.isAvailableInInventory = isAvailableInInventory;
-      }
-    }
-
-    // 🚀 UNIFIED AUTOMATION: Same logic as existing updateSaleStoreInfo function
-    const orderCode = order.orderCode;
-    const sourceRefId = sale.invoiceNumber || sale._id.toString();
-    
-    console.log(`🔄 Applying automation for ${orderCode} - ProductType: ${sale.productType}, Available: ${sale.isAvailableInInventory}`);
-
-    // CASE 1: Available -> Deduct from inventory, Create QC Job & Cleanup Pending Production/Purchase
-    if (sale.isAvailableInInventory === 'Available') {
+    // 🚀 Route every decided item through the per-item automation
+    const results = [];
+    for (const { saleItem, decision } of decisions) {
       try {
-        await ProductionOrder.deleteMany({
-          company: sale.companyId,
-          notes: new RegExp(sourceRefId),
-          status: 'Pending'
+        const { routed, splitSibling } = await applyStoreDecisionToItem({ sale, order, saleItem, decision, user: req.user });
+        results.push({
+          saleItemId: saleItem._id,
+          productName: saleItem.productName,
+          quantity: saleItem.quantity,
+          productType: saleItem.productType,
+          isAvailableInInventory: saleItem.isAvailableInInventory,
+          storeQCStatus: saleItem.storeQCStatus,
+          routed,
+          split: !!splitSibling
         });
-        await PurchaseRequest.deleteMany({
-          companyId: sale.companyId,
-          itemId: sourceRefId,
-          status: 'Pending'
-        });
-
-        // ✂️ Deduct inventory qty for each product in the order
-        for (const p of order.products) {
-          const productId = p.product?._id || p.product;
-          const deductQty = p.quantity || 1;
-          if (productId) {
-            try {
-              const invItem = await Item.findById(productId);
-              if (invItem && invItem.qty >= deductQty) {
-                invItem.qty = invItem.qty - deductQty;
-                await invItem.save();
-                console.log(`✂️ Deducted ${deductQty} from ${invItem.name}. New qty: ${invItem.qty}`);
-              }
-            } catch (deductErr) {
-              console.error(`❌ Error deducting inventory for product ${productId}:`, deductErr);
-            }
-          }
-        }
-
-        const existingQC = await QCJob.findOne({
-          source: 'Store',
-          sourceRefId: sourceRefId,
-          company: sale.companyId,
-          status: { $in: ['Pending', 'In Progress'] }
-        });
-
-        if (!existingQC) {
-          const qcJobId = await generateQCJobId();
-          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
-          const itemName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
-
-          await QCJob.create({
-            qcJobId,
-            source: 'Store',
-            sourceRefId: sourceRefId,
-            saleId: sale._id,               // ← direct Sale ref for reliable status update
-            sourceDepartment: 'Store',
-            sentBy: req.user.fullName || req.user.username || 'Store Dept',
-            itemName: itemName,
-            itemCode: orderCode,
-            category: 'Finished Good',
-            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
-            unit: 'pcs',
-            receivedDate: today(),
-            status: 'Pending',
-            company: sale.companyId,
-            createdBy: req.user._id,
-            notes: `Automatically created from Store Order ${orderCode}`
+        // Auto-split: report the shortfall line too, so the frontend shows
+        // "N from stock → QC, M → Purchase/Production" in one response
+        if (splitSibling) {
+          results.push({
+            saleItemId: splitSibling._id,
+            productName: splitSibling.productName,
+            quantity: splitSibling.quantity,
+            productType: splitSibling.productType,
+            isAvailableInInventory: splitSibling.isAvailableInInventory,
+            storeQCStatus: splitSibling.storeQCStatus,
+            routed: splitSibling.storeQCStatus === 'Goes to Purchase' ? 'purchase' : 'production',
+            split: true
           });
-          console.log(`✅ QC Job ${qcJobId} created for Order ${orderId}`);
         }
-
-        // Set store status to reflect item went to QC
-        sale.storeQCStatus = 'Goes to QC';
-      } catch (qcError) {
-        console.error('❌ Error in Available case automation:', qcError);
+      } catch (itemErr) {
+        console.error(`❌ Error routing item "${saleItem.productName}":`, itemErr);
+        results.push({ saleItemId: saleItem._id, productName: saleItem.productName, error: itemErr.message });
       }
     }
 
-    // CASE 2: Not Available & In-house Manufactured -> Create Production Order
-    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'In-house Manufactured') {
-      try {
-        await QCJob.deleteMany({
-          company: sale.companyId,
-          sourceRefId: sourceRefId,
-          status: 'Pending'
-        });
-        await PurchaseRequest.deleteMany({
-          companyId: sale.companyId,
-          itemId: sourceRefId,
-          status: 'Pending'
-        });
-
-        const existingProduction = await ProductionOrder.findOne({
-          company: sale.companyId,
-          notes: new RegExp(sourceRefId)
-        });
-
-        if (!existingProduction) {
-          const year = new Date().getFullYear();
-          const timestamp = Date.now().toString().slice(-6);
-          const prodOrderId = `PROD-${year}-${timestamp}`;
-
-          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
-          const machineName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
-
-          await ProductionOrder.create({
-            orderId: prodOrderId,
-            orderCode: order.orderCode,
-            machineCode: orderCode,
-            machineName: machineName,
-            priority: order.priority === 'High' ? 'Urgent' : 'Normal',
-            receivedDate: today(),
-            deliveryDate: today(),
-            status: 'Pending',
-            source: 'Store',
-            saleId: sale._id,               // ← direct Sale ref for reliable status update
-            company: sale.companyId,
-            createdBy: req.user._id,
-            notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
-          });
-          console.log(`✅ Production Order ${prodOrderId} created for Order ${orderId}`);
-        }
-
-        // Set store status to reflect item went to Production
-        sale.storeQCStatus = 'Goes to Production';
-      } catch (prodError) {
-        console.error('❌ Error in In-house case automation:', prodError);
-      }
-    }
-
-    // CASE 3: Not Available & Purchased (Trading Product) -> Create Purchase Request
-    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'Purchased (Trading Product)') {
-      try {
-        await QCJob.deleteMany({
-          company: sale.companyId,
-          sourceRefId: sourceRefId,
-          status: 'Pending'
-        });
-        await ProductionOrder.deleteMany({
-          company: sale.companyId,
-          notes: new RegExp(sourceRefId),
-          status: 'Pending'
-        });
-
-        const existingPurchaseReq = await PurchaseRequest.findOne({
-          companyId: sale.companyId,
-          itemId: sourceRefId
-        });
-
-        if (!existingPurchaseReq) {
-          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
-          const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
-
-          const requestId = await generateUniqueRequestId();
-
-          await PurchaseRequest.create({
-            requestId,
-            productName,
-            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
-            requestFromDepartment: 'Store',
-            priority: order.priority || 'Medium',
-            companyId: sale.companyId,
-            storeOrderId: order._id,
-            itemId: sourceRefId
-          });
-          console.log(`✅ Purchase Request ${requestId} created for Order ${orderId}`);
-        }
-
-        // Set store status to reflect item went to Purchase
-        sale.storeQCStatus = 'Goes to Purchase';
-      } catch (purchaseError) {
-        console.error('❌ Error in Purchased case automation:', purchaseError);
-      }
-    }
-
+    sale.recomputeAggregateStoreStatus();
     await sale.save();
 
-    // 📊 RESPONSE: Include flow information for frontend
-    const response = {
+    console.log(`✅ Store Info Updated - Order: ${order.orderCode}, Sale: ${sale.invoiceNumber}, ${results.length} item(s) processed`);
+
+    res.json({
       success: true,
       message: 'Store information updated successfully',
       data: {
@@ -1482,246 +1343,126 @@ const updateOrderStoreInfo = async (req, res) => {
         orderCode: order.orderCode,
         saleId: sale._id,
         invoiceNumber: sale.invoiceNumber,
+        // Aggregates (legacy consumers)
         productType: sale.productType,
         isAvailableInInventory: sale.isAvailableInInventory,
         storeQCStatus: sale.storeQCStatus,
-        isNewSale: isNewSale,
+        // Per-item outcome (new consumers)
+        items: results,
+        isNewSale,
         flowStatus: 'store_completed'
       }
-    };
-
-    console.log(`✅ Store Info Updated - Order: ${orderCode}, Sale: ${sale.invoiceNumber}, Flow: ${isNewSale ? 'New' : 'Existing'}`);
-    
-    res.json(response);
+    });
   } catch (error) {
     console.error('Error updating order store info:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// Update Store Info for a Sale (Product Type & Inventory Availability) - Legacy function
+// Update Store Info for a Sale — multi-item aware. Accepts the same bodies as
+// updateOrderStoreInfo (items[] / autoCheck / legacy single decision) and
+// routes each sale item through the per-item automation.
 const updateSaleStoreInfo = async (req, res) => {
   try {
     const { saleId } = req.params;
-    const { productType, isAvailableInInventory } = req.body;
+    const { productType, isAvailableInInventory, items: itemDecisions, autoCheck } = req.body;
 
     const sale = await Sale.findById(saleId).populate('order');
     if (!sale) {
       return res.status(404).json({ success: false, message: 'Sale not found' });
     }
+    const order = sale.order || null;
 
-    if (productType !== undefined) {
-      if (productType === '' || productType === null) {
-        sale.productType = null;
-      } else {
-        const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
-        if (!validTypes.includes(productType)) {
-          return res.status(400).json({ success: false, message: 'Invalid product type' });
-        }
-        sale.productType = productType;
-      }
+    const validTypes = ['In-house Manufactured', 'Purchased (Trading Product)'];
+    const validAvailability = ['Available', 'Not Available'];
+    if (productType && !validTypes.includes(productType)) {
+      return res.status(400).json({ success: false, message: 'Invalid product type' });
+    }
+    if (isAvailableInInventory && !validAvailability.includes(isAvailableInInventory)) {
+      return res.status(400).json({ success: false, message: 'Invalid inventory status' });
     }
 
-    if (isAvailableInInventory !== undefined) {
-      if (isAvailableInInventory === '' || isAvailableInInventory === null) {
-        sale.isAvailableInInventory = null;
-      } else {
-        const validAvailability = ['Available', 'Not Available'];
-        if (!validAvailability.includes(isAvailableInInventory)) {
-          return res.status(400).json({ success: false, message: 'Invalid inventory status' });
-        }
-        sale.isAvailableInInventory = isAvailableInInventory;
-      }
+    const saleItems = (sale.items || []).filter(it => (it.quantity || 0) > 0);
+    if (!saleItems.length) {
+      return res.status(400).json({ success: false, message: 'This sale has no items to process.' });
     }
+    const decisions = [];
 
-    // --- AUTOMATION LOGIC WITH CLEANUP ---
-
-    // CASE 1: Available -> Deduct inventory, Create QC Job & Cleanup Pending Production/Purchase
-    if (sale.isAvailableInInventory === 'Available') {
-      try {
-        const orderCode = sale.order?.orderCode || 'N/A';
-        const sourceRefId = sale.invoiceNumber || sale._id.toString();
-
-        // 1. Cleanup existing Pending Production Orders or Purchase Requests
-        await ProductionOrder.deleteMany({
-          company: sale.companyId,
-          notes: new RegExp(sourceRefId),
-          status: 'Pending'
-        });
-        await PurchaseRequest.deleteMany({
-          companyId: sale.companyId,
-          itemId: sourceRefId,
-          status: 'Pending'
-        });
-
-        // ✂️ Deduct inventory qty for each item in sale (linked via order products)
-        const linkedOrder = sale.order?._id ? await Order.findById(sale.order._id).populate('products.product') : null;
-        if (linkedOrder && linkedOrder.products) {
-          for (const p of linkedOrder.products) {
-            const productId = p.product?._id || p.product;
-            const deductQty = p.quantity || 1;
-            if (productId) {
-              try {
-                const invItem = await Item.findById(productId);
-                if (invItem && invItem.qty >= deductQty) {
-                  invItem.qty = invItem.qty - deductQty;
-                  await invItem.save();
-                  console.log(`✂️ [Sale] Deducted ${deductQty} from ${invItem.name}. New qty: ${invItem.qty}`);
-                }
-              } catch (deductErr) {
-                console.error(`❌ Error deducting inventory for product ${productId}:`, deductErr);
-              }
-            }
-          }
+    if (Array.isArray(itemDecisions) && itemDecisions.length > 0) {
+      for (const d of itemDecisions) {
+        if (d.productType && !validTypes.includes(d.productType)) {
+          return res.status(400).json({ success: false, message: 'Invalid product type for item' });
         }
-
-        // 2. Create QC Job (skip if one already active for this ref)
-        const existingQC = await QCJob.findOne({
-          source: 'Store',
-          sourceRefId: sourceRefId,
-          company: sale.companyId,
-          status: { $in: ['Pending', 'In Progress'] }
-        });
-
-        if (!existingQC) {
-          const qcJobId = await generateQCJobId();
-          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
-          const itemName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
-
-          await QCJob.create({
-            qcJobId,
-            source: 'Store',
-            sourceRefId: sourceRefId,
-            saleId: sale._id,               // ← direct Sale ref for reliable status update
-            sourceDepartment: 'Store',
-            sentBy: req.user.fullName || req.user.username || 'Store Dept',
-            itemName: itemName,
-            itemCode: orderCode,
-            category: 'Finished Good',
-            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
-            unit: 'pcs',
-            receivedDate: today(),
-            status: 'Pending',
-            company: sale.companyId,
-            createdBy: req.user._id,
-            notes: `Automatically created from Store Order ${orderCode}`
+        if (d.isAvailableInInventory && !validAvailability.includes(d.isAvailableInInventory)) {
+          return res.status(400).json({ success: false, message: 'Invalid inventory status for item' });
+        }
+        let target = null;
+        if (d.saleItemId) target = sale.items.id(d.saleItemId);
+        if (!target && d.itemRefId) {
+          target = saleItems.find(it => it.itemRef && it.itemRef.toString() === String(d.itemRefId));
+        }
+        if (!target && d.productName) {
+          target = saleItems.find(it =>
+            (it.productName || '').trim().toLowerCase() === String(d.productName).trim().toLowerCase());
+        }
+        if (!target) {
+          return res.status(400).json({
+            success: false,
+            message: `Item not found on this sale: ${d.productName || d.saleItemId || d.itemRefId}`
           });
-          console.log(`✅ QC Job ${qcJobId} created and Production/Purchase cleaned up for Sale ${saleId}`);
         }
-
-        sale.storeQCStatus = 'Goes to QC';
-      } catch (qcError) {
-        console.error('❌ Error in Available case automation:', qcError);
+        decisions.push({
+          saleItem: target,
+          decision: d.autoCheck
+            ? { autoCheck: true }
+            : { productType: d.productType, isAvailableInInventory: d.isAvailableInInventory }
+        });
+      }
+    } else {
+      const LOCKED_STATUSES = ['Goes to QC', 'Approved from QC', 'Goes to Production', 'Production Completed', 'Goes to Purchase'];
+      const wholeDecision = autoCheck ? { autoCheck: true } : { productType, isAvailableInInventory };
+      for (const it of saleItems) {
+        // Auto-check must never disturb an item already routed or QC-approved
+        if (autoCheck && LOCKED_STATUSES.includes(it.storeQCStatus)) continue;
+        decisions.push({ saleItem: it, decision: wholeDecision });
       }
     }
 
-    // CASE 2: Not Available & In-house Manufactured -> Create Production Order & Cleanup Pending QC/Purchase
-    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'In-house Manufactured') {
+    const results = [];
+    for (const { saleItem, decision } of decisions) {
       try {
-        const orderCode = sale.order?.orderCode || 'N/A';
-        const sourceRefId = sale.invoiceNumber || sale._id.toString();
-        console.log(`🏭 Triggering Production for ${orderCode} & cleaning up other workflows...`);
-
-        // 1. Cleanup existing Pending QC Jobs or Purchase Requests
-        await QCJob.deleteMany({
-          company: sale.companyId,
-          sourceRefId: sourceRefId,
-          status: 'Pending'
+        const { routed, splitSibling } = await applyStoreDecisionToItem({ sale, order, saleItem, decision, user: req.user });
+        results.push({
+          saleItemId: saleItem._id,
+          productName: saleItem.productName,
+          quantity: saleItem.quantity,
+          productType: saleItem.productType,
+          isAvailableInInventory: saleItem.isAvailableInInventory,
+          storeQCStatus: saleItem.storeQCStatus,
+          routed,
+          split: !!splitSibling
         });
-        await PurchaseRequest.deleteMany({
-          companyId: sale.companyId,
-          itemId: sourceRefId,
-          status: 'Pending'
-        });
-
-        // 2. Create Production Order
-        const existingProduction = await ProductionOrder.findOne({
-          company: sale.companyId,
-          notes: new RegExp(sourceRefId)
-        });
-
-        if (!existingProduction) {
-          const year = new Date().getFullYear();
-          const timestamp = Date.now().toString().slice(-6);
-          const prodOrderId = `PROD-${year}-${timestamp}`;
-
-          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
-          const machineName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
-
-          await ProductionOrder.create({
-            orderId: prodOrderId,
-            orderCode: sale.order?.orderCode || null,
-            machineCode: orderCode,
-            machineName: machineName,
-            priority: sale.order?.priority === 'High' ? 'Urgent' : 'Normal',
-            receivedDate: today(),
-            deliveryDate: sale.dueDate ? sale.dueDate.toISOString().split('T')[0] : today(),
-            status: 'Pending',
-            source: 'Store',
-            saleId: sale._id,               // ← direct Sale ref for reliable status update
-            company: sale.companyId,
-            createdBy: req.user._id,
-            notes: `Automatically triggered from Store - Product Not Available in Inventory. Ref: ${sourceRefId}`
+        // Auto-split: report the shortfall line too, so the frontend shows
+        // "N from stock → QC, M → Purchase/Production" in one response
+        if (splitSibling) {
+          results.push({
+            saleItemId: splitSibling._id,
+            productName: splitSibling.productName,
+            quantity: splitSibling.quantity,
+            productType: splitSibling.productType,
+            isAvailableInInventory: splitSibling.isAvailableInInventory,
+            storeQCStatus: splitSibling.storeQCStatus,
+            routed: splitSibling.storeQCStatus === 'Goes to Purchase' ? 'purchase' : 'production',
+            split: true
           });
-          console.log(`✅ Production Order ${prodOrderId} created successfully for Sale ${saleId}`);
         }
-
-        sale.storeQCStatus = 'Goes to Production';
-      } catch (prodError) {
-        console.error('❌ Error in In-house case automation:', prodError);
+      } catch (itemErr) {
+        console.error(`❌ Error routing item "${saleItem.productName}":`, itemErr);
+        results.push({ saleItemId: saleItem._id, productName: saleItem.productName, error: itemErr.message });
       }
     }
 
-    // CASE 3: Not Available & Purchased (Trading Product) -> Create Purchase Request & Cleanup Pending QC/Production
-    if (sale.isAvailableInInventory === 'Not Available' && sale.productType === 'Purchased (Trading Product)') {
-      try {
-        const orderCode = sale.order?.orderCode || 'N/A';
-        const sourceRefId = sale.invoiceNumber || sale._id.toString();
-        console.log(`🛒 Triggering Purchase Request for ${orderCode} & cleaning up other workflows...`);
-
-        // 1. Cleanup existing Pending QC Jobs or Production Orders
-        await QCJob.deleteMany({
-          company: sale.companyId,
-          sourceRefId: sourceRefId,
-          status: 'Pending'
-        });
-        await ProductionOrder.deleteMany({
-          company: sale.companyId,
-          notes: new RegExp(sourceRefId),
-          status: 'Pending'
-        });
-
-        // 2. Create Purchase Request
-        const existingPurchaseReq = await PurchaseRequest.findOne({
-          companyId: sale.companyId,
-          itemId: sourceRefId
-        });
-
-        if (!existingPurchaseReq) {
-          const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
-          const productName = sale.items && sale.items.length > 1 ? `${firstItem} + ${sale.items.length - 1} more` : firstItem;
-
-          const requestId = await generateUniqueRequestId();
-
-          await PurchaseRequest.create({
-            requestId,
-            productName,
-            quantity: sale.items?.reduce((acc, item) => acc + (item.quantity || 0), 0) || 1,
-            requestFromDepartment: 'Store',
-            priority: sale.order?.priority || 'Medium',
-            companyId: sale.companyId,
-            storeOrderId: sale.order?._id || sale._id,
-            itemId: sourceRefId
-          });
-          console.log(`✅ Purchase Request ${requestId} created successfully for Sale ${saleId}`);
-        }
-
-        sale.storeQCStatus = 'Goes to Purchase';
-      } catch (purchaseError) {
-        console.error('❌ Error in Purchased case automation:', purchaseError);
-      }
-    }
-
+    sale.recomputeAggregateStoreStatus();
     await sale.save();
 
     res.json({
@@ -1730,7 +1471,8 @@ const updateSaleStoreInfo = async (req, res) => {
       data: {
         productType: sale.productType,
         isAvailableInInventory: sale.isAvailableInInventory,
-        storeQCStatus: sale.storeQCStatus
+        storeQCStatus: sale.storeQCStatus,
+        items: results
       },
       productType: sale.productType,
       isAvailableInInventory: sale.isAvailableInInventory,
@@ -2204,15 +1946,25 @@ const getOrderByLeadId = async (req, res) => {
 
 // 🔍 Auto-check inventory for a product in an order row
 // GET /api/orders/check-inventory?itemId=xxx&requiredQty=2
+// or  /api/orders/check-inventory?name=Cutting%20Machine&requiredQty=2 (multi-item
+// rows that came from the Order Form and may not carry an inventory ref yet)
 const checkInventoryForItem = async (req, res) => {
   try {
-    const { itemId, requiredQty } = req.query;
+    const { itemId, requiredQty, name, code } = req.query;
 
-    if (!itemId) {
-      return res.status(400).json({ success: false, message: 'itemId is required' });
+    if (!itemId && !name && !code) {
+      return res.status(400).json({ success: false, message: 'itemId, code or name is required' });
     }
 
-    const item = await Item.findById(itemId).lean();
+    let item = null;
+    if (itemId && mongoose.Types.ObjectId.isValid(itemId)) {
+      item = await Item.findById(itemId).lean();
+    }
+    if (!item && (name || code)) {
+      const { resolveInventoryItem } = await import('../services/storeFlowService.js');
+      const resolved = await resolveInventoryItem(req.user.companyId, { code, name });
+      item = resolved ? resolved.toObject() : null;
+    }
     if (!item) {
       return res.status(404).json({ success: false, message: 'Item not found in inventory' });
     }

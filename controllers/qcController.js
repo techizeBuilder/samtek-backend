@@ -6,6 +6,7 @@ import notificationService from '../services/notificationService.js';
 import RDMachine from '../models/RDMachine.js'; // Import R&D models
 import RDQualityParam from '../models/RDQualityParam.js';
 import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
+import { setSaleItemStatus } from '../services/storeFlowService.js';
 
 
 
@@ -458,16 +459,27 @@ export const submitDecision = async (req, res) => {
           }
 
           if (saleByRef) {
-            saleByRef.storeQCStatus = 'Approved from QC';
-            await saleByRef.save();
-            console.log(`✅ [QC Approval - ${job.source}] storeQCStatus='Approved from QC' for Sale ${saleByRef._id}`);
+            // Multi-item: update only THIS item's status (falls back to the
+            // whole-sale field for legacy jobs without saleItemId), then the
+            // aggregate is recomputed inside setSaleItemStatus.
+            let itemIdForUpdate = job.saleItemId;
+            if (!itemIdForUpdate && job.source === 'Production' && job.sourceRefId) {
+              // Production QC jobs may predate saleItemId — recover it from the ProductionOrder
+              try {
+                const srcProd = await ProductionOrder.findOne({ orderId: job.sourceRefId, company: job.company })
+                  .select('saleItemId').lean();
+                itemIdForUpdate = srcProd?.saleItemId || null;
+              } catch (_) { /* fall back to sale-level */ }
+            }
+            const perItem = await setSaleItemStatus(saleByRef, itemIdForUpdate, 'Approved from QC');
+            console.log(`✅ [QC Approval - ${job.source}] 'Approved from QC' for Sale ${saleByRef._id}${perItem ? ` (item ${itemIdForUpdate})` : ' (sale-level)'}`);
           } else {
             console.warn(`⚠️ [QC Approval - ${job.source}] Could not find linked Sale for QC Job ${job.qcJobId}. saleId: ${job.saleId}, sourceRefId: ${job.sourceRefId}`);
           }
         } catch (e) { console.error(`❌ Error updating Sale on ${job.source} QC approval:`, e); }
 
       } else if (job.source === 'QC_Rejected') {
-        // Re-made item for original order — find linked Sale via ProductionOrder notes and trigger dispatch
+        // Re-made item for original order — mark that item ready for dispatch.
         try {
           const linkedProdOrder = await ProductionOrder.findOne({
             $or: [
@@ -477,23 +489,38 @@ export const submitDecision = async (req, res) => {
             company: job.company
           }).lean();
 
-          if (linkedProdOrder && linkedProdOrder.notes) {
+          // Strategy 1 (multi-item): direct saleId + saleItemId carried on the
+          // QC job / rejected ProductionOrder
+          let linkedSale = null;
+          let saleItemId = job.saleItemId || linkedProdOrder?.saleItemId || null;
+          const directSaleId = job.saleId || linkedProdOrder?.saleId || null;
+          if (directSaleId) {
+            linkedSale = await Sale.findById(directSaleId);
+          }
+
+          // Strategy 2 (legacy): parse "Ref: <invoice/saleId>" from the notes
+          if (!linkedSale && linkedProdOrder?.notes) {
             const notesRefMatch = linkedProdOrder.notes.match(/Ref:\s*(\S+)/);
-            const saleRef = notesRefMatch ? notesRefMatch[1] : null;
+            // Multi-item refs look like "INV#<saleItemId>" — split them apart
+            const rawRef = notesRefMatch ? notesRefMatch[1] : null;
+            const saleRef = rawRef ? rawRef.split('#')[0] : null;
+            if (rawRef && rawRef.includes('#') && !saleItemId) {
+              const parts = rawRef.split('#');
+              if (/^[0-9a-fA-F]{24}$/.test(parts[1])) saleItemId = parts[1];
+            }
             if (saleRef) {
-              const linkedSale = await Sale.findOne({
+              linkedSale = await Sale.findOne({
                 $or: [
                   { invoiceNumber: saleRef },
                   { _id: /^[0-9a-fA-F]{24}$/.test(saleRef) ? saleRef : null }
                 ]
               });
-              if (linkedSale) {
-                linkedSale.isAvailableInInventory = 'Available';
-                linkedSale.storeQCStatus = 'Approved from QC';
-                await linkedSale.save();
-                console.log(`[QC Approval - QC_Rejected] Sale ${linkedSale._id} → Available + Approved from QC. Ready for dispatch.`);
-              }
             }
+          }
+
+          if (linkedSale) {
+            const perItem = await setSaleItemStatus(linkedSale, saleItemId, 'Approved from QC', { isAvailableInInventory: 'Available' });
+            console.log(`[QC Approval - QC_Rejected] Sale ${linkedSale._id} → Approved from QC${perItem ? ` (item ${saleItemId})` : ' (sale-level)'}. Ready for dispatch.`);
           }
         } catch (e) { console.error('❌ Error updating Sale on QC_Rejected approval:', e); }
 
@@ -557,14 +584,11 @@ export const submitDecision = async (req, res) => {
             if (salePurch) {
               const finalCatLower = (job.category || '').toLowerCase().trim();
               const isMachine = finalCatLower === 'purchase machine' || finalCatLower === 'manufacturing machine';
-              if (isMachine) {
-                salePurch.storeQCStatus = 'Approved from QC';
-                console.log(`✅ [QC Approval - Purchase Machine] storeQCStatus='Approved from QC' for Sale ${salePurch._id}`);
-              } else {
-                salePurch.storeQCStatus = 'Purchase Completed';
-                console.log(`✅ [QC Approval - Purchase Material] storeQCStatus='Purchase Completed' for Sale ${salePurch._id}`);
-              }
-              await salePurch.save();
+              const newStatus = isMachine ? 'Approved from QC' : 'Purchase Completed';
+              // Multi-item: the Purchase Request carries the exact sale item
+              const saleItemId = pr.saleItemId || job.saleItemId || null;
+              const perItem = await setSaleItemStatus(salePurch, saleItemId, newStatus);
+              console.log(`✅ [QC Approval - Purchase ${isMachine ? 'Machine' : 'Material'}] '${newStatus}' for Sale ${salePurch._id}${perItem ? ` (item ${saleItemId})` : ' (sale-level)'}`);
             } else {
               console.warn(`⚠️ [QC Approval - Purchase] PR ${pr.requestId} found but could not locate linked Sale (storeOrderId: ${pr.storeOrderId})`);
             }
@@ -641,9 +665,18 @@ export const submitDecision = async (req, res) => {
           }
 
           if (saleRej) {
-            saleRej.storeQCStatus = 'Rejected from QC';
-            await saleRej.save();
-            console.log(`✅ [QC Rejection] storeQCStatus='Rejected from QC' for Sale ${saleRej._id}`);
+            // Multi-item: only the rejected item flips to 'Rejected from QC';
+            // other items of the order keep their own progress.
+            let itemIdForReject = job.saleItemId;
+            if (!itemIdForReject && (job.source === 'Production' || job.source === 'QC_Rejected') && job.sourceRefId) {
+              try {
+                const srcProd = await ProductionOrder.findOne({ orderId: job.sourceRefId, company: job.company })
+                  .select('saleItemId').lean();
+                itemIdForReject = srcProd?.saleItemId || null;
+              } catch (_) { /* fall back to sale-level */ }
+            }
+            const perItem = await setSaleItemStatus(saleRej, itemIdForReject, 'Rejected from QC');
+            console.log(`✅ [QC Rejection] 'Rejected from QC' for Sale ${saleRej._id}${perItem ? ` (item ${itemIdForReject})` : ' (sale-level)'}`);
           } else {
             console.warn(`⚠️ [QC Rejection] Could not find linked Sale for QC Job ${job.qcJobId}`);
           }
@@ -712,6 +745,18 @@ async function createRejectedProductionOrder(qcJob, user) {
       }
     }
 
+    // If the failed job came from Production, recover the sale-item link from
+    // the originating Production Order (older Production QC jobs may not
+    // carry saleItemId themselves).
+    let saleItemId = qcJob.saleItemId || null;
+    if (!saleItemId && qcJob.sourceRefId) {
+      try {
+        const srcProd = await ProductionOrder.findOne({ orderId: qcJob.sourceRefId, company: qcJob.company })
+          .select('saleItemId').lean();
+        saleItemId = srcProd?.saleItemId || null;
+      } catch (_) { /* optional */ }
+    }
+
     // Create production order for rejected item
     const productionOrder = await ProductionOrder.create({
       orderId: rejectedOrderId,
@@ -734,6 +779,11 @@ async function createRejectedProductionOrder(qcJob, user) {
       designVerified: false,
       rdRequestRaised: false,
       materialIssued: false,
+      // Multi-item linkage: the rework stays tied to the exact order item and
+      // rebuilds the full rejected quantity
+      saleId: qcJob.saleId || null,
+      saleItemId,
+      orderQuantity: qcJob.quantity || 1,
       company: qcJob.company,
       createdBy: user._id
     });

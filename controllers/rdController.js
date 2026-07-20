@@ -1080,11 +1080,18 @@ export const processRDRequest = async (req, res) => {
 
       const designDocs = await RDDocument.find({ machine: machineProfile._id, company: companyId, type: 'Design Files' });
 
+      // Multi-item/qty: the Master BOM is per-unit; a Production Order that
+      // builds N units (orderQuantity) demands N × the BOM quantity of every
+      // material. bomQuantity stays per-unit for reference.
+      const prodOrderForQty = await ProductionOrder.findById(rdRequest.productionOrderId)
+        .select('orderQuantity').lean();
+      const buildQty = Math.max(1, Number(prodOrderForQty?.orderQuantity) || 1);
+
       const demandsToPush = masterBOM.materials.map(mat => ({
         materialCode: mat.code,
         materialName: mat.item,
         bomQuantity: mat.quantity,
-        quantity: mat.quantity,
+        quantity: mat.quantity * buildQty,
         unit: mat.unit,
         status: 'Requested'
       }));

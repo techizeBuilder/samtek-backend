@@ -35,17 +35,51 @@ export const getPurchaseRequests = async (req, res) => {
     const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
 
     // --- Auto-sync existing matching Sales to Purchase Requests ---
+    // Multi-item aware: sales with per-item flow create one PR per item that
+    // is routed 'Goes to Purchase' (keyed by saleItemId); legacy sales keep
+    // the old whole-sale behavior.
     try {
       const matchingSales = await Sale.find({
         companyId,
-        isAvailableInInventory: 'Not Available',
-        productType: 'Purchased (Trading Product)'
+        $or: [
+          { isAvailableInInventory: 'Not Available', productType: 'Purchased (Trading Product)' },
+          { 'items.storeQCStatus': 'Goes to Purchase' }
+        ]
       }).populate('order');
 
       for (const sale of matchingSales) {
-        const sourceRefId = sale.invoiceNumber || sale._id.toString();
+        const sourceRefIdBase = sale.invoiceNumber || sale._id.toString();
+        const perItemFlow = (sale.items || []).some(it =>
+          it.storeQCStatus || it.isAvailableInInventory || it.productType);
 
-        const existingReq = await PurchaseRequest.findOne({ companyId, itemId: sourceRefId });
+        if (perItemFlow) {
+          for (const it of sale.items || []) {
+            if (it.storeQCStatus !== 'Goes to Purchase') continue;
+            const existingItemReq = await PurchaseRequest.findOne({ companyId, saleItemId: it._id });
+            if (existingItemReq) continue;
+
+            const requestId = await generateUniqueRequestId();
+            await PurchaseRequest.create({
+              requestId,
+              productName: it.productName,
+              quantity: it.quantity || 1,
+              requestFromDepartment: 'Store',
+              source: 'Store',
+              storeApproved: true,
+              priority: sale.order?.priority || 'Medium',
+              companyId,
+              storeOrderId: sale.order?._id || sale._id,
+              itemId: `${sourceRefIdBase}#${it._id.toString()}`,
+              saleItemId: it._id
+            });
+            console.log(`Auto-synced sale item "${it.productName}" to Purchase Request: ${requestId}`);
+          }
+          continue;
+        }
+
+        // Legacy whole-sale sync
+        if (sale.isAvailableInInventory !== 'Not Available' || sale.productType !== 'Purchased (Trading Product)') continue;
+        const existingReq = await PurchaseRequest.findOne({ companyId, itemId: sourceRefIdBase });
 
         if (!existingReq) {
           const firstItem = sale.items && sale.items.length > 0 ? sale.items[0].productName : 'Order Items';
@@ -63,7 +97,7 @@ export const getPurchaseRequests = async (req, res) => {
             priority: sale.order?.priority || 'Medium',
             companyId,
             storeOrderId: sale.order?._id || sale._id,
-            itemId: sourceRefId
+            itemId: sourceRefIdBase
           });
           console.log(`Auto-synced existing sale to Purchase Request: ${requestId}`);
         }
@@ -698,11 +732,23 @@ export const updatePurchaseRequestStatus = async (req, res) => {
             console.error('Error looking up inventory item for QC job category:', invLookupErr);
           }
 
+          // Multi-item: resolve the sales orderCode for grouping in QC screens
+          let qcOrderCode = '';
+          try {
+            if (request.storeOrderId) {
+              const OrderModel = (await import('../models/Order.js')).default;
+              const linkedOrder = await OrderModel.findById(request.storeOrderId).select('orderCode').lean();
+              qcOrderCode = linkedOrder?.orderCode || '';
+            }
+          } catch (_) { /* optional */ }
+
           await QCJob.create({
             qcJobId,
             source: 'Purchase',
             sourceRefId: sourceRefId,
             purchaseRequestId: request._id,   // ← direct PR ref for reliable Sale lookup
+            saleItemId: request.saleItemId || null, // ← exact order item this purchase fulfils
+            orderCode: qcOrderCode,
             sourceDepartment: 'Store',
             sentBy: req.user.fullName || req.user.username || 'Store Dept',
             itemName: request.productName,
