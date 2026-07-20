@@ -46,6 +46,12 @@ const purchaseRequestSchema = new mongoose.Schema({
   itemId: {
     type: String
   },
+  // Which specific Sale item (Sale.items._id) this request purchases —
+  // multi-item orders raise one Purchase Request per item. Null on legacy.
+  saleItemId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null
+  },
   purchaseOrder: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Purchase'

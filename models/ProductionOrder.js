@@ -101,6 +101,12 @@ const ProductionOrderSchema = new mongoose.Schema({
   rdRequestRaised: { type: Boolean, default: false },
   materialIssued: { type: Boolean, default: false },
   saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', default: null },
+  // Which specific Sale item (Sale.items._id) this run produces — one
+  // Production Order per order item. Null for Stock/legacy runs.
+  saleItemId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  // How many units of the machine this run must produce (the order item's
+  // qty). R&D BOM stays per-unit; material demand = bomQuantity × orderQuantity.
+  orderQuantity: { type: Number, default: 1, min: 1 },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   notes: { type: String, default: '' },

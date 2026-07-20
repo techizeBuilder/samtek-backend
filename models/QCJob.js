@@ -55,6 +55,13 @@ const QCJobSchema = new mongoose.Schema({
   purchaseRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseRequest', default: null },
   // Back-reference to the Sale that originated this QC job (Store source only)
   saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', default: null },
+  // Which specific Sale item (Sale.items._id) this QC job is for — multi-item
+  // orders create one QC job per item, and the decision updates only that
+  // item's storeQCStatus. Null on legacy/whole-order jobs.
+  saleItemId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  // The customer-facing sales Order.orderCode this job traces back to
+  // (e.g. "ORD-0043") — lets QC screens group jobs of the same order.
+  orderCode: { type: String, default: '', trim: true },
 
   // Post-decision
   transferredToStore: { type: Boolean, default: false },

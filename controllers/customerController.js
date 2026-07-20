@@ -934,7 +934,7 @@ export const getCustomerOrderFinancials = async (req, res) => {
       const orderPayments = await CustomerPayment.find({ customer: customerId, order: order._id, companyId })
         .select('amount paymentDate paymentMode referenceNo').lean();
 
-      const { total, advance, paid: paidReceipts, due, paymentStatus } =
+      const { total, advance, paid: paidReceipts, due, paymentStatus, additionalCharges } =
         computeOrderFinancials({ form, sale, orderPayments, leadPayments });
 
       orderRows.push({
@@ -955,6 +955,7 @@ export const getCustomerOrderFinancials = async (req, res) => {
         paid: paidReceipts,
         due,
         paymentStatus,
+        additionalCharges,
         payments: orderPayments
       });
     }

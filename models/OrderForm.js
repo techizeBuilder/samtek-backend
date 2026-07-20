@@ -60,6 +60,13 @@ const orderFormSchema = new mongoose.Schema({
     discountAmount: { type: Number, default: 0 },
   },
 
+  // Whether the Cash Amount collected by the salesperson for this order has
+  // been physically received/reconciled by Accounts (marked from the
+  // Customer Cash Access flow).
+  cashReceived: { type: Boolean, default: false },
+  cashReceivedAt: { type: Date, default: null },
+  cashReceivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
   // How much THIS form currently contributes to Customer.outstandingAmount
   // (Bill Amount minus the originating lead's advance payment). Tracked so
   // resubmission/return can adjust the customer's running balance by the

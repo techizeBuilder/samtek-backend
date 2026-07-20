@@ -566,7 +566,7 @@ class NotificationService {
     }
 
     if (action === 'production_completed') {
-      return this.notifyRoles(['Packing Head', 'Packing Employee', 'QC Head', 'Superadmin'], {
+      return this.notifyRoles(['Packing Head', 'Packing Employee'], {
         title: 'Production Completed',
         message: `Production completed for ${data?.orderCode || data?.batchNo || ''}. Ready for QC/Packing.`,
         type: 'production', icon: 'check-circle', priority: 'high',
