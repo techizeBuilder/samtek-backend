@@ -2,6 +2,7 @@ import { Item } from '../models/Inventory.js';
 import RDMachine from '../models/RDMachine.js';
 import RDBOM from '../models/RDBOM.js';
 import PurchaseInvoice from '../models/PurchaseInvoice.js';
+import PurchaseRequest from '../models/PurchaseRequest.js';
 import { Company } from '../models/Company.js';
 
 // Defensive cap in addition to cycle detection, in case of a very deep
@@ -90,8 +91,45 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
 }
 
 /**
+ * Finds the purchase-unit → storage-unit conversion factor for an item's most
+ * recent purchase (conversionFactor = how many purchaseUnits equal 1 base unit,
+ * captured by Store at receive time). Prefers the PurchaseRequest the invoice
+ * itself was auto-generated from (referenced in its notes), falling back to the
+ * item's last receive. Returns null when no conversion applies.
+ */
+async function findPurchaseToBaseFactor(item, invoiceNotes) {
+  try {
+    let pr = null;
+    const m = typeof invoiceNotes === 'string'
+      ? invoiceNotes.match(/Purchase Request:\s*([A-Za-z0-9_-]+)/i)
+      : null;
+    if (m) {
+      pr = await PurchaseRequest.findOne({ requestId: m[1], companyId: item.companyId })
+        .select('conversionFactor').lean();
+    }
+    // Fall through when the invoice's PR exists but has no factor yet — that
+    // happens when the recalc fires at PO-creation time, before Store enters
+    // the conversion at receive. The item's last completed receive is the next
+    // best source (same item, same unit pair).
+    if (!(pr && pr.conversionFactor > 0) && item.receivedFromPurchaseRequest) {
+      pr = await PurchaseRequest.findById(item.receivedFromPurchaseRequest)
+        .select('conversionFactor').lean();
+    }
+    if (pr && pr.conversionFactor > 0) return pr.conversionFactor;
+  } catch (e) {
+    console.error('findPurchaseToBaseFactor error for item', item.code, e.message);
+  }
+  return null;
+}
+
+/**
  * Resolves a purchase Item's cost from the most recent PurchaseInvoice line
  * that references it. Returns { cost: number|null }.
+ *
+ * The invoice unitPrice is per PURCHASE unit (the vendor's bid unit, e.g. per
+ * Meter / per Kg), but stdCost/purchaseCost and BOM quantities are in the
+ * item's base/storage unit (e.g. Centimeter / Pieces) — so the price must go
+ * through the same conversion the received quantity did.
  */
 export async function resolvePurchaseItemCost(item) {
   const rows = await PurchaseInvoice.aggregate([
@@ -100,11 +138,14 @@ export async function resolvePurchaseItemCost(item) {
     { $match: { 'items.item': item._id } },
     { $sort: { invoiceDate: -1, createdAt: -1 } },
     { $limit: 1 },
-    { $project: { unitPrice: '$items.unitPrice' } }
+    { $project: { unitPrice: '$items.unitPrice', notes: 1 } }
   ]);
 
   const cost = rows[0]?.unitPrice;
   if (!(cost > 0)) return { cost: null };
+
+  const factor = await findPurchaseToBaseFactor(item, rows[0].notes);
+  if (factor > 0) return { cost: cost * factor };
   return { cost };
 }
 

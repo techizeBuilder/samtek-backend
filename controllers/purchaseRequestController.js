@@ -763,6 +763,35 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       } catch (invoiceError) {
         console.error('❌ Error creating purchase invoice on request receipt:', invoiceError);
       }
+
+      // 3. Re-resolve the item's purchase price NOW that the receive-time unit
+      //    conversion factor is known. The auto-invoice (and the recalc it fires)
+      //    is created at PO-generation time — BEFORE Store enters the conversion —
+      //    so that early recalc stores the raw purchase-unit price. This is the
+      //    authoritative "store received it" recalc with the factor available.
+      try {
+        const { recalculateItemPricing } = await import('../services/itemPricingService.js');
+        const { Item } = await import('../models/Inventory.js');
+        const storeStr = request.companyId.toString();
+
+        let pricingItem = null;
+        if (request.itemId && /^[0-9a-fA-F]{24}$/.test(request.itemId)) {
+          pricingItem = await Item.findById(request.itemId);
+        }
+        if (!pricingItem) {
+          pricingItem = await Item.findOne({
+            name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
+            store: storeStr
+          });
+        }
+
+        if (pricingItem && pricingItem.purchase && !pricingItem.internalManufacturing) {
+          await recalculateItemPricing(pricingItem);
+          console.log(`💰 [Purchase Receipt] Pricing re-resolved with unit conversion for "${pricingItem.code}"`);
+        }
+      } catch (pricingErr) {
+        console.error('❌ Error recalculating item pricing on receipt:', pricingErr);
+      }
     }
 
     res.status(200).json({ success: true, data: request });
