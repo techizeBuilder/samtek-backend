@@ -169,6 +169,25 @@ export const createVendorPayment = async (req, res) => {
         const companyId = req.user.companyId;
         const unit = req.user.unit;
 
+        if (!amount || amount <= 0) {
+            throw new Error('Payment amount must be greater than zero.');
+        }
+
+        // 0. Resolve bank/cash account and verify sufficient balance BEFORE
+        // creating any payment/invoice records, so an insufficient-balance
+        // rejection never leaves a partial payment behind.
+        const bankAccount = req.body.accountId
+            ? await Account.findById(req.body.accountId)
+            : await Account.findOne({ isBankOrCash: true, unit });
+
+        if (!bankAccount) {
+            throw new Error('Bank or Cash account not found for payment. Please create one in Bank & Cash module.');
+        }
+
+        if (bankAccount.balance < amount) {
+            throw new Error(`Insufficient funds in ${bankAccount.accountName}. Available: ₹${bankAccount.balance}`);
+        }
+
         // 1. Create Payment record
         const payment = new VendorPayment({
             vendor: vendorId,
@@ -212,18 +231,6 @@ export const createVendorPayment = async (req, res) => {
                 description: 'Auto-generated account for vendor payables'
             });
             await payableAccount.save();
-        }
-
-        const bankAccount = req.body.accountId
-            ? await Account.findById(req.body.accountId)
-            : await Account.findOne({ isBankOrCash: true, unit });
-
-        if (!bankAccount) {
-            throw new Error('Bank or Cash account not found for payment. Please create one in Bank & Cash module.');
-        }
-
-        if (bankAccount.balance < amount) {
-            throw new Error(`Insufficient funds in ${bankAccount.accountName}. Available: ₹${bankAccount.balance}`);
         }
 
         if (payableAccount && bankAccount) {

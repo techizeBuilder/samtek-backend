@@ -76,6 +76,22 @@ import {
   receivePurchase,
   sendPOToVendor
 } from '../controllers/purchaseController.js';
+import {
+  getPurchaseExpenseCategories,
+  createPurchaseExpense,
+  getPurchaseExpenses,
+  getPurchaseExpenseSummary,
+  updatePurchaseExpense,
+  deletePurchaseExpense
+} from '../controllers/purchaseExpenseController.js';
+import {
+  getTenderExpenseCategories,
+  createTenderExpense,
+  getTenderExpenses,
+  getTenderExpenseSummary,
+  updateTenderExpense,
+  deleteTenderExpense
+} from '../controllers/tenderExpenseController.js';
 
 const accountsRouter = express.Router();
 
@@ -258,6 +274,22 @@ accountsRouter.get('/purchases/vendors', authorizeRoles('Accounts', 'Accounts He
 
 // Purchase Reports
 accountsRouter.get('/purchases/reports/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPurchaseSummary);
+
+// Purchase Expenses (job material, tools, machines, assets, etc.)
+accountsRouter.get('/purchases/expenses/categories', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPurchaseExpenseCategories);
+accountsRouter.get('/purchases/expenses/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPurchaseExpenseSummary);
+accountsRouter.get('/purchases/expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPurchaseExpenses);
+accountsRouter.post('/purchases/expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createPurchaseExpense);
+accountsRouter.put('/purchases/expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), updatePurchaseExpense);
+accountsRouter.delete('/purchases/expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), deletePurchaseExpense);
+
+// Tender Expenses (EMD, Bank Guarantee, Tender Fee Processing)
+accountsRouter.get('/tender-expenses/categories', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getTenderExpenseCategories);
+accountsRouter.get('/tender-expenses/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getTenderExpenseSummary);
+accountsRouter.get('/tender-expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getTenderExpenses);
+accountsRouter.post('/tender-expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createTenderExpense);
+accountsRouter.put('/tender-expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), updateTenderExpense);
+accountsRouter.delete('/tender-expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), deleteTenderExpense);
 
 // ==================== SALES ACCOUNTING (NEW MODULE) ====================
 // Sales Invoices

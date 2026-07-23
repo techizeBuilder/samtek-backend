@@ -1207,14 +1207,11 @@ export const receiveWebsiteWebhook = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Mobile or Email required' });
     }
 
-    // Duplicate check
-    const exists = await Lead.findOne({
-      companyId: settings.companyId,
-      $or: [{ mobile }, { email }]
-    });
-    if (exists) {
-      return res.json({ success: true, message: 'Lead already exists', leadId: exists._id });
-    }
+    // No duplicate skip — same as the PHP website webhook: every form
+    // submission creates its own lead, even from a repeat visitor (e.g. a
+    // genuinely new enquiry 6 months later). PHP keeps one persistent
+    // "buyer" record and links each new lead to it; Samtek has no separate
+    // buyer entity, so this is simply always-create.
 
     // Assign user
     const users = settings.website.assignedUserIds || [];
@@ -1259,6 +1256,106 @@ export const receiveWebsiteWebhook = async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // GET CALL LOGS FOR A LEAD
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+export const receiveIndiamartWebhook = async (req, res) => {
+  try {
+    const authKey = req.query.q || req.query.key || '';
+    if (!authKey) return res.status(400).json({ success: false, message: 'Missing API key (?q=...)' });
+
+    // Match either the legacy single-account fields or one of the
+    // multi-account entries — same dual shape syncIndiamartLeads reads.
+    let settings = await ApiSettings.findOne({ 'indiamart.authKey': authKey, 'indiamart.enabled': true });
+    let apiName = 'Primary Account';
+    let accountDoc = null;
+    if (!settings) {
+      settings = await ApiSettings.findOne({ 'indiamart.accounts.authKey': authKey, 'indiamart.enabled': true });
+      if (settings) {
+        accountDoc = settings.indiamart.accounts.find(a => a.authKey === authKey);
+        apiName = accountDoc?.apiName || apiName;
+      }
+    }
+    if (!settings) return res.status(401).json({ success: false, message: 'Invalid or inactive IndiaMART API key' });
+
+    const companyId = settings.companyId;
+
+    // IndiaMART posts either { RESPONSE: {...one lead...} } or
+    // { RESPONSE: [...several...] } — normalise both to an array.
+    const payload = req.body || {};
+    let items = [];
+    if (Array.isArray(payload.RESPONSE)) items = payload.RESPONSE;
+    else if (payload.RESPONSE && typeof payload.RESPONSE === 'object') items = [payload.RESPONSE];
+    else if (Array.isArray(payload)) items = payload;
+    else if (payload.UNIQUE_QUERY_ID || payload.QUERY_ID) items = [payload];
+
+    if (!items.length) {
+      return res.status(400).json({ success: false, message: 'No lead data found in webhook payload' });
+    }
+
+    const cleanNum = (n) => n ? String(n).replace(/\D/g, '').slice(-10) : '';
+    let imported = 0, skipped = 0;
+
+    for (const item of items) {
+      const queryId = String(item.UNIQUE_QUERY_ID || item.QUERY_ID || '').trim();
+      if (!queryId) { skipped++; continue; }
+
+      // Same dedup key the polling sync uses, so a lead pushed by the
+      // webhook is never re-imported later if polling ever runs too.
+      const exists = await Lead.findOne({ companyId, indiamartQueryId: queryId });
+      if (exists) { skipped++; continue; }
+
+      const senderName = item.SENDER_NAME || item.SUBJECT || 'IndiaMART Lead';
+      const senderMobile = cleanNum(item.SENDER_MOBILE) || cleanNum(item.SENDER_MOBILE_ALT) || '0000000000';
+
+      const count = await Lead.countDocuments({ companyId });
+      const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+
+      const newLead = new Lead({
+        leadCode,
+        companyId,
+        source: 'IndiaMart',
+        status: 'New',
+        stage: 'N/A',
+        productRequired: item.QUERY_PRODUCT_NAME || item.PRODUCT_NAME || item.SUBJECT || 'Unknown',
+        describeRequirements: `${item.QUERY_MESSAGE || ''} [QueryID:${queryId}] (Account: ${apiName})`,
+        indiamartQueryId: queryId,
+        companyName: item.SENDER_COMPANY || senderName,
+        contactPerson: senderName,
+        designation: item.DESIGNATION || '',
+        mobile: senderMobile,
+        alternateMobile: cleanNum(item.SENDER_MOBILE_ALT),
+        email: item.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`,
+        alternateEmail: item.SENDER_EMAIL_ALT || '',
+        address: item.SENDER_ADDRESS || '',
+        city: item.SENDER_CITY || '',
+        state: item.SENDER_STATE || '',
+        country: item.SENDER_COUNTRY_ISO || 'India',
+        pincode: item.SENDER_PINCODE || '',
+        // 🎯 CRUNCHER FLOW: same as the polling sync (syncIndiamartLeads /
+        // runBackgroundApiSync) — IndiaMART leads are always UNASSIGNED so
+        // both ingestion paths behave identically; Cruncher assigns manually.
+        assignedTo: null,
+        leadDate: item.QUERY_TIME ? new Date(item.QUERY_TIME) : new Date(),
+        history: [{
+          action: 'Lead Created',
+          notes: `Auto-imported via IndiaMART webhook (Account: ${apiName}, QueryID: ${queryId}) — Pending Cruncher assignment`,
+          performedBy: null
+        }]
+      });
+
+      await newLead.save();
+      imported++;
+    }
+
+    if (accountDoc) accountDoc.lastSyncedAt = new Date();
+    settings.indiamart.lastSyncedAt = new Date();
+    await settings.save();
+
+    res.json({ success: true, message: `IndiaMART webhook processed. Imported: ${imported}, Skipped (duplicates): ${skipped}` });
+  } catch (error) {
+    console.error('Error receiving IndiaMART webhook:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
 export const getCallLogs = async (req, res) => {
   try {
     const { id } = req.params;

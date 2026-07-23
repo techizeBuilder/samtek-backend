@@ -1179,24 +1179,34 @@ export const getDueBillData = async (req, res) => {
                     gstin: order.customer?.gstin || order.customer?.gst || ''
                 },
 
-                // Items — prefer the real invoice's own item breakdown (built
-                // from the Order Form's Bill+GST amounts at invoice-generation
-                // time, so it's already GST-inclusive and matches the totals
-                // above exactly). Only fall back to the raw quoted Order
-                // products when no real invoice has been generated yet.
-                items: (realSale?.items?.length ? realSale.items : null)?.map(it => ({
-                    productName: it.productName || 'Item',
-                    quantity: it.quantity,
-                    unitPrice: it.unitPrice,
-                    total: it.totalPrice,
-                    tax: it.tax || 0
-                })) || order.products.map(p => ({
-                    productName: p.product?.name || 'Unknown Item',
-                    quantity: p.quantity,
-                    unitPrice: p.price,
-                    total: p.total,
-                    tax: 0
-                })),
+                // Items — same source of truth as Customer Master's
+                // order-financials breakdown: the live Order Form's items,
+                // Amount = Bill Amount + its own GST share (already
+                // GST-inclusive), so the rows here always add up to the
+                // Taxable Amount / Total below. Includes additional-charge
+                // rows (Installation, Freight, etc.) as their own line too.
+                // The invoice's own item snapshot (realSale.items) is a
+                // point-in-time copy taken when the invoice was generated —
+                // it goes stale if the Order Form is revised afterward, so
+                // it's only used as a fallback for legacy orders with no
+                // Order Form on file.
+                items: (form?.items?.length
+                    ? form.items.map(it => ({
+                        productName: it.itemName || 'Item',
+                        quantity: it.qty || 0,
+                        total: (it.billAmount || 0) + (it.gstAmount || 0)
+                      }))
+                    : null)
+                    || (realSale?.items?.length ? realSale.items.map(it => ({
+                        productName: it.productName || 'Item',
+                        quantity: it.quantity,
+                        total: it.totalPrice
+                      })) : null)
+                    || order.products.map(p => ({
+                        productName: p.product?.name || 'Unknown Item',
+                        quantity: p.quantity,
+                        total: p.total
+                      })),
 
                 // Financials
                 subtotal,

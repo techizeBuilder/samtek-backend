@@ -92,7 +92,14 @@ export const createPurchase = async (req, res) => {
       deliveryAddress,
       terms,
       notes,
-      purchaseRequest
+      purchaseRequest,
+      // When the item is ordered in a different unit than it's stored in
+      // (e.g. bought by the kg, stocked by the piece), `items[0].quantity`
+      // above is already the purchase-unit quantity (set by the frontend) —
+      // these two are only carried through so the linked PurchaseRequest
+      // shows "Ordered: 2 kg" at receiving time, same as the RFQ flow.
+      purchaseQuantity,
+      purchaseUnit
     } = req.body;
 
     if (!supplier || !items || !Array.isArray(items) || items.length === 0) {
@@ -166,10 +173,20 @@ export const createPurchase = async (req, res) => {
     
     // Link the created PO back to the PurchaseRequest and sync status to Ordered
     if (purchaseRequest) {
-      await PurchaseRequest.findByIdAndUpdate(purchaseRequest, {
+      const prUpdate = {
         purchaseOrder: purchase._id,
         status: 'Ordered'
-      });
+      };
+      // Persist the purchase-unit quantity so the Receive screen can show
+      // "Ordered: X kg" and prompt for the base-unit conversion, exactly
+      // like a request that went through the RFQ flow.
+      if (Number(purchaseQuantity) > 0 && purchaseUnit) {
+        prUpdate.purchaseQuantity = Number(purchaseQuantity);
+        prUpdate.purchaseUnit = purchaseUnit;
+        const firstInventoryItem = await Item.findById(items[0]?.item).select('purchaseUnitType').lean();
+        if (firstInventoryItem?.purchaseUnitType) prUpdate.purchaseUnitType = firstInventoryItem.purchaseUnitType;
+      }
+      await PurchaseRequest.findByIdAndUpdate(purchaseRequest, prUpdate);
       console.log(`Linked Purchase Order ${purchase.purchaseOrderNumber} to Purchase Request ${purchaseRequest} — status set to Ordered`);
     }
 
@@ -202,7 +219,9 @@ export const updatePurchase = async (req, res) => {
       approvedBy,
       supplier,
       items,
-      taxAmount
+      taxAmount,
+      purchaseQuantity,
+      purchaseUnit
     } = req.body;
 
     const purchase = await Purchase.findById(id);
@@ -270,6 +289,19 @@ export const updatePurchase = async (req, res) => {
       updateData.isApproved = true;
       updateData.approvedBy = req.user._id;
       updateData.status = 'Sent';
+    }
+
+    // Keep the linked PurchaseRequest's purchase-unit quantity in sync when
+    // the PO is modified (e.g. accounts corrects "2 kg" to "3 kg" before
+    // sending) — same fields set at creation time, see createPurchase above.
+    if (purchase.purchaseRequest && Number(purchaseQuantity) > 0 && purchaseUnit) {
+      const prUpdate = { purchaseQuantity: Number(purchaseQuantity), purchaseUnit };
+      const firstItemId = items?.[0]?.item;
+      if (firstItemId) {
+        const firstInventoryItem = await Item.findById(firstItemId).select('purchaseUnitType').lean();
+        if (firstInventoryItem?.purchaseUnitType) prUpdate.purchaseUnitType = firstInventoryItem.purchaseUnitType;
+      }
+      await PurchaseRequest.findByIdAndUpdate(purchase.purchaseRequest, prUpdate);
     }
 
     const updatedPurchase = await Purchase.findByIdAndUpdate(
@@ -543,7 +575,7 @@ export const getPurchaseItems = async (req, res) => {
     // Get items with pagination
     const [items, total] = await Promise.all([
       Item.find(filter)
-        .select('_id name code category type qty unit purchaseCost stdCost gst minStock store')
+        .select('_id name code category type qty unit purchaseCost stdCost gst minStock store purchaseUnit purchaseUnitType')
         .skip(parseInt(skip))
         .limit(parseInt(limit))
         .sort({ name: 1 })

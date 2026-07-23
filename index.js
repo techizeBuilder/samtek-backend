@@ -398,6 +398,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.use('/api/hrms-dashboard', hrmsDashboardRouter);
             app.use('/api/leave-balance-adjustments', leaveBalanceAdjustmentRouter);
             app.use('/api/performance', performanceRouter);
+            const hrExpenseRouter = (await import('./routes/hrExpenseRoutes.js')).default;
+            app.use('/api/hr-expenses', hrExpenseRouter);
+            console.log('HR Expense routes registered at /api/hr-expenses');
             const travelRequestRouter = (await import('./routes/travelRequest.routes.js')).default;
             const attendanceRequestRouter = (await import('./routes/attendanceRequest.routes.js')).default;
             const expenseRequestRouter = (await import('./routes/expenseRequest.routes.js')).default;

@@ -327,7 +327,10 @@ export const createRFQ = async (req, res) => {
     const companyName = company?.name || 'Samtek';
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-    const emailPromises = matchedVendors.map(async (vendor) => {
+    // Each promise resolves to a { vendor, success, error } result — never
+    // rejects — so a broken SMTP server can't silently disappear behind
+    // Promise.allSettled and get reported back to the user as "success".
+    const emailResults = await Promise.allSettled(matchedVendors.map(async (vendor) => {
       const token = crypto.randomBytes(32).toString('hex');
       const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
@@ -363,23 +366,51 @@ export const createRFQ = async (req, res) => {
           companyName,
           notes: enrichedNotes // <-- Vendors see specs in email, no warranty sent
         });
+        return { vendor, success: true };
       } catch (emailError) {
         console.error(`❌ RFQ email failed for ${vendor.email}:`, emailError.message);
+        return { vendor, success: false, error: emailError.message };
       }
-    });
+    }));
 
-    await Promise.allSettled(emailPromises);
+    const outcomes = emailResults.map(r => r.status === 'fulfilled' ? r.value : { success: false, error: r.reason?.message });
+    const sentOk = outcomes.filter(o => o.success);
+    const failed = outcomes.filter(o => !o.success);
 
-    // 8. Update PR status to Approved (RFQ sent)
+    // TOTAL FAILURE — this is what a dead/misconfigured SMTP server looks
+    // like (every single vendor email failed). Roll back the RFQ/VendorBid
+    // records we just created and the PR stays exactly as it was — Accounts
+    // sees a real error and "Send RFQ" is available to retry, instead of a
+    // false "success" hiding a broken mail server.
+    if (matchedVendors.length > 0 && sentOk.length === 0) {
+      await VendorBid.deleteMany({ rfq: rfq._id });
+      await RFQ.findByIdAndDelete(rfq._id);
+      return res.status(502).json({
+        success: false,
+        message: `RFQ email could not be sent to any vendor — the mail server is unreachable or misconfigured. No RFQ was created; fix SMTP settings and try again. (${failed[0]?.error || 'unknown email error'})`
+      });
+    }
+
+    // 8. Update PR status to Approved (RFQ sent) — only reached when at
+    // least one vendor genuinely received the email.
     await PurchaseRequest.findByIdAndUpdate(purchaseRequestId, { status: 'Approved' });
 
     const populated = await RFQ.findById(rfq._id)
       .populate('purchaseRequest', 'requestId productName quantity')
       .populate('vendors', 'supplierName email vendorCategories');
 
+    // Partial failure — some vendors reached, some didn't. Still a genuine
+    // success (RFQ is live and usable), but honestly report who was missed
+    // instead of claiming every vendor got it.
+    const message = failed.length > 0
+      ? `RFQ ${rfqNo} created. Emails sent to ${sentOk.length} of ${matchedVendors.length} vendor(s) [${matchType}]. Failed for: ${failed.map(f => f.vendor?.supplierName || f.vendor?.email).filter(Boolean).join(', ')} — notify them manually.`
+      : `RFQ ${rfqNo} created. Emails sent to ${matchedVendors.length} vendor(s) [${matchType}].`;
+
     res.status(201).json({
       success: true,
-      message: `RFQ ${rfqNo} created. Emails sent to ${matchedVendors.length} vendor(s) [${matchType}].`,
+      message,
+      partialEmailFailure: failed.length > 0,
+      failedVendors: failed.map(f => ({ name: f.vendor?.supplierName, email: f.vendor?.email, error: f.error })),
       data: populated
     });
 

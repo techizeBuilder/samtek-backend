@@ -33,6 +33,7 @@ export const USER_ROLES = {
   QC_HEAD: 'QC Head',
   QC_EMPLOYEE: 'QC Employee',
   MARKETING_HEAD: 'Marketing Head',
+  MARKETING_EMPLOYEE: 'Marketing Employee',
   MIS_ADMIN: 'MIS Admin',
 };
 
