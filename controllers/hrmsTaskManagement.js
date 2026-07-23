@@ -178,7 +178,7 @@ export const getAllTasks = async (req, res) => {
   try {
     const {
       page = "1", limit = "10", search, status,
-      priority, taskType, assignedTo, date, department
+      priority, taskType, assignedTo, date, department, startDate, endDate
     } = req.query;
 
     const query = {};
@@ -225,6 +225,20 @@ export const getAllTasks = async (req, res) => {
       const end = new Date(date);
       end.setHours(23, 59, 59, 999);
       query.dueDate = { $gte: start, $lte: end };
+    } else if (startDate || endDate) {
+      // Used by the Calendar view to pull a full month's tasks in one request.
+      const range = {};
+      if (startDate) {
+        const s = new Date(startDate);
+        s.setHours(0, 0, 0, 0);
+        range.$gte = s;
+      }
+      if (endDate) {
+        const e = new Date(endDate);
+        e.setHours(23, 59, 59, 999);
+        range.$lte = e;
+      }
+      query.dueDate = range;
     }
 
     const pageNum = Number(page);
@@ -373,34 +387,50 @@ export const deleteTask = async (req, res) => {
   }
 }
 
+// Allowed forward flow: Pending -> (In Progress | Hold) -> Completed, Hold <-> In Progress.
+// Completed is terminal for normal users; Top Admins may override to correct mistakes.
+const VALID_STATUSES = ["Pending", "In Progress", "Hold", "Completed"];
+const STATUS_TRANSITIONS = {
+  "Pending": ["In Progress", "Hold"],
+  "In Progress": ["Hold", "Completed"],
+  "Hold": ["In Progress"],
+  "Completed": []
+};
+
 // update task status (only status can be updated as per flow)
 export const updateTask = async (req, res) => {
   try {
     const { taskId } = req.params;
     const { status } = req.body;
 
-    const task = await Task.findById(taskId);
+    // Scope the lookup to the caller's company (unless they hold cross-unit access)
+    // so a task ID from another company can never be targeted here.
+    const query = { _id: taskId };
+    if (!req.user.permissions?.canAccessAllUnits) {
+      query.companyId = req.user.companyId;
+    }
+
+    const task = await Task.findOne(query);
 
     if (!task) {
       return res.status(404).json({
         success: false,
-        message: "Task not found"
+        message: "Task not found or access denied"
       });
     }
 
-    // --- 3-TIER ROLE-BASED ACCESS CONTROL CHECK ---
-    const isTopAdmin = TOP_LEVEL_ADMINS.includes(req.user.role);
-    const isDeptHead = DEPT_HEADS.includes(req.user.role) && task.department === getDepartmentFromRole(req.user.role);
-
-    // Convert MongoDB ObjectIds to strings for accurate comparison
+    // --- ACCESS CONTROL: only the task's creator or an assigned user may update it ---
+    // No role-based exceptions here (not even Top Admins / Dept Heads) — creating or
+    // being assigned to the task is what grants the right to change its status.
+    const isCreator = task.createdBy?.toString() === req.user._id.toString();
     const isAssigned = task.assignedTo.some(assignedId =>
       assignedId.toString() === req.user._id.toString()
     );
 
-    if (!isTopAdmin && !isDeptHead && !isAssigned) {
+    if (!isCreator && !isAssigned) {
       return res.status(403).json({
         success: false,
-        message: "Unauthorized: Only assigned users or admins can update this task's status."
+        message: "Unauthorized: Only the task's creator or an assigned user can update its status."
       });
     }
     // ---------------------------------------------------
@@ -412,12 +442,30 @@ export const updateTask = async (req, res) => {
       });
     }
 
+    if (!VALID_STATUSES.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}`
+      });
+    }
+
     if (task.status === status) {
       return res.status(400).json({
         success: false,
         message: "Status is already the same"
       });
     }
+
+    // --- STATUS FLOW CONTROL ---
+    // Everyone (creator or assignee) must follow the linear flow below — no exceptions.
+    const allowedNextStatuses = STATUS_TRANSITIONS[task.status] || [];
+    if (!allowedNextStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot change status from "${task.status}" to "${status}". Allowed next step(s): ${allowedNextStatuses.length ? allowedNextStatuses.join(", ") : "none (task is completed)"}.`
+      });
+    }
+    // ---------------------------------------------------
 
     task.status = status;
 
@@ -578,12 +626,19 @@ export const addComment = async (req, res) => {
       });
     }
 
-    const task = await Task.findById(taskId);
+    // Scope the lookup to the caller's company (unless they hold cross-unit access)
+    // so a task ID from another company can never be targeted here.
+    const query = { _id: taskId };
+    if (!req.user.permissions?.canAccessAllUnits) {
+      query.companyId = req.user.companyId;
+    }
+
+    const task = await Task.findOne(query);
 
     if (!task) {
       return res.status(404).json({
         success: false,
-        message: "Task not found"
+        message: "Task not found or access denied"
       });
     }
 
