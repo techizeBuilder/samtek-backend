@@ -1,3 +1,6 @@
+import path from 'path';
+import fs from 'fs';
+
 /**
  * Helper function to convert number to words (Indian numbering system)
  */
@@ -382,6 +385,24 @@ export const generateServiceInvoicePDF = async (res, invoiceData) => {
 
   doc.font('Helvetica-Bold').fontSize(8).fillColor(BLACK)
      .text(`For, ${company.name || ''}`, L + W * 0.55 + 5, y + 8, { width: W * 0.45 - 10, align: 'center' });
+
+  // Company stamp — the one uploaded by the Company Admin (Company.stampUrl,
+  // e.g. /uploads/company-stamps/stamp_x.png), never a generic placeholder.
+  // Drawn between the "For, <company>" line and "Authorised Signatory" only
+  // if that company has actually uploaded one.
+  if (company.stampUrl) {
+    try {
+      const stampPath = path.join(process.cwd(), company.stampUrl);
+      if (fs.existsSync(stampPath)) {
+        const stampW = 36;
+        const stampX = L + W * 0.55 + (W * 0.45 - stampW) / 2;
+        doc.image(stampPath, stampX, y + 16, { width: stampW, height: stampW });
+      }
+    } catch (e) {
+      console.error('Could not add company stamp to service invoice:', e.message);
+    }
+  }
+
   doc.font('Helvetica-Bold').fontSize(8).fillColor(BLACK)
      .text('Authorised Signatory', L + W * 0.55 + 5, y + sigBoxH - 14, { width: W * 0.45 - 10, align: 'center' });
 

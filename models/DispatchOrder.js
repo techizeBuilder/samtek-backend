@@ -75,6 +75,18 @@ const DispatchOrderSchema = new mongoose.Schema({
     remarks: { type: String, default: '' },
     confirmedAt: { type: Date }
   },
+  // Warranty/AMC tracking — stamped once, the first time customerConfirmation
+  // flips to 'Reached Safely' (see updateCustomerConfirmation /
+  // bulkUpdateCustomerConfirmation). This is what Complaint Management's
+  // customer lookup (getCustomerHistory) reads to show past machines with
+  // live warranty/AMC status — DispatchOrder is the single per-machine
+  // record for that, not a separate copy on the sales Order.
+  warrantyExpiryDate: { type: Date, default: null },
+  // AMC tracks the paid contract period after warranty expires — only set
+  // when the order's submitted OrderForm actually includes an AMC charge.
+  amcExpiryDate: { type: Date, default: null },
+  // Physical AMC agreement document, uploaded later by Complaint Management (no upload flow yet).
+  amcDocumentUrl: { type: String, default: null },
   installation: {
     status: { type: String, enum: ['Pending', 'Scheduled', 'Completed'], default: 'Pending' },
     scheduledDate: { type: Date },
