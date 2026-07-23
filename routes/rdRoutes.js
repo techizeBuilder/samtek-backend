@@ -20,9 +20,25 @@ import {
   saveCustomFieldTemplate,
   deleteCustomFieldTemplate,
 } from '../controllers/rdController.js';
+import {
+  getRDExpenseCategories,
+  createRDExpense,
+  getRDExpenses,
+  getRDExpenseSummary,
+  updateRDExpense,
+  deleteRDExpense,
+} from '../controllers/rdExpenseController.js';
 
 const router = express.Router();
 router.use(authenticateToken);
+
+// ── R&D Expenses (raw material, designing, testing, labor) ─────────────────
+router.get('/expenses/categories', getRDExpenseCategories);
+router.get('/expenses/summary', getRDExpenseSummary);
+router.get('/expenses', getRDExpenses);
+router.post('/expenses', createRDExpense);
+router.put('/expenses/:id', updateRDExpense);
+router.delete('/expenses/:id', deleteRDExpense);
 
 // ── Machines ─────────────────────────────────────────────────────────────────
 router.get('/machines', getMachines);

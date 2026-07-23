@@ -1526,6 +1526,8 @@ const getNOCRequests = async (req, res) => {
     const LeadPayment = (await import('../models/LeadPayment.js')).default;
     const Customer = (await import('../models/Customer.js')).default;
     const ProductionOrder = (await import('../models/ProductionOrder.js')).default;
+    const OrderForm = (await import('../models/OrderForm.js')).default;
+    const CustomerPayment = (await import('../models/CustomerPayment.js')).default;
 
     // Find all sales with populated orders
     // Sort: 'Pakka' invoices first (so Pakka is preferred over Kachha for same order),
@@ -1590,22 +1592,45 @@ const getNOCRequests = async (req, res) => {
 
     const leadIds = [...new Set(sales.map(s => s.order?.leadId?.toString()).filter(Boolean))];
     const customerIds = [...new Set(sales.map(s => s.order?.customer?._id?.toString()).filter(Boolean))];
+    const orderIds = [...new Set(sales.map(s => s.order?._id?.toString()).filter(Boolean))];
 
-    const [allLeadPayments, allCustomerMasters] = await Promise.all([
+    const [allLeadPayments, allCustomerMasters, allOrderForms, allOrderPayments] = await Promise.all([
       leadIds.length
         ? LeadPayment.find({ leadId: { $in: leadIds }, status: 'Verified', companyId }).select('leadId amount').lean()
         : [],
       customerIds.length
         ? Customer.find({ _id: { $in: customerIds } }).select('outstandingAmount advancePayment').lean()
+        : [],
+      // ORDER-WISE financials — same source of truth as Customer Master's
+      // order-financials breakdown and the NOC PDF (computeOrderFinancials),
+      // so this list never disagrees with what Accounts sees elsewhere — a
+      // payment recorded after the invoice was generated must still show
+      // as Paid here instead of the stale Sale.totalAmount/paidAmount snapshot.
+      orderIds.length
+        ? OrderForm.find({ orderId: { $in: orderIds }, status: 'Submitted' })
+          .select('orderId items totals receivedAmount paymentType').lean()
+        : [],
+      orderIds.length
+        ? CustomerPayment.find({ order: { $in: orderIds }, companyId }).select('order amount').lean()
         : []
     ]);
 
     const leadPaymentSumByLeadId = new Map();
+    const leadPaymentsByLeadId = new Map();
     allLeadPayments.forEach(p => {
       const key = p.leadId.toString();
       leadPaymentSumByLeadId.set(key, (leadPaymentSumByLeadId.get(key) || 0) + (p.amount || 0));
+      if (!leadPaymentsByLeadId.has(key)) leadPaymentsByLeadId.set(key, []);
+      leadPaymentsByLeadId.get(key).push(p);
     });
     const customerMasterById = new Map(allCustomerMasters.map(c => [c._id.toString(), c]));
+    const orderFormByOrderId = new Map(allOrderForms.map(f => [f.orderId.toString(), f]));
+    const orderPaymentsByOrderId = new Map();
+    allOrderPayments.forEach(p => {
+      const key = p.order.toString();
+      if (!orderPaymentsByOrderId.has(key)) orderPaymentsByOrderId.set(key, []);
+      orderPaymentsByOrderId.get(key).push(p);
+    });
 
     const nocRequests = [];
     // Track processed orderIds to prevent duplicate NOC entries
@@ -1637,26 +1662,42 @@ const getNOCRequests = async (req, res) => {
       }
 
       if (job) {
-        // Fetch advanced payment from linked lead (if any)
         let advancedPaymentAmount = sale.advancedPaymentAmount || 0;
         if (!advancedPaymentAmount && sale.order.leadId) {
           advancedPaymentAmount = leadPaymentSumByLeadId.get(sale.order.leadId.toString()) || 0;
         }
 
-        const effectivePaidAmount = (sale.paidAmount || 0) + advancedPaymentAmount;
+        let effectiveTotalAmount, effectivePaidAmount, effectiveBalance, effectivePaymentStatus;
 
-        // Use sale.totalAmount if invoice is generated (> 0), else fallback to order value + 18% GST
-        const orderBaseAmount = sale.order?.totalAmount || 0;
-        const effectiveTotalAmount = (sale.totalAmount && sale.totalAmount > 0)
-          ? sale.totalAmount
-          : Math.round(orderBaseAmount * 1.18);
+        const form = orderFormByOrderId.get(orderIdStr);
+        if (form) {
+          const orderPayments = orderPaymentsByOrderId.get(orderIdStr) || [];
+          const leadPayments = sale.order.leadId
+            ? (leadPaymentsByLeadId.get(sale.order.leadId.toString()) || [])
+            : [];
+          const fin = computeOrderFinancials({ form, sale, orderPayments, leadPayments });
+          effectiveTotalAmount = fin.total;
+          effectivePaidAmount = fin.advance + fin.paid;
+          effectiveBalance = fin.due;
+          effectivePaymentStatus = fin.paymentStatus;
+          advancedPaymentAmount = fin.advance;
+        } else {
+          // Legacy fallback for orders with no Order Form on file
+          effectivePaidAmount = (sale.paidAmount || 0) + advancedPaymentAmount;
 
-        const effectiveBalance = Math.max(0, effectiveTotalAmount - effectivePaidAmount);
-        let effectivePaymentStatus = sale.paymentStatus;
-        if (advancedPaymentAmount > 0 && effectiveBalance <= 0) {
-          effectivePaymentStatus = 'Paid';
-        } else if (advancedPaymentAmount > 0 && effectivePaidAmount > 0) {
-          effectivePaymentStatus = 'Partially Paid';
+          // Use sale.totalAmount if invoice is generated (> 0), else fallback to order value + 18% GST
+          const orderBaseAmount = sale.order?.totalAmount || 0;
+          effectiveTotalAmount = (sale.totalAmount && sale.totalAmount > 0)
+            ? sale.totalAmount
+            : Math.round(orderBaseAmount * 1.18);
+
+          effectiveBalance = Math.max(0, effectiveTotalAmount - effectivePaidAmount);
+          effectivePaymentStatus = sale.paymentStatus;
+          if (advancedPaymentAmount > 0 && effectiveBalance <= 0) {
+            effectivePaymentStatus = 'Paid';
+          } else if (advancedPaymentAmount > 0 && effectivePaidAmount > 0) {
+            effectivePaymentStatus = 'Partially Paid';
+          }
         }
 
         // Fetch customer master financial fields

@@ -18,6 +18,14 @@ import {
   closeDispatch,
   updateDispatchOrder,
 } from '../controllers/packagingDispatchController.js';
+import {
+  getPackagingDispatchExpenseCategories,
+  createPackagingDispatchExpense,
+  getPackagingDispatchExpenses,
+  getPackagingDispatchExpenseSummary,
+  updatePackagingDispatchExpense,
+  deletePackagingDispatchExpense,
+} from '../controllers/packagingDispatchExpenseController.js';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -44,5 +52,13 @@ router.put('/dispatch-orders/:id/execute', deliveryDocsMiddleware, executeDispat
 router.put('/dispatch-orders/:id/in-transit', markInTransit);
 router.put('/dispatch-orders/:id/deliver', confirmDelivery);
 router.put('/dispatch-orders/:id/close', closeDispatch);
+
+// ── Packing & Dispatch Expenses (shared by Packing + Dispatch roles) ────────
+router.get('/expenses/categories', getPackagingDispatchExpenseCategories);
+router.get('/expenses/summary', getPackagingDispatchExpenseSummary);
+router.get('/expenses', getPackagingDispatchExpenses);
+router.post('/expenses', createPackagingDispatchExpense);
+router.put('/expenses/:id', updatePackagingDispatchExpense);
+router.delete('/expenses/:id', deletePackagingDispatchExpense);
 
 export default router;

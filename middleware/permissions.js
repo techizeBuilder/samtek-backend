@@ -84,6 +84,7 @@ export const getUserModules = (role) => {
     'Sales Employee': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
     'Sales Head': ['Dashboard', 'Sales', 'Customers', 'Marketing'],
     'Marketing Head': ['Dashboard', 'Marketing', 'Customers'],
+    'Marketing Employee': ['Dashboard', 'Marketing'],
     'MIS Admin': ['Dashboard', 'MIS']
   };
   
@@ -283,7 +284,8 @@ export const getUserPermissions = (user) => {
             { key: 'categories', view: true, add: true, edit: true, delete: true, alter: true },
             { key: 'reports', view: true, add: false, edit: false, delete: false, alter: false },
             { key: 'auditLogs', view: true, add: false, edit: false, delete: false, alter: false },
-            { key: 'notifications', view: true, add: false, edit: false, delete: false, alter: false }
+            { key: 'notifications', view: true, add: false, edit: false, delete: false, alter: false },
+            { key: 'expenses', view: true, add: true, edit: true, delete: true, alter: true }
           ]
         },
         {
@@ -291,6 +293,30 @@ export const getUserPermissions = (user) => {
           dashboard: false,
           features: [
             { key: 'addEditView', view: true, add: false, edit: false, delete: false, alter: false }
+          ]
+        }
+      ]
+    };
+  }
+
+  // Marketing Employee — logs marketing expenses only; no access to library/uploads/categories
+  if (user.role === 'Marketing Employee') {
+    return {
+      role: 'marketing_employee',
+      canAccessAllUnits: false,
+      modules: [
+        {
+          name: 'dashboard',
+          dashboard: true,
+          features: [
+            { key: 'overview', view: true, add: false, edit: false, delete: false, alter: false }
+          ]
+        },
+        {
+          name: 'marketing',
+          dashboard: false,
+          features: [
+            { key: 'expenses', view: true, add: true, edit: true, delete: true, alter: false }
           ]
         }
       ]

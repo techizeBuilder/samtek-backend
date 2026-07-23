@@ -5,6 +5,32 @@ import { Partner } from '../models/Partner.js';
 import OrderForm from '../models/OrderForm.js';
 import mongoose from 'mongoose';
 import { USER_ROLES } from '../shared/schema.js';
+import MarketingExpense from '../models/MarketingExpense.js';
+import PackagingDispatchExpense from '../models/PackagingDispatchExpense.js';
+import PurchaseExpense from '../models/PurchaseExpense.js';
+import HrExpense from '../models/HrExpense.js';
+import ProductionExpense from '../models/ProductionExpense.js';
+import RDExpense from '../models/RDExpense.js';
+import ComplaintExpense from '../models/ComplaintExpense.js';
+import TenderExpense from '../models/TenderExpense.js';
+
+// Every NEW department expense module rolled into the Financial Summary's
+// "Total Expenses" / Net Profit calculation, on top of the pre-existing
+// generic Accounts "Expense" model (which is aggregated separately below
+// via `expensesPromise`, since it alone carries a `unit` field to scope by).
+// These 8 only carry `companyId` (no `unit`), so they're matched on
+// companyId alone — see deptExpenseQuery, mirrored from the kacchaQuery
+// pattern already used for the Kaccha revenue aggregate.
+const DEPARTMENT_EXPENSE_MODELS = [
+  { key: 'marketing', label: 'Marketing Expenses', model: MarketingExpense },
+  { key: 'packagingDispatch', label: 'Packing & Dispatch Expenses', model: PackagingDispatchExpense },
+  { key: 'purchase', label: 'Purchase Expenses', model: PurchaseExpense },
+  { key: 'hr', label: 'HR Expenses', model: HrExpense },
+  { key: 'production', label: 'Production Expenses', model: ProductionExpense },
+  { key: 'rd', label: 'R&D Expenses', model: RDExpense },
+  { key: 'complaint', label: 'Service & Complaint Expenses', model: ComplaintExpense },
+  { key: 'tender', label: 'Tender Expenses', model: TenderExpense },
+];
 
 export const getFinanceSummary = async (req, res) => {
     try {
@@ -110,7 +136,8 @@ export const getFinanceSummary = async (req, res) => {
             }
         ]);
 
-        // Aggregate Expenses
+        // Aggregate Expenses — legacy Accounts "Daily Expenses" (has a `unit`
+        // field, so it's scoped by the same `query` used for Sales/Returns).
         const expensesPromise = Expense.aggregate([
             {
                 $match: {
@@ -121,25 +148,60 @@ export const getFinanceSummary = async (req, res) => {
             {
                 $group: {
                     _id: null,
-                    total: { $sum: '$amount' }
+                    total: { $sum: '$amount' },
+                    count: { $sum: 1 }
                 }
             }
         ]);
 
+        // Aggregate every department-specific expense module (Marketing,
+        // Packing & Dispatch, Purchase, HR, Production, R&D, Service &
+        // Complaint, Tender) for the same date range. None of these carry a
+        // `unit` field, so scope by companyId only — same pattern as kacchaQuery.
+        const deptExpenseQuery = {};
+        if (query.companyId) deptExpenseQuery.companyId = query.companyId;
+
+        const deptExpensePromises = DEPARTMENT_EXPENSE_MODELS.map(({ model }) =>
+            model.aggregate([
+                { $match: { ...deptExpenseQuery, date: dateQuery } },
+                { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
+            ])
+        );
+
         const partnersPromise = Partner.find({ companyId: req.user.companyId, isActive: true }).lean();
 
-        const [salesResult, returnsResult, expensesResult, kacchaResult, partners] = await Promise.all([
+        const [salesResult, returnsResult, expensesResult, kacchaResult, partners, ...deptExpenseResults] = await Promise.all([
             salesPromise,
             returnsPromise,
             expensesPromise,
             kacchaPromise,
-            partnersPromise
+            partnersPromise,
+            ...deptExpensePromises
         ]);
 
         const totalSales = salesResult[0]?.total || 0;
         const totalReturns = returnsResult[0]?.total || 0;
         const netSales = totalSales - totalReturns;
-        const totalExpenses = expensesResult[0]?.total || 0;
+
+        // Legacy Accounts "Daily Expenses" total
+        const accountsExpenseTotal = expensesResult[0]?.total || 0;
+        const accountsExpenseCount = expensesResult[0]?.count || 0;
+
+        // Department-wise breakdown, sorted highest-spend first — this is
+        // what "Show Expenses" renders on the Financial Summary page.
+        const expensesByDepartment = [
+            { key: 'accounts', label: 'Accounts — Daily Expenses', total: accountsExpenseTotal, count: accountsExpenseCount },
+            ...DEPARTMENT_EXPENSE_MODELS.map(({ key, label }, idx) => ({
+                key,
+                label,
+                total: deptExpenseResults[idx][0]?.total || 0,
+                count: deptExpenseResults[idx][0]?.count || 0,
+            })),
+        ].sort((a, b) => b.total - a.total);
+
+        // Total Expenses now reflects EVERY department's logged expenses,
+        // not just the old generic Accounts "Daily Expenses" entries.
+        const totalExpenses = expensesByDepartment.reduce((sum, d) => sum + d.total, 0);
         const netProfit = netSales - totalExpenses;
 
         // Kaccha (cash-side) profit: Billing Amount + GST Amount + Cash Amount
@@ -158,6 +220,7 @@ export const getFinanceSummary = async (req, res) => {
                 totalReturns,
                 netSales,
                 totalExpenses,
+                expensesByDepartment,
                 netProfit,
                 kacchaBillAmount,
                 kacchaGstAmount,

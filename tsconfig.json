@@ -16,6 +16,7 @@
     "db.ts",
     "storage.ts",
     "storage.js",
-    "routes.ts"
+    "routes.ts",
+    "fixFrontend.js"
   ]
 }

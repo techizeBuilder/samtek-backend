@@ -10,6 +10,10 @@ import {
   createRequest, getMyRequests, getAllRequests,
   getMatchingAssets, approveRequest, rejectRequest,
 } from '../controllers/marketingRequestController.js';
+import {
+  getMarketingExpenseCategories, createMarketingExpense, getMarketingExpenses,
+  getMarketingExpenseSummary, updateMarketingExpense, deleteMarketingExpense,
+} from '../controllers/marketingExpenseController.js';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -43,5 +47,13 @@ router.post('/requests/:id/reject', rejectRequest);
 router.get('/reports', getReports);
 router.get('/audit-logs', getAuditLogs);
 router.get('/notifications', getNotifications);
+
+// Marketing Expenses — logged by Marketing Head / Marketing Employee
+router.get('/expenses/categories', getMarketingExpenseCategories);
+router.get('/expenses/summary', getMarketingExpenseSummary);
+router.get('/expenses', getMarketingExpenses);
+router.post('/expenses', createMarketingExpense);
+router.put('/expenses/:id', updateMarketingExpense);
+router.delete('/expenses/:id', deleteMarketingExpense);
 
 export default router;

@@ -30,6 +30,14 @@ import {
 } from "../controllers/ServiceDispatchController.js";
 
 import { serviceUpload } from '../middleware/complaintServiceUpload.js';
+import {
+  getComplaintExpenseCategories,
+  createComplaintExpense,
+  getComplaintExpenses,
+  getComplaintExpenseSummary,
+  updateComplaintExpense,
+  deleteComplaintExpense,
+} from '../controllers/complaintExpenseController.js';
 
 const router = express.Router();
 
@@ -91,5 +99,13 @@ router.put('/dispatched-orders/bulk/feedback', authenticateToken, authorizeRoles
 router.put('/dispatched-orders/:id/customer-confirmation', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateCustomerConfirmation);
 router.put('/dispatched-orders/:id/installation-schedule', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateInstallationSchedule);
 router.put('/dispatched-orders/:id/feedback', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateFeedbackAndRatings);
+
+// --- 5. SERVICE & COMPLAINT EXPENSES (installation, traveling) ---
+router.get('/expenses/categories', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), getComplaintExpenseCategories);
+router.get('/expenses/summary', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), getComplaintExpenseSummary);
+router.get('/expenses', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), getComplaintExpenses);
+router.post('/expenses', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), createComplaintExpense);
+router.put('/expenses/:id', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), updateComplaintExpense);
+router.delete('/expenses/:id', authenticateToken, authorizeRoles('Complaint Management Head', 'Complaint Management Employee'), deleteComplaintExpense);
 
 export default router;
