@@ -23,6 +23,7 @@ import {
   receiveIvrCallLog,
   receiveWebsiteWebhook,
   receiveIndiamartWebhook,
+  receiveGoogleAdsWebhook,
   getCallLogs,
   clickToCall
 } from '../controllers/leadController.js';
@@ -32,9 +33,10 @@ import { leadDocumentUpload } from '../middleware/leadDocumentUpload.js';
 const router = express.Router();
 
 // ─── Public Webhook Routes (No Auth — called by external services) ───────────
-router.post('/ivr-webhook',       receiveIvrCallLog);
-router.post('/website-webhook',   receiveWebsiteWebhook);
-router.post('/indiamart-webhook', receiveIndiamartWebhook);
+router.post('/ivr-webhook',        receiveIvrCallLog);
+router.post('/website-webhook',    receiveWebsiteWebhook);
+router.post('/indiamart-webhook',  receiveIndiamartWebhook);
+router.post('/google-ads-webhook', receiveGoogleAdsWebhook);
 
 // ─── Authenticated Routes ─────────────────────────────────────────────────────
 router.use(authenticateToken);

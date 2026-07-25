@@ -721,8 +721,14 @@ export const getSalespersonInvoices = async (req, res) => {
     const salespersonDCNumbers = salespersonDispatches.map(d => d.dcno);
 
     // 2. Build filter query for existing Sale records (BROADENED)
+    // Pakka (formal/GST) invoices only — Kachha bills and Store's
+    // auto-created isPlaceholder sales aren't real invoices and must
+    // never surface here. This mirrors the same filter used in
+    // financeController.js and taxController.js.
     let saleQuery = {
       companyId: userCompanyId,
+      invoiceType: 'Pakka',
+      isPlaceholder: { $ne: true },
       $or: [
         { order: { $in: orderIds } },
         { dispatch: { $in: salespersonDispatchIds } },
@@ -742,89 +748,22 @@ export const getSalespersonInvoices = async (req, res) => {
       saleQuery.$or.push({ invoiceNumber: { $regex: search, $options: 'i' } });
     }
 
-    // 3. Get existing Sale records
+    // 3. Get existing Sale records — the only real invoices. Dispatches
+    // that haven't been formally invoiced yet belong on "My Deliveries"
+    // (getSalespersonDeliveries), not here: synthesizing a "Pending"
+    // placeholder per-dispatch and de-duping it against `sales` by
+    // invoice number/dispatch ref was unreliable and produced duplicate
+    // rows once the real invoice existed alongside its stale placeholder.
     const sales = await Sale.find(saleQuery)
       .populate('order', 'orderCode')
       .populate('customer', 'name email mobile gstin customerCode')
       .lean();
 
-    // Track which dispatches are already formally invoiced
-    const invoicedDispatchIds = sales.filter(s => s.dispatch).map(s => s.dispatch.toString());
-    const invoicedDCNumbers = sales.map(s => s.invoiceNumber.replace(/^INV-/, '')); // Normalize for matching
-
-    // Aggregate dispatches into "invoice-like" groups by dcno
-    const dispatchInvoicesRaw = await Dispatch.aggregate([
-      { $match: dispatchMatch },
-      {
-        $lookup: {
-          from: 'items',
-          localField: 'productId',
-          foreignField: '_id',
-          as: 'product'
-        }
-      },
-      { $unwind: { path: '$product', preserveNullAndEmptyArrays: true } },
-      {
-        $group: {
-          _id: '$dcno',
-          invoiceNumber: { $first: '$dcno' },
-          customer: { $first: '$customer' },
-          order: { $first: '$orderId' },
-          saleDate: { $first: { $ifNull: ['$date', '$createdAt'] } },
-          createdAt: { $first: '$createdAt' },
-          paymentStatus: { $first: 'Pending' },
-          dispatchId: { $first: '$_id' },
-          totalAmount: {
-            $sum: { $multiply: ['$dispatchedQuantitySentToday', { $ifNull: ['$product.salePrice', 0] }] }
-          },
-          items: {
-            $push: {
-              productName: '$productName',
-              quantity: '$dispatchedQuantitySentToday',
-              unitPrice: { $ifNull: ['$product.salePrice', 0] },
-              totalPrice: { $multiply: ['$dispatchedQuantitySentToday', { $ifNull: ['$product.salePrice', 0] }] }
-            }
-          }
-        }
-      }
-    ]);
-
-    // Format Dispatches and filter out those already in 'sales'
-    const pendingDispatches = [];
-    for (const dInv of dispatchInvoicesRaw) {
-      // Robust check: Skip if this DC number (normalized) exists in the Sales list
-      const normalizedInvNo = dInv.invoiceNumber.replace(/^INV-/, '');
-      const isAlreadyInvoiced = sales.some(s => s.invoiceNumber === dInv.invoiceNumber) ||
-        invoicedDCNumbers.includes(normalizedInvNo) ||
-        invoicedDispatchIds.includes(dInv.dispatchId.toString());
-
-      if (!isAlreadyInvoiced) {
-        // Populate customer info (Aggregation doesn't populate nested models easily)
-        const customer = await Customer.findById(dInv.customer).select('name email mobile gstin customerCode').lean();
-        const order = dInv.order ? await Order.findById(dInv.order).select('orderCode').lean() : null;
-
-        pendingDispatches.push({
-          _id: `pending_${dInv._id}`,
-          invoiceNumber: dInv.invoiceNumber,
-          customer: customer,
-          order: order,
-          totalAmount: dInv.totalAmount,
-          paidAmount: 0,
-          balanceAmount: dInv.totalAmount,
-          saleDate: dInv.saleDate,
-          createdAt: dInv.createdAt,
-          paymentStatus: 'Pending',
-          items: dInv.items,
-          isDispatchOriginal: true
-        });
-      }
-    }
-
-    // 5. Combine and Paginate
-    const allInvoices = [...sales, ...pendingDispatches]
+    // 5. Paginate
+    const allInvoices = [...sales]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    // Filter by paymentStatus if requested (pending dispatches are always 'Pending')
+    // Filter by paymentStatus if requested
     let filteredInvoices = allInvoices;
     if (paymentStatus && paymentStatus !== 'all') {
       filteredInvoices = allInvoices.filter(inv => inv.paymentStatus === paymentStatus);

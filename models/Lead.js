@@ -47,6 +47,7 @@ const leadSchema = new mongoose.Schema({
   },
   describeRequirements: String,
   indiamartQueryId: { type: String, default: null }, // for dedup of IndiaMart leads
+  googleAdsLeadId: { type: String, default: null }, // for dedup of Google Ads Lead Form leads
   source: {
     type: String,
     required: true,
@@ -202,5 +203,6 @@ leadSchema.index({ assignedTo: 1 });
 leadSchema.index({ mobile: 1 });
 leadSchema.index({ email: 1 });
 leadSchema.index({ companyId: 1, indiamartQueryId: 1 }, { sparse: true });
+leadSchema.index({ companyId: 1, googleAdsLeadId: 1 }, { sparse: true });
 
 export default mongoose.model('Lead', leadSchema);

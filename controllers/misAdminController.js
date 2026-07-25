@@ -19,6 +19,11 @@ const getCompanyFilter = (user) => {
 export const getMISDashboard = async (req, res) => {
   try {
     const companyFilter = getCompanyFilter(req.user);
+    // Pakka (formal/GST) invoices only — Kachha bills and Store's
+    // auto-created isPlaceholder sales aren't real invoices, so every
+    // Sale-derived KPI/chart below must exclude them. Same convention as
+    // financeController.js / taxController.js / getSalespersonInvoices.
+    const salesFilter = { ...companyFilter, invoiceType: 'Pakka', isPlaceholder: { $ne: true } };
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const startOfYear = new Date(now.getFullYear(), 0, 1);
@@ -26,15 +31,15 @@ export const getMISDashboard = async (req, res) => {
     // ── Sales KPIs ──
     const [totalRevenue, revenueThisMonth, pendingPayments] = await Promise.all([
       Sale.aggregate([
-        { $match: { ...companyFilter } },
+        { $match: { ...salesFilter } },
         { $group: { _id: null, total: { $sum: '$totalAmount' }, paid: { $sum: '$paidAmount' } } }
       ]),
       Sale.aggregate([
-        { $match: { ...companyFilter, createdAt: { $gte: startOfMonth } } },
+        { $match: { ...salesFilter, createdAt: { $gte: startOfMonth } } },
         { $group: { _id: null, total: { $sum: '$totalAmount' } } }
       ]),
       Sale.aggregate([
-        { $match: { ...companyFilter, paymentStatus: { $in: ['Pending', 'Overdue', 'Partially Paid'] } } },
+        { $match: { ...salesFilter, paymentStatus: { $in: ['Pending', 'Overdue', 'Partially Paid'] } } },
         { $group: { _id: null, total: { $sum: '$balanceAmount' } } }
       ])
     ]);
@@ -63,7 +68,7 @@ export const getMISDashboard = async (req, res) => {
     // ── Monthly Revenue Trend (last 6 months) ──
     const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
     const monthlyRevenue = await Sale.aggregate([
-      { $match: { ...companyFilter, createdAt: { $gte: sixMonthsAgo } } },
+      { $match: { ...salesFilter, createdAt: { $gte: sixMonthsAgo } } },
       {
         $group: {
           _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
@@ -82,7 +87,7 @@ export const getMISDashboard = async (req, res) => {
 
     // ── Payment Status Breakdown ──
     const paymentBreakdown = await Sale.aggregate([
-      { $match: companyFilter },
+      { $match: salesFilter },
       { $group: { _id: '$paymentStatus', count: { $sum: 1 }, amount: { $sum: '$totalAmount' } } }
     ]);
 
@@ -128,6 +133,10 @@ export const getSalesReport = async (req, res) => {
     const dateMatch = Object.keys(dateFilter).length ? { createdAt: dateFilter } : {};
 
     const matchFilter = { ...companyFilter, ...dateMatch };
+    // Pakka (formal/GST) invoices only for every Sale-derived aggregate
+    // below — returnsCount keeps using matchFilter as-is since it queries
+    // Order, which has no invoiceType field.
+    const salesMatchFilter = { ...matchFilter, invoiceType: 'Pakka', isPlaceholder: { $ne: true } };
 
     const [
       salesSummary,
@@ -140,7 +149,7 @@ export const getSalesReport = async (req, res) => {
     ] = await Promise.all([
       // Overall summary
       Sale.aggregate([
-        { $match: matchFilter },
+        { $match: salesMatchFilter },
         {
           $group: {
             _id: null,
@@ -155,7 +164,7 @@ export const getSalesReport = async (req, res) => {
 
       // Monthly revenue trend
       Sale.aggregate([
-        { $match: matchFilter },
+        { $match: salesMatchFilter },
         {
           $group: {
             _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
@@ -169,13 +178,13 @@ export const getSalesReport = async (req, res) => {
 
       // Payment status
       Sale.aggregate([
-        { $match: matchFilter },
+        { $match: salesMatchFilter },
         { $group: { _id: '$paymentStatus', count: { $sum: 1 }, amount: { $sum: '$totalAmount' } } }
       ]),
 
       // Top customers by revenue
       Sale.aggregate([
-        { $match: matchFilter },
+        { $match: salesMatchFilter },
         { $group: { _id: '$customer', totalAmount: { $sum: '$totalAmount' }, invoices: { $sum: 1 } } },
         { $sort: { totalAmount: -1 } },
         { $limit: 10 },
@@ -199,7 +208,7 @@ export const getSalesReport = async (req, res) => {
 
       // Sales by product
       Sale.aggregate([
-        { $match: matchFilter },
+        { $match: salesMatchFilter },
         { $unwind: '$items' },
         {
           $group: {
@@ -218,7 +227,7 @@ export const getSalesReport = async (req, res) => {
 
       // Overdue invoices
       Sale.aggregate([
-        { $match: { ...companyFilter, paymentStatus: 'Overdue' } },
+        { $match: { ...companyFilter, invoiceType: 'Pakka', isPlaceholder: { $ne: true }, paymentStatus: 'Overdue' } },
         { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$balanceAmount' } } }
       ])
     ]);

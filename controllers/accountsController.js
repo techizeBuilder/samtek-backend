@@ -408,9 +408,13 @@ export const getAllSalesPersons = async (req, res) => {
 
     // Get all sales persons for this company
     // Build query with proper MongoDB structure
+    // Role set mirrors the same salesperson roles used everywhere else in
+    // the codebase (leadController, orderController, salesController,
+    // unitManagerController, permissions.js) — 'Sales Person'/'Salesman'/
+    // 'Agent' were never real roles here, so this query matched nobody.
     let query = {
       companyId: userCompanyId,
-      role: { $in: ['Sales', 'Sales Person', 'Salesman', 'Agent'] }
+      role: { $in: ['Sales', 'Sales Employee', 'Sales Head'] }
     };
 
     // Add search conditions if provided

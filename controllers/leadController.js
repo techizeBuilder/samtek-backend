@@ -842,7 +842,8 @@ export const getApiSettings = async (req, res) => {
     let settings = await ApiSettings.findOne({ companyId: targetCompanyId })
       .populate('indiamart.assignedUserIds', 'fullName username')
       .populate('ivr.assignedUserIds', 'fullName username')
-      .populate('website.assignedUserIds', 'fullName username');
+      .populate('website.assignedUserIds', 'fullName username')
+      .populate('googleAds.assignedUserIds', 'fullName username');
 
     if (!settings) {
       settings = await ApiSettings.create({ companyId: targetCompanyId });
@@ -859,7 +860,7 @@ export const getApiSettings = async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 export const saveApiSettings = async (req, res) => {
   try {
-    const { indiamart, ivr, website } = req.body;
+    const { indiamart, ivr, website, googleAds } = req.body;
     // Super Admin can save settings for any company via ?companyId=xxx
     const targetCompanyId = (req.user.role === 'Super Admin' && req.query.companyId)
       ? req.query.companyId
@@ -867,7 +868,7 @@ export const saveApiSettings = async (req, res) => {
 
     const settings = await ApiSettings.findOneAndUpdate(
       { companyId: targetCompanyId },
-      { $set: { indiamart, ivr, website } },
+      { $set: { indiamart, ivr, website, googleAds } },
       { upsert: true, new: true }
     );
     res.json({ success: true, message: 'API settings saved', settings });
@@ -1353,6 +1354,112 @@ export const receiveIndiamartWebhook = async (req, res) => {
   } catch (error) {
     console.error('Error receiving IndiaMART webhook:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// GOOGLE ADS LEAD FORM WEBHOOK (No Auth — Google Ads pushes each Lead
+// Form submission here in real time. Google's protocol is different
+// from IndiaMART/Website: it (1) sends a "google_key" field in every
+// payload that must match what's configured in Google Ads, and (2)
+// requires the response body to be exactly {"google_key": "<same key>"}
+// with HTTP 200 — that's how Google verifies the endpoint, both for the
+// one-time test call made when the webhook is saved (is_test) and for
+// every real lead after. Lead fields arrive as a user_column_data array
+// of { column_id, column_name, string_value } — not fixed top-level keys.
+// ═══════════════════════════════════════════════════════════════
+export const receiveGoogleAdsWebhook = async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const googleKey = req.query.q || payload.google_key || '';
+
+    if (!googleKey) {
+      return res.status(400).json({ success: false, message: 'Missing key' });
+    }
+
+    const settings = await ApiSettings.findOne({ 'googleAds.webhookKey': googleKey, 'googleAds.enabled': true })
+      .populate('googleAds.assignedUserIds', '_id fullName');
+
+    // Google's own key check — the payload's google_key must match what
+    // this company configured, independent of the ?q= tenant lookup above.
+    if (!settings || payload.google_key !== googleKey) {
+      // Still echo the contract shape back so Google's own key-mismatch
+      // diagnostics work, just without ever creating a lead.
+      return res.status(401).json({ google_key: payload.google_key || '' });
+    }
+
+    // Google sends a one-time verification call with is_test truthy when
+    // the webhook is first saved (and whenever it's re-validated) — must
+    // be acknowledged without creating a real lead.
+    const isTest = String(payload.is_test || '').toLowerCase();
+    if (isTest === '1' || isTest === 'true') {
+      return res.status(200).json({ google_key: googleKey });
+    }
+
+    const leadId = String(payload.lead_id || '').trim();
+    if (leadId) {
+      const exists = await Lead.findOne({ companyId: settings.companyId, googleAdsLeadId: leadId });
+      if (exists) {
+        return res.status(200).json({ google_key: googleKey });
+      }
+    }
+
+    // Flatten Google's user_column_data array into a lookup by column_id
+    const columns = {};
+    for (const col of (payload.user_column_data || [])) {
+      const id = (col.column_id || col.column_name || '').toUpperCase();
+      if (id) columns[id] = col.string_value || '';
+    }
+
+    const name = columns.FULL_NAME || [columns.FIRST_NAME, columns.LAST_NAME].filter(Boolean).join(' ') || 'Google Ads Lead';
+    const mobile = (columns.PHONE_NUMBER || columns.WORK_PHONE_NUMBER || '').replace(/\D/g, '').slice(-10) || '0000000000';
+    const email = columns.EMAIL || columns.WORK_EMAIL || `googleadslead_${leadId || Date.now()}@noemail.com`;
+
+    // Assign user — same random-pick pattern as the Website webhook
+    const users = settings.googleAds.assignedUserIds || [];
+    const assignedTo = users.length > 0
+      ? users[Math.floor(Math.random() * users.length)]._id
+      : null;
+
+    const count = await Lead.countDocuments({ companyId: settings.companyId });
+    const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+
+    const newLead = new Lead({
+      leadCode,
+      companyId: settings.companyId,
+      source: 'Google Ads',
+      status: 'New',
+      stage: 'N/A',
+      productRequired: columns.LEAD_FORM_NAME || columns.COMPANY_NAME || 'Google Ads Enquiry',
+      describeRequirements: [columns.CITY, columns.STATE, columns.POSTAL_CODE].filter(Boolean).join(', ')
+        || `Lead from Google Ads campaign ${payload.campaign_name || payload.campaign_id || ''}`,
+      googleAdsLeadId: leadId || null,
+      companyName: columns.COMPANY_NAME || name,
+      contactPerson: name,
+      mobile,
+      email,
+      city: columns.CITY || '',
+      state: columns.STATE || '',
+      country: columns.COUNTRY || 'India',
+      pincode: columns.POSTAL_CODE || '',
+      assignedTo,
+      history: [{
+        action: 'Lead Created',
+        notes: `Auto-imported via Google Ads Lead Form webhook (Campaign: ${payload.campaign_name || payload.campaign_id || 'N/A'}, LeadID: ${leadId || 'N/A'})`,
+        performedBy: null
+      }]
+    });
+
+    await newLead.save();
+
+    settings.googleAds.lastSyncedAt = new Date();
+    await settings.save();
+
+    // Google requires exactly this response shape to consider delivery successful
+    return res.status(200).json({ google_key: googleKey });
+  } catch (error) {
+    console.error('Error receiving Google Ads webhook:', error);
+    res.status(500).json({ google_key: req.query.q || req.body?.google_key || '' });
   }
 };
 
