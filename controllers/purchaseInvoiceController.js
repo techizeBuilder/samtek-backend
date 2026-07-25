@@ -745,52 +745,63 @@ export const getSuppliersForAccounts = async (req, res) => {
 /**
  * Auto-creates a Purchase Return when a purchased product fails QC inspection.
  */
-export const createQCRejectedPurchaseReturn = async (qcJob, user) => {
+
+// Resolves the vendor (Supplier) and originating Purchase PO for a
+// Purchase-sourced QC job that got rejected — shared by the accounting
+// Purchase Return (below) and the Purchase Exchange workflow
+// (purchaseExchangeController.js). Follows the real DB reference chain
+// (QCJob → PurchaseRequest → Purchase → Supplier) instead of guessing, and
+// returns null values if it can't be resolved with confidence — callers
+// must NOT fabricate a fallback vendor (a wrong vendor is worse than none).
+export const resolveVendorAndPOForQCRejectedPurchase = async (qcJob) => {
+    const Purchase = mongoose.model('Purchase');
+    const PurchaseRequest = mongoose.model('PurchaseRequest');
+
+    let po = null;
+    let pr = null;
+
+    // Strategy 1 (most reliable): direct reference set when the QC job was created.
+    if (qcJob.purchaseRequestId) {
+        pr = await PurchaseRequest.findById(qcJob.purchaseRequestId).populate({
+            path: 'purchaseOrder',
+            populate: { path: 'supplier' }
+        });
+        if (pr && pr.purchaseOrder) po = pr.purchaseOrder;
+    }
+
+    // Strategy 2: match the PO number against sourceRefId.
+    if (!po && qcJob.sourceRefId) {
+        po = await Purchase.findOne({ purchaseOrderNumber: qcJob.sourceRefId }).populate('supplier');
+    }
+
+    // Strategy 3: match requestId/itemCode against PurchaseRequest.
+    if (!po) {
+        pr = await PurchaseRequest.findOne({
+            $or: [
+                { requestId: qcJob.sourceRefId },
+                { requestId: qcJob.itemCode }
+            ]
+        }).populate({
+            path: 'purchaseOrder',
+            populate: { path: 'supplier' }
+        });
+        if (pr && pr.purchaseOrder) po = pr.purchaseOrder;
+    }
+
+    const supplierId = (po && po.supplier) ? (po.supplier._id || po.supplier) : null;
+    return { po, pr, supplierId };
+};
+
+export const createQCRejectedPurchaseReturn = async (qcJob, user, qty) => {
     try {
         const companyId = qcJob.company;
         const unit = user.unit || 'Main';
 
         // 1. Find Supplier/Vendor
-        const Purchase = mongoose.model('Purchase');
-        const PurchaseRequest = mongoose.model('PurchaseRequest');
-        
-        let supplierId = null;
-        let po = null;
-        
-        // Search by sourceRefId in Purchase
-        if (qcJob.sourceRefId) {
-            po = await Purchase.findOne({ purchaseOrderNumber: qcJob.sourceRefId }).populate('supplier');
-        }
-        
-        // If not found, search by itemCode/requestId in PurchaseRequest
-        if (!po) {
-            const pr = await PurchaseRequest.findOne({
-                $or: [
-                    { requestId: qcJob.sourceRefId },
-                    { requestId: qcJob.itemCode }
-                ]
-            }).populate({
-                path: 'purchaseOrder',
-                populate: { path: 'supplier' }
-            });
-            if (pr && pr.purchaseOrder) {
-                po = pr.purchaseOrder;
-            }
-        }
-        
-        if (po && po.supplier) {
-            supplierId = po.supplier._id || po.supplier;
-        } else {
-            // Fallback: get the first active supplier for the unit
-            const Supplier = mongoose.model('Supplier');
-            const fallbackSupplier = await Supplier.findOne({ status: 'active' });
-            if (fallbackSupplier) {
-                supplierId = fallbackSupplier._id;
-            }
-        }
+        const { po, supplierId } = await resolveVendorAndPOForQCRejectedPurchase(qcJob);
 
         if (!supplierId) {
-            console.error('❌ [QC Rejection Return] Could not find vendor/supplier for return.');
+            console.error(`❌ [QC Rejection Return] Could not confidently resolve vendor for QC Job ${qcJob.qcJobId} — skipping auto Purchase Return. File it manually against the correct vendor.`);
             return null;
         }
 
@@ -835,7 +846,8 @@ export const createQCRejectedPurchaseReturn = async (qcJob, user) => {
             unitPrice = 100;
         }
 
-        const totalPrice = unitPrice * (qcJob.quantity || 1);
+        const returnQty = qty || qcJob.quantity || 1;
+        const totalPrice = unitPrice * returnQty;
 
         // 4. Find linked PurchaseInvoice if exists
         let invoiceId = undefined;
@@ -860,7 +872,7 @@ export const createQCRejectedPurchaseReturn = async (qcJob, user) => {
         const items = [{
             item: inventoryItem ? inventoryItem._id : new mongoose.Types.ObjectId(),
             itemName: qcJob.itemName,
-            quantity: qcJob.quantity || 1,
+            quantity: returnQty,
             unitPrice: unitPrice,
             gstPercent: 18,
             gstAmount: Math.round(totalPrice * 0.18),

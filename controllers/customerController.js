@@ -921,7 +921,6 @@ export const getCustomerOrderFinancials = async (req, res) => {
         .lean();
       const sale = sales.find(s => !s.isPlaceholder && s.invoiceType === 'Pakka')
         || sales.find(s => !s.isPlaceholder)
-        || sales[0]
         || null;
 
       let leadPayments = [];

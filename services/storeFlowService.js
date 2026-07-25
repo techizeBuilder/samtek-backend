@@ -360,17 +360,50 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
 // Update ONE sale item's storeQCStatus by saleItemId and recompute the
 // aggregate. Falls back to sale-level update when saleItemId is missing or
 // doesn't match (legacy artifacts). Saves the sale.
+//
+// `extra.qty` (Approved from QC only): how much of the item's quantity this
+// particular QC decision covers. A QC job's quantity can be less than the
+// item's full ordered quantity when part of it was previously rejected (see
+// QCJob.partialRejections) — the rejected slice re-enters QC later on its
+// own (Rework/Repair/Purchase Exchange) and calls this again. We only flip
+// storeQCStatus to 'Approved from QC' (the dispatch-ready gate) once the
+// accumulated approvedQty reaches the item's full quantity, so "the whole
+// order dispatches together" keeps working exactly as before. Omitting
+// extra.qty defaults to the item's full quantity — the normal, never-split
+// case still flips to ready on the first (and only) Approve, unchanged.
 export async function setSaleItemStatus(sale, saleItemId, status, extra = {}) {
   let target = null;
   if (saleItemId) target = (sale.items || []).id(saleItemId);
 
+  const applyApproval = (doc) => {
+    if (status === 'Rejected from QC' && extra.rejectionSource !== undefined) {
+      doc.lastRejectionSource = extra.rejectionSource;
+    }
+
+    // The top-level Sale doc (legacy whole-sale fallback) has no per-item
+    // `quantity` field to accumulate against — keep that path exactly as
+    // before rather than doing qty math against an undefined value.
+    const targetQty = Number(doc.quantity);
+    if (status !== 'Approved from QC' || !Number.isFinite(targetQty)) {
+      doc.storeQCStatus = status;
+      return;
+    }
+    const qty = extra.qty != null ? extra.qty : targetQty;
+    doc.approvedQty = (doc.approvedQty || 0) + qty;
+    if (doc.approvedQty >= targetQty) {
+      doc.storeQCStatus = 'Approved from QC';
+    }
+    // else: still awaiting the rest of the quantity — leave storeQCStatus as
+    // is (typically 'Goes to QC'), correctly keeping the item/order not-ready.
+  };
+
   if (target) {
-    target.storeQCStatus = status;
+    applyApproval(target);
     if (extra.isAvailableInInventory !== undefined) target.isAvailableInInventory = extra.isAvailableInInventory;
     sale.recomputeAggregateStoreStatus();
   } else {
     // Legacy: whole-sale update (single-item orders created before this change)
-    sale.storeQCStatus = status;
+    applyApproval(sale);
     if (extra.isAvailableInInventory !== undefined) sale.isAvailableInInventory = extra.isAvailableInInventory;
   }
   await sale.save();

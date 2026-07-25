@@ -64,6 +64,31 @@ const saleItemSchema = new mongoose.Schema({
     type: String,
     enum: ITEM_STORE_QC_STATUSES,
     default: null
+  },
+  // How much of this item's ordered `quantity` has been QC-approved so far.
+  // Only relevant when a QC job's quantity was reduced by a partial reject
+  // (see QCJob.partialRejections) — the rejected portion re-enters QC later
+  // (via Rework/Repair/Purchase Exchange) as its own QC job and adds to this
+  // total on its own Approve. storeQCStatus only advances to 'Approved from
+  // QC' once approvedQty reaches the full quantity — for every item that was
+  // never partially rejected, this still happens on the first (and only)
+  // Approve, exactly as before.
+  approvedQty: {
+    type: Number,
+    default: 0
+  },
+  // Which QCJob.source produced the most recent 'Rejected from QC' on this
+  // item. Store sends some items (e.g. a Purchase/Manufacturing Machine
+  // already sitting in stock) straight to QC itself (source: 'Store') — if
+  // QC rejects that, the qty comes back to Store's inventory and Store's
+  // own Check Inventory button must reactivate so Store can re-route it.
+  // A 'Production' (or 'QC_Rejected' rework-cycle) rejection instead flows
+  // through the Production Rework/Repair module — Store has no inventory
+  // stake there, so the button stays disabled.
+  lastRejectionSource: {
+    type: String,
+    enum: [null, 'Store', 'Production', 'QC_Rejected'],
+    default: null
   }
 });
 

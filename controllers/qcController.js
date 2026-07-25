@@ -283,7 +283,7 @@ export const updateChecklistItem = async (req, res) => {
 
 export const submitDecision = async (req, res) => {
   try {
-    const { decision, failReason, inspectorRemarks } = req.body;
+    const { decision, failReason, inspectorRemarks, rejectQty } = req.body;
     if (!decision || !['Pass', 'Fail'].includes(decision)) {
       return res.status(400).json({ success: false, message: 'decision must be Pass or Fail' });
     }
@@ -303,6 +303,76 @@ export const submitDecision = async (req, res) => {
           message: `${pendingItems.length} checklist item${pendingItems.length > 1 ? 's' : ''} still pending. Complete all checklist items before submitting a decision.`
         });
       }
+    }
+
+    // Partial reject: job.quantity > 1 and QC only wants to fail part of it.
+    // The job stays 'In Progress' with a reduced `quantity` — the remaining
+    // units are still awaiting their own Approve/Fail decision, so this same
+    // job can be decided on again. Omitting rejectQty (or sending it equal to
+    // the full remaining quantity) is a full reject and falls through to the
+    // unchanged legacy branch below.
+    const parsedRejectQty = Number(rejectQty);
+    const isPartialReject = decision === 'Fail'
+      && Number.isFinite(parsedRejectQty) && parsedRejectQty > 0
+      && parsedRejectQty < job.quantity;
+
+    if (isPartialReject) {
+      job.quantity -= parsedRejectQty;
+      job.partialRejections.push({ qty: parsedRejectQty, reason: failReason, rejectedBy: req.user._id });
+      job.returnedToSource = true;
+      // Downstream helpers (createRejectedProductionOrder / createQCRejectedPurchaseReturn
+      // / createQCRejectedPurchaseExchange) read qcJob.failReason for their
+      // "why was this rejected" record — the terminal (non-partial) path sets
+      // this too, but that only runs when the job fully closes. Set it here
+      // too so a partial reject's reason actually reaches Repair/Rework/Exchange.
+      job.failReason = failReason;
+
+      if (job.source === 'Purchase') {
+        try {
+          const { createQCRejectedPurchaseReturn } = await import('./purchaseInvoiceController.js');
+          await createQCRejectedPurchaseReturn(job, req.user, parsedRejectQty);
+          console.log(`✅ [QC Partial Rejection] Created purchase return for ${parsedRejectQty} of ${job.itemName}; ${job.quantity} remaining in QC`);
+        } catch (returnError) {
+          console.error('❌ Error creating purchase return for partially rejected purchase item:', returnError);
+        }
+        try {
+          const { createQCRejectedPurchaseExchange } = await import('./purchaseExchangeController.js');
+          await createQCRejectedPurchaseExchange(job, req.user, parsedRejectQty);
+        } catch (exchangeError) {
+          console.error('❌ Error creating purchase exchange for partially rejected purchase item:', exchangeError);
+        }
+      } else if (job.source === 'Store') {
+        // Store sent this item straight to QC (e.g. a Purchase/Manufacturing
+        // Machine already sitting in stock) — the rejected qty simply goes
+        // back to Store's inventory. No Production rework order: there was
+        // never a production run behind this item, and Store re-routes the
+        // restored qty itself via Check Inventory (reactivated below since
+        // storeQCStatus is left untouched on a partial reject anyway).
+        await restoreStoreInventoryQty(job, parsedRejectQty);
+        // Unlike a full reject, the linked Sale item's storeQCStatus is left
+        // untouched here — the remaining quantity is still actively in QC.
+      } else {
+        try {
+          await createRejectedProductionOrder(job, req.user, parsedRejectQty);
+          console.log(`✅ [QC Partial Rejection] Created production order for ${parsedRejectQty} of ${job.itemName}; ${job.quantity} remaining in QC`);
+        } catch (prodError) {
+          console.error('❌ Error creating production order for partially rejected item:', prodError);
+        }
+        // Unlike a full reject, the linked Sale item's storeQCStatus is left
+        // untouched here — the remaining quantity is still actively in QC.
+      }
+
+      await job.save();
+
+      try {
+        await notificationService.triggerQCNotification({
+          action: 'qc_failed',
+          data: { qcJobId: job.qcJobId, itemName: job.itemName, failReason, jobId: job._id, partial: true, rejectedQty: parsedRejectQty, remainingQty: job.quantity },
+          targetCompanyId: job.company,
+        });
+      } catch (e) { console.error('QC decision notification error:', e); }
+
+      return res.json({ success: true, data: job, partial: true });
     }
 
     job.decision = decision;
@@ -471,7 +541,7 @@ export const submitDecision = async (req, res) => {
                 itemIdForUpdate = srcProd?.saleItemId || null;
               } catch (_) { /* fall back to sale-level */ }
             }
-            const perItem = await setSaleItemStatus(saleByRef, itemIdForUpdate, 'Approved from QC');
+            const perItem = await setSaleItemStatus(saleByRef, itemIdForUpdate, 'Approved from QC', { qty: job.quantity });
             console.log(`✅ [QC Approval - ${job.source}] 'Approved from QC' for Sale ${saleByRef._id}${perItem ? ` (item ${itemIdForUpdate})` : ' (sale-level)'}`);
           } else {
             console.warn(`⚠️ [QC Approval - ${job.source}] Could not find linked Sale for QC Job ${job.qcJobId}. saleId: ${job.saleId}, sourceRefId: ${job.sourceRefId}`);
@@ -519,7 +589,7 @@ export const submitDecision = async (req, res) => {
           }
 
           if (linkedSale) {
-            const perItem = await setSaleItemStatus(linkedSale, saleItemId, 'Approved from QC', { isAvailableInInventory: 'Available' });
+            const perItem = await setSaleItemStatus(linkedSale, saleItemId, 'Approved from QC', { isAvailableInInventory: 'Available', qty: job.quantity });
             console.log(`[QC Approval - QC_Rejected] Sale ${linkedSale._id} → Approved from QC${perItem ? ` (item ${saleItemId})` : ' (sale-level)'}. Ready for dispatch.`);
           }
         } catch (e) { console.error('❌ Error updating Sale on QC_Rejected approval:', e); }
@@ -587,7 +657,7 @@ export const submitDecision = async (req, res) => {
               const newStatus = isMachine ? 'Approved from QC' : 'Purchase Completed';
               // Multi-item: the Purchase Request carries the exact sale item
               const saleItemId = pr.saleItemId || job.saleItemId || null;
-              const perItem = await setSaleItemStatus(salePurch, saleItemId, newStatus);
+              const perItem = await setSaleItemStatus(salePurch, saleItemId, newStatus, { qty: job.quantity });
               console.log(`✅ [QC Approval - Purchase ${isMachine ? 'Machine' : 'Material'}] '${newStatus}' for Sale ${salePurch._id}${perItem ? ` (item ${saleItemId})` : ' (sale-level)'}`);
             } else {
               console.warn(`⚠️ [QC Approval - Purchase] PR ${pr.requestId} found but could not locate linked Sale (storeOrderId: ${pr.storeOrderId})`);
@@ -613,37 +683,29 @@ export const submitDecision = async (req, res) => {
         } catch (returnError) {
           console.error('❌ Error creating purchase return for rejected purchase item:', returnError);
         }
-      } else {
-        // For Store source: restore inventory qty (item was deducted when sent to QC, now it's rejected so it comes back)
-        if (job.source === 'Store') {
-          try {
-            let inventoryItem = null;
-            if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
-              inventoryItem = await Item.findById(job.itemCode);
-            }
-            if (!inventoryItem && job.itemCode) {
-              inventoryItem = await Item.findOne({ code: job.itemCode, store: job.company.toString() });
-            }
-            if (!inventoryItem && job.itemName) {
-              inventoryItem = await Item.findOne({ name: job.itemName, store: job.company.toString() });
-            }
-            if (inventoryItem) {
-              const prevQty = inventoryItem.qty || 0;
-              inventoryItem.qty = prevQty + (job.quantity || 1);
-              await inventoryItem.save();
-              console.log(`↩️ [QC Rejection - Store] Restored ${job.quantity || 1} qty to ${inventoryItem.name}. New qty: ${inventoryItem.qty}`);
-            }
-          } catch (restoreErr) {
-            console.error('❌ Error restoring inventory on QC rejection:', restoreErr);
-          }
-        }
-
-        // Auto-create production order for rejected production/store items
         try {
-          await createRejectedProductionOrder(job, req.user);
-          console.log(`✅ [QC Rejection] Created production order for rejected item: ${job.itemName}`);
-        } catch (prodError) {
-          console.error('❌ Error creating production order for rejected item:', prodError);
+          const { createQCRejectedPurchaseExchange } = await import('./purchaseExchangeController.js');
+          await createQCRejectedPurchaseExchange(job, req.user);
+          console.log(`✅ [QC Rejection] Created purchase exchange for rejected purchase item: ${job.itemName}`);
+        } catch (exchangeError) {
+          console.error('❌ Error creating purchase exchange for rejected purchase item:', exchangeError);
+        }
+      } else {
+        if (job.source === 'Store') {
+          // Store sent this item straight to QC (e.g. a Purchase/Manufacturing
+          // Machine already sitting in stock) — restore the qty to inventory
+          // and let Store re-route it via Check Inventory (reactivated below
+          // since lastRejectionSource is recorded as 'Store'). No Production
+          // rework order: there was never a production run behind this item.
+          await restoreStoreInventoryQty(job, job.quantity || 1);
+        } else {
+          // Auto-create production order for rejected production items
+          try {
+            await createRejectedProductionOrder(job, req.user);
+            console.log(`✅ [QC Rejection] Created production order for rejected item: ${job.itemName}`);
+          } catch (prodError) {
+            console.error('❌ Error creating production order for rejected item:', prodError);
+          }
         }
 
         // Update linked Sale storeQCStatus to 'Rejected from QC' so Store knows
@@ -675,7 +737,7 @@ export const submitDecision = async (req, res) => {
                 itemIdForReject = srcProd?.saleItemId || null;
               } catch (_) { /* fall back to sale-level */ }
             }
-            const perItem = await setSaleItemStatus(saleRej, itemIdForReject, 'Rejected from QC');
+            const perItem = await setSaleItemStatus(saleRej, itemIdForReject, 'Rejected from QC', { rejectionSource: job.source });
             console.log(`✅ [QC Rejection] 'Rejected from QC' for Sale ${saleRej._id}${perItem ? ` (item ${itemIdForReject})` : ' (sale-level)'}`);
           } else {
             console.warn(`⚠️ [QC Rejection] Could not find linked Sale for QC Job ${job.qcJobId}`);
@@ -712,7 +774,7 @@ export const submitDecision = async (req, res) => {
 };
 
 // Helper function to create production order for rejected QC items
-async function createRejectedProductionOrder(qcJob, user) {
+async function createRejectedProductionOrder(qcJob, user, qty) {
   try {
     // Generate unique order ID
     const year = new Date().getFullYear();
@@ -783,7 +845,7 @@ async function createRejectedProductionOrder(qcJob, user) {
       // rebuilds the full rejected quantity
       saleId: qcJob.saleId || null,
       saleItemId,
-      orderQuantity: qcJob.quantity || 1,
+      orderQuantity: qty || qcJob.quantity || 1,
       company: qcJob.company,
       createdBy: user._id
     });
@@ -792,6 +854,31 @@ async function createRejectedProductionOrder(qcJob, user) {
   } catch (error) {
     console.error('Error creating rejected production order:', error);
     throw error;
+  }
+}
+
+// Restore `qty` units to inventory for a Store-sourced job (partial or full
+// reject) — the item was deducted from stock when it was sent to QC.
+async function restoreStoreInventoryQty(job, qty) {
+  try {
+    let inventoryItem = null;
+    if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
+      inventoryItem = await Item.findById(job.itemCode);
+    }
+    if (!inventoryItem && job.itemCode) {
+      inventoryItem = await Item.findOne({ code: job.itemCode, store: job.company.toString() });
+    }
+    if (!inventoryItem && job.itemName) {
+      inventoryItem = await Item.findOne({ name: job.itemName, store: job.company.toString() });
+    }
+    if (inventoryItem) {
+      const prevQty = inventoryItem.qty || 0;
+      inventoryItem.qty = prevQty + (qty || 1);
+      await inventoryItem.save();
+      console.log(`↩️ [QC Rejection - Store] Restored ${qty || 1} qty to ${inventoryItem.name}. New qty: ${inventoryItem.qty}`);
+    }
+  } catch (restoreErr) {
+    console.error('❌ Error restoring inventory on QC rejection:', restoreErr);
   }
 }
 
