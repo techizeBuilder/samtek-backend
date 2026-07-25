@@ -15,11 +15,16 @@ export const createCustomerPayment = async (req, res) => {
 
         console.log('💳 Processing customer payment (Standalone Mode):', { customerId, amount, paymentMode, unit, accountId, orderId });
 
-        // Resolve order (order-wise payment tracking) — optional
-        let linkedOrder = null;
-        if (orderId) {
-            const Order = (await import('../models/Order.js')).default;
-            linkedOrder = await Order.findOne({ _id: orderId, companyId }).select('orderCode customer').lean();
+        if (!orderId) {
+            return res.status(400).json({ success: false, message: 'Please select an order before recording a payment.' });
+        }
+
+        // Resolve order (order-wise payment tracking) — required
+        const Order = (await import('../models/Order.js')).default;
+        const linkedOrder = await Order.findOne({ _id: orderId, companyId }).select('orderCode customer').lean();
+
+        if (!linkedOrder) {
+            return res.status(400).json({ success: false, message: 'Selected order was not found. Please select a valid order.' });
         }
 
         // 1. Create Payment record

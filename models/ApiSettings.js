@@ -49,6 +49,17 @@ const apiSettingsSchema = new mongoose.Schema({
     enabled: { type: Boolean, default: false },
     apiKey: { type: String, default: '' },
     assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+  },
+
+  // ─── Google Ads Lead Form Webhook Settings ─────────────────────
+  // webhookKey doubles as both the ?q= tenant identifier (our own
+  // convention) AND the "google_key" shared secret Google Ads echoes
+  // back in every payload for its own verification handshake.
+  googleAds: {
+    enabled: { type: Boolean, default: false },
+    webhookKey: { type: String, default: '' },
+    assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    lastSyncedAt: { type: Date }
   }
 
 }, { timestamps: true });

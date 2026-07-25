@@ -28,8 +28,11 @@ export const getTaxSummary = async (req, res) => {
         }
         const companyState = (company.state || '').toLowerCase().trim();
 
-        // 1. Fetch Sales (Output Tax)
-        let salesQuery = { companyId: validCompanyId };
+        // 1. Fetch Sales (Output Tax) — Pakka (formal/GST) invoices only.
+        // Kachha bills carry no valid GST/TDS and Store's auto-created
+        // isPlaceholder sales aren't real invoices at all, so both must be
+        // excluded here — mirrors the same filter used in financeController.js.
+        let salesQuery = { companyId: validCompanyId, invoiceType: 'Pakka', isPlaceholder: { $ne: true } };
         if (moodYear && moodMonth) {
             const startDate = new Date(parseInt(moodYear), parseInt(moodMonth) - 1, 1);
             const endDate = new Date(parseInt(moodYear), parseInt(moodMonth), 0, 23, 59, 59);
@@ -37,7 +40,7 @@ export const getTaxSummary = async (req, res) => {
         }
 
         const sales = await Sale.find(salesQuery).populate('customer', 'name state');
-        console.log(`✅ Found ${sales.length} sales records`);
+        console.log(`✅ Found ${sales.length} Pakka sales records (Kachha/placeholder excluded)`);
 
         // 2. Fetch Purchase Invoices (Input Tax)
         let purchaseQuery = { companyId: validCompanyId };
