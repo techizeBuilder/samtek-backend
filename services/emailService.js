@@ -432,6 +432,98 @@ export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantit
 };
 
 /**
+ * Send Purchase Exchange request email — QC rejected some qty of a
+ * Purchase-sourced item and we're asking the vendor to replace it.
+ */
+export const sendPurchaseExchangeEmail = async ({ to, vendorName, itemName, exchangeQty, purchaseUnit, reason, poNumber, acceptLink, companyName }) => {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.log(`[EMAIL SKIPPED] No SMTP config. Would send Purchase Exchange request to: ${to}`);
+    return { success: true, mocked: true, message: 'No SMTP config, mock success' };
+  }
+
+  const transporter = createTransporter();
+  const subject = `🔄 Replacement Requested: ${itemName} | ${companyName}`;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: linear-gradient(135deg, #b91c1c, #7c3aed); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 22px;">🔄 Purchase Exchange Request</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${companyName}${poNumber ? ' · PO ' + poNumber : ''}</p>
+      </div>
+
+      <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 16px;">Dear <strong>${vendorName}</strong>,</p>
+        <p style="color: #6b7280; line-height: 1.6;">
+          During Quality Control inspection, part of a recent shipment did not pass inspection. We request a replacement for the quantity below.
+        </p>
+
+        <div style="background: #fef2f2; border-left: 4px solid #b91c1c; border-radius: 4px; padding: 20px; margin: 20px 0;">
+          <h3 style="color: #b91c1c; margin: 0 0 12px;">📦 Replacement Details</h3>
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px; width: 40%;">Item</td>
+              <td style="padding: 6px 0; color: #111827; font-weight: bold;">${itemName}</td>
+            </tr>
+            <tr style="border-top: 1px solid #fecaca;">
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">Quantity to Replace</td>
+              <td style="padding: 6px 0; color: #111827; font-weight: bold;">${exchangeQty} ${purchaseUnit || 'Unit(s)'}</td>
+            </tr>
+            ${reason ? `
+            <tr style="border-top: 1px solid #fecaca;">
+              <td style="padding: 6px 0; color: #6b7280; font-size: 14px;">QC Rejection Reason</td>
+              <td style="padding: 6px 0; color: #374151;">${reason}</td>
+            </tr>` : ''}
+          </table>
+        </div>
+
+        <p style="color: #374151; line-height: 1.6;">
+          Please click below to confirm you can send a replacement. Once confirmed, our Store team will expect the replacement shipment.
+        </p>
+
+        <div style="text-align: center; margin: 28px 0;">
+          <a href="${acceptLink}" style="
+            display: inline-block;
+            background: linear-gradient(135deg, #b91c1c, #7c3aed);
+            color: white;
+            text-decoration: none;
+            padding: 14px 36px;
+            border-radius: 8px;
+            font-weight: bold;
+            font-size: 16px;
+            letter-spacing: 0.5px;
+          ">
+            ✅ Confirm Replacement
+          </a>
+        </div>
+
+        <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; padding: 14px; margin-top: 20px;">
+          <p style="color: #92400e; font-size: 13px; margin: 0;">
+            ⏰ <strong>Note:</strong> This link is valid for 7 days. If you have any questions, please contact us directly.
+          </p>
+        </div>
+
+        <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">Thank you for your partnership.</p>
+        <p style="color: #111827; font-weight: bold;">— ${companyName} Procurement Team</p>
+      </div>
+    </div>
+  `;
+
+  try {
+    const result = await transporter.sendMail({
+      from: `"${companyName} Procurement" <${process.env.SMTP_USER}>`,
+      to,
+      subject,
+      html
+    });
+    console.log(`✅ Purchase Exchange email sent to ${to} for ${itemName}`);
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    console.error(`❌ Purchase Exchange email failed to ${to}:`, error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
  * Send Vendor Bid Confirmation Email (when vendor is selected as winner)
  */
 export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, poNumber, productName, quantity, unitPrice, deliveryDays, warrantyMonths, companyName }) => {

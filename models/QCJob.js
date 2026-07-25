@@ -67,6 +67,17 @@ const QCJobSchema = new mongoose.Schema({
   transferredToStore: { type: Boolean, default: false },
   returnedToSource: { type: Boolean, default: false },
 
+  // Audit trail of partial rejections. When a job's quantity is >1 and QC
+  // rejects only part of it, we log each rejected slice here and reduce
+  // `quantity` by that amount rather than closing the job — the remaining
+  // quantity stays in QC pending an Approve/Fail decision of its own.
+  partialRejections: [{
+    qty: { type: Number, required: true },
+    reason: { type: String, default: '' },
+    rejectedAt: { type: Date, default: Date.now },
+    rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  }],
+
   notes: { type: String, default: '' },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },

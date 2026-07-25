@@ -28,6 +28,76 @@ async function generateOrderId(companyId) {
   return `ORD-${year}-${String(count + 1).padStart(3, '0')}`;
 }
 
+// Auto-creates (or reuses) the central QC intake job for a Production Order's
+// output — used once the last process step is QC-approved (approveQC below)
+// and, identically, once a Repair job is marked complete.
+async function createQCJobForCompletedOrder(order, sentBy, userId) {
+  const existingQC = await QCJob.findOne({
+    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+    sourceRefId: order.orderId,
+    company: order.company
+  });
+  if (existingQC) return existingQC;
+
+  const year = new Date().getFullYear();
+  const lastJob = await QCJob.findOne({
+    qcJobId: new RegExp(`^QC-${year}-`)
+  }).sort({ qcJobId: -1 }).lean();
+
+  let nextNumber = 1;
+  if (lastJob && lastJob.qcJobId) {
+    const parts = lastJob.qcJobId.split('-');
+    if (parts.length === 3) {
+      const lastNumber = parseInt(parts[2]);
+      if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
+    }
+  }
+  const qcJobId = `QC-${year}-${String(nextNumber).padStart(4, '0')}`;
+
+  let qcCategory = 'Finished Good';
+  try {
+    const inventoryItem = await Item.findOne({
+      $or: [{ code: order.machineCode }, { name: order.machineName }],
+      companyId: order.company
+    });
+    if (inventoryItem && inventoryItem.category) qcCategory = inventoryItem.category;
+  } catch (itemErr) {
+    console.error('Error looking up inventory item for category:', itemErr);
+  }
+
+  const qcJob = await QCJob.create({
+    qcJobId,
+    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+    sourceRefId: order.orderId,
+    sourceDepartment: 'Production',
+    sentBy: sentBy || 'Production Dept',
+    itemName: order.machineName,
+    itemCode: order.machineCode,
+    category: qcCategory,
+    quantity: order.orderQuantity || 1,
+    unit: 'pcs',
+    receivedDate: today(),
+    status: 'Pending',
+    saleId: order.saleId,
+    saleItemId: order.saleItemId || null,
+    orderCode: order.orderCode || '',
+    company: order.company,
+    createdBy: userId,
+    notes: `Automatically created from completed Production Order: ${order.orderId}`
+  });
+  console.log(`✅ QC Job ${qcJobId} automatically created for Production Order ${order.orderId}`);
+
+  try {
+    await notificationService.triggerQCNotification({
+      action: 'qc_job_created',
+      data: { qcJobId, itemName: order.machineName, jobId: qcJob._id },
+      targetCompanyId: order.company,
+    });
+  } catch (e) { console.error('QC job notification error:', e); }
+
+  return qcJob;
+}
+
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
 
 export const getOrders = async (req, res) => {
@@ -175,6 +245,106 @@ export const raiseRDRequest = async (req, res) => {
     await order.save();
 
     res.json({ success: true, message: 'R&D Request raised successfully.', data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── QC-REJECTED ORDER: REWORK / REPAIR DECISION ───────────────────────────────
+// A QC_Rejected order sits with reworkDecision='Pending' (BOM/R&D UI hidden)
+// until Production explicitly picks one of these two paths.
+
+export const decideRework = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId, source: 'QC_Rejected' });
+    if (!order) return res.status(404).json({ success: false, message: 'Rejected order not found' });
+    if (order.reworkDecision !== 'Pending') {
+      return res.status(400).json({ success: false, message: `Decision already made: ${order.reworkDecision}` });
+    }
+    // Rework = rebuild from scratch, same as this order's default automatic
+    // pipeline (BOM verify → material issue → process steps → QC), just now
+    // gated behind an explicit choice instead of firing immediately.
+    order.reworkDecision = 'Rework';
+    await order.save();
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const decideRepair = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId, source: 'QC_Rejected' });
+    if (!order) return res.status(404).json({ success: false, message: 'Rejected order not found' });
+    if (order.reworkDecision !== 'Pending') {
+      return res.status(400).json({ success: false, message: `Decision already made: ${order.reworkDecision}` });
+    }
+    order.reworkDecision = 'Repair';
+    order.status = 'On Hold'; // parks it out of the normal active-production board
+    order.repair.status = 'Pending';
+    await order.save();
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── REPAIR PRODUCTION MODULE ──────────────────────────────────────────────────
+// Repair jobs are QC_Rejected Production Orders that were routed here instead
+// of the full rebuild pipeline — same record, filtered by reworkDecision.
+
+export const getRepairJobs = async (req, res) => {
+  try {
+    const orders = await ProductionOrder.find({ company: req.user.companyId, reworkDecision: 'Repair' })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, data: orders });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const startRepair = async (req, res) => {
+  try {
+    const { assignedTo } = req.body;
+    const order = await ProductionOrder.findOneAndUpdate(
+      { _id: req.params.id, company: req.user.companyId, reworkDecision: 'Repair' },
+      { 'repair.status': 'In Progress', 'repair.assignedTo': assignedTo || '' },
+      { new: true }
+    );
+    if (!order) return res.status(404).json({ success: false, message: 'Repair job not found' });
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const completeRepair = async (req, res) => {
+  try {
+    const { notes } = req.body;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId, reworkDecision: 'Repair' });
+    if (!order) return res.status(404).json({ success: false, message: 'Repair job not found' });
+    if (order.repair.status === 'Completed') {
+      return res.status(400).json({ success: false, message: 'Repair already completed' });
+    }
+
+    order.repair.status = 'Completed';
+    order.repair.notes = notes || order.repair.notes;
+    order.repair.completedAt = new Date();
+    order.status = 'Completed';
+    await order.save();
+
+    // Repaired qty re-enters the same central QC intake pipeline as any
+    // finished production run — Approve in QC then behaves exactly like a
+    // normal QC_Rejected Pass (routes straight to dispatch for the original
+    // order); Fail re-runs this same Rework/Repair choice again.
+    try {
+      await createQCJobForCompletedOrder(order, 'Repair Dept', req.user._id);
+    } catch (qcErr) {
+      console.error('❌ Error creating QC Job for completed repair:', qcErr);
+    }
+
+    res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -772,78 +942,7 @@ export const approveQC = async (req, res) => {
 
       // 🏭 Auto-create QC Job for completed production order
       try {
-        const existingQC = await QCJob.findOne({
-          source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
-          sourceRefId: order.orderId,
-          company: order.company
-        });
-
-        if (!existingQC) {
-          const year = new Date().getFullYear();
-          const lastJob = await QCJob.findOne({
-            qcJobId: new RegExp(`^QC-${year}-`)
-          }).sort({ qcJobId: -1 }).lean();
-
-          let nextNumber = 1;
-          if (lastJob && lastJob.qcJobId) {
-            const parts = lastJob.qcJobId.split('-');
-            if (parts.length === 3) {
-              const lastNumber = parseInt(parts[2]);
-              if (!isNaN(lastNumber)) {
-                nextNumber = lastNumber + 1;
-              }
-            }
-          }
-          const qcJobId = `QC-${year}-${String(nextNumber).padStart(4, '0')}`;
-
-          let qcCategory = 'Finished Good'; // default for production
-          try {
-            const { Item } = await import('../models/Inventory.js');
-            const inventoryItem = await Item.findOne({
-              $or: [
-                { code: order.machineCode },
-                { name: order.machineName }
-              ],
-              companyId: order.company
-            });
-            if (inventoryItem && inventoryItem.category) {
-              qcCategory = inventoryItem.category;
-            }
-          } catch (itemErr) {
-            console.error('Error looking up inventory item for category:', itemErr);
-          }
-
-          const qcJob = await QCJob.create({
-            qcJobId,
-            source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
-            sourceRefId: order.orderId,
-            sourceDepartment: 'Production',
-            sentBy: qcBy || 'Production Dept',
-            itemName: order.machineName,
-            itemCode: order.machineCode,
-            category: qcCategory,
-            // Multi-qty: QC inspects the full produced quantity of this run
-            quantity: order.orderQuantity || 1,
-            unit: 'pcs',
-            receivedDate: today(),
-            status: 'Pending',
-            saleId: order.saleId,
-            saleItemId: order.saleItemId || null,
-            orderCode: order.orderCode || '',
-            company: order.company,
-            createdBy: req.user._id,
-            notes: `Automatically created from completed Production Order: ${order.orderId}`
-          });
-          console.log(`✅ QC Job ${qcJobId} automatically created for Production Order ${order.orderId}`);
-
-          try {
-            await notificationService.triggerQCNotification({
-              action: 'qc_job_created',
-              data: { qcJobId, itemName: order.machineName, jobId: qcJob._id },
-              targetCompanyId: order.company,
-            });
-          } catch (e) { console.error('QC job notification error:', e); }
-        }
+        await createQCJobForCompletedOrder(order, qcBy, req.user._id);
       } catch (qcCreateErr) {
         console.error('❌ Error creating QC Job for completed production order:', qcCreateErr);
       }

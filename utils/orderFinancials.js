@@ -18,11 +18,13 @@ export function computeOrderFinancials({ form, sale, orderPayments = [], leadPay
     advance = leadPayments.reduce((s, p) => s + (p.amount || 0), 0);
   }
 
-  // Paid (receipts, not counting the advance) — invoice allocation is
-  // authoritative once an invoice exists; otherwise use receipts recorded
-  // directly against this order.
+  // Paid (receipts, not counting the advance) — CustomerPayment receipts are
+  // the authoritative order-wise ledger. An invoice's own paidAmount can lag
+  // behind them (e.g. the receipt was recorded before the real invoice was
+  // generated, or landed on a Store placeholder that predates it), so never
+  // let the invoice under-report what's actually been received for this order.
   const receiptsSum = orderPayments.reduce((s, p) => s + (p.amount || 0), 0);
-  const paid = sale ? (sale.paidAmount || 0) : receiptsSum;
+  const paid = Math.max(sale?.paidAmount || 0, receiptsSum);
 
   const due = Math.max(0, total - advance - paid);
   const paymentStatus = due <= 0 ? 'Paid' : (advance + paid) > 0 ? 'Partially Paid' : 'Pending';

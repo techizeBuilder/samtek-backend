@@ -309,6 +309,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.get('/api/vendor-bid/:token', getBidByToken);
             app.post('/api/vendor-bid/:token', submitBidByToken);
             console.log('RFQ / Vendor Bidding routes registered at /api/rfq + /api/vendor-bid/:token');
+            // Purchase Exchange (QC-rejected purchased goods -> vendor replacement) routes
+            const purchaseExchangeRoutes = (await import('./routes/purchaseExchangeRoutes.js')).default;
+            app.use('/api/purchase-exchange', purchaseExchangeRoutes);
+            console.log('Purchase Exchange routes registered at /api/purchase-exchange');
             const dashboardRoutes = (await import('./routes/dashboardRoutes.js')).default;
             app.use('/api/dashboard', dashboardRoutes);
             console.log('Dashboard routes registered at /api/dashboard');

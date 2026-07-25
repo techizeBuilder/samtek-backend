@@ -21,7 +21,12 @@ import {
   downloadMaterialListPDF,
   addSubEntry,
   completeSubEntry,
-  qcSubEntry
+  qcSubEntry,
+  decideRework,
+  decideRepair,
+  getRepairJobs,
+  startRepair,
+  completeRepair
 } from '../controllers/productionMfgController.js';
 
 const router = express.Router();
@@ -35,6 +40,15 @@ router.put('/orders/:id/verify-bom', verifyBOM);
 router.put('/orders/:id/verify-design', verifyDesign);
 router.put('/orders/:id/raise-rd-request', raiseRDRequest);
 router.put('/orders/:id/mark-material-issued', receiveMaterialInProduction);
+
+// ── QC-rejected order: Rework / Repair decision ────────────────────────────
+router.put('/orders/:id/decide-rework', decideRework);
+router.put('/orders/:id/decide-repair', decideRepair);
+
+// ── Repair Production module ────────────────────────────────────────────────
+router.get('/repair-jobs', getRepairJobs);
+router.put('/orders/:id/repair/start', startRepair);
+router.put('/orders/:id/repair/complete', completeRepair);
 
 // ── Material demands ────────────────────────────────────────────────────────
 router.post('/orders/:id/materials', addMaterialDemand);

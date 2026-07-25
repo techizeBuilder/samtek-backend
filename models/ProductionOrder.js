@@ -119,6 +119,17 @@ const ProductionOrderSchema = new mongoose.Schema({
     rejectedDate: { type: String, default: null },
     qcJobId: { type: String, default: null }
   },
+  // Only meaningful for source: 'QC_Rejected' orders. Newly-created rejected
+  // orders sit at 'Pending' (BOM/R&D verification hidden in the UI) until
+  // Production explicitly chooses Rework (full rebuild — normal pipeline
+  // unlocked) or Repair (routed to the separate Repair Production module).
+  reworkDecision: { type: String, enum: ['Pending', 'Rework', 'Repair'], default: 'Pending' },
+  repair: {
+    status: { type: String, enum: ['Pending', 'In Progress', 'Completed'], default: 'Pending' },
+    assignedTo: { type: String, default: '' },
+    notes: { type: String, default: '' },
+    completedAt: { type: Date, default: null },
+  },
   status: {
     type: String,
     enum: ['Pending', 'BOM Pending', 'In Progress', 'On Hold', 'Completed'],
