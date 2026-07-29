@@ -391,7 +391,7 @@ const getOrderById = async (req, res) => {
 
     const order = await Order.findById(id)
       .populate('customer', 'name email mobile address city state')
-      .populate('products.product', 'name salePrice purchaseCost mrp brand category subCategory image');
+      .populate('products.product', 'name specifications salePrice purchaseCost mrp brand category subCategory image');
 
     if (!order) {
       return res.status(404).json({
@@ -1018,7 +1018,7 @@ const getOrderTracking = async (req, res) => {
         path: 'order',
         populate: {
           path: 'products.product',
-          select: 'name specification'
+          select: 'name specifications'
         }
       })
       .populate('customer', 'name mobile outstandingAmount')
@@ -1073,7 +1073,7 @@ const getOrderTracking = async (req, res) => {
     const pendingOrders = await Order.find(orderQuery)
       .populate('customer', 'name mobile outstandingAmount')
       .populate('leadId', 'leadCode dealValue')
-      .populate('products.product', 'name specification')
+      .populate('products.product', 'name specifications')
       .lean();
 
     const pendingOrderTrackingData = [];
@@ -1551,13 +1551,23 @@ const getNOCRequests = async (req, res) => {
     // several sequential queries PER sale (N+1). Same data, same lookups —
     // just fetched once up front and read from in-memory maps in the loop.
     const companyId = req.user.companyId;
+
+    // Tab filter: which packaging lifecycle stage to show.
+    // pending = still packed, awaiting NOC/gate pass/dispatch (previous default/only view)
+    // completed = already dispatched
+    // all = both
+    const tab = (req.query.status || 'pending').toLowerCase();
+    const jobStatuses = tab === 'completed' ? ['Dispatched'] : tab === 'all' ? ['Packed', 'Dispatched'] : ['Packed'];
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 10));
+
     const orderCodes = [...new Set(sales.map(s => s.order?.orderCode).filter(Boolean))];
     const saleIds = sales.map(s => s._id);
 
     const [directJobs, linkedProdOrders] = await Promise.all([
       PackagingJob.find({
         company: companyId,
-        status: 'Packed',
+        status: { $in: jobStatuses },
         $or: [{ orderId: { $in: orderCodes } }, { saleId: { $in: saleIds } }]
       }).lean(),
       ProductionOrder.find({ saleId: { $in: saleIds }, company: companyId }).select('_id saleId').lean()
@@ -1582,7 +1592,7 @@ const getNOCRequests = async (req, res) => {
 
     const allProdOrderIds = linkedProdOrders.map(po => po._id);
     const jobsByProdOrder = allProdOrderIds.length
-      ? await PackagingJob.find({ productionOrderId: { $in: allProdOrderIds }, status: 'Packed', company: companyId }).lean()
+      ? await PackagingJob.find({ productionOrderId: { $in: allProdOrderIds }, status: { $in: jobStatuses }, company: companyId }).lean()
       : [];
     const jobByProdOrderId = new Map();
     jobsByProdOrder.forEach(j => {
@@ -1740,7 +1750,8 @@ const getNOCRequests = async (req, res) => {
           // order, Due = what's left on this order
           displayTotal: effectiveTotalAmount,
           displayPaid: effectivePaidAmount,
-          displayDue: effectiveBalance
+          displayDue: effectiveBalance,
+          _packedDate: job.packingCompleteTime || job.updatedAt
         });
 
         // Mark this orderId as processed so duplicate Sale docs are skipped
@@ -1748,7 +1759,26 @@ const getNOCRequests = async (req, res) => {
       }
     }
 
-    res.json({ success: true, data: nocRequests });
+    // Most recently packed/dispatched order first — also gives pagination a
+    // stable, deterministic order to slice against.
+    nocRequests.sort((a, b) => new Date(b._packedDate || 0) - new Date(a._packedDate || 0));
+
+    const search = (req.query.search || '').trim().toLowerCase();
+    const filtered = search
+      ? nocRequests.filter(r =>
+          (r.orderCode || '').toLowerCase().includes(search) ||
+          (r.customerName || '').toLowerCase().includes(search) ||
+          (r.machineName || '').toLowerCase().includes(search)
+        )
+      : nocRequests;
+
+    const total = filtered.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const paged = filtered
+      .slice((page - 1) * limit, page * limit)
+      .map(({ _packedDate, ...rest }) => rest);
+
+    res.json({ success: true, data: paged, pagination: { total, page, limit, totalPages } });
   } catch (error) {
     console.error('Error in getNOCRequests:', error);
     res.status(500).json({ success: false, message: error.message });

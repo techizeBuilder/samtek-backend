@@ -1,18 +1,9 @@
-import nodemailer from 'nodemailer';
-
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: process.env.SMTP_PORT || 587,
-    secure: false, // true for 465, false for other ports
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-    },
-});
+import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
 
 /**
  * Multi-purpose email sender for Task Management
- * @param {Object} params 
+ * @param {Object} params
+ * @param {string} params.companyId - Company whose HR SMTP mailbox to send from
  * @param {string} params.to - Recipient email
  * @param {string} params.userName - Name of the recipient
  * @param {string} params.subject - Email Subject line
@@ -21,6 +12,7 @@ const transporter = nodemailer.createTransport({
  * @param {Object} [params.taskDetails] - Optional task object (title, type, priority, status, dueDate)
  */
 export const sendTaskEmail = async ({
+    companyId,
     to,
     userName,
     subject,
@@ -29,6 +21,12 @@ export const sendTaskEmail = async ({
     taskDetails = null
 }) => {
     try {
+        const mailer = await getDeptMailer(companyId, DEPARTMENTS.HR);
+        if (!mailer) {
+            console.log(`[EMAIL SKIPPED] HR SMTP not configured. Would send task email to: ${to}`);
+            return false;
+        }
+
         // Dynamically build the Task Details box if data is provided
         let taskDetailsHtml = '';
 
@@ -58,7 +56,7 @@ export const sendTaskEmail = async ({
         }
 
         const mailOptions = {
-            from: `"${process.env.SMTP_FROM_NAME}" <${process.env.SMTP_USER}>`,
+            from: `"${process.env.SMTP_FROM_NAME}" <${mailer.fromAddress}>`,
             to: to,
             subject: subject,
             html: `
@@ -85,7 +83,7 @@ export const sendTaskEmail = async ({
             `
         };
 
-        const info = await transporter.sendMail(mailOptions);
+        const info = await mailer.transporter.sendMail(mailOptions);
         console.log(`✉️ Email sent to ${to}: ${info.messageId}`);
         return true;
     } catch (error) {

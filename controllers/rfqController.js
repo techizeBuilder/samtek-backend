@@ -355,6 +355,7 @@ export const createRFQ = async (req, res) => {
 
       try {
         await sendRFQEmail({
+          companyId,
           to: vendor.email,
           vendorName: vendor.supplierName,
           rfqNo: rfq.rfqNo,
@@ -593,6 +594,7 @@ export const selectVendor = async (req, res) => {
     const companyName = company?.name || 'Samtek';
     try {
       await sendVendorBidConfirmationEmail({
+        companyId,
         to: winningBid.vendor.email,
         vendorName: winningBid.vendor.supplierName,
         rfqNo: rfq.rfqNo,

@@ -91,6 +91,39 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
 }
 
 /**
+ * Computes a finished item's BOM material cost using each material's MRP
+ * (not purchaseCost/stdCost) — used by the Sales Order Form to enforce a
+ * minimum Billing Amount. Flat sum, no recursive sub-BOM walk:
+ * Σ(material.mrp × qty). Returns { found: false } when there's no
+ * RDMachine/BOM for this code at all — callers should skip validation
+ * entirely in that case (per product requirement: no BOM = no check).
+ */
+export async function computeBOMMaterialsMrpCost(code, companyId) {
+  const machine = await RDMachine.findOne({ code, company: companyId }).lean();
+  if (!machine) return { found: false, totalCost: 0, materials: [] };
+
+  const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();
+  const activeMaterials = (bom?.materials || []).filter(m => !m.isDiscontinued);
+  if (activeMaterials.length === 0) return { found: false, totalCost: 0, materials: [] };
+
+  const items = await Item.find({
+    companyId,
+    code: { $in: activeMaterials.map(m => new RegExp(`^${escapeRegex(m.code)}$`, 'i')) }
+  }).select('code mrp').lean();
+  const mrpByCode = new Map(items.map(it => [it.code.toLowerCase(), it.mrp || 0]));
+
+  let totalCost = 0;
+  const materials = activeMaterials.map(m => {
+    const mrp = mrpByCode.get((m.code || '').toLowerCase()) || 0;
+    const lineTotal = round2(mrp * (m.quantity || 0));
+    totalCost += lineTotal;
+    return { code: m.code, item: m.item, quantity: m.quantity, unit: m.unit, mrp, lineTotal };
+  });
+
+  return { found: true, totalCost: round2(totalCost), materials };
+}
+
+/**
  * Finds the purchase-unit → storage-unit conversion factor for an item's most
  * recent purchase (conversionFactor = how many purchaseUnits equal 1 base unit,
  * captured by Store at receive time). Prefers the PurchaseRequest the invoice

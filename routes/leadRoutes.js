@@ -24,6 +24,8 @@ import {
   receiveWebsiteWebhook,
   receiveIndiamartWebhook,
   receiveGoogleAdsWebhook,
+  verifyFacebookWebhook,
+  receiveFacebookWebhook,
   getCallLogs,
   clickToCall
 } from '../controllers/leadController.js';
@@ -37,6 +39,8 @@ router.post('/ivr-webhook',        receiveIvrCallLog);
 router.post('/website-webhook',    receiveWebsiteWebhook);
 router.post('/indiamart-webhook',  receiveIndiamartWebhook);
 router.post('/google-ads-webhook', receiveGoogleAdsWebhook);
+router.get('/facebook-webhook',    verifyFacebookWebhook);
+router.post('/facebook-webhook',   receiveFacebookWebhook);
 
 // ─── Authenticated Routes ─────────────────────────────────────────────────────
 router.use(authenticateToken);

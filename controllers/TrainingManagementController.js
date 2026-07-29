@@ -133,7 +133,7 @@ export const stageCandidate = async (req, res) => {
             stagedBy: managerId
         });
 
-        sendTrainingEmail(traineeUser.email, TrainingEmailType.CANDIDATE_STAGED, {
+        sendTrainingEmail(companyId, traineeUser.email, TrainingEmailType.CANDIDATE_STAGED, {
             fullName: traineeUser.fullName,
             department: extractedDepartment || 'General'
         });
@@ -445,7 +445,7 @@ export const finalizeTrainee = async (req, res) => {
             profile.status = 'Completed_Onboarding';
             await profile.save();
 
-            sendTrainingEmail(profile.user.email, TrainingEmailType.TRAINING_PASSED, {
+            sendTrainingEmail(profile.companyId, profile.user.email, TrainingEmailType.TRAINING_PASSED, {
                 fullName: profile.user.fullName,
                 department: profile.assignedDepartment,
                 role: profile.user.role
@@ -463,7 +463,7 @@ export const finalizeTrainee = async (req, res) => {
             profile.isEligible = false;
             await profile.save();
 
-            sendTrainingEmail(profile.user.email, TrainingEmailType.TRAINING_REJECTED, {
+            sendTrainingEmail(profile.companyId, profile.user.email, TrainingEmailType.TRAINING_REJECTED, {
                 fullName: profile.user.fullName,
                 department: profile.assignedDepartment
             });

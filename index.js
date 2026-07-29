@@ -190,9 +190,13 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
         // SMTP Test route (development only)
             app.get('/api/test-smtp', async (req, res) => {
                 try {
+                    if (!req.query.email || !req.query.companyId) {
+                        return res.status(400).json({ success: false, message: 'Pass ?email=...&companyId=... to test' });
+                    }
                     const { sendSupportEmail } = await import('./utils/serviceEmail.js');
-                    const testEmail = req.query.email || process.env.SMTP_USER;
+                    const testEmail = req.query.email;
                     await sendSupportEmail({
+                        companyId: req.query.companyId,
                         type: 'INSTALLATION_COMPLETE',
                         to: testEmail,
                         name: 'Test Customer',
@@ -282,6 +286,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const leadRouter = (await import('./routes/leadRoutes.js')).default;
             app.use('/api/leads', leadRouter);
             console.log('Lead routes registered at /api/leads');
+            const whatsappRouter = (await import('./routes/whatsappRoutes.js')).default;
+            app.use('/api/whatsapp', whatsappRouter);
+            console.log('WhatsApp routes registered at /api/whatsapp');
             // Lead Payment routes
             const leadPaymentRouter = (await import('./routes/leadPaymentRoutes.js')).default;
             app.use('/api/lead-payments', leadPaymentRouter);

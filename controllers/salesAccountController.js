@@ -334,6 +334,7 @@ export const getPendingAccountOrders = async (req, res) => {
         const Order = (await import('../models/Order.js')).default;
         const Sale = (await import('../models/Sale.js')).default;
         const LeadPayment = (await import('../models/LeadPayment.js')).default;
+        const OrderForm = (await import('../models/OrderForm.js')).default;
 
         const query = {
             companyId: req.user.companyId,
@@ -345,6 +346,17 @@ export const getPendingAccountOrders = async (req, res) => {
             .populate('products.product', 'name price brand unit')
             .sort({ orderDate: -1 })
             .lean();
+
+        // Order Form's Grand Total (Bill + GST) — the actual billable amount
+        // once Accounts has filled the form — is what the "Amount" column
+        // should show (same figure as the View modal's "Grand Total" line).
+        const orderForms = await OrderForm.find({
+            orderId: { $in: orders.map(o => o._id) },
+            status: 'Submitted'
+        }).select('orderId totals').lean();
+        const orderFormTotalByOrderId = new Map(
+            orderForms.map(f => [f.orderId.toString(), (f.totals?.billAmount || 0) + (f.totals?.gstAmount || 0)])
+        );
 
         // Enrich with invoicing status + advanced payment from linked lead
         const ordersWithInvoices = await Promise.all(orders.map(async (order) => {
@@ -368,7 +380,10 @@ export const getPendingAccountOrders = async (req, res) => {
                 ...order,
                 generatedInvoices: invoices.map(inv => inv.invoiceType),
                 advancedPaymentAmount,
-                advancedPayments
+                advancedPayments,
+                orderFormTotal: orderFormTotalByOrderId.has(order._id.toString())
+                    ? orderFormTotalByOrderId.get(order._id.toString())
+                    : null
             };
         }));
 
@@ -729,9 +744,18 @@ export const getPackedOrders = async (req, res) => {
 
         const companyId = req.user.companyId;
 
-        // Find packaging jobs with status 'Packed' under user's company
+        // Tab filter: which packaging lifecycle stage to show.
+        // pending = still packed, awaiting final payment/dispatch (previous default/only view)
+        // completed = already dispatched
+        // all = both
+        const tab = (req.query.status || 'pending').toLowerCase();
+        const jobStatuses = tab === 'completed' ? ['Dispatched'] : tab === 'all' ? ['Packed', 'Dispatched'] : ['Packed'];
+        const page = Math.max(1, parseInt(req.query.page) || 1);
+        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 10));
+
+        // Find packaging jobs matching the selected tab, under user's company
         const packedJobs = await PackagingJob.find({
-            status: 'Packed',
+            status: { $in: jobStatuses },
             company: companyId
         }).sort({ updatedAt: -1 });
 
@@ -968,9 +992,27 @@ export const getPackedOrders = async (req, res) => {
             }
         }
 
-        const results = Array.from(groupsByOrder.values());
+        // Most recently packed/dispatched order first — also gives pagination
+        // a stable, deterministic order to slice against.
+        let results = Array.from(groupsByOrder.values())
+            .sort((a, b) => new Date(b.packedDate || 0) - new Date(a.packedDate || 0));
 
-        res.json({ success: true, data: results });
+        const search = (req.query.search || '').trim().toLowerCase();
+        if (search) {
+            results = results.filter(r =>
+                (r.orderCode || '').toLowerCase().includes(search) ||
+                (r.customer?.name || '').toLowerCase().includes(search) ||
+                (r.customer?.mobile || '').toLowerCase().includes(search) ||
+                (r.machineName || '').toLowerCase().includes(search) ||
+                (r.serialNumber || '').toLowerCase().includes(search)
+            );
+        }
+
+        const total = results.length;
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+        const paged = results.slice((page - 1) * limit, page * limit);
+
+        res.json({ success: true, data: paged, pagination: { total, page, limit, totalPages } });
     } catch (error) {
         console.error('Error in getPackedOrders:', error);
         res.status(500).json({ success: false, message: error.message });

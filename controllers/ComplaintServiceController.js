@@ -267,6 +267,7 @@ export const createSupportTicket = async (req, res) => {
 
         // --- SEND EMAIL ALERTS ---
         sendSupportEmail({
+            companyId: req.user.companyId,
             type: 'CREATED',
             to: newTicket.customer.email,
             name: newTicket.customer.name,
@@ -515,6 +516,7 @@ export const assignTicket = async (req, res) => {
 
         // --- SEND EMAIL ALERTS ---
         sendSupportEmail({
+            companyId: req.user.companyId,
             type: 'ASSIGNED_CUSTOMER',
             to: ticket.customer.email,
             name: ticket.customer.name,
@@ -526,6 +528,7 @@ export const assignTicket = async (req, res) => {
         });
 
         sendSupportEmail({
+            companyId: req.user.companyId,
             type: 'ASSIGNED_TECH',
             to: technician.email || technician.username,
             name: techName,
@@ -686,6 +689,7 @@ export const cancelTicket = async (req, res) => {
 
         // --- SEND EMAIL ALERTS ---
         sendSupportEmail({
+            companyId: req.user.companyId,
             type: 'CANCELLED',
             to: ticket.customer.email,
             name: ticket.customer.name,
@@ -751,6 +755,7 @@ export const sendVerificationEmail = async (req, res) => {
         const verificationLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/verify-ticket/${token}`;
 
         await sendSupportEmail({
+            companyId: req.user.companyId,
             type: 'VERIFICATION',
             to: ticket.customer.email,
             name: ticket.customer.name,
@@ -810,6 +815,7 @@ export const verifyCustomerResponse = async (req, res) => {
 
             // --- SEND EMAIL ALERT ---
             sendSupportEmail({
+                companyId: ticket.companyId,
                 type: 'CLOSED',
                 to: ticket.customer.email,
                 name: ticket.customer.name,

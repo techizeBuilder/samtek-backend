@@ -119,6 +119,7 @@ export const createTask = async (req, res) => {
       const emailPromises = populatedTask.assignedTo.map(assignee => {
         if (assignee.email) {
           return sendTaskEmail({
+            companyId: req.user.companyId,
             to: assignee.email,
             userName: assignee.username,
             subject: `New Task Assigned: ${populatedTask.title}`,

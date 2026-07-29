@@ -1,32 +1,18 @@
 import Meeting from '../models/Meeting.js';
 import Lead from '../models/Lead.js';
 import User from '../models/User.js';
-import nodemailer from 'nodemailer';
-
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: false,
-    auth: {
-      user: process.env.SMTP_USER || '',
-      pass: process.env.SMTP_PASS || ''
-    },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 30000
-  });
-};
+import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
 
 /**
  * Send Meeting Schedule Email
  */
-const sendMeetingInviteEmail = async ({ to, contactPerson, meetingDate, startTime, endTime, meetingType, venue, onlineMeetingUrl, purpose, remarks, assigneeName, companyName }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[EMAIL SKIPPED] No SMTP config. Would send meeting invite to: ${to}`);
+const sendMeetingInviteEmail = async ({ companyId, to, contactPerson, meetingDate, startTime, endTime, meetingType, venue, onlineMeetingUrl, purpose, remarks, assigneeName, companyName }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.SALES);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Sales SMTP not configured. Would send meeting invite to: ${to}`);
     return { skipped: true };
   }
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const formattedDate = new Date(meetingDate).toLocaleDateString('en-IN', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
   });
@@ -88,7 +74,7 @@ const sendMeetingInviteEmail = async ({ to, contactPerson, meetingDate, startTim
   try {
     const result = await transporter.sendMail({
       messageId: `meeting-${Date.now()}@samtek`,
-      from: `"${companyName}" <${process.env.SMTP_USER}>`,
+      from: `"${companyName}" <${fromAddress}>`,
       to,
       subject: `📅 Meeting Scheduled: ${formattedDate} at ${startTime} — ${companyName}`,
       html
@@ -176,6 +162,7 @@ export const scheduleMeeting = async (req, res) => {
         const assigneeName = assignee?.fullName || assignee?.username || '';
 
         await sendMeetingInviteEmail({
+          companyId: req.user.companyId,
           to: lead.email,
           contactPerson: lead.contactPerson,
           meetingDate,

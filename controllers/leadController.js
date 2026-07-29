@@ -843,7 +843,9 @@ export const getApiSettings = async (req, res) => {
       .populate('indiamart.assignedUserIds', 'fullName username')
       .populate('ivr.assignedUserIds', 'fullName username')
       .populate('website.assignedUserIds', 'fullName username')
-      .populate('googleAds.assignedUserIds', 'fullName username');
+      .populate('googleAds.assignedUserIds', 'fullName username')
+      .populate('facebook.assignedUserIds', 'fullName username');
+    // whatsapp has no assignedUserIds — nothing to populate
 
     if (!settings) {
       settings = await ApiSettings.create({ companyId: targetCompanyId });
@@ -860,7 +862,7 @@ export const getApiSettings = async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 export const saveApiSettings = async (req, res) => {
   try {
-    const { indiamart, ivr, website, googleAds } = req.body;
+    const { indiamart, ivr, website, googleAds, facebook, whatsapp } = req.body;
     // Super Admin can save settings for any company via ?companyId=xxx
     const targetCompanyId = (req.user.role === 'Super Admin' && req.query.companyId)
       ? req.query.companyId
@@ -868,7 +870,7 @@ export const saveApiSettings = async (req, res) => {
 
     const settings = await ApiSettings.findOneAndUpdate(
       { companyId: targetCompanyId },
-      { $set: { indiamart, ivr, website, googleAds } },
+      { $set: { indiamart, ivr, website, googleAds, facebook, whatsapp } },
       { upsert: true, new: true }
     );
     res.json({ success: true, message: 'API settings saved', settings });
@@ -1462,6 +1464,163 @@ export const receiveGoogleAdsWebhook = async (req, res) => {
     res.status(500).json({ google_key: req.query.q || req.body?.google_key || '' });
   }
 };
+
+// ═══════════════════════════════════════════════════════════════
+// FACEBOOK / META LEAD ADS WEBHOOK — two very different steps, unlike
+// IndiaMART/Website/Google Ads:
+//
+// 1. GET  — Facebook's one-time (and periodic re-)verification handshake.
+//    It sends hub.mode/hub.verify_token/hub.challenge and expects the raw
+//    hub.challenge string echoed back as plain text with HTTP 200 — NOT
+//    JSON. This must match before Facebook will ever call the POST side.
+//
+// 2. POST — sent every time a lead form is submitted. Unlike the others,
+//    this payload does NOT contain the lead's actual answers — only a
+//    leadgen_id. We must call back out to the Graph API ourselves with a
+//    stored Page Access Token to fetch the real field_data. If that token
+//    is missing/expired, the webhook still succeeds (Facebook only cares
+//    that we returned 200 fast) but no Lead gets created — check server
+//    logs for "[Facebook]" errors if leads aren't appearing.
+//
+// No HMAC (X-Hub-Signature-256) check here — the real security boundary
+// is that lead field data is always pulled server-side from Facebook's
+// Graph API using our own Page Access Token, so a forged POST can't
+// inject fake lead data even without a signature check.
+// ═══════════════════════════════════════════════════════════════
+export const verifyFacebookWebhook = async (req, res) => {
+  try {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode !== 'subscribe' || !token) {
+      return res.status(400).send('Bad Request');
+    }
+
+    // hub.verify_token IS our tenant/security identifier here — Facebook's
+    // protocol already gives us a shared secret round-trip, so no separate
+    // ?q= param is needed the way the other webhooks use one.
+    const settings = await ApiSettings.findOne({ 'facebook.verifyToken': token, 'facebook.enabled': true });
+    if (!settings) {
+      return res.status(403).send('Verification token mismatch');
+    }
+
+    // Must be the RAW challenge string, plain text, not JSON-wrapped
+    return res.status(200).send(challenge);
+  } catch (error) {
+    console.error('Error verifying Facebook webhook:', error);
+    res.status(500).send('Server error');
+  }
+};
+
+export const receiveFacebookWebhook = async (req, res) => {
+  const body = req.body || {};
+
+  // Facebook needs HTTP 200 back within a few seconds or it treats the
+  // subscription as failing — acknowledge immediately, then process.
+  res.status(200).json({ received: true });
+
+  if (body.object !== 'page') return;
+
+  try {
+    for (const entry of (body.entry || [])) {
+      const pageId = entry.id;
+      for (const change of (entry.changes || [])) {
+        if (change.field !== 'leadgen') continue;
+        const leadgenId = change.value?.leadgen_id;
+        if (!leadgenId) continue;
+        await processFacebookLead(pageId, leadgenId, change.value || {});
+      }
+    }
+  } catch (error) {
+    console.error('[Facebook] Error processing lead webhook:', error);
+  }
+};
+
+async function processFacebookLead(pageId, leadgenId, changeValue) {
+  const settings = await ApiSettings.findOne({
+    'facebook.enabled': true,
+    ...(pageId ? { 'facebook.pageId': pageId } : {})
+  });
+  if (!settings) {
+    console.error(`[Facebook] No enabled settings found for page ${pageId}`);
+    return;
+  }
+
+  const companyId = settings.companyId;
+
+  const exists = await Lead.findOne({ companyId, facebookLeadId: leadgenId });
+  if (exists) return;
+
+  const pageAccessToken = settings.facebook.pageAccessToken;
+  if (!pageAccessToken) {
+    console.error(`[Facebook] Page Access Token not configured for company ${companyId} — cannot fetch lead ${leadgenId}. Configure it in Admin Settings → Facebook.`);
+    return;
+  }
+
+  let leadData;
+  try {
+    const url = `https://graph.facebook.com/v21.0/${leadgenId}?access_token=${encodeURIComponent(pageAccessToken)}`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    leadData = await response.json();
+    if (leadData.error) {
+      console.error(`[Facebook] Graph API error fetching lead ${leadgenId}:`, leadData.error.message);
+      return;
+    }
+  } catch (err) {
+    console.error(`[Facebook] Failed to fetch lead ${leadgenId} from Graph API:`, err.message);
+    return;
+  }
+
+  // field_data is [{ name: 'full_name', values: ['John Doe'] }, ...]
+  const fields = {};
+  for (const f of (leadData.field_data || [])) {
+    fields[(f.name || '').toLowerCase()] = (f.values || [])[0] || '';
+  }
+
+  const name = fields.full_name || [fields.first_name, fields.last_name].filter(Boolean).join(' ') || 'Facebook Lead';
+  const mobile = (fields.phone_number || '').replace(/\D/g, '').slice(-10) || '0000000000';
+  const email = fields.email || `fblead_${leadgenId}@noemail.com`;
+
+  const users = settings.facebook.assignedUserIds || [];
+  const assignedTo = users.length > 0
+    ? users[Math.floor(Math.random() * users.length)]
+    : null;
+
+  const count = await Lead.countDocuments({ companyId });
+  const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+
+  const newLead = new Lead({
+    leadCode,
+    companyId,
+    source: 'Facebook Ads',
+    status: 'New',
+    stage: 'N/A',
+    productRequired: fields.job_title || fields.company_name || 'Facebook Ads Enquiry',
+    describeRequirements: [fields.city, fields.state, fields.zip_code].filter(Boolean).join(', ')
+      || `Lead from Facebook Ads form ${changeValue.form_id || ''}`,
+    facebookLeadId: leadgenId,
+    companyName: fields.company_name || name,
+    contactPerson: name,
+    mobile,
+    email,
+    city: fields.city || '',
+    state: fields.state || '',
+    pincode: fields.zip_code || fields.post_code || '',
+    assignedTo,
+    leadDate: changeValue.created_time ? new Date(changeValue.created_time * 1000) : new Date(),
+    history: [{
+      action: 'Lead Created',
+      notes: `Auto-imported via Facebook Lead Ads webhook (Form: ${changeValue.form_id || 'N/A'}, LeadID: ${leadgenId})`,
+      performedBy: null
+    }]
+  });
+
+  await newLead.save();
+
+  settings.facebook.lastSyncedAt = new Date();
+  await settings.save();
+}
 
 export const getCallLogs = async (req, res) => {
   try {
