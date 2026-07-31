@@ -13,9 +13,9 @@ export const addHoliday = async (req, res) => {
         const { title, date, companyId } = req.body;
         const currentUser = req.user;
 
-        // Prevent Manager from adding holidays
-        if (currentUser.role === 'Manager') {
-            return res.status(403).json({ message: "Access denied. Managers cannot add holidays." });
+        // Only HR-Admin (and platform-wide Superadmin) can add holidays
+        if (!['HR-Admin', 'Hr Admin', 'Superadmin', 'Super Admin'].includes(currentUser.role)) {
+            return res.status(403).json({ message: "Access denied. Only HR-Admin can add holidays." });
         }
 
         if (!title || !date) {
@@ -106,9 +106,9 @@ export const updateHoliday = async (req, res) => {
         const { title, date } = req.body;
         const currentUser = req.user;
 
-        // Prevent Manager from updating holidays
-        if (currentUser.role === 'Manager') {
-            return res.status(403).json({ message: "Access denied. Managers cannot edit holidays." });
+        // Only HR-Admin (and platform-wide Superadmin) can edit holidays
+        if (!['HR-Admin', 'Hr Admin', 'Superadmin', 'Super Admin'].includes(currentUser.role)) {
+            return res.status(403).json({ message: "Access denied. Only HR-Admin can edit holidays." });
         }
 
         const updateData = {};
@@ -147,9 +147,9 @@ export const deleteHolidayById = async (req, res) => {
     try {
         const currentUser = req.user;
 
-        // Prevent Manager from deleting holidays
-        if (currentUser.role === 'Manager') {
-            return res.status(403).json({ message: "Access denied. Managers cannot delete holidays." });
+        // Only HR-Admin (and platform-wide Superadmin) can delete holidays
+        if (!['HR-Admin', 'Hr Admin', 'Superadmin', 'Super Admin'].includes(currentUser.role)) {
+            return res.status(403).json({ message: "Access denied. Only HR-Admin can delete holidays." });
         }
 
         const holiday = await Holiday.findByIdAndDelete(req.params.id);

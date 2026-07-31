@@ -352,6 +352,23 @@ export const updateUser = async (req, res) => {
       });
     }
 
+    // Prevent a user from escalating/altering their own access
+    const isSelfUpdate = user._id.toString() === req.user._id.toString();
+    if (isSelfUpdate) {
+      if (role !== undefined && role !== user.role) {
+        return res.status(400).json({
+          message: 'You cannot change your own role',
+          success: false
+        });
+      }
+      if (permissions !== undefined) {
+        return res.status(400).json({
+          message: 'You cannot change your own module permissions',
+          success: false
+        });
+      }
+    }
+
     // Validate fields ONLY if they are provided
     if (email) {
       // Check for duplicate email (excluding current user)

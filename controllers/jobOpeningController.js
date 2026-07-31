@@ -60,7 +60,7 @@ export const getAllJobOpenings = async (req, res) => {
       }
     }
 
-    const jobs = await JobOpenings.find(filter).populate("recruitingManager", "name email").sort({ createdAt: -1 });
+    const jobs = await JobOpenings.find(filter).populate("recruitingManager", "fullName username email").sort({ createdAt: -1 });
     res.json(jobs);
   } catch (error) {
     res.status(500).json({
@@ -75,7 +75,7 @@ export const getAllJobOpenings = async (req, res) => {
  */
 export const getJobOpeningById = async (req, res) => {
   try {
-    const job = await JobOpenings.findById(req.params.id).populate("recruitingManager", "name email");
+    const job = await JobOpenings.findById(req.params.id).populate("recruitingManager", "fullName username email");
 
     if (!job) {
       return res.status(404).json({ message: "Job opening not found" });

@@ -1,4 +1,5 @@
 import Payslip from "../models/Payslips.js";
+import User from "../models/User.js";
 
 export const getStatutoryReports = async (req, res) => {
   try {
@@ -8,7 +9,16 @@ export const getStatutoryReports = async (req, res) => {
       return res.status(400).json({ message: "Month is required" });
     }
 
-    const payslips = await Payslip.find({ month })
+    const filter = { month };
+
+    // Company-wise isolation — HR-Admin / Company Admin only see their own
+    // company's employees. Platform-wide admins see everything.
+    if (!["Superadmin", "Super Admin", "super_user"].includes(req.user.role) && req.user.companyId) {
+      const companyUsers = await User.find({ companyId: req.user.companyId }).select("_id").lean();
+      filter.user = { $in: companyUsers.map((u) => u._id) };
+    }
+
+    const payslips = await Payslip.find(filter)
       .populate("user", "fullName username email")
       .lean();
 
@@ -46,13 +56,19 @@ export const getStatutoryReports = async (req, res) => {
 export const generateStatutoryReports = async (req, res) => {
   try {
     const { month } = req.body;
-    
+
+    const filter = { month };
+    if (!["Superadmin", "Super Admin", "super_user"].includes(req.user.role) && req.user.companyId) {
+      const companyUsers = await User.find({ companyId: req.user.companyId }).select("_id").lean();
+      filter.user = { $in: companyUsers.map((u) => u._id) };
+    }
+
     // Statutory reports are derived from Payslips.
-    // Ensure payslips exist for the month.
-    const count = await Payslip.countDocuments({ month });
+    // Ensure payslips exist for the month (within the caller's own company).
+    const count = await Payslip.countDocuments(filter);
     if (count === 0) {
-      return res.status(400).json({ 
-        message: "No payslips found for this month. Please generate payslips first." 
+      return res.status(400).json({
+        message: "No payslips found for this month. Please generate payslips first."
       });
     }
 
