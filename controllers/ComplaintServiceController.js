@@ -7,6 +7,7 @@ import { sendSupportEmail } from '../utils/serviceEmail.js';
 import { generateServiceInvoicePDF } from '../utils/servicePdfGenerator.js';
 import Customer from '../models/Customer.js';
 import Order from '../models/Order.js';
+import DispatchOrder from '../models/DispatchOrder.js';
 import notificationService from '../services/notificationService.js';
 
 // --- CONTROLLERS ---
@@ -41,54 +42,86 @@ export const getCustomerHistory = async (req, res) => {
 
         let pastPurchases = [];
 
-        // 4. If Customer exists, pull their actual machines from their Orders
+        // 4. If Customer exists, pull their actual machines from DispatchOrder
+        // — the one per-machine record the dispatch flow already creates,
+        // carrying its own serial number and (once delivery is confirmed as
+        // 'Reached Safely') warrantyExpiryDate/amcExpiryDate. Order.products
+        // never gets machine-level data populated, so DispatchOrder is the
+        // real source here, matched via this customer's Order.orderCode.
         if (customer) {
-            // Find all orders that aren't cancelled or rejected
             const orders = await Order.find({
                 customer: customer._id,
                 companyId: req.user.companyId,
                 status: { $nin: ['cancelled', 'rejected'] }
-            }).populate('products.product', 'name category code'); // Pull item details
+            }).select('orderCode orderDate').lean();
 
-            // Loop through all orders, and all products in those orders
-            orders.forEach(order => {
-                order.products.forEach(lineItem => {
+            const orderCodes = orders.map(o => o.orderCode).filter(Boolean);
+            const orderDateByCode = new Map(orders.map(o => [o.orderCode, o.orderDate]));
 
-                    // Read from the new machineDetails array!
-                    if (lineItem.machineDetails && lineItem.machineDetails.length > 0) {
-                        lineItem.machineDetails.forEach(machine => {
-                            // 1. Calculate Warranty specifically for THIS serial number
-                            let wStatus = 'Unknown';
-                            if (machine.warrantyExpiryDate) {
-                                wStatus = new Date(machine.warrantyExpiryDate) > new Date() ? 'Active' : 'Expired';
-                            }
+            if (orderCodes.length) {
+                const dispatchOrders = await DispatchOrder.find({
+                    orderId: { $in: orderCodes },
+                    company: req.user.companyId
+                }).lean();
 
-                            // 2. Calculate AMC specifically for THIS serial number
-                            let aStatus = 'Not Subscribed';
-                            if (machine.amcExpiryDate) {
-                                const expiry = new Date(machine.amcExpiryDate);
-                                if (expiry > new Date()) {
-                                    aStatus = `Valid until ${expiry.toLocaleDateString('en-GB')}`;
-                                } else {
-                                    aStatus = 'Expired';
-                                }
-                            }
+                // Batch-fetch product master info (category) for nicer display —
+                // one query for every machine code instead of one per machine.
+                const machineCodes = [...new Set(dispatchOrders.map(d => d.machineCode).filter(Boolean))];
+                const items = machineCodes.length
+                    ? await Item.find({ code: { $in: machineCodes }, companyId: req.user.companyId }).select('code category name').lean()
+                    : [];
+                const itemByCode = new Map(items.map(it => [it.code, it]));
 
-                            // 3. Push the specific machine to the frontend list
-                            pastPurchases.push({
-                                machineType: lineItem.product ? lineItem.product.category : "Unknown",
-                                model: lineItem.product ? lineItem.product.name : "Unknown",
-                                serialNumber: machine.serialNumber,
-                                purchaseDate: order.orderDate ? new Date(order.orderDate).toISOString().split('T')[0] : "Unknown",
-                                warrantyStatus: wStatus,
-                                amcStatus: aStatus,
-                                amcDocumentUrl: machine.amcDocumentUrl || null
-                            });
-                        });
+                dispatchOrders.forEach(d => {
+                    const item = itemByCode.get(d.machineCode);
+
+                    // 1. Warranty status for THIS serial number — includes the
+                    // expiry date, same pattern as AMC below (frontend badge
+                    // styling matches on the "Active" prefix, not an exact string).
+                    let wStatus = 'Unknown';
+                    if (d.warrantyExpiryDate) {
+                        const wExpiry = new Date(d.warrantyExpiryDate);
+                        wStatus = wExpiry > new Date() ? `Active until ${wExpiry.toLocaleDateString('en-GB')}` : 'Expired';
                     }
+
+                    // 2. AMC status for THIS serial number
+                    let aStatus = 'Not Subscribed';
+                    if (d.amcExpiryDate) {
+                        const expiry = new Date(d.amcExpiryDate);
+                        aStatus = expiry > new Date() ? `Valid until ${expiry.toLocaleDateString('en-GB')}` : 'Expired';
+                    }
+
+                    const purchaseDate = d.actualDeliveryDate
+                        || (orderDateByCode.get(d.orderId) ? new Date(orderDateByCode.get(d.orderId)).toISOString().split('T')[0] : 'Unknown');
+
+                    // 3. Push the specific machine to the frontend list.
+                    // `machineType` is the card's title on the frontend, so it
+                    // needs to actually identify the machine — DispatchOrder's
+                    // own machineName (always populated, proven reliable
+                    // throughout dispatch) takes priority over the Item-master
+                    // category, which depends on machineCode matching an Item
+                    // that may not exist under that exact code.
+                    pastPurchases.push({
+                        machineType: d.machineName || item?.category || 'Unknown',
+                        model: item?.name || d.machineName || '',
+                        serialNumber: d.serialNumber,
+                        purchaseDate,
+                        warrantyStatus: wStatus,
+                        amcStatus: aStatus,
+                        amcDocumentUrl: d.amcDocumentUrl || null
+                    });
                 });
-            });
+            }
         }
+
+        // Customer stores address across separate fields (address1/city/state/
+        // pin) for billing purposes; a service ticket just needs one usable
+        // line for a technician to find the location, so combine them here
+        // rather than adding matching separate fields to the ticket schema.
+        const fullAddress = customer
+            ? [customer.address1, customer.city, customer.state].filter(Boolean).join(', ')
+                + (customer.pin ? ` - ${customer.pin}` : '')
+            : '';
 
         // 5. Send Dynamic Response exactly how the frontend expects it
         res.status(200).json({
@@ -96,7 +129,7 @@ export const getCustomerHistory = async (req, res) => {
             data: {
                 customerName: customer ? customer.name : "Unknown Customer",
                 mobileNumber: mobileNumber,
-                address: customer ? (customer.address1 || "") : "",
+                address: fullAddress,
                 email: customer ? (customer.email || "") : "",
                 pastPurchases: pastPurchases,
                 previousComplaints: previousTickets
@@ -888,12 +921,16 @@ export const generateServiceInvoice = async (req, res) => {
                         if (partsMap[itemId]) {
                             partsMap[itemId].quantity += part.quantity;
                         } else {
+                            // Service invoices bill at MRP, not the internal
+                            // sale price — `rate` (what the PDF actually uses
+                            // as the taxable base) must prefer mrp, falling
+                            // back to salePrice only if the item has no MRP set.
                             partsMap[itemId] = {
                                 name: `${part.item.name} (${part.item.code || ''})`,
                                 hsn: part.item.hsn || '',
                                 quantity: part.quantity,
                                 unit: part.item.unit || 'nos',
-                                rate: part.item.salePrice || 0,
+                                rate: part.item.mrp || part.item.salePrice || 0,
                                 mrp: part.item.mrp || part.item.salePrice || 0,
                                 gst: part.item.gst || 0,
                                 discountPct: 0
@@ -1081,6 +1118,7 @@ export const startVisit = async (req, res) => {
 
 // 13. Complete Visit
 export const completeVisit = async (req, res) => {
+    const session = await mongoose.startSession();
     try {
         if (!req.user || !req.user.companyId) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
@@ -1098,10 +1136,20 @@ export const completeVisit = async (req, res) => {
             }
         }
 
-        const formattedParts = Array.isArray(partsUsed) ? partsUsed.map(part => ({
+        const rawParts = Array.isArray(partsUsed) ? partsUsed.map(part => ({
             item: part.item || part._id,
             quantity: Number(part.quantity) || 1
         })).filter(part => part.item) : [];
+
+        // Combine repeated lines for the same item BEFORE checking stock —
+        // two entries requesting the same item must be validated against
+        // their combined total, not each one in isolation.
+        const partsByItem = new Map();
+        rawParts.forEach(p => {
+            const key = p.item.toString();
+            partsByItem.set(key, (partsByItem.get(key) || 0) + p.quantity);
+        });
+        const formattedParts = [...partsByItem.entries()].map(([item, quantity]) => ({ item, quantity }));
 
         if (!workDoneDetails) {
             return res.status(400).json({ success: false, message: 'Work done details are required.' });
@@ -1133,6 +1181,37 @@ export const completeVisit = async (req, res) => {
             });
         }
 
+        // 🚧 STOCK GUARD — never let a part consumption push inventory
+        // negative. Checked up front here for a friendly, named error, AND
+        // re-enforced atomically inside the transaction below (qty: {$gte})
+        // so a concurrent completion touching the same item can't slip
+        // through in the gap between this check and the actual write.
+        if (formattedParts.length > 0) {
+            const items = await Item.find({
+                _id: { $in: formattedParts.map(p => p.item) },
+                companyId: req.user.companyId
+            }).select('qty name code').lean();
+            const itemById = new Map(items.map(it => [it._id.toString(), it]));
+
+            const insufficient = formattedParts
+                .map(part => {
+                    const it = itemById.get(part.item.toString());
+                    const available = it?.qty || 0;
+                    return (!it || available < part.quantity)
+                        ? { name: it?.name || 'Unknown item', code: it?.code || '', available, requested: part.quantity }
+                        : null;
+                })
+                .filter(Boolean);
+
+            if (insufficient.length > 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Cannot complete visit — insufficient stock: ${insufficient.map(i => `${i.name} (${i.code}) has ${i.available}, needs ${i.requested}`).join('; ')}`,
+                    insufficientStock: insufficient
+                });
+            }
+        }
+
         const mediaUrls = [];
         if (req.files && req.files.length > 0) {
             req.files.forEach(file => {
@@ -1141,6 +1220,23 @@ export const completeVisit = async (req, res) => {
                     type: file.mimetype.startsWith('video/') ? 'video' : 'image'
                 });
             });
+        }
+
+        session.startTransaction();
+
+        // Deduct each item ONLY if it still has enough stock at write time —
+        // if anything fails this atomic check, throw and abort the whole
+        // transaction so nothing gets deducted and the ticket stays
+        // untouched (In Progress), instead of half-completing.
+        for (const part of formattedParts) {
+            const result = await Item.updateOne(
+                { _id: part.item, companyId: req.user.companyId, qty: { $gte: part.quantity } },
+                { $inc: { qty: -part.quantity } },
+                { session }
+            );
+            if (result.modifiedCount !== 1) {
+                throw new Error('Stock changed while completing this visit — please re-check available quantity and try again.');
+            }
         }
 
         currentVisit.visitEnd = new Date();
@@ -1156,22 +1252,6 @@ export const completeVisit = async (req, res) => {
         const previousStatus = ticket.status;
         ticket.status = 'Resolved';
 
-        if (formattedParts.length > 0) {
-            try {
-                const bulkOperations = formattedParts.map(part => ({
-                    updateOne: {
-                        filter: { _id: part.item },
-                        update: { $inc: { qty: -Math.abs(part.quantity) } }
-                    }
-                }));
-
-                await Item.bulkWrite(bulkOperations);
-                console.log(`Successfully deducted ${formattedParts.length} items from inventory.`);
-            } catch (inventoryError) {
-                console.error("Failed to deduct inventory:", inventoryError);
-            }
-        }
-
         ticket.auditLog.push({
             action: `Technician finished work. Parts used: ${currentVisit.partsUsed.length}. Media attached: ${mediaUrls.length}.`,
             performedBy: {
@@ -1182,10 +1262,12 @@ export const completeVisit = async (req, res) => {
             newStatus: 'Resolved'
         });
 
-        // 🔥 NEW: Free up the technician so they appear 'Available' to the dispatcher
-        await User.findByIdAndUpdate(req.user._id, { currentStatus: 'Available' });
+        await ticket.save({ session });
 
-        await ticket.save();
+        // Free up the technician so they appear 'Available' to the dispatcher
+        await User.findByIdAndUpdate(req.user._id, { currentStatus: 'Available' }, { session });
+
+        await session.commitTransaction();
 
         res.status(200).json({
             success: true,
@@ -1194,8 +1276,14 @@ export const completeVisit = async (req, res) => {
         });
 
     } catch (error) {
+        if (session.inTransaction()) {
+            await session.abortTransaction();
+        }
         console.error('Error completing visit:', error);
-        res.status(500).json({ success: false, message: 'Server error while completing visit.' });
+        const status = /stock changed/i.test(error.message || '') ? 409 : 500;
+        res.status(status).json({ success: false, message: error.message || 'Server error while completing visit.' });
+    } finally {
+        session.endSession();
     }
 };
 

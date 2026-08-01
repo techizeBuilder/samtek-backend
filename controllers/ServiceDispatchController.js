@@ -4,6 +4,59 @@ import Customer from '../models/Customer.js';
 import crypto from 'crypto';
 import { sendSupportEmail } from '../utils/serviceEmail.js';
 
+const addMonths = (date, months) => {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + months);
+  return d;
+};
+
+// Per-product warranty length, months (Item.warranty.period) — defaults to
+// 12 if the product master has no warranty configured.
+async function resolveWarrantyMonths(machineCode, machineName, companyId) {
+  const { Item } = await import('../models/Inventory.js');
+  const item = await Item.findOne({
+    companyId,
+    $or: [{ code: machineCode }, { name: machineName }]
+  }).select('warranty.period').lean();
+  return item?.warranty?.period ?? 12;
+}
+
+// AMC is one flat charge on the whole order (not per machine) — it only
+// exists as a `hiddenCharge` row on the order's submitted OrderForm (see
+// OrderFormModal.jsx / quotationCharges). True/false per order, cached by
+// the caller so a multi-machine order only looks this up once.
+async function resolveOrderHasAMC(orderCode, companyId) {
+  const order = await Order.findOne({ orderCode, companyId }).select('_id').lean();
+  if (!order) return false;
+  const OrderForm = (await import('../models/OrderForm.js')).default;
+  const form = await OrderForm.findOne({ orderId: order._id, status: 'Submitted' }).select('items').lean();
+  if (!form) return false;
+  return (form.items || []).some(it => it.hiddenCharge && /amc/i.test(it.itemName || ''));
+}
+
+// Warranty is genuinely per-machine (each product can have its own
+// Item.warranty.period), so it's computed per DispatchOrder. AMC — when
+// present on the order — starts only after THIS machine's own warranty
+// ends (per the original design intent: "AMC tracks the paid contract
+// period after warranty expires"), so it naturally varies per machine too
+// even though "did the customer buy AMC" is a single yes/no per order.
+async function computeWarrantyAndAmc(dispatchOrder, companyId, amcCache) {
+  const months = await resolveWarrantyMonths(dispatchOrder.machineCode, dispatchOrder.machineName, companyId);
+  const baseDate = dispatchOrder.actualDeliveryDate ? new Date(dispatchOrder.actualDeliveryDate) : new Date();
+  const warrantyExpiryDate = addMonths(baseDate, months);
+
+  let hasAmc = amcCache.get(dispatchOrder.orderId);
+  if (hasAmc === undefined) {
+    hasAmc = await resolveOrderHasAMC(dispatchOrder.orderId, companyId);
+    amcCache.set(dispatchOrder.orderId, hasAmc);
+  }
+  // Fixed 12-month AMC term for now — no per-charge duration is configured
+  // anywhere yet (Admin Settings only stores name/price/GST for the charge).
+  const amcExpiryDate = hasAmc ? addMonths(warrantyExpiryDate, 12) : null;
+
+  return { warrantyExpiryDate, amcExpiryDate };
+}
+
 export const getDispatchedOrders = async (req, res) => {
     try {
         if (!req.user || !req.user.companyId) {
@@ -27,19 +80,30 @@ export const updateCustomerConfirmation = async (req, res) => {
     try {
         const { id } = req.params;
         const { status, remarks } = req.body;
-        
+
+        const existing = await DispatchOrder.findOne({ _id: id, company: req.user.companyId });
+        if (!existing) return res.status(404).json({ success: false, message: 'Order not found' });
+
+        const updateFields = {
+            'customerConfirmation.status': status,
+            'customerConfirmation.remarks': remarks || '',
+            'customerConfirmation.confirmedAt': new Date()
+        };
+
+        // Stamp warranty/AMC expiry the FIRST time this machine is confirmed
+        // as safely reached — never recomputed on a later remarks-only edit.
+        if (status === 'Reached Safely' && existing.customerConfirmation?.status !== 'Reached Safely') {
+            const { warrantyExpiryDate, amcExpiryDate } = await computeWarrantyAndAmc(existing, req.user.companyId, new Map());
+            updateFields.warrantyExpiryDate = warrantyExpiryDate;
+            if (amcExpiryDate) updateFields.amcExpiryDate = amcExpiryDate;
+        }
+
         const order = await DispatchOrder.findOneAndUpdate(
             { _id: id, company: req.user.companyId },
-            { 
-                $set: { 
-                    'customerConfirmation.status': status,
-                    'customerConfirmation.remarks': remarks || '',
-                    'customerConfirmation.confirmedAt': new Date()
-                } 
-            },
+            { $set: updateFields },
             { new: true }
         );
-        
+
         if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
         res.status(200).json({ success: true, data: order });
     } catch (error) {
@@ -51,7 +115,9 @@ export const updateCustomerConfirmation = async (req, res) => {
 // Bulk (whole-order) variant of updateCustomerConfirmation — `ids` is every
 // DispatchOrder (one per machine) of a single sales order. The customer only
 // ever gets ONE delivery-confirmation conversation for the whole shipment,
-// so one call here updates every machine's record together.
+// so one call here updates every machine's record together, and stamps
+// warranty/AMC expiry on whichever of them are being confirmed for the
+// first time (see computeWarrantyAndAmc).
 export const bulkUpdateCustomerConfirmation = async (req, res) => {
     try {
         const { ids, status, remarks } = req.body;
@@ -59,16 +125,37 @@ export const bulkUpdateCustomerConfirmation = async (req, res) => {
             return res.status(400).json({ success: false, message: 'ids array is required' });
         }
 
-        await DispatchOrder.updateMany(
-            { _id: { $in: ids }, company: req.user.companyId },
-            {
-                $set: {
-                    'customerConfirmation.status': status,
-                    'customerConfirmation.remarks': remarks || '',
-                    'customerConfirmation.confirmedAt': new Date()
-                }
+        const existingDocs = await DispatchOrder.find({ _id: { $in: ids }, company: req.user.companyId });
+        if (!existingDocs.length) return res.status(404).json({ success: false, message: 'No matching orders found' });
+
+        const baseFields = {
+            'customerConfirmation.status': status,
+            'customerConfirmation.remarks': remarks || '',
+            'customerConfirmation.confirmedAt': new Date()
+        };
+
+        if (status === 'Reached Safely') {
+            const newlyConfirmed = existingDocs.filter(d => d.customerConfirmation?.status !== 'Reached Safely');
+            const alreadyConfirmedIds = existingDocs.filter(d => d.customerConfirmation?.status === 'Reached Safely').map(d => d._id);
+
+            if (newlyConfirmed.length) {
+                // Same order → same AMC lookup, computed once and reused
+                // across every machine in this batch.
+                const amcCache = new Map();
+                const ops = await Promise.all(newlyConfirmed.map(async (d) => {
+                    const { warrantyExpiryDate, amcExpiryDate } = await computeWarrantyAndAmc(d, req.user.companyId, amcCache);
+                    const fields = { ...baseFields, warrantyExpiryDate };
+                    if (amcExpiryDate) fields.amcExpiryDate = amcExpiryDate;
+                    return { updateOne: { filter: { _id: d._id, company: req.user.companyId }, update: { $set: fields } } };
+                }));
+                await DispatchOrder.bulkWrite(ops);
             }
-        );
+            if (alreadyConfirmedIds.length) {
+                await DispatchOrder.updateMany({ _id: { $in: alreadyConfirmedIds }, company: req.user.companyId }, { $set: baseFields });
+            }
+        } else {
+            await DispatchOrder.updateMany({ _id: { $in: ids }, company: req.user.companyId }, { $set: baseFields });
+        }
 
         const orders = await DispatchOrder.find({ _id: { $in: ids }, company: req.user.companyId });
         if (!orders.length) return res.status(404).json({ success: false, message: 'No matching orders found' });

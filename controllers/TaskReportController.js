@@ -120,6 +120,9 @@ const buildEmployeeReportPipeline = (req) => {
     pipeline.push({
         $group: {
             _id: '$assignedTo',
+            // Use the task's own department rather than the assignee's role, so
+            // cross-department assignments are labelled by the task, not the assignee.
+            department: { $first: '$department' },
             totalAssigned: { $sum: 1 },
             completed: { $sum: { $cond: [{ $eq: ['$status', 'Completed'] }, 1, 0] } },
             pending: { $sum: { $cond: [{ $eq: ['$status', 'Pending'] }, 1, 0] } },
@@ -138,14 +141,13 @@ const buildEmployeeReportPipeline = (req) => {
     if (search) {
         pipeline.push({ $match: { 'user.username': { $regex: search, $options: 'i' } } });
     }
-    // Department from role via $switch - no user.department field needed
     pipeline.push(
         {
             $project: {
                 _id: 1,
                 employeeName: '$user.username',
                 role: '$user.role',
-                department: roleToDeptSwitch('$user.role'),
+                department: 1,
                 totalAssigned: 1,
                 completed: 1,
                 pending: 1,
@@ -296,6 +298,8 @@ export const getTaskTypeEfficiency = async (req, res) => {
             {
                 $group: {
                     _id: { employee: '$assignedTo', taskType: '$taskType' },
+                    // Task's own department, not the assignee's role.
+                    department: { $first: '$department' },
                     total: { $sum: 1 },
                     completed: { $sum: { $cond: [{ $eq: ['$status', 'Completed'] }, 1, 0] } }
                 }
@@ -308,6 +312,7 @@ export const getTaskTypeEfficiency = async (req, res) => {
                     _id: '$_id.employee',
                     employeeName: { $first: '$user.username' },
                     role: { $first: '$user.role' },
+                    department: { $first: '$department' },
                     taskTypes: {
                         $push: {
                             taskType: '$_id.taskType',
@@ -322,13 +327,12 @@ export const getTaskTypeEfficiency = async (req, res) => {
                     grandCompleted: { $sum: '$completed' }
                 }
             },
-            // Department from role via $switch
             {
                 $project: {
                     _id: 1,
                     employeeName: 1,
                     role: 1,
-                    department: roleToDeptSwitch('$role'),
+                    department: 1,
                     taskTypes: 1,
                     grandTotal: 1,
                     grandCompleted: 1,
@@ -419,7 +423,8 @@ export const getProductivityTrends = async (req, res) => {
                 $group: {
                     _id: {
                         date: dateGroupFormat,
-                        department: roleToDeptSwitch('$user.role'),
+                        // Task's own department, not the completer's role.
+                        department: '$department',
                         employeeName: '$user.username'
                     },
                     tasksCompleted: { $sum: 1 }
@@ -630,6 +635,7 @@ const buildEfficiencyData = async (req) => {
         {
             $group: {
                 _id: { employee: '$assignedTo', taskType: '$taskType' },
+                department: { $first: '$department' },
                 total: { $sum: 1 },
                 completed: { $sum: { $cond: [{ $eq: ['$status', 'Completed'] }, 1, 0] } }
             }
@@ -641,6 +647,7 @@ const buildEfficiencyData = async (req) => {
                 _id: '$_id.employee',
                 employeeName: { $first: '$user.username' },
                 role: { $first: '$user.role' },
+                department: { $first: '$department' },
                 taskTypes: { $push: { taskType: '$_id.taskType', total: '$total', completed: '$completed' } }
             }
         }
@@ -656,7 +663,7 @@ export const exportTaskTypeEfficiencyExcel = async (req, res) => {
         if (!data) return res.status(403).json({ message: 'Unauthorized' });
         const rows = [];
         data.forEach(emp => {
-            const dept = getDepartmentFromRole(emp.role);
+            const dept = emp.department || 'General';
             emp.taskTypes.forEach(tt => {
                 rows.push({
                     'Employee Name': emp.employeeName,
@@ -684,7 +691,7 @@ export const exportTaskTypeEfficiencyPDF = async (req, res) => {
         if (!data) return res.status(403).json({ message: 'Unauthorized' });
         const rows = [];
         data.forEach(emp => {
-            const dept = getDepartmentFromRole(emp.role);
+            const dept = emp.department || 'General';
             emp.taskTypes.forEach(tt => {
                 rows.push([
                     emp.employeeName, dept, tt.taskType,
@@ -753,7 +760,8 @@ const buildProductivityData = async (req) => {
             $group: {
                 _id: {
                     date: dateGroupFormat,
-                    department: roleToDeptSwitch('$user.role'),
+                    // Task's own department, not the completer's role.
+                    department: '$department',
                     employeeName: '$user.username'
                 },
                 tasksCompleted: { $sum: 1 }

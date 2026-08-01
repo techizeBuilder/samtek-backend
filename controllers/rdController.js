@@ -674,6 +674,21 @@ export const resolveChangeRequest = async (req, res) => {
       { new: true }
     );
     if (!cr) return res.status(404).json({ success: false, message: 'Change request not found' });
+
+    // Approving a change request is the ONLY way to edit a locked BOM — so
+    // approval must unlock the machine's BOM here. Nothing else in the
+    // codebase ever flips isLocked back to false (lockBOM only ever sets it
+    // true), so without this the BOM stayed locked forever after approval.
+    // The CR only references `machine`, not a specific BOM id, but
+    // RDBOM enforces a unique {company, machine} pair, so this lookup is
+    // unambiguous.
+    if (approved) {
+      await RDBOM.findOneAndUpdate(
+        { machine: cr.machine, company: req.user.companyId },
+        { isLocked: false, lockedAt: null }
+      );
+    }
+
     res.json({ success: true, data: cr });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
