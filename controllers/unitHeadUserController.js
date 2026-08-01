@@ -1026,6 +1026,8 @@ const getDefaultPermissionsByRole = (role) => {
         dashboard: true,
         features: [
           { key: 'orders', view: true, add: true, edit: true, delete: false },
+          { key: 'leads', view: true, add: true, edit: true, delete: false },
+          { key: 'paymentRequests', view: true, add: true, edit: true, delete: false },
           { key: 'myCustomers', view: true, add: true, edit: true, delete: false },
           { key: 'myDeliveries', view: true, add: false, edit: false, delete: false },
           { key: 'myInvoices', view: true, add: false, edit: false, delete: false },
@@ -1041,7 +1043,14 @@ const getDefaultPermissionsByRole = (role) => {
         features: [
           { key: 'productionDashboard', view: true, add: false, edit: false, delete: false },
           { key: 'productionReports', view: true, add: false, edit: false, delete: false },
-          { key: 'productionSheet', view: true, add: true, edit: true, delete: false }
+          { key: 'productionSheet', view: true, add: true, edit: true, delete: false },
+          { key: 'orders', view: true, add: true, edit: true, delete: false },
+          { key: 'repairProduction', view: true, add: true, edit: true, delete: false },
+          { key: 'workPlanning', view: true, add: true, edit: true, delete: false },
+          { key: 'processQc', view: true, add: true, edit: true, delete: false },
+          { key: 'jobCards', view: true, add: true, edit: true, delete: false },
+          { key: 'manpower', view: true, add: true, edit: true, delete: false },
+          { key: 'expenses', view: true, add: true, edit: true, delete: false }
         ]
       }];
       break;
@@ -1073,11 +1082,15 @@ const getDefaultPermissionsByRole = (role) => {
 
     case 'Dispatch':
       defaultPermissions.modules = [{
-        name: 'dispatch',
+        name: 'dispatches',
         dashboard: true,
         features: [
           { key: 'dashboard', view: true, add: false, edit: false, delete: false },
           { key: 'deliveryChallan', view: true, add: true, edit: true, delete: false },
+          { key: 'packagingQueue', view: true, add: true, edit: true, delete: false },
+          { key: 'packagingJobs', view: true, add: true, edit: true, delete: false },
+          { key: 'dispatchPlanning', view: true, add: true, edit: true, delete: false },
+          { key: 'activeDispatches', view: true, add: true, edit: true, delete: false },
           { key: 'dispatchHistory', view: true, add: false, edit: false, delete: false }
         ]
       }];

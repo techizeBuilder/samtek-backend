@@ -68,8 +68,9 @@ export const updateOvertime = async (req, res) => {
 
     /* ================= ROLE BASED LOGIC ================= */
 
-    // 🔹 EMPLOYEE: can edit only when PENDING
-    if (req.user.role === "Employee") {
+    // 🔹 EMPLOYEE (any "...Employee" role, e.g. Sales Employee, Production
+    // Employee — not just the literal "Employee" role): can edit only when PENDING
+    if ((req.user.role || "").toLowerCase().endsWith("employee")) {
       if (
         overtime.employee.toString() !== req.user._id.toString() ||
         overtime.status !== "PENDING"
