@@ -637,6 +637,7 @@ export const sendPOToVendor = async (req, res) => {
 
     // Send email
     const emailResult = await sendPurchaseOrderEmail({
+      companyId: req.user.companyId,
       to: purchase.supplier.email,
       vendorName: purchase.supplier.supplierName || 'Vendor',
       poNumber: purchase.purchaseOrderNumber,

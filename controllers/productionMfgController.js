@@ -33,7 +33,7 @@ async function generateOrderId(companyId) {
 // and, identically, once a Repair job is marked complete.
 async function createQCJobForCompletedOrder(order, sentBy, userId) {
   const existingQC = await QCJob.findOne({
-    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : (order.source === 'Stock' ? 'Stock' : 'Production'),
     sourceRefId: order.orderId,
     company: order.company
   });
@@ -67,7 +67,7 @@ async function createQCJobForCompletedOrder(order, sentBy, userId) {
 
   const qcJob = await QCJob.create({
     qcJobId,
-    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : 'Production',
+    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : (order.source === 'Stock' ? 'Stock' : 'Production'),
     sourceRefId: order.orderId,
     sourceDepartment: 'Production',
     sentBy: sentBy || 'Production Dept',

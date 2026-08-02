@@ -19,24 +19,10 @@ const storage = multer.diskStorage({
 });
 
 // Create the multer instance
+// No fileFilter: any bill/receipt file type (image, PDF, etc.) is accepted.
 export const expenseUpload = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
-  },
-  fileFilter: function (req, file, cb) {
-    // Allow images and PDFs
-    const allowedTypes = [
-      "image/jpeg",
-      "image/png",
-      "image/jpg",
-      "application/pdf",
-    ];
-    
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error("Only images (JPEG, PNG) and PDFs are allowed for expense receipts!"), false);
-    }
+    fileSize: 10 * 1024 * 1024, // 10MB limit (bumped up so larger scanned PDFs aren't rejected)
   },
 });

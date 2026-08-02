@@ -43,6 +43,7 @@ async function sendExchangeEmailFor(exchange, po) {
     const acceptLink = `${frontendUrl}/purchase-exchange/${token}`;
 
     const result = await sendPurchaseExchangeEmail({
+        companyId: exchange.companyId,
         to: vendor.email,
         vendorName: vendor.supplierName,
         itemName: exchange.itemName,

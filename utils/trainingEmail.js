@@ -1,4 +1,4 @@
-import nodemailer from 'nodemailer';
+import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
 
 // --- DEFINED EMAIL TYPES ---
 export const TrainingEmailType = {
@@ -7,19 +7,8 @@ export const TrainingEmailType = {
     TRAINING_REJECTED: 'TRAINING_REJECTED'
 };
 
-// --- CONFIGURE TRANSPORTER ---
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT,
-    secure: process.env.SMTP_PORT == 465, 
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-    }
-});
-
 // --- MAIN EMAIL FUNCTION ---
-export const sendTrainingEmail = async (to, type, data) => {
+export const sendTrainingEmail = async (companyId, to, type, data) => {
     let subject = '';
     let htmlContent = '';
 
@@ -90,15 +79,21 @@ export const sendTrainingEmail = async (to, type, data) => {
             return false;
     }
 
+    const mailer = await getDeptMailer(companyId, DEPARTMENTS.HR);
+    if (!mailer) {
+        console.log(`[EMAIL SKIPPED] HR SMTP not configured. Would send training email to: ${to}`);
+        return false;
+    }
+
     const mailOptions = {
-        from: `"${process.env.SMTP_FROM_NAME}" <${process.env.SMTP_USER}>`,
+        from: `"${process.env.SMTP_FROM_NAME}" <${mailer.fromAddress}>`,
         to: to,
         subject: subject,
         html: htmlContent
     };
 
     try {
-        await transporter.sendMail(mailOptions);
+        await mailer.transporter.sendMail(mailOptions);
         console.log(`✅ Email sent successfully to ${to} [${type}]`);
         return true;
     } catch (error) {

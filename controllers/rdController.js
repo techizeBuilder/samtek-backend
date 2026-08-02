@@ -9,6 +9,7 @@ import RDRequest from '../models/RDRequest.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
+import { computeBOMMaterialsMrpCost } from '../services/itemPricingService.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
@@ -507,6 +508,22 @@ export const getBOMByMachineCode = async (req, res) => {
 
     const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();
     res.json({ success: true, data: { machine, bom: bom || null } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── Cross-department lookup: a machine's BOM material cost by MRP ────────────
+// Used by the Sales Order Form to show/enforce a minimum Billing Amount per
+// item (material MRP × qty, summed across the BOM). `data: null` means no
+// RDMachine/BOM exists for this code — callers should skip validation entirely.
+export const getBOMCostByMachineCode = async (req, res) => {
+  try {
+    const { code } = req.params;
+    const companyId = req.user.companyId;
+
+    const result = await computeBOMMaterialsMrpCost(code, companyId);
+    res.json({ success: true, data: result.found ? result : null });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

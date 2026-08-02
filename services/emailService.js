@@ -1,42 +1,4 @@
-import nodemailer from 'nodemailer';
-
-
-/**
- * Create a reusable email transporter
- * Gmail ya koi bhi SMTP use kar sakte ho — .env se config hoga
- */
-const createTransporter = () => {
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || "smtp.gmail.com",
-    port: parseInt(process.env.SMTP_PORT || "587"),
-    secure: false, // true only for port 465
-
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-
-    // Debug logs
-    logger: true,
-    debug: true,
-
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 30000,
-  });
-
-  // Verify SMTP connection
-  transporter.verify((error, success) => {
-    if (error) {
-      console.error("❌ SMTP Verify Failed:");
-      console.error(error);
-    } else {
-      console.log("✅ SMTP Server Ready");
-    }
-  });
-
-  return transporter;
-};
+import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
 
 /**
  * Send Cash Access OTP Email to the Company Admin.
@@ -44,12 +6,12 @@ const createTransporter = () => {
  * NOTE: unlike the other senders below, this THROWS on failure — the caller
  * must know the OTP never reached the admin (no silent {success:false}).
  */
-export const sendOtpEmail = async ({ to, otp, requestedByName, customerName }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    throw new Error('SMTP is not configured (SMTP_USER / SMTP_PASS missing in .env)');
+export const sendOtpEmail = async ({ companyId, to, otp, requestedByName, customerName }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.CASH_ACCESS);
+  if (!mailer) {
+    throw new Error('Cash Access SMTP is not configured (Admin Settings > SMTP Settings)');
   }
-
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const subject = `🔐 Cash Access OTP: ${otp} — approval requested`;
 
   const html = `
@@ -80,7 +42,7 @@ export const sendOtpEmail = async ({ to, otp, requestedByName, customerName }) =
   `;
 
   const result = await transporter.sendMail({
-    from: `"Cash Access Security" <${process.env.SMTP_USER}>`,
+    from: `"Cash Access Security" <${fromAddress}>`,
     to,
     subject,
     html
@@ -92,13 +54,13 @@ export const sendOtpEmail = async ({ to, otp, requestedByName, customerName }) =
 /**
  * Send Payment Reminder Email to Customer
  */
-export const sendPaymentReminderEmail = async ({ to, customerName, invoiceNo, totalAmount, paidAmount, balanceAmount, dueDate, companyName, daysOverdue }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[EMAIL SKIPPED] No SMTP config. Would send reminder to: ${to}`);
+export const sendPaymentReminderEmail = async ({ companyId, to, customerName, invoiceNo, totalAmount, paidAmount, balanceAmount, dueDate, companyName, daysOverdue }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.ACCOUNTS);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Accounts SMTP not configured. Would send reminder to: ${to}`);
     return { skipped: true, reason: 'No SMTP config' };
   }
-
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const isOverdue = daysOverdue > 0;
   const subject = isOverdue
     ? `⚠️ OVERDUE Payment Reminder — Invoice ${invoiceNo} (${daysOverdue} days overdue)`
@@ -162,7 +124,7 @@ export const sendPaymentReminderEmail = async ({ to, customerName, invoiceNo, to
 
   try {
     const result = await transporter.sendMail({
-      from: `"${companyName}" <${process.env.SMTP_USER}>`,
+      from: `"${companyName}" <${fromAddress}>`,
       to,
       subject,
       html
@@ -178,13 +140,13 @@ export const sendPaymentReminderEmail = async ({ to, customerName, invoiceNo, to
 /**
  * Send Quotation Email to Customer with PDF Attachment
  */
-export const sendQuotationEmail = async ({ to, customerName, leadCode, companyName, attachmentBase64 }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[EMAIL SKIPPED] No SMTP config. Would send quotation to: ${to}`);
+export const sendQuotationEmail = async ({ companyId, to, customerName, leadCode, companyName, attachmentBase64 }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.SALES);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Sales SMTP not configured. Would send quotation to: ${to}`);
     return { skipped: true, reason: 'No SMTP config' };
   }
-
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const subject = `📄 Quotation from ${companyName} — Lead #${leadCode}`;
 
   const html = `
@@ -197,7 +159,7 @@ export const sendQuotationEmail = async ({ to, customerName, leadCode, companyNa
       <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
         <p style="color: #374151; font-size: 16px;">Dear <strong>${customerName}</strong>,</p>
         <p style="color: #6b7280;">
-          Please find attached the quotation for your requirement (Lead #${leadCode}). 
+          Please find attached the quotation for your requirement (Lead #${leadCode}).
           We have carefully reviewed your needs and prepared a professional proposal for your consideration.
         </p>
 
@@ -225,7 +187,7 @@ export const sendQuotationEmail = async ({ to, customerName, leadCode, companyNa
     }
 
     const result = await transporter.sendMail({
-      from: `"${companyName}" <${process.env.SMTP_USER}>`,
+      from: `"${companyName}" <${fromAddress}>`,
       to,
       subject,
       html,
@@ -248,13 +210,13 @@ export const sendQuotationEmail = async ({ to, customerName, leadCode, companyNa
 /**
  * Send Purchase Order Email to Vendor
  */
-export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, grandTotal, companyName }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[EMAIL SKIPPED] No SMTP config. Would send PO ${poNumber} to: ${to}`);
+export const sendPurchaseOrderEmail = async ({ companyId, to, vendorName, poNumber, items, grandTotal, companyName }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send PO ${poNumber} to: ${to}`);
     return { success: true, mocked: true, message: 'No SMTP config, mock success' };
   }
-
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const subject = `🛒 New Purchase Order ${poNumber} from ${companyName}`;
 
   const itemsRows = items.map(item => `
@@ -276,7 +238,7 @@ export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, 
       <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
         <p style="color: #374151; font-size: 16px;">Dear <strong>${vendorName}</strong>,</p>
         <p style="color: #6b7280;">
-          We are pleased to place the following Purchase Order (PO Number: <strong>${poNumber}</strong>) with you. 
+          We are pleased to place the following Purchase Order (PO Number: <strong>${poNumber}</strong>) with you.
           Please review the items and prepare the shipment as per our agreement.
         </p>
 
@@ -311,7 +273,7 @@ export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, 
 
   try {
     const result = await transporter.sendMail({
-      from: `"${companyName}" <${process.env.SMTP_USER}>`,
+      from: `"${companyName}" <${fromAddress}>`,
       to,
       subject,
       html
@@ -327,13 +289,13 @@ export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, 
 /**
  * Send RFQ (Request for Quotation) Email to Vendor
  */
-export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[EMAIL SKIPPED] No SMTP config. Would send RFQ ${rfqNo} to: ${to}`);
+export const sendRFQEmail = async ({ companyId, to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send RFQ ${rfqNo} to: ${to}`);
     return { success: true, mocked: true, message: 'No SMTP config, mock success' };
   }
-
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const subject = `📋 Request for Quotation: ${rfqNo} — ${productName} | ${companyName}`;
 
   const formattedDate = requiredByDate
@@ -418,7 +380,7 @@ export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantit
 
   try {
     const result = await transporter.sendMail({
-      from: `"${companyName} Procurement" <${process.env.SMTP_USER}>`,
+      from: `"${companyName} Procurement" <${fromAddress}>`,
       to,
       subject,
       html
@@ -435,13 +397,13 @@ export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantit
  * Send Purchase Exchange request email — QC rejected some qty of a
  * Purchase-sourced item and we're asking the vendor to replace it.
  */
-export const sendPurchaseExchangeEmail = async ({ to, vendorName, itemName, exchangeQty, purchaseUnit, reason, poNumber, acceptLink, companyName }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[EMAIL SKIPPED] No SMTP config. Would send Purchase Exchange request to: ${to}`);
+export const sendPurchaseExchangeEmail = async ({ companyId, to, vendorName, itemName, exchangeQty, purchaseUnit, reason, poNumber, acceptLink, companyName }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send Purchase Exchange request to: ${to}`);
     return { success: true, mocked: true, message: 'No SMTP config, mock success' };
   }
-
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const subject = `🔄 Replacement Requested: ${itemName} | ${companyName}`;
 
   const html = `
@@ -510,7 +472,7 @@ export const sendPurchaseExchangeEmail = async ({ to, vendorName, itemName, exch
 
   try {
     const result = await transporter.sendMail({
-      from: `"${companyName} Procurement" <${process.env.SMTP_USER}>`,
+      from: `"${companyName} Procurement" <${fromAddress}>`,
       to,
       subject,
       html
@@ -526,13 +488,13 @@ export const sendPurchaseExchangeEmail = async ({ to, vendorName, itemName, exch
 /**
  * Send Vendor Bid Confirmation Email (when vendor is selected as winner)
  */
-export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, poNumber, productName, quantity, unitPrice, deliveryDays, warrantyMonths, companyName }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[EMAIL SKIPPED] No SMTP config. Would send confirmation to: ${to}`);
+export const sendVendorBidConfirmationEmail = async ({ companyId, to, vendorName, rfqNo, poNumber, productName, quantity, unitPrice, deliveryDays, warrantyMonths, companyName }) => {
+  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send confirmation to: ${to}`);
     return { success: true, mocked: true };
   }
-
-  const transporter = createTransporter();
+  const { transporter, fromAddress } = mailer;
   const subject = `🎉 Congratulations! Your Quotation Selected — PO ${poNumber} | ${companyName}`;
   const totalValue = (unitPrice * quantity * 1.18).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 
@@ -546,7 +508,7 @@ export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, po
       <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
         <p style="color: #374151; font-size: 16px;">Dear <strong>${vendorName}</strong>,</p>
         <p style="color: #6b7280; line-height: 1.6;">
-          We are pleased to inform you that your quotation for <strong>${rfqNo}</strong> has been selected. 
+          We are pleased to inform you that your quotation for <strong>${rfqNo}</strong> has been selected.
           A Purchase Order has been generated in your name. Please proceed with the delivery as per the agreed terms.
         </p>
 
@@ -604,7 +566,7 @@ export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, po
 
   try {
     const result = await transporter.sendMail({
-      from: `"${companyName} Procurement" <${process.env.SMTP_USER}>`,
+      from: `"${companyName} Procurement" <${fromAddress}>`,
       to,
       subject,
       html

@@ -326,6 +326,7 @@ export const updateInstallationSchedule = async (req, res) => {
             if (resolvedEmail) {
                 const feedbackLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/feedback/${feedbackToken}`;
                 sendSupportEmail({
+                    companyId: req.user.companyId,
                     type: 'INSTALLATION_COMPLETE',
                     to: resolvedEmail,
                     name: order.customerName || 'Customer',
@@ -445,6 +446,7 @@ export const bulkUpdateInstallationSchedule = async (req, res) => {
             if (resolvedEmail) {
                 const feedbackLink = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/feedback/${feedbackToken}`;
                 sendSupportEmail({
+                    companyId: req.user.companyId,
                     type: 'INSTALLATION_COMPLETE',
                     to: resolvedEmail,
                     name: existingOrder.customerName || 'Customer',

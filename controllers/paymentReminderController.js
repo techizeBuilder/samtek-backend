@@ -148,6 +148,7 @@ export const sendManualReminder = async (req, res) => {
         const balanceAmount = invoice.totalAmount - (invoice.paidAmount || 0);
 
         const result = await sendPaymentReminderEmail({
+            companyId,
             to: customer.email,
             customerName: customer.name,
             invoiceNo: invoice.invoiceNumber,
@@ -226,6 +227,7 @@ export const runDailyReminderCron = async () => {
 
                 if (shouldSend) {
                     await sendPaymentReminderEmail({
+                        companyId,
                         to: customer.email,
                         customerName: customer.name,
                         invoiceNo: invoice.invoiceNumber,

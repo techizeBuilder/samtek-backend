@@ -4,7 +4,7 @@ import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
   getMachines, createMachine, updateMachine,
   updateDesignStatus, updateReleaseStatus, discontinueMachine, reactivateMachine,
-  getBOMs, getBOMForMachine, getBOMByMachineCode, createBOM, addMaterial, updateMaterial, deleteMaterial,
+  getBOMs, getBOMForMachine, getBOMByMachineCode, getBOMCostByMachineCode, createBOM, addMaterial, updateMaterial, deleteMaterial,
   lockBOM, discontinueMaterial, reactivateMaterial,
   getPrototypes, createPrototype, updatePrototype,
   getChangeRequests, createChangeRequest, resolveChangeRequest,
@@ -55,6 +55,7 @@ router.put('/machines/:id/reactivate', reactivateMachine);
 router.get('/boms', getBOMs);
 router.get('/boms/machine/:machineId', getBOMForMachine);
 router.get('/boms/by-code/:code', getBOMByMachineCode);
+router.get('/boms/by-code/:code/cost', getBOMCostByMachineCode);
 router.post('/boms', createBOM);
 router.post('/boms/:id/materials', addMaterial);
 router.put('/boms/:id/materials/:materialId', updateMaterial);

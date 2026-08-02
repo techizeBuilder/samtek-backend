@@ -5,6 +5,7 @@ import Lead from '../models/Lead.js';
 import Customer from '../models/Customer.js';
 import notificationService from '../services/notificationService.js';
 import { syncOrderItemsFromForm } from '../services/storeFlowService.js';
+import { computeBOMMaterialsMrpCost } from '../services/itemPricingService.js';
 
 const isSuperadmin = (role) => role === 'Superadmin' || role === 'Super Admin';
 const isAccountsRole = (role) => ['Accounts', 'Accounts Head', 'Account Employee'].includes(role) || isSuperadmin(role);
@@ -116,6 +117,32 @@ export const upsertOrderForm = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Bill Amount is required for every item row.'
+      });
+    }
+
+    // BOM-based minimum Billing Amount — an item's Bill Amount must clear its
+    // own BOM material cost (Σ material MRP × qty) by more than 10%, so a
+    // sale is never billed at/below what it cost to build. Items with no
+    // RDMachine/BOM for their code are skipped entirely — nothing to compare.
+    const bomChecks = await Promise.all(
+      cleanItems
+        .filter(it => !it.hiddenCharge && it.mcCode)
+        .map(async (it) => {
+          const bom = await computeBOMMaterialsMrpCost(it.mcCode, order.companyId);
+          if (!bom.found) return null;
+          const minBillAmount = bom.totalCost * 1.1;
+          if (it.billAmount <= minBillAmount) {
+            return { mcCode: it.mcCode, itemName: it.itemName, bomCost: bom.totalCost, minBillAmount, billAmount: it.billAmount };
+          }
+          return null;
+        })
+    );
+    const bomFailures = bomChecks.filter(Boolean);
+    if (bomFailures.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Billing Amount must be above 10% of BOM cost for: ${bomFailures.map(f => `${f.itemName || f.mcCode} (min ₹${Math.round(f.minBillAmount).toLocaleString('en-IN')}, BOM cost ₹${Math.round(f.bomCost).toLocaleString('en-IN')})`).join('; ')}`,
+        bomFailures
       });
     }
 

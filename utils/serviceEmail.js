@@ -1,16 +1,7 @@
-import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT,
-    secure: process.env.SMTP_PORT == 465,
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-    }
-});
+import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
 
 // Reusable base layout for all emails
 const generateEmailHTML = (title, content) => `
@@ -30,7 +21,7 @@ const generateEmailHTML = (title, content) => `
  * Universal function to send support emails based on the 'type'
  * TYPES: 'CREATED', 'ASSIGNED_CUSTOMER', 'ASSIGNED_TECH', 'VERIFICATION', 'CLOSED', 'CANCELLED', 'SLA_BREACH'
  */
-export const sendSupportEmail = async ({ type, to, name, data }) => {
+export const sendSupportEmail = async ({ companyId, type, to, name, data }) => {
     if (!to) return; // Fail silently if no email is provided
 
     let subject = '';
@@ -144,19 +135,25 @@ export const sendSupportEmail = async ({ type, to, name, data }) => {
             return;
     }
 
+    const mailer = await getDeptMailer(companyId, DEPARTMENTS.INFO);
+    if (!mailer) {
+        console.log(`[EMAIL SKIPPED] Info SMTP not configured. Would send [${type}] to: ${to}`);
+        return;
+    }
+
     const mailOptions = {
-        from: `"${process.env.SMTP_FROM_NAME}" <${process.env.SMTP_USER}>`,
+        from: `"${process.env.SMTP_FROM_NAME}" <${mailer.fromAddress}>`,
         to,
         subject,
         html: generateEmailHTML(subject, content)
     };
 
     try {
-        const info = await transporter.sendMail(mailOptions);
+        const info = await mailer.transporter.sendMail(mailOptions);
         console.log(`✅ Email [${type}] sent to ${to}`);
         return info;
     } catch (error) {
-        // We catch and log the error but DO NOT throw it. 
+        // We catch and log the error but DO NOT throw it.
         // We don't want a failed email to crash the ticket creation/assignment process!
         console.error(`❌ Error sending [${type}] email to ${to}:`, error.message);
     }

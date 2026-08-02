@@ -185,8 +185,7 @@ export const downloadPayslipPDF = async (req, res) => {
       return res.status(404).json({ message: "Payslip not found" });
     }
 
-    const pdfPath = await generatePayslipPDF(payslip);
-    res.download(pdfPath);
+    await generatePayslipPDF(res, payslip);
   } catch (error) {
     res.status(500).json({
       message: "PDF download failed",
@@ -206,8 +205,6 @@ export const sendPayslipToEmployee = async (req, res) => {
     if (!payslip) {
       return res.status(404).json({ message: "Payslip not found" });
     }
-
-    await generatePayslipPDF(payslip);
 
     payslip.status = "Sent";
     payslip.sentAt = new Date();

@@ -5,6 +5,7 @@ import Order from '../models/Order.js';
 import QCJob from '../models/QCJob.js';
 
 import fs from 'fs';
+import path from 'path';
 import notificationService from '../services/notificationService.js';
 import { Item } from '../models/Inventory.js';
 
@@ -717,6 +718,17 @@ export const updatePurchaseRequestStatus = async (req, res) => {
           inventoryItem.serialNumber = request.serialNumber;
           inventoryItem.warranty.period = request.warrantyPeriod;
           if (request.warrantyCardUrl) {
+            // Replace the old warranty card with the newly uploaded one —
+            // delete the previous file so it doesn't linger orphaned on disk.
+            const oldCardUrl = inventoryItem.warranty.cardUrl;
+            if (oldCardUrl && oldCardUrl !== request.warrantyCardUrl) {
+              try {
+                const oldCardPath = path.join(process.cwd(), oldCardUrl.replace(/^\//, ''));
+                if (fs.existsSync(oldCardPath)) fs.unlinkSync(oldCardPath);
+              } catch (unlinkErr) {
+                console.error('Failed to delete old warranty card:', oldCardUrl, unlinkErr.message);
+              }
+            }
             inventoryItem.warranty.cardUrl = request.warrantyCardUrl;
             inventoryItem.warranty.cardUploadedAt = new Date();
           }

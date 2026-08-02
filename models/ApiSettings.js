@@ -60,6 +60,34 @@ const apiSettingsSchema = new mongoose.Schema({
     webhookKey: { type: String, default: '' },
     assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     lastSyncedAt: { type: Date }
+  },
+
+  // ─── Facebook / Meta Lead Ads Webhook Settings ─────────────────
+  // verifyToken: echoed back on Facebook's one-time GET handshake when the
+  // webhook is subscribed in the App dashboard (hub.verify_token).
+  // pageAccessToken: a long-lived Page token — the POST notification only
+  // carries a leadgen_id, so this is required to actually fetch the lead's
+  // field data back from the Graph API.
+  facebook: {
+    enabled: { type: Boolean, default: false },
+    verifyToken: { type: String, default: '' },
+    pageAccessToken: { type: String, default: '' },
+    pageId: { type: String, default: '' },
+    assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    lastSyncedAt: { type: Date }
+  },
+
+  // ─── WhatsApp Cloud API (Meta) Settings ─────────────────────────
+  // accessToken must be a permanent System User token (not the 24h test
+  // token from the Meta dashboard) — used as Authorization: Bearer ...
+  // when POSTing to graph.facebook.com/<ver>/<phoneNumberId>/messages.
+  // Free-text sends only succeed inside a customer's 24h service window;
+  // outside it, Meta requires an approved message Template instead.
+  whatsapp: {
+    enabled: { type: Boolean, default: false },
+    phoneNumberId: { type: String, default: '' },
+    accessToken: { type: String, default: '' },
+    lastSyncedAt: { type: Date }
   }
 
 }, { timestamps: true });

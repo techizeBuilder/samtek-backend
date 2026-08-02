@@ -55,6 +55,7 @@ export const startSLAMonitor = (): void => {
                 for (const manager of managers) {
                     if (manager.email) {
                         await sendSupportEmail({
+                            companyId: ticket.companyId,
                             type: 'SLA_BREACH',
                             to: manager.email,
                             name: manager.fullName || manager.username || 'Manager',

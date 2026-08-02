@@ -381,6 +381,7 @@ export const getPendingAccountOrders = async (req, res) => {
         const Order = (await import('../models/Order.js')).default;
         const Sale = (await import('../models/Sale.js')).default;
         const LeadPayment = (await import('../models/LeadPayment.js')).default;
+        const OrderForm = (await import('../models/OrderForm.js')).default;
 
         const { page = 1, limit = 20, search } = req.query;
         const skip = (page - 1) * limit;
@@ -433,9 +434,22 @@ export const getPendingAccountOrders = async (req, res) => {
 
         const stats = statsAgg[0] || { totalAmount: 0, invoicedCount: 0, notInvoicedCount: 0 };
 
+        // Order Form's Grand Total (Bill + GST) — the actual billable amount
+        // once Accounts has filled the form — is what the "Amount" column
+        // should show (same figure as the View modal's "Grand Total" line).
+        // Scoped to just the current page's orders, same as the enrichment below.
+        const orderForms = await OrderForm.find({
+            orderId: { $in: orders.map(o => o._id) },
+            status: 'Submitted'
+        }).select('orderId totals').lean();
+        const orderFormTotalByOrderId = new Map(
+            orderForms.map(f => [f.orderId.toString(), (f.totals?.billAmount || 0) + (f.totals?.gstAmount || 0)])
+        );
+
         // Enrich with invoicing status + advanced payment from linked lead —
         // only for the current page's rows, not every pending order the
         // company has ever had.
+
         const ordersWithInvoices = await Promise.all(orders.map(async (order) => {
             const invoices = await Sale.find({ order: order._id, isPlaceholder: { $ne: true } }).select('invoiceType');
 
@@ -457,7 +471,10 @@ export const getPendingAccountOrders = async (req, res) => {
                 ...order,
                 generatedInvoices: invoices.map(inv => inv.invoiceType),
                 advancedPaymentAmount,
-                advancedPayments
+                advancedPayments,
+                orderFormTotal: orderFormTotalByOrderId.has(order._id.toString())
+                    ? orderFormTotalByOrderId.get(order._id.toString())
+                    : null
             };
         }));
 
@@ -827,9 +844,18 @@ export const getPackedOrders = async (req, res) => {
 
         const companyId = req.user.companyId;
 
-        // Find packaging jobs with status 'Packed' under user's company
+        // Tab filter: which packaging lifecycle stage to show.
+        // pending = still packed, awaiting final payment/dispatch (previous default/only view)
+        // completed = already dispatched
+        // all = both
+        const tab = (req.query.status || 'pending').toLowerCase();
+        const jobStatuses = tab === 'completed' ? ['Dispatched'] : tab === 'all' ? ['Packed', 'Dispatched'] : ['Packed'];
+        const page = Math.max(1, parseInt(req.query.page) || 1);
+        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 10));
+
+        // Find packaging jobs matching the selected tab, under user's company
         const packedJobs = await PackagingJob.find({
-            status: 'Packed',
+            status: { $in: jobStatuses },
             company: companyId
         }).sort({ updatedAt: -1 });
 
@@ -1066,32 +1092,36 @@ export const getPackedOrders = async (req, res) => {
             }
         }
 
-        let results = Array.from(groupsByOrder.values());
-
         // Same reasoning as getNOCRequests: the grouping above needs every
         // packed job to build correctly, so it can't be paginated at the DB
-        // query level — but the final response is search-filtered +
-        // paginated here instead of shipping every packed order at once.
-        const { page = 1, limit = 20, search } = req.query;
+        // query level — but the final response is search-filtered + paginated
+        // here instead of shipping every packed order at once. page/limit
+        // are already parsed above (line ~853) for the tab/jobStatuses
+        // filter — reused here rather than redeclared.
+        //
+        // Most recently packed/dispatched order first — also gives pagination
+        // a stable, deterministic order to slice against.
+        let results = Array.from(groupsByOrder.values())
+            .sort((a, b) => new Date(b.packedDate || 0) - new Date(a.packedDate || 0));
+
+        const search = (req.query.search || '').trim().toLowerCase();
         if (search) {
-            const q = search.toLowerCase();
-            results = results.filter(item =>
-                (item.orderCode || '').toLowerCase().includes(q) ||
-                (item.customer?.name || '').toLowerCase().includes(q) ||
-                (item.customer?.mobile || '').toLowerCase().includes(q) ||
-                (item.machineName || '').toLowerCase().includes(q) ||
-                (item.serialNumber || '').toLowerCase().includes(q)
+            results = results.filter(r =>
+                (r.orderCode || '').toLowerCase().includes(search) ||
+                (r.customer?.name || '').toLowerCase().includes(search) ||
+                (r.customer?.mobile || '').toLowerCase().includes(search) ||
+                (r.machineName || '').toLowerCase().includes(search) ||
+                (r.serialNumber || '').toLowerCase().includes(search)
             );
         }
 
         const total = results.length;
-        const skip = (parseInt(page) - 1) * parseInt(limit);
-        const paginated = results.slice(skip, skip + parseInt(limit));
+        const paged = results.slice((page - 1) * limit, page * limit);
 
         res.json({
             success: true,
-            data: paginated,
-            pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+            data: paged,
+            pagination: { page, limit, total, pages: Math.ceil(total / limit) },
         });
     } catch (error) {
         console.error('Error in getPackedOrders:', error);

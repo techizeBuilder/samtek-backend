@@ -2294,6 +2294,7 @@ export const sendQuotationEmailHandler = async (req, res) => {
 
     console.log('📧 Starting email transmission via service...');
     const result = await sendQuotationEmail({
+      companyId: userCompanyId,
       to,
       customerName,
       leadCode,
