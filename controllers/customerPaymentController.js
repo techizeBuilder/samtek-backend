@@ -174,7 +174,7 @@ export const getCustomerPayments = async (req, res) => {
             success: true,
             data: {
                 payments,
-                pagination: { total, page: parseInt(page), limit: parseInt(limit) }
+                pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) }
             }
         });
     } catch (error) {

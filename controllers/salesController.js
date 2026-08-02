@@ -538,14 +538,6 @@ export const getSalespersonDeliveries = async (req, res) => {
 
     const bulkDeliveries = await Dispatch.aggregate(aggregationStages);
 
-    // Populate customer info for bulk deliveries
-    const populatedBulkDeliveries = await Promise.all(bulkDeliveries.map(async (delivery) => {
-      if (delivery.customer) {
-        delivery.customer = await Customer.findById(delivery.customer).select('name email mobile city area address category').lean();
-      }
-      return delivery;
-    }));
-
     // 2. QUERY DISPATCH ORDERS (Specific machines from packaging-dispatch)
     const dispatchOrderQuery = {
       company: userCompanyId
@@ -584,34 +576,18 @@ export const getSalespersonDeliveries = async (req, res) => {
 
     const rawDispatchOrders = await DispatchOrder.find(dispatchOrderQuery).sort({ createdAt: -1 }).lean();
 
-    const mappedDispatchOrders = await Promise.all(rawDispatchOrders.map(async (doEntry) => {
-      let customerObj = null;
-      if (doEntry.orderId) {
-        const order = await Order.findOne({ orderCode: doEntry.orderId, companyId: userCompanyId }).populate('customer').lean();
-        if (order && order.customer) {
-          customerObj = {
-            _id: order.customer._id,
-            name: order.customer.name,
-            email: order.customer.email,
-            mobile: order.customer.mobile,
-            city: order.customer.city,
-            area: order.customer.area,
-            address: order.customer.address,
-            category: order.customer.category
-          };
-        }
-      }
-
-      if (!customerObj && doEntry.customerName) {
-        customerObj = {
-          name: doEntry.customerName,
-          mobile: doEntry.customerContact,
-          email: doEntry.customerEmail,
-          address: doEntry.deliveryAddress,
-          city: '',
-          area: ''
-        };
-      }
+    // Synchronous mapping only — no per-row Order lookup here. The
+    // richer customer (from the linked Order, when present) is fetched
+    // later, only for whichever rows actually land on the current page.
+    const mappedDispatchOrders = rawDispatchOrders.map((doEntry) => {
+      const fallbackCustomer = doEntry.customerName ? {
+        name: doEntry.customerName,
+        mobile: doEntry.customerContact,
+        email: doEntry.customerEmail,
+        address: doEntry.deliveryAddress,
+        city: '',
+        area: ''
+      } : null;
 
       // Map status values to match UI classes in MyDeliveries.jsx
       let mappedStatus = 'outline';
@@ -627,7 +603,7 @@ export const getSalespersonDeliveries = async (req, res) => {
         _id: doEntry._id,
         dcno: doEntry.dispatchId,
         date: new Date(dateValue),
-        customer: customerObj,
+        customer: fallbackCustomer,
         vehicleNumber: doEntry.vehicleNumber,
         transporterName: doEntry.transportCompanyName,
         status: mappedStatus,
@@ -641,12 +617,17 @@ export const getSalespersonDeliveries = async (req, res) => {
           }
         ],
         totalItems: 1,
-        createdAt: doEntry.createdAt
+        createdAt: doEntry.createdAt,
+        _source: 'dispatchOrder',
+        _sourceOrderCode: doEntry.orderId || null,
       };
-    }));
+    });
 
     // 3. MERGE, SORT AND PAGINATE
-    const allDeliveries = [...populatedBulkDeliveries, ...mappedDispatchOrders];
+    const allDeliveries = [
+      ...bulkDeliveries.map(d => ({ ...d, _source: 'bulk' })),
+      ...mappedDispatchOrders,
+    ];
 
     // Sort by date / createdAt descending
     allDeliveries.sort((a, b) => {
@@ -660,9 +641,36 @@ export const getSalespersonDeliveries = async (req, res) => {
     const total = allDeliveries.length;
     const paginated = allDeliveries.slice((pageNum - 1) * limitNum, pageNum * limitNum);
 
+    // Enrich customer info ONLY for the current page's rows — this is what
+    // actually bounds the per-row lookups; previously they ran once per row
+    // across the entire matched set, unpaginated, on every request.
+    const enrichedDeliveries = await Promise.all(paginated.map(async (item) => {
+      const { _source, _sourceOrderCode, ...rest } = item;
+      if (_source === 'bulk' && item.customer) {
+        rest.customer = await Customer.findById(item.customer)
+          .select('name email mobile city area address category').lean();
+      } else if (_source === 'dispatchOrder' && _sourceOrderCode) {
+        const order = await Order.findOne({ orderCode: _sourceOrderCode, companyId: userCompanyId })
+          .populate('customer').lean();
+        if (order?.customer) {
+          rest.customer = {
+            _id: order.customer._id,
+            name: order.customer.name,
+            email: order.customer.email,
+            mobile: order.customer.mobile,
+            city: order.customer.city,
+            area: order.customer.area,
+            address: order.customer.address,
+            category: order.customer.category
+          };
+        }
+      }
+      return rest;
+    }));
+
     res.json({
       success: true,
-      deliveries: paginated,
+      deliveries: enrichedDeliveries,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -754,33 +762,39 @@ export const getSalespersonInvoices = async (req, res) => {
     // placeholder per-dispatch and de-duping it against `sales` by
     // invoice number/dispatch ref was unreliable and produced duplicate
     // rows once the real invoice existed alongside its stale placeholder.
-    const sales = await Sale.find(saleQuery)
-      .populate('order', 'orderCode')
-      .populate('customer', 'name email mobile gstin customerCode')
-      .lean();
-
-    // 5. Paginate
-    const allInvoices = [...sales]
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-    // Filter by paymentStatus if requested
-    let filteredInvoices = allInvoices;
-    if (paymentStatus && paymentStatus !== 'all') {
-      filteredInvoices = allInvoices.filter(inv => inv.paymentStatus === paymentStatus);
-    }
-
-    const total = filteredInvoices.length;
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    const paginatedInvoices = filteredInvoices.slice(skip, skip + parseInt(limit));
+    const [paginatedInvoices, total, statsAgg] = await Promise.all([
+      Sale.find(saleQuery)
+        .populate('order', 'orderCode')
+        .populate('customer', 'name email mobile gstin customerCode')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Sale.countDocuments(saleQuery),
+      // Stats reflect the full filtered set (all matching invoices), not
+      // just the current page — computed via aggregate instead of pulling
+      // every matching Sale document into memory to reduce() over.
+      Sale.aggregate([
+        { $match: saleQuery },
+        {
+          $group: {
+            _id: null,
+            totalAmount: { $sum: '$totalAmount' },
+            paidAmount: { $sum: '$paidAmount' },
+            overdueCount: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'Overdue'] }, 1, 0] } },
+          }
+        }
+      ]),
+    ]);
 
-    // 6. Calculate Stats (on full filtered set)
-    const stats = filteredInvoices.reduce((acc, inv) => {
-      acc.totalAmount += (inv.totalAmount || 0);
-      acc.paidAmount += (inv.paidAmount || 0);
-      acc.balanceAmount += ((inv.totalAmount || 0) - (inv.paidAmount || 0));
-      if (inv.paymentStatus === 'Overdue') acc.overdueCount += 1;
-      return acc;
-    }, { totalAmount: 0, paidAmount: 0, balanceAmount: 0, overdueCount: 0 });
+    const s = statsAgg[0] || { totalAmount: 0, paidAmount: 0, overdueCount: 0 };
+    const stats = {
+      totalAmount: s.totalAmount,
+      paidAmount: s.paidAmount,
+      balanceAmount: s.totalAmount - s.paidAmount,
+      overdueCount: s.overdueCount,
+    };
 
     res.json({
       success: true,

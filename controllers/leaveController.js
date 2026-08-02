@@ -121,10 +121,23 @@ export const applyLeave = async (req, res) => {
 // ================= GET MY LEAVES =================
 export const getMyLeaves = async (req, res) => {
   try {
-    const leaves = await Leave.find({
-      employee: req.user._id,
-    }).sort({ createdAt: -1 });
+    const { page, limit } = req.query;
+    const query = { employee: req.user._id };
 
+    if (page || limit) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const [leaves, total] = await Promise.all([
+        Leave.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        Leave.countDocuments(query),
+      ]);
+      return res.json({
+        data: leaves,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
+    const leaves = await Leave.find(query).sort({ createdAt: -1 });
     res.json(leaves);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch leaves" });

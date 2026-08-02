@@ -35,14 +35,66 @@ async function generateChangeId(companyId) {
 export const getMachines = async (req, res) => {
   try {
     const companyId = req.user.companyId;
+    // Opt-in pagination: several consumers (BOM/Tool-Process/Quality-Param
+    // dropdowns, Prototype/Change Management machine pickers, dashboard stats)
+    // rely on this endpoint returning the FULL unfiltered array with no
+    // params — only paginate/filter when page/limit is explicitly sent
+    // (Product Master's list view, Design Approval's queue).
+    const { page, limit, search, designStatus, releaseStatus, discontinued, forwardToNextPhase, withStatusCounts, pType, category, pSourceType } = req.query;
+    const isPaginated = !!(page || limit);
 
-    // 1. Fetch all machines for the company (.lean() makes it plain JSON so we can add properties)
-    const machines = await RDMachine.find({ company: companyId })
-      .sort({ createdAt: -1 })
-      .lean();
+    // Base filter excludes designStatus so status-count aggregates below can
+    // report totals per status regardless of which status tab is selected.
+    const baseQuery = { company: companyId };
+    if (discontinued === 'true') baseQuery.isDiscontinued = true;
+    else if (discontinued === 'false') baseQuery.isDiscontinued = false;
+    if (forwardToNextPhase === 'true') baseQuery.forwardToNextPhase = true;
+    else if (forwardToNextPhase === 'false') baseQuery.forwardToNextPhase = false;
+    if (releaseStatus && releaseStatus !== 'All') baseQuery.releaseStatus = releaseStatus;
+    // Classification filters — lets R&D find every product under a P-Type/Category/P-Source Type
+    // before renaming or deleting that option, so they can reassign items instead of hunting for them.
+    if (pType) baseQuery.pType = pType;
+    if (category) baseQuery.category = category;
+    if (pSourceType) baseQuery.pSourceType = pSourceType;
+    if (search) {
+      baseQuery.$or = [
+        { code: { $regex: search, $options: 'i' } },
+        { name: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const query = { ...baseQuery };
+    if (designStatus && designStatus !== 'All') query.designStatus = designStatus;
+
+    let statusCounts;
+    if (withStatusCounts === 'true') {
+      const countsAgg = await RDMachine.aggregate([
+        { $match: baseQuery },
+        { $group: { _id: '$designStatus', count: { $sum: 1 } } },
+      ]);
+      statusCounts = countsAgg.reduce((acc, c) => { acc[c._id] = c.count; return acc; }, {});
+      statusCounts.All = countsAgg.reduce((sum, c) => sum + c.count, 0);
+    }
+
+    let machines, pagination;
+    if (isPaginated) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const skip = (pageNum - 1) * limitNum;
+      const [rows, total] = await Promise.all([
+        RDMachine.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+        RDMachine.countDocuments(query),
+      ]);
+      machines = rows;
+      pagination = { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) };
+    } else {
+      // 1. Fetch all machines for the company (.lean() makes it plain JSON so we can add properties)
+      machines = await RDMachine.find(query).sort({ createdAt: -1 }).lean();
+    }
 
     if (machines.length === 0) {
-      return res.json({ success: true, data: [] });
+      return res.json({ success: true, data: [], ...(pagination ? { pagination } : {}), ...(statusCounts ? { statusCounts } : {}) });
     }
 
     // 2. Fetch all Design Files for these machines
@@ -70,7 +122,12 @@ export const getMachines = async (req, res) => {
       designFiles: docsByMachine[machine._id.toString()] || []
     }));
 
-    res.json({ success: true, data: enrichedMachines });
+    res.json({
+      success: true,
+      data: enrichedMachines,
+      ...(pagination ? { pagination } : {}),
+      ...(statusCounts ? { statusCounts } : {}),
+    });
   } catch (err) {
     console.error('Error fetching machines with design files:', err);
     res.status(500).json({ success: false, message: err.message });
@@ -85,7 +142,9 @@ export const createMachine = async (req, res) => {
     const {
       code, name, description,
       category, pType, pSourceType,
-      brand, machineType, metrology,
+      brand, machineType, metrology, size,
+      unitWeightValue, unitWeightUnitType, unitWeightUnit,
+      inputUnitType, inputUnit, outputUnitType, outputUnit,
       specifications, customFields, forwardToNextPhase
     } = req.body;
 
@@ -106,6 +165,14 @@ export const createMachine = async (req, res) => {
       pSourceType,
       brand: brand || '',
       metrology: metrology || '',
+      size: size || '',
+      unitWeightValue: unitWeightValue !== undefined && unitWeightValue !== '' ? Number(unitWeightValue) : null,
+      unitWeightUnitType: unitWeightUnitType || '',
+      unitWeightUnit: unitWeightUnit || '',
+      inputUnitType: inputUnitType || '',
+      inputUnit: inputUnit || '',
+      outputUnitType: outputUnitType || '',
+      outputUnit: outputUnit || '',
       machineType: machineType || 'Standard',
       specifications: specifications || [],
       customFields: customFields || [],
@@ -146,7 +213,7 @@ export const getDropdownOptions = async (req, res) => {
     // Group them for the frontend, keeping parentValue so cascading selects can filter.
     // Category depends on P-Type; P-SourceType depends on Category. Metrology and MaterialType
     // (used by BOM Management) are standalone, unrelated to the Product Master cascade.
-    const toOption = (o) => ({ value: o.value, parentValue: o.parentValue || null });
+    const toOption = (o) => ({ _id: o._id, value: o.value, parentValue: o.parentValue || null });
     const groupedOptions = {
       PType: options.filter(o => o.field === 'P-Type').map(toOption),
       Category: options.filter(o => o.field === 'Category').map(toOption),
@@ -189,6 +256,108 @@ export const addDropdownOption = async (req, res) => {
     if (err.code === 11000) {
       return res.status(400).json({ success: false, message: 'This option already exists.' });
     }
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// Field -> the RDMachine column it snapshots into, for cascading edits/usage checks
+const MACHINE_FIELD_MAP = { 'P-Type': 'pType', 'Category': 'category', 'P-SourceType': 'pSourceType', 'Metrology': 'metrology' };
+// Field -> the child dropdown field whose parentValue chains off it
+const CHILD_FIELD_MAP = { 'P-Type': 'Category', 'Category': 'P-SourceType' };
+
+// ─── 3b. UPDATE DROPDOWN OPTION (rename a value, cascading everywhere it's used) ─
+export const updateDropdownOption = async (req, res) => {
+  try {
+    const { value } = req.body;
+    if (!value || !value.trim()) {
+      return res.status(400).json({ success: false, message: 'Option value cannot be empty.' });
+    }
+    const newValue = value.trim();
+
+    const option = await RDMasterOption.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!option) return res.status(404).json({ success: false, message: 'Option not found' });
+
+    const oldValue = option.value;
+    if (oldValue === newValue) {
+      return res.json({ success: true, data: option });
+    }
+
+    const duplicate = await RDMasterOption.findOne({
+      _id: { $ne: option._id }, company: req.user.companyId,
+      field: option.field, parentValue: option.parentValue, value: newValue
+    });
+    if (duplicate) {
+      return res.status(400).json({ success: false, message: 'This option already exists.' });
+    }
+
+    option.value = newValue;
+    await option.save();
+
+    const machineField = MACHINE_FIELD_MAP[option.field];
+    if (machineField) {
+      await RDMachine.updateMany(
+        { company: req.user.companyId, [machineField]: oldValue },
+        { $set: { [machineField]: newValue } }
+      );
+      await RDBOM.updateMany(
+        { company: req.user.companyId, [`materials.${machineField}`]: oldValue },
+        { $set: { [`materials.$[elem].${machineField}`]: newValue } },
+        { arrayFilters: [{ [`elem.${machineField}`]: oldValue }] }
+      );
+    }
+
+    const childField = CHILD_FIELD_MAP[option.field];
+    if (childField) {
+      await RDMasterOption.updateMany(
+        { company: req.user.companyId, field: childField, parentValue: oldValue },
+        { $set: { parentValue: newValue } }
+      );
+    }
+
+    if (option.field === 'P-Type') {
+      await RDCustomFieldTemplate.updateMany({ company: req.user.companyId, pType: oldValue }, { $set: { pType: newValue } });
+    } else if (option.field === 'Category') {
+      await RDCustomFieldTemplate.updateMany({ company: req.user.companyId, category: oldValue }, { $set: { category: newValue } });
+    } else if (option.field === 'P-SourceType') {
+      await RDCustomFieldTemplate.updateMany({ company: req.user.companyId, pSourceType: oldValue }, { $set: { pSourceType: newValue } });
+    }
+
+    res.json({ success: true, data: option });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── 3c. DELETE DROPDOWN OPTION (blocked if still referenced by products/children) ─
+export const deleteDropdownOption = async (req, res) => {
+  try {
+    const option = await RDMasterOption.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!option) return res.status(404).json({ success: false, message: 'Option not found' });
+
+    const machineField = MACHINE_FIELD_MAP[option.field];
+    const productCount = machineField
+      ? await RDMachine.countDocuments({ company: req.user.companyId, [machineField]: option.value })
+      : 0;
+
+    const childField = CHILD_FIELD_MAP[option.field];
+    const childCount = childField
+      ? await RDMasterOption.countDocuments({ company: req.user.companyId, field: childField, parentValue: option.value })
+      : 0;
+
+    if (productCount > 0 || childCount > 0) {
+      const parts = [];
+      if (productCount > 0) parts.push(`${productCount} product${productCount > 1 ? 's' : ''}`);
+      if (childCount > 0) parts.push(`${childCount} linked ${childField.replace('P-', 'P-')} value${childCount > 1 ? 's' : ''}`);
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete "${option.value}" — still used by ${parts.join(' and ')}. Reassign or remove those first.`,
+        productCount, childCount
+      });
+    }
+
+    await option.deleteOne();
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -383,14 +552,26 @@ export const addMaterial = async (req, res) => {
     // 1. Extract 'code' alongside the new fields
     const {
       code, childPart, subChildPart, item, itemType, quantity, unit,
-      category, pSourceType, brand, description, metrology, specifications, customFields
+      category, pType, pSourceType, brand, description, metrology, specifications, customFields,
+      size, unitWeightValue, unitWeightUnitType, unitWeightUnit,
+      inputUnitType, inputUnit, outputUnitType, outputUnit
     } = req.body;
 
     // 2. Validate that 'code' is present
-    if (!code || !item || !itemType || !quantity || !unit) {
+    if (!code || !item || !quantity || !unit) {
       return res.status(400).json({
         success: false,
-        message: 'code, item, itemType, quantity, and unit are required'
+        message: 'code, item, quantity, and unit are required'
+      });
+    }
+
+    // BOM materials must reference an existing Product Master entry — no free-typed codes,
+    // even via direct API calls that bypass the frontend's MaterialCodePicker.
+    const sourceMachine = await RDMachine.findOne({ company: req.user.companyId, code: code.trim() });
+    if (!sourceMachine) {
+      return res.status(400).json({
+        success: false,
+        message: `"${code}" does not match any Product Master item. BOM materials must be selected from Product Master.`
       });
     }
 
@@ -404,15 +585,24 @@ export const addMaterial = async (req, res) => {
             childPart,
             subChildPart,
             item,
-            itemType,
+            itemType: itemType || '',
             quantity: Number(quantity),
             unit,
             // Product Master snapshot, captured client-side when the code matched
             category: category || '',
+            pType: pType || '',
             pSourceType: pSourceType || '',
             brand: brand || '',
             description: description || '',
             metrology: metrology || '',
+            size: size || '',
+            unitWeightValue: unitWeightValue !== undefined && unitWeightValue !== '' ? Number(unitWeightValue) : null,
+            unitWeightUnitType: unitWeightUnitType || '',
+            unitWeightUnit: unitWeightUnit || '',
+            inputUnitType: inputUnitType || '',
+            inputUnit: inputUnit || '',
+            outputUnitType: outputUnitType || '',
+            outputUnit: outputUnit || '',
             specifications: specifications || [],
             customFields: customFields || [],
           }
@@ -435,6 +625,17 @@ export const updateMaterial = async (req, res) => {
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
     const mat = bom.materials.id(req.params.materialId);
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
+
+    if (req.body.code && req.body.code.trim() !== mat.code) {
+      const sourceMachine = await RDMachine.findOne({ company: req.user.companyId, code: req.body.code.trim() });
+      if (!sourceMachine) {
+        return res.status(400).json({
+          success: false,
+          message: `"${req.body.code}" does not match any Product Master item. BOM materials must be selected from Product Master.`
+        });
+      }
+    }
+
     Object.assign(mat, req.body);
     await bom.save();
     res.json({ success: true, data: bom });
@@ -568,8 +769,44 @@ function deriveStatus(perf, output, dur) {
 
 export const getPrototypes = async (req, res) => {
   try {
-    const prototypes = await RDPrototype.find({ company: req.user.companyId }).sort({ createdAt: -1 });
-    res.json({ success: true, data: prototypes });
+    const companyId = req.user.companyId;
+    // Opt-in pagination: the "New Prototype" modal's machine picker and other
+    // consumers expect the full unfiltered array — only paginate/filter when
+    // page/limit is explicitly sent by the Prototype Management list view.
+    const { page, limit, status, withStatusCounts } = req.query;
+    const isPaginated = !!(page || limit);
+
+    const query = { company: companyId };
+    if (status && status !== 'All') query.status = status;
+
+    let statusCounts;
+    if (withStatusCounts === 'true') {
+      const countsAgg = await RDPrototype.aggregate([
+        { $match: { company: companyId } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]);
+      statusCounts = countsAgg.reduce((acc, c) => { acc[c._id] = c.count; return acc; }, {});
+      statusCounts.All = countsAgg.reduce((sum, c) => sum + c.count, 0);
+    }
+
+    if (isPaginated) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const skip = (pageNum - 1) * limitNum;
+      const [prototypes, total] = await Promise.all([
+        RDPrototype.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum),
+        RDPrototype.countDocuments(query),
+      ]);
+      return res.json({
+        success: true,
+        data: prototypes,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+        ...(statusCounts ? { statusCounts } : {}),
+      });
+    }
+
+    const prototypes = await RDPrototype.find(query).sort({ createdAt: -1 });
+    res.json({ success: true, data: prototypes, ...(statusCounts ? { statusCounts } : {}) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -621,8 +858,51 @@ export const updatePrototype = async (req, res) => {
 
 export const getChangeRequests = async (req, res) => {
   try {
-    const requests = await RDChangeRequest.find({ company: req.user.companyId }).sort({ createdAt: -1 });
-    res.json({ success: true, data: requests });
+    const companyId = req.user.companyId;
+    // Opt-in pagination: the "Raise Change Request" modal's machine picker
+    // (via getMachines) is unaffected; only paginate/filter when page/limit
+    // is explicitly sent by the Change Management list view.
+    const { page, limit, search, status, withStatusCounts } = req.query;
+    const isPaginated = !!(page || limit);
+
+    const query = { company: companyId };
+    if (status && status !== 'All') query.status = status;
+    if (search) {
+      query.$or = [
+        { machineName: { $regex: search, $options: 'i' } },
+        { machineCode: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    let statusCounts;
+    if (withStatusCounts === 'true') {
+      const countsAgg = await RDChangeRequest.aggregate([
+        { $match: { company: companyId } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]);
+      statusCounts = countsAgg.reduce((acc, c) => { acc[c._id] = c.count; return acc; }, {});
+      statusCounts.All = countsAgg.reduce((sum, c) => sum + c.count, 0);
+    }
+
+    if (isPaginated) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const skip = (pageNum - 1) * limitNum;
+      const [requests, total] = await Promise.all([
+        RDChangeRequest.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum),
+        RDChangeRequest.countDocuments(query),
+      ]);
+      return res.json({
+        success: true,
+        data: requests,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+        ...(statusCounts ? { statusCounts } : {}),
+      });
+    }
+
+    const requests = await RDChangeRequest.find(query).sort({ createdAt: -1 });
+    res.json({ success: true, data: requests, ...(statusCounts ? { statusCounts } : {}) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -939,13 +1219,28 @@ export const getRDRequests = async (req, res) => {
 
     // ── IMPROVED: Smart Search ──
     if (search) {
-      query.$or = [
+      const orConditions = [
         { machineCode: { $regex: search, $options: 'i' } },
         { machineName: { $regex: search, $options: 'i' } },
         // Now R&D can search by the specific material code/name requested!
         { "materialChangeDetails.materialCode": { $regex: search, $options: 'i' } },
         { "materialChangeDetails.materialName": { $regex: search, $options: 'i' } }
       ];
+
+      // Also match by either of Production's two order IDs — its own internal
+      // orderId (e.g. "PROD-2026-682637") or the real sales order code (e.g. "ORD-0094").
+      const matchingOrders = await ProductionOrder.find({
+        company: companyId,
+        $or: [
+          { orderId: { $regex: search, $options: 'i' } },
+          { orderCode: { $regex: search, $options: 'i' } }
+        ]
+      }).select('_id').lean();
+      if (matchingOrders.length > 0) {
+        orConditions.push({ productionOrderId: { $in: matchingOrders.map(o => o._id) } });
+      }
+
+      query.$or = orConditions;
     }
 
     // Pagination Logic
@@ -958,7 +1253,8 @@ export const getRDRequests = async (req, res) => {
 
     // Fetch the actual paginated data
     const requests = await RDRequest.find(query)
-      .populate('productionOrderId', 'orderId priority receivedDate deliveryDate status source')
+      .populate('productionOrderId', 'orderId orderCode priority receivedDate deliveryDate status source machineCode rejectionDetails')
+      .populate('processedBy', 'username fullName')
       .sort({ createdAt: -1 })
       .skip(skip)   // Skip previous pages
       .limit(limit) // Limit to 20 items
@@ -1000,6 +1296,9 @@ export const processRDRequest = async (req, res) => {
     // ─────────────────────────────────────────────────────────────
     if (action === 'Reject') {
       rdRequest.status = 'Rejected';
+      rdRequest.processedBy = req.user._id;
+      rdRequest.processedAt = new Date();
+      rdRequest.rejectReason = rejectReason || null;
       await rdRequest.save();
 
       if (rdRequest.requestType === 'Material Change') {
@@ -1077,6 +1376,8 @@ export const processRDRequest = async (req, res) => {
         await order.save();
 
         rdRequest.status = 'Approved';
+        rdRequest.processedBy = req.user._id;
+        rdRequest.processedAt = new Date();
         await rdRequest.save();
         return res.json({ success: true, message: 'Material change approved and order updated.' });
       }
@@ -1120,6 +1421,8 @@ export const processRDRequest = async (req, res) => {
       });
 
       rdRequest.status = 'Approved';
+      rdRequest.processedBy = req.user._id;
+      rdRequest.processedAt = new Date();
       await rdRequest.save();
 
       return res.json({ success: true, message: 'Initial BOM injected into Production Order.' });

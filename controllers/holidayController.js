@@ -68,6 +68,15 @@ export const getAllHolidays = async (req, res) => {
             if (companyId) filter.companyId = companyId;
         }
 
+        // Opt-in month filter ("YYYY-MM") — only narrows the query when a
+        // caller (e.g. the attendance calendar) explicitly asks for one
+        // month; other consumers of this endpoint keep getting the full list.
+        const { month } = req.query;
+        if (month) {
+            const [y, m] = month.split('-').map(Number);
+            filter.date = { $gte: new Date(y, m - 1, 1), $lt: new Date(y, m, 1) };
+        }
+
         const holidays = await Holiday.find(filter).sort({ date: 1 });
         res.json(holidays);
     } catch (error) {

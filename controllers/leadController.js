@@ -115,6 +115,7 @@ export const getLeads = async (req, res) => {
       stage,
       assignedTo,
       search,
+      page = 1,
       limit = 20,
       sortBy = 'createdAt',
       order = 'desc',
@@ -126,19 +127,29 @@ export const getLeads = async (req, res) => {
       enquiryDateTo,
       nextFollowUpDateFrom,
       nextFollowUpDateTo,
-      paymentCheckRequested
+      paymentCheckRequested,
+      paymentCheckStatusFilter
     } = req.query;
 
     let parsedLimit = parseInt(limit);
     if (paymentCheckRequested === 'true' && !req.query.limit) {
       parsedLimit = 1000;
     }
+    const parsedPage = parseInt(page) || 1;
+    const skip = (parsedPage - 1) * parsedLimit;
 
     const query = { companyId: req.user.companyId };
     const andConditions = [];
 
     if (paymentCheckRequested === 'true') {
-      query.paymentCheckStatus = { $in: ['Pending', 'Paid', 'Partially Paid', 'Rejected'] };
+      // Payment Verifications' own status filter (Paid/Pending/Partially
+      // Paid/Rejected) narrows further than the base "has a payment check
+      // request at all" set.
+      if (paymentCheckStatusFilter && paymentCheckStatusFilter !== 'all') {
+        query.paymentCheckStatus = paymentCheckStatusFilter;
+      } else {
+        query.paymentCheckStatus = { $in: ['Pending', 'Paid', 'Partially Paid', 'Rejected'] };
+      }
     }
 
     // ðŸŽ¯ NEW ROLE-BASED ACCESS CONTROL
@@ -279,13 +290,17 @@ export const getLeads = async (req, res) => {
       sortOptions[sortBy] = order === 'asc' ? 1 : -1;
     }
 
-    const leadsDocs = await Lead.find(query)
-      .select('-quotation')
-      .populate('assignedTo', 'fullName username')
-      .populate('observer', 'fullName username')
-      .populate('history.performedBy', 'fullName username')
-      .sort(sortOptions)
-      .limit(parsedLimit);
+    const [leadsDocs, total] = await Promise.all([
+      Lead.find(query)
+        .select('-quotation')
+        .populate('assignedTo', 'fullName username')
+        .populate('observer', 'fullName username')
+        .populate('history.performedBy', 'fullName username')
+        .sort(sortOptions)
+        .skip(skip)
+        .limit(parsedLimit),
+      Lead.countDocuments(query),
+    ]);
 
     // Efficiently check which leads have a quotation
     const leadIds = leadsDocs.map(l => l._id);
@@ -306,7 +321,33 @@ export const getLeads = async (req, res) => {
       return doc;
     });
 
-    res.json({ success: true, count: leads.length, leads });
+    // Payment Verifications' 4 stat cards (Total/Pending/Verified/Rejected)
+    // need to reflect every payment-check-requested lead, not just the
+    // current page — computed here via a small aggregate, independent of
+    // paymentCheckStatusFilter, same "always show all statuses" convention
+    // used by the Orders/Job Cards stat bars elsewhere in this app.
+    let paymentCheckSummary;
+    if (paymentCheckRequested === 'true') {
+      const statusAgg = await Lead.aggregate([
+        { $match: { companyId: new mongoose.Types.ObjectId(req.user.companyId), paymentCheckStatus: { $in: ['Pending', 'Paid', 'Partially Paid', 'Rejected'] } } },
+        { $group: { _id: '$paymentCheckStatus', count: { $sum: 1 } } },
+      ]);
+      const countFrom = (key) => (statusAgg.find(a => a._id === key)?.count) || 0;
+      paymentCheckSummary = {
+        total: statusAgg.reduce((sum, a) => sum + a.count, 0),
+        pending: countFrom('Pending'),
+        verified: countFrom('Paid') + countFrom('Partially Paid'),
+        rejected: countFrom('Rejected'),
+      };
+    }
+
+    res.json({
+      success: true,
+      count: leads.length,
+      leads,
+      pagination: { page: parsedPage, limit: parsedLimit, total, pages: Math.ceil(total / parsedLimit) },
+      ...(paymentCheckSummary ? { paymentCheckSummary } : {}),
+    });
   } catch (error) {
     console.error('Error fetching leads:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });

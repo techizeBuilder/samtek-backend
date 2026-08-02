@@ -30,6 +30,10 @@ const rdRequestSchema = new mongoose.Schema({
         enum: ['Pending', 'Drafting BOM', 'Approved', 'Rejected'],
         default: 'Pending'
     },
+    // Who approved/rejected this request, and when — and why, for rejections.
+    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    processedAt: { type: Date, default: null },
+    rejectReason: { type: String, default: null },
     draftBOM: [{
         itemCode: { type: String, required: true },
         quantity: { type: Number, required: true },

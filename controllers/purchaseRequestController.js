@@ -117,6 +117,14 @@ export const getPurchaseRequests = async (req, res) => {
         { source: { $in: ['Production', 'QC'] }, storeApproved: true }
       ];
     }
+    // RFQ Management only ever needs the still-actionable (Pending/Approved)
+    // subset, not the full historical archive Purchase Request browses —
+    // scope at the DB query level via ?status=Pending,Approved instead of
+    // fetching everything and filtering client-side.
+    if (req.query.status) {
+      const statuses = req.query.status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length) query.status = { $in: statuses };
+    }
 
     const requests = await PurchaseRequest.find(query)
       .populate({ path: 'purchaseOrder', populate: { path: 'supplier' } })
@@ -139,10 +147,28 @@ export const getPurchaseRequests = async (req, res) => {
         .sort({ createdAt: -1 });
     }
 
+    // Auto-sync + self-healing above still need to see (and fix) every
+    // purchase request, so that part isn't paginated — but search/pagination
+    // ARE applied here, before the per-row Master Item lookup below, so that
+    // expensive N+1 enrichment only ever runs for the current page's rows,
+    // not every purchase request the company has ever filed.
+    const { page = 1, limit = 20, search } = req.query;
+    let filteredRequests = finalRequests;
+    if (search) {
+      const q = search.toLowerCase();
+      filteredRequests = filteredRequests.filter(r =>
+        (r.productName || '').toLowerCase().includes(q) ||
+        (r.requestId || '').toLowerCase().includes(q)
+      );
+    }
+    const total = filteredRequests.length;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const pageRequests = filteredRequests.slice(skip, skip + parseInt(limit));
+
     // ─────────────────────────────────────────────────────────────
     // NEW: Attach Master Inventory Item (R&D Specs) to each PR
     // ─────────────────────────────────────────────────────────────
-    const enrichedRequests = await Promise.all(finalRequests.map(async (reqObj) => {
+    const enrichedRequests = await Promise.all(pageRequests.map(async (reqObj) => {
       const pr = reqObj.toObject();
 
       // Attempt to find the Master Item to attach R&D Specs
@@ -161,7 +187,11 @@ export const getPurchaseRequests = async (req, res) => {
       return pr;
     }));
 
-    res.status(200).json({ success: true, data: enrichedRequests });
+    res.status(200).json({
+      success: true,
+      data: enrichedRequests,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+    });
   } catch (error) {
     console.error('Error fetching purchase requests:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
@@ -695,6 +725,24 @@ export const updatePurchaseRequestStatus = async (req, res) => {
           console.log(`✅ Inventory item "${inventoryItem.name}" updated with serial & warranty info`);
         } else {
           console.warn(`⚠️  No matching inventory item found for "${request.productName}" – skipping inventory update`);
+        }
+
+        // 📊 Feed the delivery-date estimator: this request's full
+        // request→receive cycle becomes one sample in this item's vendor
+        // lead-time average. This IS the real Store "mark as Received" flow
+        // (unlike controllers/purchaseController.js's receivePurchase,
+        // which has no frontend caller at all) — this is the only place
+        // that should ever record a Purchase-path sample. Best-effort,
+        // never blocks receiving.
+        try {
+          const resolvedCode = request.materialCode || inventoryItem?.code || null;
+          if (resolvedCode) {
+            const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
+            const durationDays = (request.receivedAt.getTime() - new Date(request.requestDate).getTime()) / (1000 * 60 * 60 * 24);
+            await recordLeadTimeSample(request.companyId, resolvedCode, request.productName, 'Purchase', durationDays);
+          }
+        } catch (statsErr) {
+          console.error('❌ Error recording purchase lead-time sample:', statsErr.message);
         }
       } catch (invErr) {
         console.error('❌ Error updating inventory item on receive:', invErr);

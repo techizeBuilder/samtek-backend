@@ -38,6 +38,8 @@ const PackagingJobSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 PackagingJobSchema.index({ company: 1, status: 1 });
+// Supports the paginated getPackagingJobs query (status filter + sort by createdAt).
+PackagingJobSchema.index({ company: 1, status: 1, createdAt: -1 });
 // Compound unique indexes: same jobId/serialNumber allowed across companies, not within same company
 PackagingJobSchema.index({ company: 1, jobId: 1 }, { unique: true, sparse: true });
 PackagingJobSchema.index({ company: 1, serialNumber: 1 }, { unique: true, sparse: true });

@@ -47,7 +47,12 @@ export const getAssets = async (req, res) => {
       { description: new RegExp(search, 'i') },
     ];
     if (category) query.category = category;
-    if (fileType) query.fileType = fileType.toUpperCase();
+    if (fileType) {
+      // Comma-separated list lets the frontend send a type BUCKET (e.g.
+      // "PDF,DOC,DOCX" for "Documents") instead of one exact fileType.
+      const types = fileType.split(',').map(t => t.trim().toUpperCase()).filter(Boolean);
+      query.fileType = types.length > 1 ? { $in: types } : types[0];
+    }
     if (tag) query.tags = new RegExp(tag, 'i');
 
     const skip = (parseInt(page) - 1) * parseInt(limit);

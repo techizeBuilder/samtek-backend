@@ -265,6 +265,12 @@ const saleSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Supports the paginated getSalespersonInvoices query (company-scoped,
+// optional paymentStatus filter, sorted by createdAt). No indexes existed
+// on this model before.
+saleSchema.index({ companyId: 1, createdAt: -1 });
+saleSchema.index({ companyId: 1, paymentStatus: 1 });
+
 // ── Multi-item helpers ───────────────────────────────────────────────────────
 
 // True when this sale is tracked per-item (any item carries flow state).

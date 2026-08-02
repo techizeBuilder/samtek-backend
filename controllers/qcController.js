@@ -92,17 +92,83 @@ export const getDashboard = async (req, res) => {
 // ── QC Jobs CRUD ──────────────────────────────────────────────────────────────
 export const getQCJobs = async (req, res) => {
   try {
-    const { status, source, category } = req.query;
+    const { status, source, category, search, page, limit, withStatusCounts } = req.query;
     const filter = { company: req.user.companyId };
     if (status) filter.status = status;
     if (source) filter.source = source;
     if (category) filter.category = category;
+
+    const isPaginated = !!(page || limit);
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+
+    let statusCounts;
+    if (withStatusCounts === 'true') {
+      const countsAgg = await QCJob.aggregate([
+        { $match: { company: req.user.companyId } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]);
+      statusCounts = countsAgg.reduce((acc, c) => { acc[c._id] = c.count; return acc; }, {});
+      statusCounts.all = countsAgg.reduce((sum, c) => sum + c.count, 0);
+    }
+
+    if (search) {
+      // orderCode is resolved per-job (not a stored/indexed field), so
+      // matching it requires enriching every job in the filtered set —
+      // this path accepts that per-row lookup cost only while actively
+      // searching, rather than paginating first and silently missing
+      // order-code matches that fall outside the current page.
+      const jobs = await QCJob.find(filter).sort({ createdAt: -1 }).lean();
+      const jobsWithOrderCode = await Promise.all(jobs.map(async (job) => ({
+        ...job,
+        orderCode: await resolveSalesOrderCodeForQCJob(job, req.user.companyId),
+      })));
+      const s = search.toLowerCase();
+      const matched = jobsWithOrderCode.filter(j =>
+        (j.qcJobId || '').toLowerCase().includes(s) ||
+        (j.itemName || '').toLowerCase().includes(s) ||
+        (j.sourceRefId || '').toLowerCase().includes(s) ||
+        (j.inspector || '').toLowerCase().includes(s) ||
+        (j.orderCode || '').toLowerCase().includes(s)
+      );
+
+      if (isPaginated) {
+        const total = matched.length;
+        const data = matched.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+        return res.json({
+          success: true, data,
+          pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+          ...(statusCounts ? { statusCounts } : {}),
+        });
+      }
+      return res.json({ success: true, data: matched, ...(statusCounts ? { statusCounts } : {}) });
+    }
+
+    if (isPaginated) {
+      // Real DB-level pagination — resolveSalesOrderCodeForQCJob now only
+      // runs for the current page's rows, not the entire company history.
+      const [jobs, total] = await Promise.all([
+        QCJob.find(filter).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum).lean(),
+        QCJob.countDocuments(filter),
+      ]);
+      const jobsWithOrderCode = await Promise.all(jobs.map(async (job) => ({
+        ...job,
+        orderCode: await resolveSalesOrderCodeForQCJob(job, req.user.companyId),
+      })));
+      return res.json({
+        success: true, data: jobsWithOrderCode,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+        ...(statusCounts ? { statusCounts } : {}),
+      });
+    }
+
+    // No page/limit sent — original unbounded behavior, unchanged.
     const jobs = await QCJob.find(filter).sort({ createdAt: -1 }).lean();
     const jobsWithOrderCode = await Promise.all(jobs.map(async (job) => ({
       ...job,
       orderCode: await resolveSalesOrderCodeForQCJob(job, req.user.companyId),
     })));
-    res.json({ success: true, data: jobsWithOrderCode });
+    res.json({ success: true, data: jobsWithOrderCode, ...(statusCounts ? { statusCounts } : {}) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

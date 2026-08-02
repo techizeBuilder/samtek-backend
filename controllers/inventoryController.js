@@ -1085,6 +1085,12 @@ const sanitizeItemData = (data) => {
   if (sanitized.hsn) sanitized.hsn = sanitized.hsn.trim();
   if (sanitized.description) sanitized.description = sanitized.description.trim();
   if (sanitized.internalNotes) sanitized.internalNotes = sanitized.internalNotes.trim();
+  if (sanitized.brand) sanitized.brand = sanitized.brand.trim();
+  if (sanitized.metrology) sanitized.metrology = sanitized.metrology.trim();
+  if (sanitized.size) sanitized.size = sanitized.size.trim();
+  if (sanitized.unitWeightValue !== undefined && sanitized.unitWeightValue !== null && sanitized.unitWeightValue !== '') {
+    sanitized.unitWeightValue = Number(sanitized.unitWeightValue);
+  }
 
   // Convert numeric fields
   if (sanitized.qty !== undefined) sanitized.qty = Number(sanitized.qty);

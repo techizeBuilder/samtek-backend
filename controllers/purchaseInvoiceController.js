@@ -152,7 +152,7 @@ export const getPurchaseInvoices = async (req, res) => {
             success: true,
             data: {
                 invoices,
-                pagination: { total, page: parseInt(page), limit: parseInt(limit) }
+                pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) }
             }
         });
     } catch (error) {

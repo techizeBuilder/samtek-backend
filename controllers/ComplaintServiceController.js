@@ -422,6 +422,17 @@ export const getSupportTickets = async (req, res) => {
             value: stat.count
         }));
 
+        // Dashboard-accuracy counts: computed over the FULL matching query
+        // (independent of page/limit), not the current page's 10-50 rows —
+        // status filters are overridden here regardless of what's already on
+        // `query` so these always reflect the true company-wide totals for
+        // whatever other filters (date range, technician, etc.) are active.
+        const [completedCount, pendingCount, breachedCount] = await Promise.all([
+            ServiceTicket.countDocuments({ ...query, status: { $in: ['Resolved', 'Closed'] } }),
+            ServiceTicket.countDocuments({ ...query, status: { $in: ['Unassigned', 'Pending', 'In Progress', 'Reopened'] } }),
+            ServiceTicket.countDocuments({ ...query, 'sla.isBreached': true }),
+        ]);
+
         res.status(200).json({
             success: true,
             pagination: {
@@ -432,7 +443,12 @@ export const getSupportTickets = async (req, res) => {
             },
             metrics: {
                 averageResolutionTime: `${avgResolutionMinutes} minutes`,
-                issueTypeBreakdown: formattedIssueStats
+                issueTypeBreakdown: formattedIssueStats,
+                statusCounts: {
+                    completed: completedCount,
+                    pending: pendingCount,
+                    breached: breachedCount,
+                }
             },
             data: tickets
         });

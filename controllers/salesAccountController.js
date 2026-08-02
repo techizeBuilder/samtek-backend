@@ -259,15 +259,30 @@ export const getSalesInvoices = async (req, res) => {
             ];
         }
 
-        const invoices = await Sale.find(query)
-            .populate('customer', 'name mobile email gstin address1 city state pin contactPerson')
-            .populate('companyId', 'name unitName address city state locationPin email mobile gst')
-            .sort({ saleDate: -1 })
-            .skip((page - 1) * limit)
-            .limit(parseInt(limit))
-            .lean();
+        const [invoices, total, statsAgg] = await Promise.all([
+            Sale.find(query)
+                .populate('customer', 'name mobile email gstin address1 city state pin contactPerson')
+                .populate('companyId', 'name unitName address city state locationPin email mobile gst')
+                .sort({ saleDate: -1 })
+                .skip((page - 1) * limit)
+                .limit(parseInt(limit))
+                .lean(),
+            Sale.countDocuments(query),
+            // Stat cards (Total Invoice/Revenue/Unpaid Balance) reflect every
+            // matching invoice, not just the current page.
+            Sale.aggregate([
+                { $match: query },
+                {
+                    $group: {
+                        _id: null,
+                        totalAmount: { $sum: '$totalAmount' },
+                        unpaidAmount: { $sum: { $cond: [{ $ne: ['$paymentStatus', 'Paid'] }, '$totalAmount', 0] } },
+                    }
+                }
+            ]),
+        ]);
 
-        const total = await Sale.countDocuments(query);
+        const stats = statsAgg[0] || { totalAmount: 0, unpaidAmount: 0 };
 
         // Fetch approved orders that are NOT yet invoiced. Placeholder Sales
         // (Store's internal auto-created record — see updateOrderStoreInfo)
@@ -320,9 +335,41 @@ export const getSalesInvoices = async (req, res) => {
             data: {
                 invoices: invoicesWithSibling,
                 pendingOrders,
-                pagination: { total, page: parseInt(page), limit: parseInt(limit) }
+                pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) },
+                summary: {
+                    totalInvoices: total,
+                    totalRevenue: stats.totalAmount,
+                    unpaidBalance: stats.unpaidAmount,
+                    pendingOrdersCount: pendingOrders.length,
+                },
             }
         });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// Next available invoice number for the current year (INV-{year}-{series}) —
+// used to prefill the "New Invoice" form. Finds just the highest existing
+// series via an indexed, sorted query instead of fetching every invoice the
+// company has ever issued.
+export const getNextInvoiceNumber = async (req, res) => {
+    try {
+        const currentYear = new Date().getFullYear();
+        const prefix = `INV-${currentYear}-`;
+        const lastInvoice = await Sale.findOne({
+            companyId: req.user.companyId,
+            invoiceNumber: { $regex: `^${prefix}` }
+        }).sort({ invoiceNumber: -1 }).select('invoiceNumber').lean();
+
+        let nextSeries = 1;
+        if (lastInvoice?.invoiceNumber) {
+            const parts = lastInvoice.invoiceNumber.split('-');
+            const num = parseInt(parts[2]) || 0;
+            nextSeries = num + 1;
+        }
+
+        res.json({ success: true, invoiceNumber: `${prefix}${String(nextSeries).padStart(2, '0')}` });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -335,18 +382,60 @@ export const getPendingAccountOrders = async (req, res) => {
         const Sale = (await import('../models/Sale.js')).default;
         const LeadPayment = (await import('../models/LeadPayment.js')).default;
 
+        const { page = 1, limit = 20, search } = req.query;
+        const skip = (page - 1) * limit;
+
         const query = {
             companyId: req.user.companyId,
             status: { $in: ['approved', 'completed'] }
         };
+        if (search) {
+            query.orderCode = { $regex: search, $options: 'i' };
+        }
 
-        const orders = await Order.find(query)
-            .populate('customer', 'name mobile email gstin address1 city state pin contactPerson customerCode')
-            .populate('products.product', 'name price brand unit')
-            .sort({ orderDate: -1 })
-            .lean();
+        const baseQuery = { companyId: req.user.companyId, status: { $in: ['approved', 'completed'] } };
 
-        // Enrich with invoicing status + advanced payment from linked lead
+        const [orders, total, statsAgg] = await Promise.all([
+            Order.find(query)
+                .populate('customer', 'name mobile email gstin address1 city state pin contactPerson customerCode')
+                .populate('products.product', 'name price brand unit')
+                .sort({ orderDate: -1 })
+                .skip(skip)
+                .limit(parseInt(limit))
+                .lean(),
+            Order.countDocuments(query),
+            // Stat cards (Not Invoiced / Invoiced / Potential Revenue) reflect
+            // ALL matching orders, not just the current page — computed via
+            // aggregate instead of pulling every order + its Sale docs into memory.
+            Order.aggregate([
+                { $match: baseQuery },
+                {
+                    $lookup: {
+                        from: 'sales',
+                        let: { orderId: '$_id' },
+                        pipeline: [
+                            { $match: { $expr: { $and: [{ $eq: ['$order', '$$orderId'] }, { $ne: ['$isPlaceholder', true] }] } } },
+                            { $limit: 1 },
+                        ],
+                        as: 'invoiceCheck',
+                    }
+                },
+                {
+                    $group: {
+                        _id: null,
+                        totalAmount: { $sum: '$totalAmount' },
+                        invoicedCount: { $sum: { $cond: [{ $gt: [{ $size: '$invoiceCheck' }, 0] }, 1, 0] } },
+                        notInvoicedCount: { $sum: { $cond: [{ $gt: [{ $size: '$invoiceCheck' }, 0] }, 0, 1] } },
+                    }
+                }
+            ]),
+        ]);
+
+        const stats = statsAgg[0] || { totalAmount: 0, invoicedCount: 0, notInvoicedCount: 0 };
+
+        // Enrich with invoicing status + advanced payment from linked lead —
+        // only for the current page's rows, not every pending order the
+        // company has ever had.
         const ordersWithInvoices = await Promise.all(orders.map(async (order) => {
             const invoices = await Sale.find({ order: order._id, isPlaceholder: { $ne: true } }).select('invoiceType');
 
@@ -372,7 +461,16 @@ export const getPendingAccountOrders = async (req, res) => {
             };
         }));
 
-        res.json({ success: true, data: ordersWithInvoices });
+        res.json({
+            success: true,
+            data: ordersWithInvoices,
+            pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+            summary: {
+                notInvoicedCount: stats.notInvoicedCount,
+                invoicedCount: stats.invoicedCount,
+                potentialRevenue: stats.totalAmount,
+            },
+        });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
@@ -968,9 +1066,33 @@ export const getPackedOrders = async (req, res) => {
             }
         }
 
-        const results = Array.from(groupsByOrder.values());
+        let results = Array.from(groupsByOrder.values());
 
-        res.json({ success: true, data: results });
+        // Same reasoning as getNOCRequests: the grouping above needs every
+        // packed job to build correctly, so it can't be paginated at the DB
+        // query level — but the final response is search-filtered +
+        // paginated here instead of shipping every packed order at once.
+        const { page = 1, limit = 20, search } = req.query;
+        if (search) {
+            const q = search.toLowerCase();
+            results = results.filter(item =>
+                (item.orderCode || '').toLowerCase().includes(q) ||
+                (item.customer?.name || '').toLowerCase().includes(q) ||
+                (item.customer?.mobile || '').toLowerCase().includes(q) ||
+                (item.machineName || '').toLowerCase().includes(q) ||
+                (item.serialNumber || '').toLowerCase().includes(q)
+            );
+        }
+
+        const total = results.length;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const paginated = results.slice(skip, skip + parseInt(limit));
+
+        res.json({
+            success: true,
+            data: paginated,
+            pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+        });
     } catch (error) {
         console.error('Error in getPackedOrders:', error);
         res.status(500).json({ success: false, message: error.message });

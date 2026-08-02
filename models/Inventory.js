@@ -132,6 +132,38 @@ const itemSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Optional attributes mirrored from Product Master when the item's code matches an
+  // R&D-defined product (see itemCode autofill in SimpleInventoryForm). Independent of
+  // Product Master's own Category/P-Type taxonomy — never populated from those.
+  brand: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  metrology: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  size: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  unitWeightValue: {
+    type: Number,
+    default: null
+  },
+  unitWeightUnitType: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  unitWeightUnit: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   internalNotes: {
     type: String,
     trim: true

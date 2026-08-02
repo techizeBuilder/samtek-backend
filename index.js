@@ -262,6 +262,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.use('/api', supplierRoutes);
             const companyRoutes = (await import('./routes/companyRoutes.js')).default;
             app.use('/api/companies', companyRoutes);
+            const deliveryEstimateRoutes = (await import('./routes/deliveryEstimateRoutes.js')).default;
+            app.use('/api/delivery-estimate', deliveryEstimateRoutes);
             console.log('Company routes registered at /api/companies');
             const { default: orderRoutes } = await import('./routes/orderRoutes.js');
             const salesRouter = (await import('./routes/salesRoutes.js')).default;

@@ -1676,7 +1676,7 @@ export const getTransactions = async (req, res) => {
     res.json({
       success: true,
       transactions,
-      pagination: { total, page: parseInt(page), limit: parseInt(limit) }
+      pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) }
     });
   } catch (error) {
     console.error('Get transactions error:', error);

@@ -130,13 +130,25 @@ export const createQCRejectedPurchaseExchange = async (qcJob, user, qty) => {
 
 export const getPurchaseExchanges = async (req, res) => {
     try {
-        const { status } = req.query;
+        const { status, page = 1, limit = 20, search } = req.query;
         const query = { companyId: req.user.companyId };
-        if (status) query.status = status;
-        const exchanges = await PurchaseExchange.find(query)
-            .populate('vendor', 'supplierName email')
-            .sort({ createdAt: -1 });
-        res.json({ success: true, data: exchanges });
+        if (status && status !== 'all') query.status = status;
+        if (search) query.itemName = { $regex: search, $options: 'i' };
+
+        const [exchanges, total] = await Promise.all([
+            PurchaseExchange.find(query)
+                .populate('vendor', 'supplierName email')
+                .sort({ createdAt: -1 })
+                .skip((page - 1) * limit)
+                .limit(parseInt(limit)),
+            PurchaseExchange.countDocuments(query),
+        ]);
+
+        res.json({
+            success: true,
+            data: exchanges,
+            pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+        });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }

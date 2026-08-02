@@ -433,8 +433,11 @@ export const getProductionReport = async (req, res) => {
         { $sort: { '_id.year': 1, '_id.month': 1 } }
       ]).option({ maxTimeMS: 15000 }),
 
-      // Recent orders — lean + no deep populate to avoid hanging
-      Order.find(companyFilter)
+      // Recent orders — lean + no deep populate to avoid hanging. Uses the
+      // same matchFilter (company + date range) as the aggregates above, so
+      // it honors the page's date filter instead of always showing the last
+      // 10 ever regardless of the selected range.
+      Order.find(matchFilter)
         .sort({ createdAt: -1 })
         .limit(10)
         .populate('customer', 'name')
@@ -469,7 +472,7 @@ export const getInventoryReport = async (req, res) => {
       categoryBreakdown,
       lowStockItems,
       highValueItems,
-      criticalItems
+      criticalCount
     ] = await Promise.all([
       Item.countDocuments(companyFilter),
 
@@ -490,9 +493,9 @@ export const getInventoryReport = async (req, res) => {
         .select('name code qty stdCost category')
         .lean(),
 
-      Item.find({ ...companyFilter, importance: 'Critical' })
-        .select('name code qty minStock importance')
-        .lean()
+      // Only the count is ever used (summary.criticalCount) — no consumer
+      // renders the full list, so this no longer fetches every critical item.
+      Item.countDocuments({ ...companyFilter, importance: 'Critical' })
     ]);
 
     const totalValue = await Item.aggregate([
@@ -512,13 +515,12 @@ export const getInventoryReport = async (req, res) => {
           totalItems,
           totalValue: totalValue[0]?.total || 0,
           lowStockCount: lowStockItems.length,
-          criticalCount: criticalItems.length
+          criticalCount
         },
         categoryBreakdown,
         typeBreakdown,
         lowStockItems,
-        highValueItems,
-        criticalItems
+        highValueItems
       }
     });
   } catch (error) {
@@ -563,7 +565,10 @@ export const getComplaintReport = async (req, res) => {
         { $group: { _id: '$issue.issueType', count: { $sum: 1 } } }
       ]),
 
-      ComplaintService.find(companyFilter)
+      // Same matchFilter (company + date range) as the aggregates above, so
+      // this honors the page's date filter instead of always showing the
+      // last 10 ever regardless of the selected range.
+      ComplaintService.find(matchFilter)
         .sort({ createdAt: -1 })
         .limit(10)
         .lean()
