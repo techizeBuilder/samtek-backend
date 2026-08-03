@@ -6,6 +6,7 @@ import Purchase from '../models/Purchase.js';
 import { Item } from '../models/Inventory.js';
 import { Company } from '../models/Company.js';
 import { sendRFQEmail, sendVendorBidConfirmationEmail } from '../services/emailService.js';
+import { getDeptMailer, DEPARTMENTS } from '../config/mailAccounts.js';
 import crypto from 'crypto';
 import notificationService from '../services/notificationService.js';
 
@@ -346,6 +347,12 @@ export const createRFQ = async (req, res) => {
     const companyName = company?.name || 'Samtek';
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
+    // Looked up once here instead of once per vendor inside sendRFQEmail —
+    // for N vendors that was N redundant GlobalSmtpSettings queries + N
+    // freshly-built nodemailer transporters for what is always the same
+    // Purchase mailbox within a single createRFQ call.
+    const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
+
     // Each promise resolves to a { vendor, success, error } result — never
     // rejects — so a broken SMTP server can't silently disappear behind
     // Promise.allSettled and get reported back to the user as "success".
@@ -353,7 +360,7 @@ export const createRFQ = async (req, res) => {
       const token = crypto.randomBytes(32).toString('hex');
       const tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
-      await VendorBid.create({
+      const vendorBid = await VendorBid.create({
         rfq: rfq._id,
         rfqNo: rfq.rfqNo,
         vendor: vendor._id,
@@ -373,8 +380,8 @@ export const createRFQ = async (req, res) => {
       const bidLink = `${frontendUrl}/vendor-bid/${token}`;
 
       try {
-        await sendRFQEmail({
-          companyId,
+        const emailResult = await sendRFQEmail({
+          mailer,
           to: vendor.email,
           vendorName: vendor.supplierName,
           rfqNo: rfq.rfqNo,
@@ -386,9 +393,25 @@ export const createRFQ = async (req, res) => {
           companyName,
           notes: enrichedNotes // <-- Vendors see specs in email, no warranty sent
         });
+        // sendRFQEmail never throws — it resolves to {success:false, error}
+        // for both send failures AND an unconfigured Purchase SMTP mailbox,
+        // so that case must be checked here, not assumed from a resolved promise.
+        // Persisted onto the VendorBid so a failed send is visible later
+        // (e.g. in the Vendor Bids screen) and can be retried per-vendor,
+        // not just reported once in this request's response.
+        vendorBid.emailStatus = emailResult.success ? 'Sent' : 'Failed';
+        vendorBid.emailError = emailResult.success ? undefined : emailResult.error;
+        await vendorBid.save();
+
+        if (!emailResult.success) {
+          return { vendor, success: false, error: emailResult.error };
+        }
         return { vendor, success: true };
       } catch (emailError) {
         console.error(`❌ RFQ email failed for ${vendor.email}:`, emailError.message);
+        vendorBid.emailStatus = 'Failed';
+        vendorBid.emailError = emailError.message;
+        await vendorBid.save();
         return { vendor, success: false, error: emailError.message };
       }
     }));
@@ -477,6 +500,73 @@ export const getRFQBids = async (req, res) => {
     res.json({ success: true, data: { rfq, bids: enriched } });
   } catch (error) {
     console.error('getRFQBids error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// POST /api/rfq/:id/vendor-bid/:bidId/resend  — Retry a failed RFQ invite email
+// ──────────────────────────────────────────────────────────────────────────────
+export const resendVendorBidEmail = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+
+    const rfq = await RFQ.findOne({ _id: req.params.id, companyId });
+    if (!rfq) {
+      return res.status(404).json({ success: false, message: 'RFQ not found' });
+    }
+
+    const bid = await VendorBid.findOne({ _id: req.params.bidId, rfq: rfq._id })
+      .populate('vendor', 'supplierName email');
+    if (!bid) {
+      return res.status(404).json({ success: false, message: 'Vendor invite not found' });
+    }
+    if (!bid.vendor?.email) {
+      return res.status(400).json({ success: false, message: 'This vendor has no email on file.' });
+    }
+    // A vendor who already submitted/won/lost a bid has a working link —
+    // resending would just be noise, and re-purposing this route for them
+    // isn't what "resend the failed invite" means.
+    if (bid.status !== 'Invited') {
+      return res.status(400).json({ success: false, message: `Cannot resend — this vendor has already ${bid.status.toLowerCase()} for this RFQ.` });
+    }
+
+    // Reuse the existing bidToken (so any link the vendor may already have
+    // still works) but push tokenExpiry out another 7 days if it's expired
+    // or close to it.
+    if (!bid.tokenExpiry || bid.tokenExpiry < new Date(Date.now() + 24 * 60 * 60 * 1000)) {
+      bid.tokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    }
+
+    const company = await Company.findById(companyId);
+    const companyName = company?.name || 'Samtek';
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const bidLink = `${frontendUrl}/vendor-bid/${bid.bidToken}`;
+
+    const emailResult = await sendRFQEmail({
+      to: bid.vendor.email,
+      vendorName: bid.vendorName,
+      rfqNo: rfq.rfqNo,
+      productName: rfq.productName,
+      quantity: rfq.quantity,
+      quantityUnit: rfq.quantityUnit,
+      requiredByDate: rfq.requiredByDate,
+      bidLink,
+      companyName,
+      notes: rfq.notes
+    });
+
+    bid.emailStatus = emailResult.success ? 'Sent' : 'Failed';
+    bid.emailError = emailResult.success ? undefined : emailResult.error;
+    await bid.save();
+
+    if (!emailResult.success) {
+      return res.status(502).json({ success: false, message: `Resend failed: ${emailResult.error}` });
+    }
+
+    res.json({ success: true, message: `RFQ email resent to ${bid.vendorName}.` });
+  } catch (error) {
+    console.error('resendVendorBidEmail error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

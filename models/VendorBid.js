@@ -68,6 +68,17 @@ const vendorBidSchema = new mongoose.Schema({
   submittedAt: {
     type: Date
   },
+  // Tracks whether the RFQ invite email actually reached this vendor, so a
+  // failed send (e.g. Purchase SMTP unconfigured) is visible per-vendor
+  // instead of only in the create-time API response, and can be retried.
+  emailStatus: {
+    type: String,
+    enum: ['Sent', 'Failed'],
+    default: 'Sent'
+  },
+  emailError: {
+    type: String
+  },
   companyId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Company',

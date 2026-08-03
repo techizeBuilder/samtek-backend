@@ -4,6 +4,7 @@ import {
   getRFQs,
   createRFQ,
   getRFQBids,
+  resendVendorBidEmail,
   selectVendor,
   getBidByToken,
   submitBidByToken,
@@ -26,6 +27,7 @@ router.get('/vendors-for-rfq', authorizeRoles('Accounts', 'Accounts Head', 'Supe
 router.get('/', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getRFQs);
 router.post('/', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createRFQ);
 router.get('/:id/bids', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getRFQBids);
+router.post('/:id/vendor-bid/:bidId/resend', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), resendVendorBidEmail);
 router.post('/:id/select-vendor', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), selectVendor);
 
 export default router;

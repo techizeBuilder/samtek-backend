@@ -289,13 +289,18 @@ export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, 
 /**
  * Send RFQ (Request for Quotation) Email to Vendor
  */
-export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
-  const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
-  if (!mailer) {
+export const sendRFQEmail = async ({ mailer, to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
+  // A caller sending to several vendors at once (createRFQ) looks up the
+  // Purchase mailbox once and passes it in here for every vendor, instead of
+  // this function re-querying GlobalSmtpSettings + rebuilding a transporter
+  // per vendor. Callers that only ever send one RFQ email (resend) can omit
+  // it and let this function resolve it itself.
+  const resolvedMailer = mailer || await getDeptMailer(DEPARTMENTS.PURCHASE);
+  if (!resolvedMailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send RFQ ${rfqNo} to: ${to}`);
-    return { success: true, mocked: true, message: 'No SMTP config, mock success' };
+    return { success: false, error: 'Purchase email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
   }
-  const { transporter, fromAddress } = mailer;
+  const { transporter, fromAddress } = resolvedMailer;
   const subject = `📋 Request for Quotation: ${rfqNo} — ${productName} | ${companyName}`;
 
   const formattedDate = requiredByDate

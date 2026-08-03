@@ -157,6 +157,18 @@ export const createMachine = async (req, res) => {
       });
     }
 
+    // No DB-level unique index on code (some pre-existing data already violates
+    // one), so guard against duplicates here instead — a second active machine
+    // sharing a code silently shadows the first one everywhere it's looked up
+    // by code (BOM/R&D approval, autofill, etc.).
+    const existing = await RDMachine.findOne({ code: code.trim(), company: req.user.companyId, isDiscontinued: false });
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: `Product Code "${code}" is already used by "${existing.name}". Codes must be unique.`
+      });
+    }
+
     const machine = await RDMachine.create({
       code,
       name,
@@ -802,7 +814,11 @@ export const getPrototypes = async (req, res) => {
         { $match: { company: companyId } },
         { $group: { _id: '$status', count: { $sum: 1 } } },
       ]);
-      statusCounts = countsAgg.reduce((acc, c) => { acc[c._id] = c.count; return acc; }, {});
+      // Start every known status at 0 — the aggregate only emits a group for
+      // statuses that actually have >=1 document, so a status with zero
+      // prototypes would otherwise be missing from the object entirely.
+      statusCounts = { Passed: 0, Failed: 0, 'In Progress': 0 };
+      countsAgg.forEach(c => { statusCounts[c._id] = c.count; });
       statusCounts.All = countsAgg.reduce((sum, c) => sum + c.count, 0);
     }
 
@@ -1401,7 +1417,10 @@ export const processRDRequest = async (req, res) => {
 
       // ── WORKFLOW 2: INITIAL BOM APPROVAL ──
       // (Your original logic remains untouched here)
-      const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId });
+      // isDiscontinued: false — code isn't guaranteed unique (see createMachine's
+      // duplicate-code guard), so an old discontinued duplicate must never shadow
+      // the live machine this BOM/prototype actually belongs to.
+      const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId, isDiscontinued: false });
       if (!machineProfile || machineProfile.releaseStatus !== 'Released') {
         return res.status(400).json({ success: false, message: 'Machine profile missing or not released.' });
       }
@@ -1465,7 +1484,8 @@ export const getRDRequestReviewData = async (req, res) => {
     }
 
     // 2. Fetch the corresponding R&D Machine Profile
-    const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId }).lean();
+    // isDiscontinued: false — see the same guard in processRDRequest's Initial BOM workflow.
+    const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId, isDiscontinued: false }).lean();
 
     // If R&D hasn't created the machine yet, return empty arrays so the frontend doesn't crash
     if (!machineProfile) {
