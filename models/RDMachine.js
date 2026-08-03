@@ -14,6 +14,21 @@ const RDMachineSchema = new mongoose.Schema({
   // Other Text Fields
   brand: { type: String, default: '' },
   metrology: { type: String, default: '', trim: true },
+  size: { type: String, default: '', trim: true },
+
+  // Unit Weight: a numeric value plus its own Unit Type -> Unit pair (dynamic,
+  // sourced from /api/inventory/unit-types — same system BOM Management uses).
+  unitWeightValue: { type: Number, default: null },
+  unitWeightUnitType: { type: String, default: '', trim: true },
+  unitWeightUnit: { type: String, default: '', trim: true },
+
+  // Input Unit (how this product is purchased) / Output Unit (how it's issued
+  // or stocked) — unit-only, no value. Mirrors Inventory Item's
+  // purchaseUnitType/purchaseUnit + unitType/unit convention.
+  inputUnitType: { type: String, default: '', trim: true },
+  inputUnit: { type: String, default: '', trim: true },
+  outputUnitType: { type: String, default: '', trim: true },
+  outputUnit: { type: String, default: '', trim: true },
 
   // Dynamic Key-Value Specifications
   specifications: [{

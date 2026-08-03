@@ -42,10 +42,23 @@ export const getMyOvertimeRequests = async (
   res,
 ) => {
   try {
-    const data = await Overtime.find({ employee: req.user._id }).sort({
-      createdAt: -1,
-    });
+    const { page, limit } = req.query;
+    const query = { employee: req.user._id };
 
+    if (page || limit) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const [data, total] = await Promise.all([
+        Overtime.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        Overtime.countDocuments(query),
+      ]);
+      return res.json({
+        data,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
+    const data = await Overtime.find(query).sort({ createdAt: -1 });
     res.json(data);
   } catch {
     res.status(500).json({ message: "Failed to fetch overtime requests" });

@@ -205,6 +205,8 @@ leadSchema.index({ mobile: 1 });
 leadSchema.index({ email: 1 });
 leadSchema.index({ companyId: 1, indiamartQueryId: 1 }, { sparse: true });
 leadSchema.index({ companyId: 1, googleAdsLeadId: 1 }, { sparse: true });
+// Supports the paginated getLeads query (status filter + sort by createdAt).
+leadSchema.index({ companyId: 1, status: 1, createdAt: -1 });
 leadSchema.index({ companyId: 1, facebookLeadId: 1 }, { sparse: true });
 
 export default mongoose.model('Lead', leadSchema);

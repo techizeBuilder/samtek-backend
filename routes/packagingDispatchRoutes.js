@@ -5,12 +5,14 @@ import {
   getDashboard,
   getReadyForPackaging,
   getPackagingJobs,
+  getActivePackagingJobs,
   createPackagingJob,
   updatePackingType,
   startPacking,
   updateChecklist,
   completePacking,
   getDispatchOrders,
+  getActiveDispatchOrders,
   createDispatchOrder,
   executeDispatch,
   markInTransit,
@@ -38,6 +40,7 @@ router.get('/ready-for-packaging', getReadyForPackaging);
 
 // ── Packaging Jobs ────────────────────────────────────────────────────────────
 router.get('/jobs', getPackagingJobs);
+router.get('/jobs/active', getActivePackagingJobs);
 router.post('/jobs', createPackagingJob);
 router.put('/jobs/:id/packing-type', updatePackingType);
 router.put('/jobs/:id/start', startPacking);
@@ -46,6 +49,7 @@ router.put('/jobs/:id/complete', completePacking);
 
 // ── Dispatch Orders ───────────────────────────────────────────────────────────
 router.get('/dispatch-orders', getDispatchOrders);
+router.get('/dispatch-orders/active', getActiveDispatchOrders);
 router.post('/dispatch-orders', createDispatchOrder);
 router.put('/dispatch-orders/:id', updateDispatchOrder);
 router.put('/dispatch-orders/:id/execute', deliveryDocsMiddleware, executeDispatch);

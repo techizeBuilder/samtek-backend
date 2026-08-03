@@ -22,9 +22,36 @@ const upload = multer({
 export const getSuppliers = async (req, res) => {
   try {
     const unit = req.user.unit;
-    const suppliers = await Supplier.find({
-      unit: { $in: [unit, 'Main'] }
-    }).sort({ createdAt: -1 });
+    const { page, limit, search, supplierType } = req.query;
+    const query = { unit: { $in: [unit, 'Main'] } };
+    if (supplierType) query.supplierType = supplierType;
+    if (search) {
+      query.$or = [
+        { supplierName: { $regex: search, $options: 'i' } },
+        { supplierCode: { $regex: search, $options: 'i' } },
+        { contactPerson: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    // Vendor-picker dropdowns (PurchaseInvoices, VendorPayments, etc.) call
+    // this with no page/limit and need the full list — only paginate when a
+    // caller (Vendor Master's own browse page) actually asks for a page.
+    if (page || limit) {
+      const pageNum = parseInt(page) || 1;
+      const limitNum = parseInt(limit) || 20;
+      const [suppliers, total] = await Promise.all([
+        Supplier.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        Supplier.countDocuments(query),
+      ]);
+      return res.json({
+        suppliers,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
+    const suppliers = await Supplier.find(query).sort({ createdAt: -1 });
     res.json({ suppliers });
   } catch (error) {
     console.error('Error fetching suppliers:', error);

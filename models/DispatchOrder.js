@@ -112,6 +112,8 @@ const DispatchOrderSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 DispatchOrderSchema.index({ company: 1, status: 1 });
+// Supports the paginated getDispatchOrders query (status/scope filter + sort by createdAt).
+DispatchOrderSchema.index({ company: 1, status: 1, createdAt: -1 });
 // Compound unique: same dispatchId allowed across companies, not within same company
 DispatchOrderSchema.index({ company: 1, dispatchId: 1 }, { unique: true, sparse: true });
 DispatchOrderSchema.index({ company: 1, packagingJobId: 1 }, { unique: true });

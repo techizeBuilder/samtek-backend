@@ -57,9 +57,42 @@ export const createRequest = async (req, res) => {
 // ─── MY REQUESTS (Sales side) ─────────────────────────────────────────────────
 export const getMyRequests = async (req, res) => {
   try {
-    const requests = await MarketingRequest.find({ company: cid(req), requestedBy: uid(req) })
-      .populate(REQUEST_POPULATE).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, data: requests });
+    const { page = 1, limit = 20, status } = req.query;
+    const skip = (page - 1) * limit;
+
+    const baseQuery = { company: cid(req), requestedBy: uid(req) };
+    const query = { ...baseQuery };
+    if (status && status !== 'All') query.status = status;
+
+    const [requests, total, statusAgg] = await Promise.all([
+      MarketingRequest.find(query)
+        .populate(REQUEST_POPULATE)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      MarketingRequest.countDocuments(query),
+      // Global status counts (independent of the current status filter) —
+      // backs the Pending/Approved/Rejected tab counts.
+      MarketingRequest.aggregate([
+        { $match: baseQuery },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const countFrom = (key) => (statusAgg.find(a => a._id === key)?.count) || 0;
+    const summary = {
+      Pending: countFrom('Pending'),
+      Approved: countFrom('Approved'),
+      Rejected: countFrom('Rejected'),
+    };
+
+    res.json({
+      success: true,
+      data: requests,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+      summary,
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -68,12 +101,43 @@ export const getMyRequests = async (req, res) => {
 // ─── ALL REQUESTS (Marketing side) ────────────────────────────────────────────
 export const getAllRequests = async (req, res) => {
   try {
-    const { status } = req.query;
-    const query = { company: cid(req) };
-    if (status) query.status = status;
-    const requests = await MarketingRequest.find(query)
-      .populate(REQUEST_POPULATE).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, data: requests });
+    const { page = 1, limit = 20, status } = req.query;
+    const skip = (page - 1) * limit;
+
+    const baseQuery = { company: cid(req) };
+    const query = { ...baseQuery };
+    if (status && status !== 'All') query.status = status;
+
+    const [requests, total, statusAgg] = await Promise.all([
+      MarketingRequest.find(query)
+        .populate(REQUEST_POPULATE)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      MarketingRequest.countDocuments(query),
+      // Global status counts (independent of the current status filter) —
+      // backs the Pending/Approved/Rejected/All tab counts.
+      MarketingRequest.aggregate([
+        { $match: baseQuery },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const countFrom = (key) => (statusAgg.find(a => a._id === key)?.count) || 0;
+    const summary = {
+      Pending: countFrom('Pending'),
+      Approved: countFrom('Approved'),
+      Rejected: countFrom('Rejected'),
+      All: statusAgg.reduce((sum, a) => sum + a.count, 0),
+    };
+
+    res.json({
+      success: true,
+      data: requests,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+      summary,
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

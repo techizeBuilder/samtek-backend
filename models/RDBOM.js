@@ -6,8 +6,8 @@ const MaterialSchema = new mongoose.Schema({
   subChildPart: { type: String, default: '' },
   item: { type: String, required: true, trim: true }, // Replaces 'name'
   // Independent BOM-only classification (RDMasterOption field "MaterialType") —
-  // not derived from Product Master's P-Type.
-  itemType: { type: String, required: true, trim: true },
+  // not derived from Product Master's P-Type. Optional: no longer collected on the form.
+  itemType: { type: String, default: '', trim: true },
   quantity: { type: Number, required: true, min: 0 },
   unit: { type: String, required: true },
   isDiscontinued: { type: Boolean, default: false },
@@ -16,10 +16,19 @@ const MaterialSchema = new mongoose.Schema({
   // RDMachine entry at add/edit time. Kept as a snapshot (not a live populate) so a locked
   // BOM stays stable even if the underlying Product Master record changes later.
   category: { type: String, default: '' },
+  pType: { type: String, default: '' },
   pSourceType: { type: String, default: '' },
   brand: { type: String, default: '' },
   description: { type: String, default: '' },
   metrology: { type: String, default: '' },
+  size: { type: String, default: '' },
+  unitWeightValue: { type: Number, default: null },
+  unitWeightUnitType: { type: String, default: '' },
+  unitWeightUnit: { type: String, default: '' },
+  inputUnitType: { type: String, default: '' },
+  inputUnit: { type: String, default: '' },
+  outputUnitType: { type: String, default: '' },
+  outputUnit: { type: String, default: '' },
   specifications: [{ key: String, value: String }],
   customFields: [{ groupLabel: String, fieldName: String, value: String }],
 });

@@ -62,14 +62,83 @@ export const getDispatchedOrders = async (req, res) => {
         if (!req.user || !req.user.companyId) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
-        
-        // Fetch orders that have been Dispatched, In Transit, Delivered, or Closed
-        const orders = await DispatchOrder.find({
+
+        const query = {
             company: req.user.companyId,
             status: { $in: ['Dispatched', 'In Transit', 'Delivered', 'Closed'] }
-        }).sort({ createdAt: -1 });
-        
-        res.status(200).json({ success: true, data: orders });
+        };
+
+        // Consumers (Delivery Confirmation / Installation Schedule / Feedback &
+        // Ratings) group these records by orderId client-side — every machine
+        // of one order must arrive together for that grouping to stay correct.
+        // orderId and customerName are identical across every machine of the
+        // same order, so filtering on them here can only ever include/exclude
+        // a WHOLE order's records, never split one order's machines apart.
+        const { search, stage, bucket, page = 1, limit = 10 } = req.query;
+        if (search) {
+            query.$or = [
+                { orderId: { $regex: search, $options: 'i' } },
+                { customerName: { $regex: search, $options: 'i' } },
+            ];
+        }
+
+        // Stage/bucket scoping — splits the 3 consuming pages' "active
+        // worklist" tabs (Pending/Scheduled/Pending-Feedback) from their
+        // "history" tab (Confirmed/Completed/Received). Safe to filter
+        // directly on these status fields (no need to replicate the
+        // Pending-vs-Issue/Scheduled-vs-Completed labeling rules here):
+        // bulkUpdateCustomerConfirmation / bulkUpdateInstallationSchedule /
+        // bulkUpdateFeedbackAndRatings each set the SAME value across every
+        // machine of one order in a single updateMany, so these fields are
+        // always uniform within an order — never mixed.
+        if (stage === 'installation') {
+            query['customerConfirmation.status'] = 'Reached Safely';
+        } else if (stage === 'feedback') {
+            query['installation.status'] = 'Completed';
+        }
+
+        if (stage === 'delivery') {
+            query['customerConfirmation.status'] = bucket === 'history' ? 'Reached Safely' : { $ne: 'Reached Safely' };
+        } else if (stage === 'installation') {
+            query['installation.status'] = bucket === 'history' ? 'Completed' : { $ne: 'Completed' };
+        } else if (stage === 'feedback') {
+            query['feedback.rating'] = bucket === 'history' ? { $gt: 0 } : { $not: { $gt: 0 } };
+        }
+
+        if (bucket !== 'history') {
+            // Active/operational worklist — bounded by status, not by count,
+            // same as other current-work queues in this codebase.
+            const orders = await DispatchOrder.find(query).sort({ createdAt: -1 });
+            return res.status(200).json({ success: true, data: orders });
+        }
+
+        // History — paginate by ORDER (10 orders/page by default), not by
+        // raw machine record, so one order's machines never get split
+        // across a page boundary.
+        const limitNum = Math.max(1, parseInt(limit, 10) || 10);
+        const pageNum = Math.max(1, parseInt(page, 10) || 1);
+        const [{ groups = [], totalCount = [] } = {}] = await DispatchOrder.aggregate([
+            { $match: query },
+            { $group: { _id: '$orderId', latest: { $max: '$createdAt' } } },
+            {
+                $facet: {
+                    groups: [{ $sort: { latest: -1 } }, { $skip: (pageNum - 1) * limitNum }, { $limit: limitNum }],
+                    totalCount: [{ $count: 'count' }],
+                }
+            }
+        ]);
+        const pageOrderIds = groups.map(g => g._id);
+        const total = totalCount[0]?.count || 0;
+
+        const orders = pageOrderIds.length
+            ? await DispatchOrder.find({ ...query, orderId: { $in: pageOrderIds } }).sort({ createdAt: -1 })
+            : [];
+
+        res.status(200).json({
+            success: true,
+            data: orders,
+            pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) }
+        });
     } catch (error) {
         console.error('Error fetching dispatched orders:', error);
         res.status(500).json({ success: false, message: 'Server error' });

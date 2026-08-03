@@ -83,7 +83,11 @@ async function createQCJobForCompletedOrder(order, sentBy, userId) {
     orderCode: order.orderCode || '',
     company: order.company,
     createdBy: userId,
-    notes: `Automatically created from completed Production Order: ${order.orderId}`
+    // Repair jobs carry forward what was actually fixed/replaced, so QC can see
+    // it while re-inspecting instead of just a generic auto-created message.
+    notes: (order.reworkDecision === 'Repair' && order.repair?.notes)
+      ? `Repaired: ${order.repair.notes}`
+      : `Automatically created from completed Production Order: ${order.orderId}`
   });
   console.log(`✅ QC Job ${qcJobId} automatically created for Production Order ${order.orderId}`);
 
@@ -100,24 +104,149 @@ async function createQCJobForCompletedOrder(order, sentBy, userId) {
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
 
+const VALID_ORDER_STATUSES = ['Pending', 'BOM Pending', 'In Progress', 'On Hold', 'Completed'];
+
 export const getOrders = async (req, res) => {
   try {
     const companyId = req.user.companyId;
-    console.log(`🔍 Fetching Production Orders for Company: ${companyId}`);
+    const { page = 1, limit = 20, search, status, source } = req.query;
+    const skip = (page - 1) * limit;
 
-    // Find orders for this company, using lean() for faster read and easier debugging
+    const query = { company: companyId };
+    if (status && status !== 'all' && VALID_ORDER_STATUSES.includes(status)) {
+      query.status = status;
+    }
+
+    // $and holds the search/source conditions separately since both would
+    // otherwise need the top-level `$or` key.
+    const andConditions = [];
+    if (search) {
+      andConditions.push({
+        $or: [
+          { orderId: { $regex: search, $options: 'i' } },
+          { orderCode: { $regex: search, $options: 'i' } },
+          { machineCode: { $regex: search, $options: 'i' } },
+          { machineName: { $regex: search, $options: 'i' } },
+        ]
+      });
+    }
+    if (source === 'Store') {
+      // Legacy records predate the `source` field, so missing == Store.
+      andConditions.push({ $or: [{ source: { $exists: false } }, { source: 'Store' }] });
+    } else if (source === 'QC_Rejected' || source === 'Stock') {
+      query.source = source;
+    }
+    if (andConditions.length) query.$and = andConditions;
+
+    const [orders, total, summaryAgg] = await Promise.all([
+      ProductionOrder.find(query)
+        .populate('processes.assignedTeam', 'name supervisor members')
+        .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      ProductionOrder.countDocuments(query),
+      // Summary reflects ALL of the company's orders (not just the current
+      // page/filter), matching the stat-card behavior the Orders page has
+      // always had — these are global counters, not "count of this search".
+      ProductionOrder.aggregate([
+        { $match: { company: new mongoose.Types.ObjectId(companyId) } },
+        {
+          $facet: {
+            statusCounts: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+            priorityCounts: [{ $group: { _id: '$priority', count: { $sum: 1 } } }],
+            sourceCounts: [{ $group: { _id: '$source', count: { $sum: 1 } } }],
+            total: [{ $count: 'count' }],
+          }
+        }
+      ]),
+    ]);
+
+    const facet = summaryAgg[0] || { statusCounts: [], priorityCounts: [], sourceCounts: [], total: [] };
+    const countFrom = (arr, key) => (arr.find(a => a._id === key)?.count) || 0;
+    const summary = {
+      total: facet.total[0]?.count || 0,
+      pending: countFrom(facet.statusCounts, 'Pending'),
+      bomPending: countFrom(facet.statusCounts, 'BOM Pending'),
+      inProgress: countFrom(facet.statusCounts, 'In Progress'),
+      onHold: countFrom(facet.statusCounts, 'On Hold'),
+      completed: countFrom(facet.statusCounts, 'Completed'),
+      urgent: countFrom(facet.priorityCounts, 'Urgent'),
+      storeOrders: countFrom(facet.sourceCounts, 'Store'),
+      rejectedOrders: countFrom(facet.sourceCounts, 'QC_Rejected'),
+    };
+
+    res.json({
+      success: true,
+      data: {
+        orders,
+        pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+        summary,
+      }
+    });
+  } catch (err) {
+    console.error('❌ Error in getOrders:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// Lightweight "current work" feed for board/kanban-style pages (Work
+// Planning, Process & QC order-picker, Manpower's live board) — these only
+// ever operate on non-Completed orders, so unlike getOrders above this isn't
+// paginated: it's bounded by how much work is actually in flight, not by
+// total order history. Orders completed within the last 7 days stay visible
+// too, so Process & QC's picker doesn't yank a just-finished order out from
+// under a user mid-workflow.
+export const getActiveOrders = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
     const orders = await ProductionOrder.find({
-      company: companyId
+      company: companyId,
+      $or: [
+        { status: { $ne: 'Completed' } },
+        { updatedAt: { $gte: sevenDaysAgo } },
+      ],
     })
       .populate('processes.assignedTeam', 'name supervisor members')
       .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
       .sort({ createdAt: -1 })
+      .limit(500)
       .lean();
 
-    console.log(`✅ Found ${orders.length} orders for company ${companyId}`);
     res.json({ success: true, data: orders });
   } catch (err) {
-    console.error('❌ Error in getOrders:', err);
+    console.error('❌ Error in getActiveOrders:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// On-demand history for a single team, used by Manpower's "View Full
+// History" modal — fetched only when that modal opens, so the shared
+// context never has to carry every team's entire history up front.
+export const getTeamOrderHistory = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const { teamId } = req.params;
+
+    const orders = await ProductionOrder.find({
+      company: companyId,
+      $or: [
+        { 'processes.assignedTeam': teamId },
+        { 'extraUnits.processes.assignedTeam': teamId },
+      ],
+    })
+      .populate('processes.assignedTeam', 'name supervisor members')
+      .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+
+    res.json({ success: true, data: orders });
+  } catch (err) {
+    console.error('❌ Error in getTeamOrderHistory:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -307,9 +436,12 @@ export const getRepairJobs = async (req, res) => {
 export const startRepair = async (req, res) => {
   try {
     const { assignedTo } = req.body;
+    if (!assignedTo || !assignedTo.trim()) {
+      return res.status(400).json({ success: false, message: 'A supervisor/team must be assigned before starting a repair.' });
+    }
     const order = await ProductionOrder.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, reworkDecision: 'Repair' },
-      { 'repair.status': 'In Progress', 'repair.assignedTo': assignedTo || '' },
+      { 'repair.status': 'In Progress', 'repair.assignedTo': assignedTo.trim() },
       { new: true }
     );
     if (!order) return res.status(404).json({ success: false, message: 'Repair job not found' });
@@ -741,6 +873,18 @@ function getUnitProcesses(order, unitNumber) {
 // check.
 function allUnitsCompleted(order) {
   const mainDone = order.processes.every(p => p.status === 'Completed');
+
+  // extraUnits entries are created LAZILY (see getUnitProcesses) — only the
+  // first time that unit's tab is actually opened/worked on. If a unit has
+  // never been touched, there's no entry for it at all yet, which is not
+  // the same as "no steps outstanding" for it. Without this check,
+  // `[].every(...)` on a still-empty extraUnits array is vacuously true,
+  // which silently marked a whole multi-unit order Completed the moment
+  // Unit 1 alone finished, even with Units 2/3 never started.
+  const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
+  const extraUnitsExpected = buildQty - 1;
+  if (order.extraUnits.length < extraUnitsExpected) return false;
+
   const extraDone = order.extraUnits.every(u => u.processes.every(p => p.status === 'Completed'));
   return mainDone && extraDone;
 }
@@ -861,6 +1005,7 @@ export const approveQC = async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     const procs = getUnitProcesses(order, unitNumber);
     if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    const wasCompleted = order.status === 'Completed';
     procs[idx].status = 'Completed';
     procs[idx].qcStatus = 'Approved';
     procs[idx].qcBy = qcBy;
@@ -874,6 +1019,32 @@ export const approveQC = async (req, res) => {
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+
+    // 📊 Feed the delivery-date estimator: ONE sample PER PHYSICAL UNIT, not
+    // one lump sample for the whole (possibly multi-unit) order. Each unit's
+    // own first-step-start → last-step-end span is used, so:
+    //   - a 3-unit order still contributes 3 honest per-unit durations
+    //     (avgLeadDays stays a genuine "time to build ONE", which the
+    //     estimator then multiplies by however many units a new quote needs)
+    //   - staggered completion (unit 2 finishing weeks after unit 1) doesn't
+    //     inflate the sample — each unit is measured against its own actual
+    //     working span, not the whole order's elapsed wall-clock time.
+    // Only on the transition into Completed, never on a later re-save.
+    if (order.status === 'Completed' && !wasCompleted) {
+      try {
+        const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
+        const units = [order.processes, ...order.extraUnits.map(u => u.processes)];
+        for (const unitProcs of units) {
+          const starts = unitProcs.map(p => p.startDate).filter(Boolean).map(d => new Date(d).getTime());
+          const ends = unitProcs.map(p => p.endDate).filter(Boolean).map(d => new Date(d).getTime());
+          if (!starts.length || !ends.length) continue;
+          const durationDays = Math.max(0, (Math.max(...ends) - Math.min(...starts)) / (1000 * 60 * 60 * 24));
+          await recordLeadTimeSample(order.company, order.machineCode, order.machineName, 'Production', durationDays);
+        }
+      } catch (e) {
+        console.error('Failed to record production lead-time sample:', e.message);
+      }
+    }
 
     // 🔔 Notify Packing/Dispatch when all processes are done
     if (order.status === 'Completed') {
@@ -1084,8 +1255,45 @@ export const updateProcessNotes = async (req, res) => {
 
 export const getTeams = async (req, res) => {
   try {
-    const teams = await ProductionTeam.find({ company: req.user.companyId, isActive: true }).sort({ createdAt: 1 });
-    res.json({ success: true, data: teams });
+    const companyId = req.user.companyId;
+    const teams = await ProductionTeam.find({ company: companyId, isActive: true }).sort({ createdAt: 1 }).lean();
+
+    // All-time per-team assignment counts (total / completed), independent of
+    // the active-orders window ManpowerTracking's main board reads `orders`
+    // from — without this, a team's lifetime "Completed"/"Total" tallies
+    // would incorrectly shrink to only recent activity. Counted via
+    // aggregation instead of pulling every order's full documents.
+    const companyObjectId = new mongoose.Types.ObjectId(companyId);
+    const [mainCounts, extraCounts] = await Promise.all([
+      ProductionOrder.aggregate([
+        { $match: { company: companyObjectId } },
+        { $unwind: '$processes' },
+        { $match: { 'processes.assignedTeam': { $ne: null } } },
+        { $group: { _id: { team: '$processes.assignedTeam', status: '$processes.status' }, count: { $sum: 1 } } },
+      ]),
+      ProductionOrder.aggregate([
+        { $match: { company: companyObjectId } },
+        { $unwind: '$extraUnits' },
+        { $unwind: '$extraUnits.processes' },
+        { $match: { 'extraUnits.processes.assignedTeam': { $ne: null } } },
+        { $group: { _id: { team: '$extraUnits.processes.assignedTeam', status: '$extraUnits.processes.status' }, count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const statsByTeam = {};
+    for (const { _id, count } of [...mainCounts, ...extraCounts]) {
+      const teamId = String(_id.team);
+      if (!statsByTeam[teamId]) statsByTeam[teamId] = { total: 0, completed: 0 };
+      statsByTeam[teamId].total += count;
+      if (_id.status === 'Completed') statsByTeam[teamId].completed += count;
+    }
+
+    const teamsWithStats = teams.map(t => ({
+      ...t,
+      assignmentStats: statsByTeam[String(t._id)] || { total: 0, completed: 0 },
+    }));
+
+    res.json({ success: true, data: teamsWithStats });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

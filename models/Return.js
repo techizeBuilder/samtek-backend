@@ -146,5 +146,8 @@ returnSchema.index({ type: 1 });
 returnSchema.index({ createdAt: -1 });
 returnSchema.index({ companyId: 1 });
 returnSchema.index({ salesPerson: 1 });
+// Supports the paginated getSalespersonReturns/getSalespersonDamages queries
+// (type + optional status filter, sorted by createdAt).
+returnSchema.index({ type: 1, status: 1, createdAt: -1 });
 
 export default mongoose.model('Return', returnSchema);

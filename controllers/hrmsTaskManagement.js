@@ -525,8 +525,14 @@ export const getDashboardStats = async (req, res) => {
     // --- 3-TIER RBAC FILTER ---
     const isTopAdmin = TOP_LEVEL_ADMINS.includes(req.user.role);
     const isDeptHead = DEPT_HEADS.includes(req.user.role);
+    // "My Task" dashboard: always scoped to the caller's own assigned tasks,
+    // regardless of role, so a Dept Head's personal view doesn't collapse into
+    // the same department-wide numbers as the Task Management dashboard.
+    const myTasksOnly = req.query.myTasksOnly === 'true';
 
-    if (!isTopAdmin) {
+    if (myTasksOnly) {
+      query.assignedTo = req.user._id;
+    } else if (!isTopAdmin) {
       if (isDeptHead) {
         query.department = getDepartmentFromRole(req.user.role);
       } else {
@@ -596,7 +602,7 @@ export const getDashboardStats = async (req, res) => {
       },
       performance: {
         completionRate: totalCount > 0 ? Number((((statusMap["Completed"] || 0) / totalCount) * 100).toFixed(2)) : 0,
-        departmentPerformance: !isTopAdmin && !isDeptHead ? [] : departmentStats
+        departmentPerformance: (myTasksOnly || (!isTopAdmin && !isDeptHead)) ? [] : departmentStats
       }
     };
 

@@ -37,6 +37,7 @@ import {
 import {
   createSalesInvoice,
   getSalesInvoices,
+  getNextInvoiceNumber,
   getReceivableAgeing,
   getSalesSummary,
   getSalesItems,
@@ -295,6 +296,7 @@ accountsRouter.delete('/tender-expenses/:id', authorizeRoles('Accounts', 'Accoun
 // Sales Invoices
 accountsRouter.post('/sales/account/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), createSalesInvoice);
 accountsRouter.get('/sales/account/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head', 'Sales Person'), getSalesInvoices);
+accountsRouter.get('/sales/account/invoices/next-number', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getNextInvoiceNumber);
 accountsRouter.get('/sales/account/items', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getSalesItems);
 accountsRouter.get('/sales/account/pending-orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPendingAccountOrders);
 accountsRouter.post('/sales/account/approve-order', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), approveOrderAccount);

@@ -223,8 +223,20 @@ export const sendPayslipToEmployee = async (req, res) => {
 export const getMyPayslips = async (req, res) => {
   try {
     const userId = req.user._id || req.user.userId || req.user.id;
+    const { month, year } = req.query;
 
-    const payslips = await Payslip.find({ user: userId })
+    // month is stored as "YYYY-MM"; filter here instead of fetching every
+    // payslip ever issued and filtering client-side.
+    const query = { user: userId };
+    if (month && year) {
+      query.month = `${year}-${String(month).padStart(2, '0')}`;
+    } else if (year) {
+      query.month = { $regex: `^${year}-` };
+    } else if (month) {
+      query.month = { $regex: `-${String(month).padStart(2, '0')}$` };
+    }
+
+    const payslips = await Payslip.find(query)
       .populate("payroll")
       .sort({ month: -1 });
 

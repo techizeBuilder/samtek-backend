@@ -147,11 +147,30 @@ export const endBreak = async (req, res) => {
 export const getMyAttendance = async (req, res) => {
   try {
     const userId = req.user._id;
+    const { month, page, limit } = req.query;
 
-    const records = await Attendance.find({ user: userId }).sort({
-      date: -1,
-    });
+    const query = { user: userId };
+    // month = "YYYY-MM" — date is stored as a "YYYY-MM-DD" string, so a
+    // lexicographic range match works directly (same pattern as
+    // getTeamAttendance's date-range query below).
+    if (month) {
+      query.date = { $gte: `${month}-01`, $lte: `${month}-31` };
+    }
 
+    if (page || limit) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const [records, total] = await Promise.all([
+        Attendance.find(query).sort({ date: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        Attendance.countDocuments(query),
+      ]);
+      return res.json({
+        data: records,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
+    const records = await Attendance.find(query).sort({ date: -1 });
     res.json(records);
   } catch (err) {
     console.error("Get My Attendance Error:", err);

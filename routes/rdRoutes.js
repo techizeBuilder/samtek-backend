@@ -16,6 +16,8 @@ import {
   getRDRequestReviewData,
   getDropdownOptions,
   addDropdownOption,
+  updateDropdownOption,
+  deleteDropdownOption,
   getCustomFieldTemplates,
   saveCustomFieldTemplate,
   deleteCustomFieldTemplate,
@@ -102,6 +104,8 @@ router.get('/production-rnd-requests/:id/review', getRDRequestReviewData);
 // New Routes for Dynamic Dropdowns
 router.get('/master-options', getDropdownOptions);
 router.post('/master-options', addDropdownOption);
+router.put('/master-options/:id', updateDropdownOption);
+router.delete('/master-options/:id', deleteDropdownOption);
 
 // ── Custom Field Templates ───────────────────────────────────────────────────
 router.get('/custom-field-templates', getCustomFieldTemplates);

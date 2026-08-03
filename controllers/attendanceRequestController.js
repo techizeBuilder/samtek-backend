@@ -52,9 +52,23 @@ export const createAttendanceRequest = async (req, res) => {
 /* ================= EMPLOYEE: GET MY REQUESTS ================= */
 export const getMyAttendanceRequests = async (req, res) => {
   try {
-    const requests = await AttendanceRequest.find({ user: req.user._id }).sort({
-      createdAt: -1,
-    });
+    const { page, limit } = req.query;
+    const query = { user: req.user._id };
+
+    if (page || limit) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const [requests, total] = await Promise.all([
+        AttendanceRequest.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        AttendanceRequest.countDocuments(query),
+      ]);
+      return res.json({
+        data: requests,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
+    const requests = await AttendanceRequest.find(query).sort({ createdAt: -1 });
     res.json(requests);
   } catch (error) {
     console.error(error);

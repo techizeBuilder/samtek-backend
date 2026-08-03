@@ -12,6 +12,7 @@ export const getTaxSummary = async (req, res) => {
         const companyId = req.user.companyId;
         const moodYear = req.query.year;
         const moodMonth = req.query.month;
+        const { page = 1, limit = 20, search, type } = req.query;
 
         console.log('📊 Fetching Tax Summary for Company:', companyId, { year: moodYear, month: moodMonth });
 
@@ -129,6 +130,28 @@ export const getTaxSummary = async (req, res) => {
         summary.netGSTLiability = summary.outputGST.total - summary.inputGST.total;
 
         console.log('📊 Resulting Summary TDS:', { receivable: summary.tdsReceivable, payable: summary.tdsPayable });
+
+        // The GST/TDS totals above are computed from every matching sale/purchase
+        // (they wouldn't be correct otherwise), but the "Tax Compliance Log" table
+        // only ever needs to show one page at a time — filter/sort/paginate the
+        // transaction log here instead of shipping the whole thing to the client.
+        let transactions = summary.transactions;
+        if (type && type !== 'All') {
+            transactions = transactions.filter(t => t.transactionType === type);
+        }
+        if (search) {
+            const q = search.toLowerCase();
+            transactions = transactions.filter(t =>
+                (t.invoiceNo || '').toLowerCase().includes(q) ||
+                (t.period || '').toLowerCase().includes(q)
+            );
+        }
+        transactions.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+        const total = transactions.length;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        summary.transactions = transactions.slice(skip, skip + parseInt(limit));
+        summary.pagination = { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) };
 
         res.json({ success: true, data: summary });
     } catch (error) {

@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import PackagingJob from '../models/PackagingJob.js';
 import DispatchOrder from '../models/DispatchOrder.js';
 import ProductionOrder from '../models/ProductionOrder.js';
@@ -5,8 +6,92 @@ import QCJob from '../models/QCJob.js';
 import AdminSettings from '../models/AdminSettings.js';
 import notificationService from '../services/notificationService.js';
 import Sale from '../models/Sale.js';
+import Order from '../models/Order.js';
 import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
 import { getOrderItemsReadiness } from '../services/storeFlowService.js';
+
+const JOB_STATUSES = ['Pending', 'In Progress', 'Packed', 'Dispatched'];
+
+// Enriches packaging jobs with NOC/gate-pass/customer info from the linked
+// sales Order + Sale — shared by the paginated (getPackagingJobs) and bounded
+// active-work (getActivePackagingJobs) endpoints so both stay consistent
+// without duplicating this lookup logic.
+async function enrichPackagingJobs(jobs, companyId) {
+  return Promise.all(jobs.map(async (job) => {
+    let nocStatus = 'Pending';
+    let gatePassStatus = 'Pending';
+    let customerName = '';
+    let customerContact = '';
+    let invoiceNumber = '';
+
+    if (job.orderId) {
+      // orderId is actually the orderCode string
+      const order = await Order.findOne({ orderCode: job.orderId, companyId }).populate('customer');
+      if (order) {
+        customerName = order.customer?.name || '';
+        customerContact = order.customer?.mobile || '';
+
+        const orderSales = await Sale.find({ order: order._id });
+        if (orderSales.length) {
+          const realSale = orderSales.find(s => !s.isPlaceholder && s.invoiceType === 'Pakka')
+            || orderSales.find(s => !s.isPlaceholder)
+            || orderSales[0];
+          nocStatus = realSale.gatePass?.nocStatus || 'Pending';
+          gatePassStatus = realSale.gatePass?.status || 'Pending';
+          invoiceNumber = (orderSales.find(s => !s.isPlaceholder))?.invoiceNumber || '';
+        }
+      }
+    }
+
+    return { ...job, nocStatus, gatePassStatus, customerName, customerContact, invoiceNumber };
+  }));
+}
+
+// Enriches dispatch orders with gate-pass data + the order's full item list —
+// shared by the paginated (getDispatchOrders) and bounded active-work
+// (getActiveDispatchOrders) endpoints.
+async function enrichDispatchOrdersList(orders, companyId) {
+  const itemsCache = new Map(); // orderCode → orderItems summary
+  return Promise.all(orders.map(async (order) => {
+    if (!order.orderId) return order;
+    try {
+      let orderItems = null;
+      if (itemsCache.has(order.orderId)) {
+        orderItems = itemsCache.get(order.orderId);
+      } else {
+        try {
+          const r = await getOrderItemsReadiness(order.orderId, companyId);
+          orderItems = r.found
+            ? r.items.map(i => ({ name: i.name, qty: i.qty, status: i.status, ready: i.ready }))
+            : null;
+        } catch (e) { orderItems = null; }
+        itemsCache.set(order.orderId, orderItems);
+      }
+
+      const matchedOrder = await Order.findOne({ orderCode: order.orderId, companyId }).select('_id').lean();
+      if (!matchedOrder) return { ...order, orderItems };
+
+      const matchedSale = await Sale.findOne({
+        order: matchedOrder._id,
+        companyId,
+        'gatePass.status': 'Generated'
+      }).select('gatePass').lean();
+      if (!matchedSale?.gatePass) return { ...order, orderItems };
+
+      return {
+        ...order,
+        orderItems,
+        gatePassVehicleNumber: matchedSale.gatePass.vehicleNumber || '',
+        gatePassDriverName: matchedSale.gatePass.driverName || '',
+        gatePassContactNumber: matchedSale.gatePass.contactNumber || '',
+        gatePassNumber: matchedSale.gatePass.gatePassNumber || '',
+        gatePassGenerated: true
+      };
+    } catch (e) {
+      return order;
+    }
+  }));
+}
 
 // Categories whose physical units each get their own packaging job + serial
 // number. Anything else (accessories/materials) packs as one job with qty.
@@ -319,56 +404,80 @@ export const getReadyForPackaging = async (req, res) => {
 
 export const getPackagingJobs = async (req, res) => {
   try {
-    const jobs = await PackagingJob.find({ company: req.user.companyId })
+    const companyId = req.user.companyId;
+    const { page = 1, limit = 20, search, status } = req.query;
+    const skip = (page - 1) * limit;
+
+    const query = { company: companyId };
+    if (status && status !== 'all' && JOB_STATUSES.includes(status)) {
+      query.status = status;
+    }
+    if (search) {
+      query.$or = [
+        { jobId: { $regex: search, $options: 'i' } },
+        { orderId: { $regex: search, $options: 'i' } },
+        { machineCode: { $regex: search, $options: 'i' } },
+        { machineName: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const [jobs, total, statusAgg] = await Promise.all([
+      PackagingJob.find(query).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)).lean(),
+      PackagingJob.countDocuments(query),
+      // Global status breakdown (not scoped to the current search/status
+      // filter) — same "always show all statuses' counts" stat-bar
+      // convention used by Orders in the production module.
+      PackagingJob.aggregate([
+        { $match: { company: new mongoose.Types.ObjectId(companyId) } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const enrichedJobs = await enrichPackagingJobs(jobs, companyId);
+    const countFrom = (key) => (statusAgg.find(a => a._id === key)?.count) || 0;
+    const summary = {
+      all: JOB_STATUSES.reduce((sum, k) => sum + countFrom(k), 0),
+      Pending: countFrom('Pending'),
+      'In Progress': countFrom('In Progress'),
+      Packed: countFrom('Packed'),
+      Dispatched: countFrom('Dispatched'),
+    };
+
+    res.json({
+      success: true,
+      data: {
+        jobs: enrichedJobs,
+        pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+        summary,
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// Bounded "current work" feed for board-style pages (Dispatch Planning) —
+// non-Dispatched jobs, plus anything dispatched within the last 7 days so a
+// multi-machine order's just-dispatched siblings don't vanish mid-workflow.
+// Unlike getPackagingJobs above this isn't paginated: it's bounded by how
+// much packaging work is actually in flight, not by total job history.
+export const getActivePackagingJobs = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const jobs = await PackagingJob.find({
+      company: companyId,
+      $or: [
+        { status: { $ne: 'Dispatched' } },
+        { updatedAt: { $gte: sevenDaysAgo } },
+      ],
+    })
       .sort({ createdAt: -1 })
+      .limit(500)
       .lean();
 
-    const Sale = (await import('../models/Sale.js')).default;
-    const Order = (await import('../models/Order.js')).default;
-
-    const enrichedJobs = await Promise.all(jobs.map(async (job) => {
-      let nocStatus = 'Pending';
-      let gatePassStatus = 'Pending';
-      let customerName = '';
-      let customerContact = '';
-      let invoiceNumber = '';
-
-      if (job.orderId) {
-        // orderId is actually the orderCode string
-        const order = await Order.findOne({ orderCode: job.orderId, companyId: req.user.companyId }).populate('customer');
-        if (order) {
-          customerName = order.customer?.name || '';
-          customerContact = order.customer?.mobile || '';
-          
-          const orderSales = await Sale.find({ order: order._id });
-          if (orderSales.length) {
-            // Placeholder Sales (internal Store bookkeeping) never get
-            // gatePass/NOC data written to them — that only ever happens on
-            // the real generated invoice. Reading from the placeholder made
-            // Dispatch Planning show "NOC: Pending" / "GP: Pending" even
-            // after Accounts had actually approved both. Prefer a real Pakka
-            // bill, then real Kachha, then anything — same chain used
-            // everywhere else this bug was fixed.
-            const realSale = orderSales.find(s => !s.isPlaceholder && s.invoiceType === 'Pakka')
-              || orderSales.find(s => !s.isPlaceholder)
-              || orderSales[0];
-            nocStatus = realSale.gatePass?.nocStatus || 'Pending';
-            gatePassStatus = realSale.gatePass?.status || 'Pending';
-            invoiceNumber = (orderSales.find(s => !s.isPlaceholder))?.invoiceNumber || '';
-          }
-        }
-      }
-
-      return {
-        ...job,
-        nocStatus,
-        gatePassStatus,
-        customerName,
-        customerContact,
-        invoiceNumber
-      };
-    }));
-
+    const enrichedJobs = await enrichPackagingJobs(jobs, companyId);
     res.json({ success: true, data: enrichedJobs });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -658,63 +767,69 @@ export const completePacking = async (req, res) => {
 
 export const getDispatchOrders = async (req, res) => {
   try {
-    const { status } = req.query;
-    const filter = { company: req.user.companyId };
-    if (status) filter.status = status;
-    const orders = await DispatchOrder.find(filter).sort({ createdAt: -1 }).lean();
+    const companyId = req.user.companyId;
+    const { page = 1, limit = 20, search, status, scope } = req.query;
+    const skip = (page - 1) * limit;
 
-    // Enrich each order with gate pass data from Sale model (if gate pass was
-    // generated) + the order's full item list (multi-item: dispatch screens
-    // show exactly which items travel together under this order)
-    const Sale = (await import('../models/Sale.js')).default;
-    const Order = (await import('../models/Order.js')).default;
-    const itemsCache = new Map(); // orderCode → orderItems summary
+    const filter = { company: companyId };
+    // `scope=history` is what Dispatch History uses — constrains to the two
+    // terminal states, then `status` (if given) narrows to just one of them.
+    if (scope === 'history') {
+      filter.status = { $in: ['Delivered', 'Closed'] };
+    }
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+    if (search) {
+      filter.$or = [
+        { dispatchId: { $regex: search, $options: 'i' } },
+        { orderId: { $regex: search, $options: 'i' } },
+        { machineCode: { $regex: search, $options: 'i' } },
+        { customerName: { $regex: search, $options: 'i' } },
+        { trackingId: { $regex: search, $options: 'i' } },
+      ];
+    }
 
-    const enriched = await Promise.all(orders.map(async (order) => {
-      if (!order.orderId) return order;
-      try {
-        let orderItems = null;
-        if (itemsCache.has(order.orderId)) {
-          orderItems = itemsCache.get(order.orderId);
-        } else {
-          try {
-            const r = await getOrderItemsReadiness(order.orderId, req.user.companyId);
-            orderItems = r.found
-              ? r.items.map(i => ({ name: i.name, qty: i.qty, status: i.status, ready: i.ready }))
-              : null;
-          } catch (e) { orderItems = null; }
-          itemsCache.set(order.orderId, orderItems);
-        }
+    const [orders, total] = await Promise.all([
+      DispatchOrder.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit)).lean(),
+      DispatchOrder.countDocuments(filter),
+    ]);
 
-        // Find the Order document by orderCode
-        const matchedOrder = await Order.findOne({
-          orderCode: order.orderId,
-          companyId: req.user.companyId
-        }).select('_id').lean();
-        if (!matchedOrder) return { ...order, orderItems };
+    const enriched = await enrichDispatchOrdersList(orders, companyId);
 
-        // Find the Sale linked to this order that has a Generated gate pass
-        const matchedSale = await Sale.findOne({
-          order: matchedOrder._id,
-          companyId: req.user.companyId,
-          'gatePass.status': 'Generated'
-        }).select('gatePass').lean();
-        if (!matchedSale?.gatePass) return { ...order, orderItems };
+    const pagination = { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) };
+    let summary;
+    if (scope === 'history') {
+      // Counts within the history scope (all/Delivered/Closed), independent
+      // of the current search text — backs Dispatch History's filter tabs.
+      const [delivered, closed] = await Promise.all([
+        DispatchOrder.countDocuments({ company: companyId, status: 'Delivered' }),
+        DispatchOrder.countDocuments({ company: companyId, status: 'Closed' }),
+      ]);
+      summary = { all: delivered + closed, Delivered: delivered, Closed: closed };
+    }
 
-        return {
-          ...order,
-          orderItems,
-          gatePassVehicleNumber: matchedSale.gatePass.vehicleNumber || '',
-          gatePassDriverName: matchedSale.gatePass.driverName || '',
-          gatePassContactNumber: matchedSale.gatePass.contactNumber || '',
-          gatePassNumber: matchedSale.gatePass.gatePassNumber || '',
-          gatePassGenerated: true
-        };
-      } catch (e) {
-        return order;
-      }
-    }));
+    res.json({ success: true, data: { orders: enriched, pagination, summary } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
+// Bounded "current work" feed for board-style pages (Active Dispatches) —
+// everything except Closed, which is the only true terminal state here
+// ('Delivered' is still actionable until manually closed, so no time-based
+// grace window is needed the way packaging jobs need one). Unlike
+// getDispatchOrders above this isn't paginated: bounded by how much is
+// actually in flight, not by total dispatch history.
+export const getActiveDispatchOrders = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const orders = await DispatchOrder.find({ company: companyId, status: { $ne: 'Closed' } })
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+
+    const enriched = await enrichDispatchOrdersList(orders, companyId);
     res.json({ success: true, data: enriched });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

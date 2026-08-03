@@ -37,15 +37,21 @@ export const getFinanceSummary = async (req, res) => {
         const { unit, startDate, endDate, period = 'month' } = req.query;
 
         let query = {};
-        // If user is Super Admin or Accountant, allow viewing consolidated summary (all units)
-        // unless a specific unit filter is provided in the query.
-        if (req.user.role === USER_ROLES.SUPER_ADMIN || req.user.role === USER_ROLES.SUPER_USER || req.user.role === 'Accounts') {
+        // Only true platform-level roles get a cross-company "All Units" view.
+        // 'Accounts' is a normal per-company role — it used to be bundled in
+        // with Super Admin here, which meant an Accounts user could see every
+        // company's Sale/Return/Expense data (and everything derived from
+        // `query` below: kacchaQuery, deptExpenseQuery) by picking a unit with
+        // no companyId restriction at all, or see ALL companies if they left
+        // unit blank. Sale/Return/Expense all carry a `companyId` field, so
+        // this is a fixable scoping gap, not a "no such field" situation.
+        if (req.user.role === USER_ROLES.SUPER_ADMIN || req.user.role === USER_ROLES.SUPER_USER) {
             if (unit) {
                 query.unit = unit;
             }
             // If no unit provided, query stays empty {} which means "All Units"
         } else {
-            // For other roles (like Unit Head), restrict to their own unit
+            // For other roles (Accounts, Unit Head, etc.), restrict to their own company
             if (req.user.unit) query.unit = req.user.unit;
             if (req.user.companyId) query.companyId = new mongoose.Types.ObjectId(req.user.companyId);
         }

@@ -32,10 +32,23 @@ export const createProfileUpdate = async (req, res) => {
 /* ================= GET MY REQUESTS ================= */
 export const getMyProfileUpdates = async (req, res) => {
   try {
-    const requests = await ProfileUpdate.find({
-      employee: req.user._id,
-    }).sort({ createdAt: -1 });
+    const { page, limit } = req.query;
+    const query = { employee: req.user._id };
 
+    if (page || limit) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const [requests, total] = await Promise.all([
+        ProfileUpdate.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        ProfileUpdate.countDocuments(query),
+      ]);
+      return res.json({
+        data: requests,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
+    const requests = await ProfileUpdate.find(query).sort({ createdAt: -1 });
     res.json(requests);
   } catch {
     res.status(500).json({ message: "Failed to fetch requests" });

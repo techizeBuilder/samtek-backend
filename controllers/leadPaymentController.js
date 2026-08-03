@@ -246,10 +246,14 @@ const createLedgerTransaction = async (leadPayment, bankAccount, user) => {
 export const getLeadPayments = async (req, res) => {
   try {
     const companyId = req.user.companyId;
-    const { leadId, status } = req.query;
+    const { leadId, leadIds, status } = req.query;
 
     const query = { companyId };
     if (leadId) query.leadId = leadId;
+    // `leadIds` (comma-separated) — used by Payment Verifications to scope
+    // this fetch down to just the leads on the current paginated page,
+    // instead of pulling every payment record the company has ever had.
+    if (leadIds) query.leadId = { $in: leadIds.split(',') };
     if (status) query.status = status;
 
     const payments = await LeadPayment.find(query)

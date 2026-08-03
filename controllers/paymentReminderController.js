@@ -48,6 +48,7 @@ export const saveReminderSettings = async (req, res) => {
 export const getOverdueInvoices = async (req, res) => {
     try {
         const companyId = req.user.companyId;
+        const { tab = 'overdue', page = 1, limit = 20, search = '', level = 'all', status = 'all' } = req.query;
         const settings = await PaymentReminderSettings.findOne({ companyId });
         const overdueAfterDays = settings?.overdueAfterDays || 30;
         const today = new Date();
@@ -82,17 +83,42 @@ export const getOverdueInvoices = async (req, res) => {
         const overdueList = enriched.filter(i => i.isOverdue);
         const pendingList = enriched.filter(i => !i.isOverdue);
 
+        // Summary always reflects BOTH lists in full, regardless of which tab
+        // was requested — the tab counters/₹ totals need the whole picture,
+        // only the actual table rows below get filtered + paginated.
+        const summary = {
+            totalOverdue: overdueList.length,
+            totalPending: pendingList.length,
+            totalOverdueAmount: overdueList.reduce((s, i) => s + i.balanceAmount, 0),
+            totalPendingAmount: pendingList.reduce((s, i) => s + i.balanceAmount, 0)
+        };
+
+        let list = tab === 'pending' ? pendingList : overdueList;
+
+        if (search) {
+            const q = search.toLowerCase();
+            list = list.filter(inv =>
+                inv.invoiceNumber?.toLowerCase().includes(q) ||
+                inv.customer?.name?.toLowerCase().includes(q)
+            );
+        }
+        if (tab === 'overdue' && level !== 'all') {
+            list = list.filter(inv => inv.overdueLevel === level);
+        }
+        if (tab === 'pending' && status !== 'all') {
+            list = list.filter(inv => inv.paymentStatus === status);
+        }
+
+        const total = list.length;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const items = list.slice(skip, skip + parseInt(limit));
+
         res.json({
             success: true,
             data: {
-                overdue: overdueList,
-                pending: pendingList,
-                summary: {
-                    totalOverdue: overdueList.length,
-                    totalPending: pendingList.length,
-                    totalOverdueAmount: overdueList.reduce((s, i) => s + i.balanceAmount, 0),
-                    totalPendingAmount: pendingList.reduce((s, i) => s + i.balanceAmount, 0)
-                }
+                items,
+                pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+                summary
             }
         });
     } catch (error) {

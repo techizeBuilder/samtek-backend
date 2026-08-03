@@ -1076,12 +1076,20 @@ const getOrderTracking = async (req, res) => {
       .populate('products.product', 'name specifications')
       .lean();
 
+    // Batch-resolve Sale records for uncovered orders in one query instead of
+    // one Sale.findOne() per row (was an N+1 inside this loop).
+    const uncoveredOrders = pendingOrders.filter(order => !saleOrderIds.has(order._id.toString()));
+    const uncoveredOrderIds = uncoveredOrders.map(order => order._id);
+    const relatedSales = uncoveredOrderIds.length
+      ? await Sale.find({ order: { $in: uncoveredOrderIds } }).lean()
+      : [];
+    const saleByOrderId = new Map(relatedSales.map(s => [s.order?.toString(), s]));
+
     const pendingOrderTrackingData = [];
-    
-    for (const order of pendingOrders.filter(order => !saleOrderIds.has(order._id.toString()))) {
-      // Check if this order has a Sale record (could be auto-created)
-      const orderSale = await Sale.findOne({ order: order._id }).lean();
-      
+
+    for (const order of uncoveredOrders) {
+      const orderSale = saleByOrderId.get(order._id.toString()) || null;
+
       const trackingItem = {
         _id: order._id,
         orderId: order._id,
@@ -1143,15 +1151,46 @@ const getOrderTracking = async (req, res) => {
 
     console.log(`📊 Order Tracking: Found ${trackingData.length} records (${saleTrackingData.length} from Sales, ${pendingOrderTrackingData.length} pending orders) for company ${userCompanyId}`);
 
+    // Opt-in pagination/search/sort — only applied when the caller explicitly
+    // sends page/limit. The Store Dashboard's "recent orders" call sends
+    // neither and keeps getting the full unfiltered array exactly as before
+    // (it needs the complete set to slice its own top-5 + summary stats).
+    // Store Orders' browse view opts in and gets the same "visible orders"
+    // rule + sort it already applied client-side, now applied here instead —
+    // copied verbatim, not changed — so pagination totals stay accurate.
+    const { page, limit, search } = req.query;
+    let responseData = trackingData;
+    let pagination;
+    if (page || limit) {
+      let visibleData = trackingData.filter(item =>
+        item.orderStatus === 'approved' || item.orderStatus === 'pending' || item.paymentStatus === 'Paid'
+      );
+      if (search) {
+        const s = search.toLowerCase();
+        visibleData = visibleData.filter(item =>
+          (item.orderCode || '').toLowerCase().includes(s) ||
+          (item.customerName || '').toLowerCase().includes(s)
+        );
+      }
+      visibleData = visibleData.slice().sort((a, b) => new Date(b.orderDate) - new Date(a.orderDate));
+
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const total = visibleData.length;
+      responseData = visibleData.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      pagination = { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) };
+    }
+
     res.json({
       success: true,
-      data: trackingData,
+      data: responseData,
       summary: {
         total: trackingData.length,
         storeOrders: storeOrdersCount,
         pendingDispatch: pendingDispatchCount,
         completedToday
-      }
+      },
+      ...(pagination ? { pagination } : {}),
     });
   } catch (error) {
     console.error('❌ Error in getOrderTracking:', error);
@@ -1759,6 +1798,14 @@ const getNOCRequests = async (req, res) => {
       }
     }
 
+    // The dedup above needs to see every sale to correctly keep just one NOC
+    // row per order (preferring Pakka over Kachha), so it can't be paginated
+    // at the DB query level — but the final response IS paginated + search-
+    // filtered here, instead of shipping every NOC row the company has ever
+    // had to the browser on every load. page/limit are already parsed above
+    // (line ~1600) for the tab/jobStatuses filter — reused here rather than
+    // redeclared.
+    //
     // Most recently packed/dispatched order first — also gives pagination a
     // stable, deterministic order to slice against.
     nocRequests.sort((a, b) => new Date(b._packedDate || 0) - new Date(a._packedDate || 0));
@@ -1773,12 +1820,15 @@ const getNOCRequests = async (req, res) => {
       : nocRequests;
 
     const total = filtered.length;
-    const totalPages = Math.max(1, Math.ceil(total / limit));
     const paged = filtered
       .slice((page - 1) * limit, page * limit)
       .map(({ _packedDate, ...rest }) => rest);
 
-    res.json({ success: true, data: paged, pagination: { total, page, limit, totalPages } });
+    res.json({
+      success: true,
+      data: paged,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
   } catch (error) {
     console.error('Error in getNOCRequests:', error);
     res.status(500).json({ success: false, message: error.message });

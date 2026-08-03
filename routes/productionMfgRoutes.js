@@ -2,6 +2,8 @@ import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
 import {
   getOrders,
+  getActiveOrders,
+  getTeamOrderHistory,
   createOrder,
   verifyBOM,
   verifyDesign,
@@ -35,6 +37,7 @@ router.use(authenticateToken);
 
 // ── Orders ──────────────────────────────────────────────────────────────────
 router.get('/orders', getOrders);
+router.get('/orders/active', getActiveOrders);
 router.post('/orders', createOrder);
 router.put('/orders/:id/verify-bom', verifyBOM);
 router.put('/orders/:id/verify-design', verifyDesign);
@@ -71,6 +74,7 @@ router.put('/orders/:id/processes/:stepIndex/sub-entries/:subEntryId/qc', qcSubE
 
 // ── Teams ───────────────────────────────────────────────────────────────────
 router.get('/teams', getTeams);
+router.get('/teams/:teamId/history', getTeamOrderHistory);
 router.post('/teams', createTeam);
 
 export default router;

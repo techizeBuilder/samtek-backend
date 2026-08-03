@@ -40,10 +40,23 @@ export const createTravelRequest = async (req, res) => {
 /* ================= GET MY REQUESTS (EMPLOYEE) ================= */
 export const getMyTravelRequests = async (req, res) => {
   try {
-    const requests = await TravelRequest.find({
-      employee: req.user._id,
-    }).sort({ createdAt: -1 });
+    const { page, limit } = req.query;
+    const query = { employee: req.user._id };
 
+    if (page || limit) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const [requests, total] = await Promise.all([
+        TravelRequest.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        TravelRequest.countDocuments(query),
+      ]);
+      return res.json({
+        data: requests,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
+    const requests = await TravelRequest.find(query).sort({ createdAt: -1 });
     res.json(requests);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch travel requests" });

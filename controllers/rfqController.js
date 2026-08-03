@@ -125,19 +125,34 @@ export const getVendorsForRFQ = async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 export const getRFQs = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, page = 1, limit = 20, search } = req.query;
     const query = { companyId: req.user.companyId };
-    if (status) query.status = status;
+    if (status) {
+      // Comma-separated list (e.g. "Awarded,Closed" for the History tab) lets
+      // one request cover several statuses via $in instead of exact match.
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      query.status = statuses.length > 1 ? { $in: statuses } : statuses[0];
+    }
+    if (search) query.$or = [
+      { rfqNo: { $regex: search, $options: 'i' } },
+      { productName: { $regex: search, $options: 'i' } },
+    ];
 
-    const rfqs = await RFQ.find(query)
-      .populate('purchaseRequest', 'requestId productName quantity status')
-      .populate('vendors', 'supplierName email phone vendorCategories')
-      .populate('selectedVendor', 'supplierName email')
-      .populate('selectedBid')
-      .populate('createdBy', 'fullName')
-      .sort({ createdAt: -1 });
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [rfqs, total] = await Promise.all([
+      RFQ.find(query)
+        .populate('purchaseRequest', 'requestId productName quantity status')
+        .populate('vendors', 'supplierName email phone vendorCategories')
+        .populate('selectedVendor', 'supplierName email')
+        .populate('selectedBid')
+        .populate('createdBy', 'fullName')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      RFQ.countDocuments(query),
+    ]);
 
-    // Attach bid counts
+    // Attach bid counts (only for the current page's RFQs)
     const rfqIds = rfqs.map(r => r._id);
     const bidCounts = await VendorBid.aggregate([
       { $match: { rfq: { $in: rfqIds }, status: { $in: ['Submitted', 'Selected'] } } },
@@ -151,7 +166,11 @@ export const getRFQs = async (req, res) => {
       bidCount: bidCountMap[rfq._id.toString()] || 0
     }));
 
-    res.json({ success: true, data: result });
+    res.json({
+      success: true,
+      data: result,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
+    });
   } catch (error) {
     console.error('getRFQs error:', error);
     res.status(500).json({ success: false, message: error.message });
