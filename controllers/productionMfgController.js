@@ -83,7 +83,11 @@ async function createQCJobForCompletedOrder(order, sentBy, userId) {
     orderCode: order.orderCode || '',
     company: order.company,
     createdBy: userId,
-    notes: `Automatically created from completed Production Order: ${order.orderId}`
+    // Repair jobs carry forward what was actually fixed/replaced, so QC can see
+    // it while re-inspecting instead of just a generic auto-created message.
+    notes: (order.reworkDecision === 'Repair' && order.repair?.notes)
+      ? `Repaired: ${order.repair.notes}`
+      : `Automatically created from completed Production Order: ${order.orderId}`
   });
   console.log(`✅ QC Job ${qcJobId} automatically created for Production Order ${order.orderId}`);
 
@@ -432,9 +436,12 @@ export const getRepairJobs = async (req, res) => {
 export const startRepair = async (req, res) => {
   try {
     const { assignedTo } = req.body;
+    if (!assignedTo || !assignedTo.trim()) {
+      return res.status(400).json({ success: false, message: 'A supervisor/team must be assigned before starting a repair.' });
+    }
     const order = await ProductionOrder.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, reworkDecision: 'Repair' },
-      { 'repair.status': 'In Progress', 'repair.assignedTo': assignedTo || '' },
+      { 'repair.status': 'In Progress', 'repair.assignedTo': assignedTo.trim() },
       { new: true }
     );
     if (!order) return res.status(404).json({ success: false, message: 'Repair job not found' });
