@@ -1,8 +1,8 @@
 import express from 'express';
-import { authenticateToken } from '../middleware/auth.js';
+import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import {
   getAdminSettings,
-  addSmtp, updateSmtp, deleteSmtp,
+  getGlobalSmtp, addGlobalSmtp, updateGlobalSmtp, deleteGlobalSmtp,
   leadStagesCrud,
   leadSourcesCrud,
   businessTypesCrud,
@@ -22,10 +22,11 @@ router.use(authenticateToken);
 // ─── Full settings (read all) ─────────────────────────────────────────────────
 router.get('/', getAdminSettings);
 
-// ─── SMTP ─────────────────────────────────────────────────────────────────────
-router.post('/smtp', addSmtp);
-router.put('/smtp/:id', updateSmtp);
-router.delete('/smtp/:id', deleteSmtp);
+// ─── SMTP (platform-wide, Super Admin only) ───────────────────────────────────
+router.get('/global-smtp', authorizeRoles('Super Admin'), getGlobalSmtp);
+router.post('/global-smtp', authorizeRoles('Super Admin'), addGlobalSmtp);
+router.put('/global-smtp/:id', authorizeRoles('Super Admin'), updateGlobalSmtp);
+router.delete('/global-smtp/:id', authorizeRoles('Super Admin'), deleteGlobalSmtp);
 
 // ─── Lead Stages ──────────────────────────────────────────────────────────────
 router.get('/lead-stages', leadStagesCrud.list);

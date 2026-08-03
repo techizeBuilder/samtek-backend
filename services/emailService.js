@@ -6,8 +6,8 @@ import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
  * NOTE: unlike the other senders below, this THROWS on failure — the caller
  * must know the OTP never reached the admin (no silent {success:false}).
  */
-export const sendOtpEmail = async ({ companyId, to, otp, requestedByName, customerName }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.CASH_ACCESS);
+export const sendOtpEmail = async ({ to, otp, requestedByName, customerName }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.CASH_ACCESS);
   if (!mailer) {
     throw new Error('Cash Access SMTP is not configured (Admin Settings > SMTP Settings)');
   }
@@ -54,11 +54,11 @@ export const sendOtpEmail = async ({ companyId, to, otp, requestedByName, custom
 /**
  * Send Payment Reminder Email to Customer
  */
-export const sendPaymentReminderEmail = async ({ companyId, to, customerName, invoiceNo, totalAmount, paidAmount, balanceAmount, dueDate, companyName, daysOverdue }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.ACCOUNTS);
+export const sendPaymentReminderEmail = async ({ to, customerName, invoiceNo, totalAmount, paidAmount, balanceAmount, dueDate, companyName, daysOverdue }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.ACCOUNTS);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Accounts SMTP not configured. Would send reminder to: ${to}`);
-    return { skipped: true, reason: 'No SMTP config' };
+    return { success: false, skipped: true, error: 'Accounts email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
   }
   const { transporter, fromAddress } = mailer;
   const isOverdue = daysOverdue > 0;
@@ -140,11 +140,11 @@ export const sendPaymentReminderEmail = async ({ companyId, to, customerName, in
 /**
  * Send Quotation Email to Customer with PDF Attachment
  */
-export const sendQuotationEmail = async ({ companyId, to, customerName, leadCode, companyName, attachmentBase64 }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.SALES);
+export const sendQuotationEmail = async ({ to, customerName, leadCode, companyName, attachmentBase64 }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.SALES);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Sales SMTP not configured. Would send quotation to: ${to}`);
-    return { skipped: true, reason: 'No SMTP config' };
+    return { success: false, skipped: true, error: 'Sales email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
   }
   const { transporter, fromAddress } = mailer;
   const subject = `📄 Quotation from ${companyName} — Lead #${leadCode}`;
@@ -210,8 +210,8 @@ export const sendQuotationEmail = async ({ companyId, to, customerName, leadCode
 /**
  * Send Purchase Order Email to Vendor
  */
-export const sendPurchaseOrderEmail = async ({ companyId, to, vendorName, poNumber, items, grandTotal, companyName }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, grandTotal, companyName }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send PO ${poNumber} to: ${to}`);
     return { success: true, mocked: true, message: 'No SMTP config, mock success' };
@@ -289,8 +289,8 @@ export const sendPurchaseOrderEmail = async ({ companyId, to, vendorName, poNumb
 /**
  * Send RFQ (Request for Quotation) Email to Vendor
  */
-export const sendRFQEmail = async ({ companyId, to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+export const sendRFQEmail = async ({ to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send RFQ ${rfqNo} to: ${to}`);
     return { success: true, mocked: true, message: 'No SMTP config, mock success' };
@@ -397,8 +397,8 @@ export const sendRFQEmail = async ({ companyId, to, vendorName, rfqNo, productNa
  * Send Purchase Exchange request email — QC rejected some qty of a
  * Purchase-sourced item and we're asking the vendor to replace it.
  */
-export const sendPurchaseExchangeEmail = async ({ companyId, to, vendorName, itemName, exchangeQty, purchaseUnit, reason, poNumber, acceptLink, companyName }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+export const sendPurchaseExchangeEmail = async ({ to, vendorName, itemName, exchangeQty, purchaseUnit, reason, poNumber, acceptLink, companyName }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send Purchase Exchange request to: ${to}`);
     return { success: true, mocked: true, message: 'No SMTP config, mock success' };
@@ -488,8 +488,8 @@ export const sendPurchaseExchangeEmail = async ({ companyId, to, vendorName, ite
 /**
  * Send Vendor Bid Confirmation Email (when vendor is selected as winner)
  */
-export const sendVendorBidConfirmationEmail = async ({ companyId, to, vendorName, rfqNo, poNumber, productName, quantity, unitPrice, deliveryDays, warrantyMonths, companyName }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.PURCHASE);
+export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, poNumber, productName, quantity, unitPrice, deliveryDays, warrantyMonths, companyName }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send confirmation to: ${to}`);
     return { success: true, mocked: true };

@@ -1,4 +1,5 @@
 import AdminSettings from '../models/AdminSettings.js';
+import GlobalSmtpSettings from '../models/GlobalSmtpSettings.js';
 
 // ─── Default data used when creating new settings ─────────────────────────────
 const DEFAULT_LEAD_STAGES = [
@@ -149,11 +150,28 @@ export const getAdminSettings = async (req, res) => {
   }
 };
 
-// ─── SMTP ─────────────────────────────────────────────────────────────────────
-export const addSmtp = async (req, res) => {
+// ─── Global SMTP (Super Admin only — shared by every company) ─────────────────
+async function getOrCreateGlobalSmtp() {
+  let settings = await GlobalSmtpSettings.findOne();
+  if (!settings) {
+    settings = new GlobalSmtpSettings({ smtp: [] });
+    await settings.save();
+  }
+  return settings;
+}
+
+export const getGlobalSmtp = async (req, res) => {
   try {
-    const companyId = req.user.companyId;
-    const settings = await getOrCreateSettings(companyId);
+    const settings = await getOrCreateGlobalSmtp();
+    res.json({ success: true, smtp: settings.smtp });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const addGlobalSmtp = async (req, res) => {
+  try {
+    const settings = await getOrCreateGlobalSmtp();
     settings.smtp.push(req.body);
     await settings.save();
     res.json({ success: true, smtp: settings.smtp });
@@ -162,11 +180,10 @@ export const addSmtp = async (req, res) => {
   }
 };
 
-export const updateSmtp = async (req, res) => {
+export const updateGlobalSmtp = async (req, res) => {
   try {
-    const companyId = req.user.companyId;
     const { id } = req.params;
-    const settings = await getOrCreateSettings(companyId);
+    const settings = await getOrCreateGlobalSmtp();
     const item = settings.smtp.id(id);
     if (!item) return res.status(404).json({ success: false, message: 'SMTP config not found' });
     Object.assign(item, req.body);
@@ -177,11 +194,10 @@ export const updateSmtp = async (req, res) => {
   }
 };
 
-export const deleteSmtp = async (req, res) => {
+export const deleteGlobalSmtp = async (req, res) => {
   try {
-    const companyId = req.user.companyId;
     const { id } = req.params;
-    const settings = await getOrCreateSettings(companyId);
+    const settings = await getOrCreateGlobalSmtp();
     settings.smtp.pull({ _id: id });
     await settings.save();
     res.json({ success: true, smtp: settings.smtp });

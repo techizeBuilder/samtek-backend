@@ -1,10 +1,11 @@
 import nodemailer from 'nodemailer';
-import AdminSettings from '../models/AdminSettings.js';
+import GlobalSmtpSettings from '../models/GlobalSmtpSettings.js';
 
 /**
- * Department-wise SMTP mailboxes, configured per-company in the Admin
- * Settings > SMTP Settings screen (AdminSettings.smtp, one entry per
- * department). Each entry carries its own real mailbox + password.
+ * Department-wise SMTP mailboxes, configured platform-wide by Super Admin in
+ * Admin Settings > SMTP Settings (GlobalSmtpSettings.smtp, one entry per
+ * department). Shared by every company — there is exactly one mailbox per
+ * department across the whole platform.
  */
 export const DEPARTMENTS = {
   SALES: 'SALES',
@@ -15,20 +16,19 @@ export const DEPARTMENTS = {
   CASH_ACCESS: 'CASH_ACCESS',
 };
 
-const findDeptConfig = async (companyId, department) => {
-  if (!companyId) return null;
-  const settings = await AdminSettings.findOne({ companyId }, { smtp: 1 }).lean();
+const findDeptConfig = async (department) => {
+  const settings = await GlobalSmtpSettings.findOne({}, { smtp: 1 }).lean();
   if (!settings) return null;
   return (settings.smtp || []).find(s => s.department === department && s.isActive) || null;
 };
 
 /**
- * Resolves a department's mailbox for a company and returns a ready-to-use
- * transporter + its "from" address, or null if that department's SMTP
- * hasn't been configured yet in Admin Settings.
+ * Resolves a department's mailbox and returns a ready-to-use transporter +
+ * its "from" address, or null if that department's SMTP hasn't been
+ * configured yet in Admin Settings.
  */
-export const getDeptMailer = async (companyId, department) => {
-  const config = await findDeptConfig(companyId, department);
+export const getDeptMailer = async (department) => {
+  const config = await findDeptConfig(department);
   if (!config || !config.email || !config.password) return null;
 
   const transporter = nodemailer.createTransport({

@@ -8,23 +8,8 @@ const adminSettingsSchema = new mongoose.Schema({
     unique: true
   },
 
-  // ─── SMTP / Email Settings ─────────────────────────────────────
-  // Each entry is one department's real mailbox. `department` picks which
-  // module (quotations, payment reminders, PO/RFQ, HR, etc.) sends through it —
-  // see server/config/mailAccounts.js for where each department is used.
-  smtp: [{
-    department: {
-      type: String,
-      enum: ['SALES', 'ACCOUNTS', 'PURCHASE', 'HR', 'INFO', 'CASH_ACCESS'],
-      required: true,
-    },
-    provider: { type: String, enum: ['Gmail', 'Other'], default: 'Gmail' },
-    mailServer: { type: String, default: 'smtp.gmail.com' },
-    port: { type: Number, default: 587 },
-    email: { type: String, default: '' },
-    password: { type: String, default: '' },
-    isActive: { type: Boolean, default: true },
-  }],
+  // Note: SMTP / Email settings used to live here per-company. They are now
+  // platform-wide, shared by every company — see models/GlobalSmtpSettings.js.
 
   // ─── Lead Settings ─────────────────────────────────────────────
   leadStages: [{
