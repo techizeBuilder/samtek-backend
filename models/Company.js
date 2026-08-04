@@ -103,6 +103,14 @@ const companySchema = new mongoose.Schema({
     trim: true,
     default: null
   },
+  // Uploaded by the Company Admin on the My Company page — shown at the top
+  // of the Sidebar for every user of this company. Falls back to the default
+  // Samtek logo (frontend-side) when null.
+  logoUrl: {
+    type: String,
+    trim: true,
+    default: null
+  },
   // 6-digit password set by the Company Admin, required as the first factor
   // before an Accounts user can view a customer's Cash Amount. Stored AES
   // encrypted (not hashed) so the Company Admin can view it back — see

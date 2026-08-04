@@ -39,6 +39,45 @@ const stampUpload = multer({
   }
 });
 
+// Multer setup for company logo uploads — shown at the top of the Sidebar
+// for every user of this company (see Sidebar.jsx)
+const logoStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = 'uploads/company-logos';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `logo_${req.params.id}_${Date.now()}${ext}`);
+  }
+});
+const logoUpload = multer({
+  storage: logoStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ['.jpg', '.jpeg', '.png', '.webp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowed.includes(ext)) cb(null, true);
+    else cb(new Error('Only JPG, PNG, WEBP images are allowed for the logo'));
+  }
+});
+
+// Only that company's own Company Admin (or Superadmin) may set its logo —
+// same ownership rule as the Cash Password below.
+const assertLogoAccess = (req, res) => {
+  const isSuperadmin = req.user.role === 'Superadmin' || req.user.role === 'Super Admin';
+  if (!isSuperadmin && req.user.companyId?.toString() !== req.params.id) {
+    res.status(403).json({ success: false, message: 'Access denied.' });
+    return false;
+  }
+  if (!isSuperadmin && req.user.role !== 'Company Admin') {
+    res.status(403).json({ success: false, message: 'Only the Company Admin can update the company logo.' });
+    return false;
+  }
+  return true;
+};
+
 // Public routes (no authentication required)
 router.get('/simple', getCompaniesSimple);
 
@@ -62,6 +101,31 @@ router.put('/:id/stamp', stampUpload.single('stamp'), async (req, res) => {
     res.json({ success: true, message: 'Stamp uploaded successfully', stampUrl, company });
   } catch (err) {
     console.error('Stamp upload error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Company logo upload route
+router.put('/:id/logo', logoUpload.single('logo'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No logo image uploaded' });
+    }
+    if (!assertLogoAccess(req, res)) {
+      fs.unlink(req.file.path, () => {}); // best-effort — reject wrote the file before we could check
+      return;
+    }
+    const { Company } = await import('../models/Company.js');
+    const logoUrl = `/uploads/company-logos/${req.file.filename}`;
+    const company = await Company.findByIdAndUpdate(
+      req.params.id,
+      { logoUrl },
+      { new: true }
+    );
+    if (!company) return res.status(404).json({ success: false, message: 'Company not found' });
+    res.json({ success: true, message: 'Logo uploaded successfully', logoUrl, company });
+  } catch (err) {
+    console.error('Logo upload error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 });
