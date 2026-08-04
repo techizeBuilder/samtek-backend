@@ -28,9 +28,9 @@ export const createLead = async (req, res) => {
     if (!leadData.source || !leadData.source.trim()) {
       errors.push('Source field fill karein');
     }
-    // At least email or mobile required
-    if (!leadData.email && !leadData.mobile) {
-      errors.push('Email ya Mobile number mein se ek zaroor enter karein');
+    // Mobile required, email optional
+    if (!leadData.mobile || !leadData.mobile.trim()) {
+      errors.push('Mobile number enter karein');
     }
     // Email format
     if (leadData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(leadData.email.trim())) {

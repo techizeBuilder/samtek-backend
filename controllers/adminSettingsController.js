@@ -1,5 +1,6 @@
 import AdminSettings from '../models/AdminSettings.js';
 import GlobalSmtpSettings from '../models/GlobalSmtpSettings.js';
+import { USER_ROLES } from '../shared/schema.js';
 
 // ─── Default data used when creating new settings ─────────────────────────────
 const DEFAULT_LEAD_STAGES = [
@@ -92,13 +93,18 @@ const DEFAULT_HRMS_DOCUMENT_TYPES = [
   { key: 'PASSBOOK', label: 'Bank Passbook', description: 'First page of bank passbook / cancelled cheque' },
 ].map((d, i) => ({ ...d, order: i }));
 
+// Every role already built into the system (Sidebar/permissions/route-guards
+// reference these exact names elsewhere) — seeded once as isBuiltIn so they
+// show up in Role Setting from day one, protected from rename/delete.
+const DEFAULT_ROLES = Object.values(USER_ROLES)
+  .map((name, i) => ({ name, isBuiltIn: true, order: i }));
+
 // ─── Helper: get or create settings for a company ─────────────────────────────
 async function getOrCreateSettings(companyId) {
   let settings = await AdminSettings.findOne({ companyId });
   if (!settings) {
     settings = new AdminSettings({
       companyId,
-      smtp: [],
       leadStages: DEFAULT_LEAD_STAGES,
       leadSources: DEFAULT_LEAD_SOURCES,
       businessTypes: DEFAULT_BUSINESS_TYPES,
@@ -110,6 +116,7 @@ async function getOrCreateSettings(companyId) {
       leadRejectReasons: DEFAULT_LEAD_REJECT_REASONS,
       quotationNumberSettings: DEFAULT_QUOTATION_NUMBER_SETTINGS,
       hrmsDocumentTypes: DEFAULT_HRMS_DOCUMENT_TYPES,
+      roles: DEFAULT_ROLES,
     });
     await settings.save();
   } else {
@@ -130,6 +137,10 @@ async function getOrCreateSettings(companyId) {
     }
     if (!settings.hrmsDocumentTypes || settings.hrmsDocumentTypes.length === 0) {
       settings.hrmsDocumentTypes = DEFAULT_HRMS_DOCUMENT_TYPES;
+      changed = true;
+    }
+    if (!settings.roles || settings.roles.length === 0) {
+      settings.roles = DEFAULT_ROLES;
       changed = true;
     }
     if (changed) await settings.save();
@@ -283,3 +294,62 @@ export const dispatchChecklistCrud = makeArrayCrud('dispatchChecklist');
 export const leadRejectReasonsCrud = makeArrayCrud('leadRejectReasons');
 export const quotationNumberSettingsCrud = makeArrayCrud('quotationNumberSettings');
 export const hrmsDocumentTypesCrud = makeArrayCrud('hrmsDocumentTypes');
+
+// ─── HRMS: Role Setting (built-in roles are protected from rename/delete) ─────
+export const rolesCrud = {
+  list: async (req, res) => {
+    try {
+      const settings = await getOrCreateSettings(req.user.companyId);
+      res.json({ success: true, data: settings.roles });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+  add: async (req, res) => {
+    try {
+      const settings = await getOrCreateSettings(req.user.companyId);
+      const name = (req.body.name || '').trim();
+      if (!name) return res.status(400).json({ success: false, message: 'Role name is required' });
+      if (settings.roles.some(r => r.name.toLowerCase() === name.toLowerCase())) {
+        return res.status(400).json({ success: false, message: 'A role with this name already exists' });
+      }
+      settings.roles.push({ name, isBuiltIn: false, order: settings.roles.length });
+      await settings.save();
+      res.json({ success: true, data: settings.roles });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+  update: async (req, res) => {
+    try {
+      const settings = await getOrCreateSettings(req.user.companyId);
+      const role = settings.roles.id(req.params.id);
+      if (!role) return res.status(404).json({ success: false, message: 'Role not found' });
+      if (role.isBuiltIn) {
+        return res.status(403).json({ success: false, message: 'Built-in roles cannot be renamed' });
+      }
+      const name = (req.body.name || '').trim();
+      if (!name) return res.status(400).json({ success: false, message: 'Role name is required' });
+      role.name = name;
+      await settings.save();
+      res.json({ success: true, data: settings.roles });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+  remove: async (req, res) => {
+    try {
+      const settings = await getOrCreateSettings(req.user.companyId);
+      const role = settings.roles.id(req.params.id);
+      if (!role) return res.status(404).json({ success: false, message: 'Role not found' });
+      if (role.isBuiltIn) {
+        return res.status(403).json({ success: false, message: 'Built-in roles cannot be deleted' });
+      }
+      settings.roles.pull({ _id: req.params.id });
+      await settings.save();
+      res.json({ success: true, data: settings.roles });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+};

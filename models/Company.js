@@ -112,22 +112,10 @@ const companySchema = new mongoose.Schema({
     default: null,
     select: false
   },
-  // Pricing rules for auto-calculated R&D item MRP/Sale Price (see
-  // itemPricingService.js). Once an item's real cost is known (BOM
-  // roll-up or actual purchase price), MRP = cost + cost*profitPercent/100
-  // and SalePrice = cost - cost*discountPercent/100.
-  profitPercent: {
-    type: Number,
-    min: 0,
-    max: 1000,
-    default: 0
-  },
-  discountPercent: {
-    type: Number,
-    min: 0,
-    max: 100,
-    default: 0
-  },
+  // Note: Pricing rules (Profit%/Discount% for auto-calculated MRP/Sale
+  // Price) used to be one company-wide pair here. They are now set per-item
+  // — see Item.profitPercent/discountPercent in models/Inventory.js and the
+  // Pricing Value module (Company Admin).
   // Bank details shown on quotation PDFs (BANK DETAILS block). Filled by the
   // Company Admin in My Company; unfilled fields render blank on the quotation.
   bankDetails: {

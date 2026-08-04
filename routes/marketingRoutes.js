@@ -5,6 +5,7 @@ import {
   getDashboard, getAssets, getAsset, createAsset, updateAsset, deleteAsset, shareAsset,
   getCategories, createCategory, updateCategory, deleteCategory,
   getReports, getAuditLogs, getNotifications,
+  getItemFilters, getMarketingItems, uploadItemMedia,
 } from '../controllers/marketingController.js';
 import {
   createRequest, getMyRequests, getAllRequests,
@@ -34,6 +35,16 @@ router.get('/categories', getCategories);
 router.post('/categories', createCategory);
 router.put('/categories/:id', updateCategory);
 router.delete('/categories/:id', deleteCategory);
+
+// Item media — Group/Category/SubCategory filtered product picker (same
+// filter as Sales > Send Quotation) + image/video/brochure upload per item
+router.get('/item-filters', getItemFilters);
+router.get('/items', getMarketingItems);
+router.post('/items/:id/media', marketingUpload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'video', maxCount: 1 },
+  { name: 'brochure', maxCount: 1 },
+]), uploadItemMedia);
 
 // Content Requests (Sales ↔ Marketing)
 router.post('/requests', createRequest);

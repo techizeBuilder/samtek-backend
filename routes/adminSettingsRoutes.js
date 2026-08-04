@@ -14,6 +14,7 @@ import {
   leadRejectReasonsCrud,
   quotationNumberSettingsCrud,
   hrmsDocumentTypesCrud,
+  rolesCrud,
 } from '../controllers/adminSettingsController.js';
 
 const router = express.Router();
@@ -94,5 +95,12 @@ router.get('/hrms-document-types', hrmsDocumentTypesCrud.list);
 router.post('/hrms-document-types', hrmsDocumentTypesCrud.add);
 router.put('/hrms-document-types/:id', hrmsDocumentTypesCrud.update);
 router.delete('/hrms-document-types/:id', hrmsDocumentTypesCrud.remove);
+
+// ─── HRMS: Role Setting ────────────────────────────────────────────────────────
+const canManageRoles = authorizeRoles('Super Admin', 'HR-Admin', 'Company Admin');
+router.get('/roles', rolesCrud.list);
+router.post('/roles', canManageRoles, rolesCrud.add);
+router.put('/roles/:id', canManageRoles, rolesCrud.update);
+router.delete('/roles/:id', canManageRoles, rolesCrud.remove);
 
 export default router;

@@ -2,7 +2,9 @@ import MarketingAsset from '../models/MarketingAsset.js';
 import MarketingCategory from '../models/MarketingCategory.js';
 import MarketingShareLog from '../models/MarketingShareLog.js';
 import { getFileType } from '../middleware/marketingUpload.js';
+import { Item, Group, Category } from '../models/Inventory.js';
 import fs from 'fs';
+import path from 'path';
 
 const cid = (req) => req.user.companyId;
 const uid = (req) => req.user._id;
@@ -292,6 +294,128 @@ export const getNotifications = async (req, res) => {
       .populate('performedBy', 'fullName').sort({ createdAt: -1 }).limit(20).lean();
     res.json({ success: true, data: logs });
   } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── ITEM MEDIA ───────────────────────────────────────────────────────────────
+// Lets Marketing browse products via the same Group/Category/SubCategory
+// filter used on Sales > Send Quotation (customer & dealer), then attach
+// image/video/PDF brochure directly to that Item — the same fields Send
+// Quotation reads (Item.image/videoUrl/brochureUrl), so uploads here show up
+// there immediately.
+
+// Groups + Categories (with subcategories) for the cascading filter, scoped
+// to the logged-in user's company — mirrors inventoryController's
+// getGroups/getCategories but reachable by Marketing roles.
+export const getItemFilters = async (req, res) => {
+  try {
+    const companyId = cid(req);
+    if (!companyId) return res.status(400).json({ success: false, message: 'User does not belong to a company.' });
+
+    const [groups, categories] = await Promise.all([
+      Group.find({ companyId }).sort({ name: 1 }).select('name').lean(),
+      Category.find({ companyId }).sort({ name: 1 }).select('name subcategories').lean(),
+    ]);
+
+    res.json({ success: true, groups, categories });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// All Product-type items for the company — client filters by
+// group/category/subCategory, same pattern as the Quotation page.
+export const getMarketingItems = async (req, res) => {
+  try {
+    const companyId = cid(req);
+    if (!companyId) return res.json({ success: true, items: [] });
+
+    const items = await Item.find({ store: companyId.toString(), type: 'Product' })
+      .select('name code group category subCategory image videoUrl brochureUrl unit')
+      .sort({ category: 1, name: 1 })
+      .lean();
+
+    res.json({ success: true, items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// Deletes a previously uploaded item media file from disk, given its stored
+// URL (e.g. "/uploads/marketing/mkt-123.jpg"). Best-effort — a missing file
+// shouldn't fail the caller. Restricted to the uploads folder to prevent
+// path traversal via a crafted URL.
+const deleteUploadedMediaFile = (fileUrl) => {
+  if (!fileUrl || typeof fileUrl !== 'string' || !fileUrl.startsWith('/uploads/')) return;
+  try {
+    const filePath = path.join(process.cwd(), fileUrl.replace(/^\//, ''));
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch (err) {
+    console.error('Failed to delete uploaded item media file:', fileUrl, err.message);
+  }
+};
+
+// Attaches image / video / PDF brochure to a single Item. Only items
+// belonging to the caller's own company can be updated.
+export const uploadItemMedia = async (req, res) => {
+  const files = req.files || {};
+  const imageFile = files.image?.[0];
+  const videoFile = files.video?.[0];
+  const brochureFile = files.brochure?.[0];
+  // Multer already wrote these to disk before the handler runs — any early
+  // return below (validation failure, ownership check) must clean them up
+  // too, not just the catch block.
+  const cleanupNewFiles = () => [imageFile, videoFile, brochureFile]
+    .forEach(f => { if (f) deleteUploadedMediaFile(`/uploads/marketing/${f.filename}`); });
+
+  try {
+    const companyId = cid(req);
+    const item = await Item.findById(req.params.id);
+    if (!item) { cleanupNewFiles(); return res.status(404).json({ success: false, message: 'Item not found' }); }
+    if (!companyId || item.store !== companyId.toString()) {
+      cleanupNewFiles();
+      return res.status(403).json({ success: false, message: 'Access denied. Item does not belong to your company.' });
+    }
+
+    if (!imageFile && !videoFile && !brochureFile) {
+      return res.status(400).json({ success: false, message: 'Please provide at least one file (image, video, or PDF brochure).' });
+    }
+    if (imageFile && !imageFile.mimetype.startsWith('image/')) {
+      cleanupNewFiles();
+      return res.status(400).json({ success: false, message: 'Image field must be an image file.' });
+    }
+    if (videoFile && !videoFile.mimetype.startsWith('video/')) {
+      cleanupNewFiles();
+      return res.status(400).json({ success: false, message: 'Video field must be a video file.' });
+    }
+    if (brochureFile && brochureFile.mimetype !== 'application/pdf') {
+      cleanupNewFiles();
+      return res.status(400).json({ success: false, message: 'Brochure must be a PDF file.' });
+    }
+
+    const previous = { image: item.image, videoUrl: item.videoUrl, brochureUrl: item.brochureUrl };
+
+    if (imageFile) item.image = `/uploads/marketing/${imageFile.filename}`;
+    if (videoFile) item.videoUrl = `/uploads/marketing/${videoFile.filename}`;
+    if (brochureFile) item.brochureUrl = `/uploads/marketing/${brochureFile.filename}`;
+
+    await item.save();
+
+    if (imageFile && previous.image && previous.image !== item.image) deleteUploadedMediaFile(previous.image);
+    if (videoFile && previous.videoUrl && previous.videoUrl !== item.videoUrl) deleteUploadedMediaFile(previous.videoUrl);
+    if (brochureFile && previous.brochureUrl && previous.brochureUrl !== item.brochureUrl) deleteUploadedMediaFile(previous.brochureUrl);
+
+    // Best-effort audit entry — must never roll back the media that's already saved on the item.
+    MarketingShareLog.create({
+      action: 'Upload', assetName: `${item.name} (${item.code})`, performedBy: uid(req), company: companyId,
+    }).catch(err => console.error('Failed to log item media upload:', err.message));
+
+    res.json({ success: true, message: 'Item media uploaded successfully', item });
+  } catch (err) {
+    // Clean up files that were written to disk but never attached to the item,
+    // e.g. an Item.save() error.
+    cleanupNewFiles();
     res.status(500).json({ success: false, message: err.message });
   }
 };
