@@ -117,10 +117,7 @@ const leadSchema = new mongoose.Schema({
     areaCode: String,
     number: String
   },
-  email: {
-    type: String,
-    required: true
-  },
+  email: String,
   alternateEmail: String,
   address: String,
   state: String,

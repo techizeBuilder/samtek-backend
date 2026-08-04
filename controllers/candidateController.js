@@ -66,7 +66,7 @@ export const getAllCandidates = async (req, res) => {
         path: "jobId",
         populate: {
           path: "recruitingManager",
-          select: "name",
+          select: "fullName username email",
         },
       })
       .sort({ createdAt: -1 });

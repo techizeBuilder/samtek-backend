@@ -3,7 +3,6 @@ import RDMachine from '../models/RDMachine.js';
 import RDBOM from '../models/RDBOM.js';
 import PurchaseInvoice from '../models/PurchaseInvoice.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
-import { Company } from '../models/Company.js';
 
 // Defensive cap in addition to cycle detection, in case of a very deep
 // (but non-circular) BOM tree.
@@ -183,17 +182,19 @@ export async function resolvePurchaseItemCost(item) {
 }
 
 /**
- * Applies the Company's profit%/discount% to a resolved cost and persists
- * it onto the Item. Never overwrites a manual value when cost is unusable.
+ * Applies the Item's own profit%/discount% (Company Admin > Pricing Value)
+ * to a resolved cost and persists it onto the Item. Never overwrites a
+ * manual value when cost is unusable. Unset profit%/discount% (null) counts
+ * as 0 — no markup/discount, MRP and Sale Price just show cost.
  */
-export async function applyPricingToItem(item, company, cost, source) {
+export async function applyPricingToItem(item, cost, source) {
   if (!(cost > 0)) return false;
 
   if (source === 'BOM') item.stdCost = round2(cost);
   if (source === 'Purchase') item.purchaseCost = round2(cost);
 
-  const profitPercent = company.profitPercent || 0;
-  const discountPercent = company.discountPercent || 0;
+  const profitPercent = item.profitPercent || 0;
+  const discountPercent = item.discountPercent || 0;
 
   item.mrp = round2(cost + (cost * profitPercent) / 100);
   item.salePrice = round2(cost - (cost * discountPercent) / 100);
@@ -212,9 +213,6 @@ export async function applyPricingToItem(item, company, cost, source) {
 export async function recalculateItemPricing(item) {
   if (!item.internalManufacturing && !item.purchase) return { updated: false };
 
-  const company = await Company.findById(item.companyId);
-  if (!company) return { updated: false };
-
   if (item.internalManufacturing) {
     const { cost, issue } = await resolveManufacturingItemCost(item);
     if (cost == null) {
@@ -224,48 +222,36 @@ export async function recalculateItemPricing(item) {
       }
       return { updated: false, issue };
     }
-    const updated = await applyPricingToItem(item, company, cost, 'BOM');
+    const updated = await applyPricingToItem(item, cost, 'BOM');
     return { updated };
   }
 
   const { cost } = await resolvePurchaseItemCost(item);
   if (cost == null) return { updated: false };
-  const updated = await applyPricingToItem(item, company, cost, 'Purchase');
+  const updated = await applyPricingToItem(item, cost, 'Purchase');
   return { updated };
 }
 
 /**
- * Cheap reapply for when Company profitPercent/discountPercent changes —
- * reuses each Item's already-stored cost, no BOM walk / purchase re-query.
+ * Cheap reapply for when a single Item's own profitPercent/discountPercent
+ * changes (Pricing Value module) — reuses the Item's already-stored cost,
+ * no BOM walk / purchase re-query. No-op when the item's cost isn't known
+ * yet (costSource still 'Manual') — R&D's manual mrp/salePrice stand until
+ * a real cost resolves.
  */
-export async function reapplyCompanyPricingFormula(companyId) {
-  const company = await Company.findById(companyId);
-  if (!company) return { updated: 0 };
+export async function reapplyItemPricingFormula(itemId) {
+  const item = await Item.findById(itemId).select('costSource stdCost purchaseCost profitPercent discountPercent');
+  if (!item || !['BOM', 'Purchase'].includes(item.costSource)) return { updated: false };
 
-  const profitPercent = company.profitPercent || 0;
-  const discountPercent = company.discountPercent || 0;
+  const cost = item.costSource === 'BOM' ? item.stdCost : item.purchaseCost;
+  if (!(cost > 0)) return { updated: false };
 
-  const items = await Item.find({
-    companyId,
-    costSource: { $in: ['BOM', 'Purchase'] }
-  }).select('_id stdCost purchaseCost costSource');
+  const profitPercent = item.profitPercent || 0;
+  const discountPercent = item.discountPercent || 0;
 
-  const ops = items
-    .map((it) => {
-      const cost = it.costSource === 'BOM' ? it.stdCost : it.purchaseCost;
-      if (!(cost > 0)) return null;
-      return {
-        updateOne: {
-          filter: { _id: it._id },
-          update: {
-            mrp: round2(cost + (cost * profitPercent) / 100),
-            salePrice: round2(cost - (cost * discountPercent) / 100)
-          }
-        }
-      };
-    })
-    .filter(Boolean);
-
-  if (ops.length) await Item.bulkWrite(ops);
-  return { updated: ops.length };
+  await Item.updateOne({ _id: itemId }, {
+    mrp: round2(cost + (cost * profitPercent) / 100),
+    salePrice: round2(cost - (cost * discountPercent) / 100)
+  });
+  return { updated: true };
 }

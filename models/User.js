@@ -30,10 +30,11 @@ const userSchema = new mongoose.Schema({
   profilePicture: {
     type: String
   },
+  // Not enum-restricted to USER_ROLES — Company Admin can add custom roles
+  // via Admin Settings > HRMS Setting > Role Setting (see AdminSettings.roles).
   role: {
     type: String,
     required: true,
-    enum: Object.values(USER_ROLES),
     default: USER_ROLES.PRODUCTION
   },
   unit: {

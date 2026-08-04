@@ -348,6 +348,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const adminSettingsRoutes = (await import('./routes/adminSettingsRoutes.js')).default;
             app.use('/api/admin-settings', adminSettingsRoutes);
             console.log('Admin Settings routes registered at /api/admin-settings');
+            // Pricing Value routes (per-item Profit%/Discount% for sellable items)
+            const pricingValueRoutes = (await import('./routes/pricingValueRoutes.js')).default;
+            app.use('/api/pricing-value', pricingValueRoutes);
+            console.log('Pricing Value routes registered at /api/pricing-value');
             // Production routes (batch/shift - existing)
             const productionRoutes = (await import('./routes/productionRoutes.js')).default;
             app.use('/api/production', productionRoutes);

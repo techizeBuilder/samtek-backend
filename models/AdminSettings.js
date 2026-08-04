@@ -78,6 +78,20 @@ const adminSettingsSchema = new mongoose.Schema({
     order: { type: Number, default: 0 }
   }],
 
+  // ─── HRMS: Role Setting ──────────────────────────────────────────
+  // Assignable role names shown in Add User's Role dropdown. Seeded once
+  // (on first fetch) with every role already built into the system
+  // (isBuiltIn: true — protected from rename/delete since those exact
+  // names are hardcoded across Sidebar/permissions/route-guards elsewhere).
+  // Only custom roles added here (isBuiltIn: false) are editable/deletable.
+  // A custom role is a label only — it isn't wired into the Sidebar's
+  // per-role menu or the Roles & Permissions module grid.
+  roles: [{
+    name: { type: String, required: true, trim: true },
+    isBuiltIn: { type: Boolean, default: false },
+    order: { type: Number, default: 0 }
+  }],
+
 }, { timestamps: true });
 
 export default mongoose.model('AdminSettings', adminSettingsSchema);

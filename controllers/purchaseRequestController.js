@@ -765,10 +765,13 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       try {
         const sourceRefId = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
 
-        // Check if a QC job for this sourceRefId already exists
+        // Check if a QC job for THIS specific purchase request already exists.
+        // (Exchange-replacement requests reuse the original PO, so matching on
+        // sourceRefId alone collides with the original request's already-closed
+        // QC job and wrongly skips creating a new one.)
         const existingQC = await QCJob.findOne({
           source: 'Purchase',
-          sourceRefId: sourceRefId,
+          purchaseRequestId: request._id,
           company: request.companyId
         });
 

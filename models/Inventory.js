@@ -92,6 +92,23 @@ const itemSchema = new mongoose.Schema({
     min: 0,
     default: 0
   },
+  // Per-item Pricing Value (Company Admin > Pricing Value) — set only on
+  // items the company actually sells (type: 'Product'). Once a real cost is
+  // known (BOM roll-up or purchase price), MRP = cost + cost*profitPercent/100
+  // and Sale Price = cost - cost*discountPercent/100. null means "not set
+  // yet" — treated as 0 (no markup/discount) by itemPricingService.js.
+  profitPercent: {
+    type: Number,
+    min: 0,
+    max: 1000,
+    default: null
+  },
+  discountPercent: {
+    type: Number,
+    min: 0,
+    max: 100,
+    default: null
+  },
   // Tracks whether stdCost/purchaseCost/salePrice/mrp are still R&D's manual
   // guess, or have been auto-computed from a real BOM roll-up / purchase
   // price. See server/services/itemPricingService.js.
