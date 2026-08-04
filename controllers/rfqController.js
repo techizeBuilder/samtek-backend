@@ -162,9 +162,26 @@ export const getRFQs = async (req, res) => {
     const bidCountMap = {};
     bidCounts.forEach(b => { bidCountMap[b._id.toString()] = b.count; });
 
+    // Vendors whose invite email never went out — these never become a bid
+    // (the vendor was never notified), so they'd otherwise be invisible here.
+    // Surfaced per-RFQ so "Send RFQ" itself can show + retry them, without
+    // needing a bid to already exist (unlike the Vendor Bids screen, whose
+    // "View Bids" is gated on bidCount > 0).
+    const failedEmailBidsRaw = await VendorBid.find({
+      rfq: { $in: rfqIds }, status: 'Invited', emailStatus: 'Failed'
+    }).select('rfq vendorName emailError').lean();
+    const failedEmailBidsMap = {};
+    failedEmailBidsRaw.forEach(b => {
+      const key = b.rfq.toString();
+      (failedEmailBidsMap[key] = failedEmailBidsMap[key] || []).push({
+        _id: b._id, vendorName: b.vendorName, error: b.emailError
+      });
+    });
+
     const result = rfqs.map(rfq => ({
       ...rfq.toObject(),
-      bidCount: bidCountMap[rfq._id.toString()] || 0
+      bidCount: bidCountMap[rfq._id.toString()] || 0,
+      failedEmailBids: failedEmailBidsMap[rfq._id.toString()] || []
     }));
 
     res.json({

@@ -29,7 +29,10 @@ import { getModuleLearningView, getMyDashboard, markContentCompleted, startTest,
 const router = express.Router();
 
 // --- 1. Define Role Groups ---
-const TOP_ADMINS = ['HR-Admin', 'MIS Admin', 'Company Admin', 'Super Admin', 'Admin'];
+// MIS Admin has no LMS entry in the sidebar at all (misAdminMenuItems has
+// zero Training Management items) — excluded here so the backend doesn't
+// grant an access level the frontend never offers.
+const TOP_ADMINS = ['HR-Admin', 'Company Admin', 'Super Admin', 'Admin'];
 const DEPT_HEADS = [
   'Production Head', 'Packing Head', 'Dispatch Head',
   'Accounts Head', 'Sales Head', 'Manager', 'Finance Manager',
@@ -63,8 +66,10 @@ router.get('/trainees/:id', authenticateToken, authorizeRoles(...ALL_MANAGEMENT)
 // Update assigned courses for an already staged trainee
 router.put('/trainees/:id/modules', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), updateTraineeModules);
 
-// Finalize trainee (Hire or Reject)
-router.post('/trainees/:id/finalize', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), finalizeTrainee);
+// Finalize trainee (Hire or Reject) — restricted to Top Admins only; a
+// candidate's onboarding decision shouldn't be a dept head/manager action,
+// matching the frontend's own canFinalize gate.
+router.post('/trainees/:id/finalize', authenticateToken, authorizeRoles(...TOP_ADMINS), finalizeTrainee);
 
 // Hard delete a trainee and all associated LMS data
 router.delete('/trainees/:id', authenticateToken, authorizeRoles(...TOP_ADMINS), deleteTraineeRecord); // Usually restricted to Top Admins

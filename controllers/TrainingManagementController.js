@@ -430,8 +430,9 @@ export const finalizeTrainee = async (req, res) => {
     try {
         const { id } = req.params;
         const { action } = req.body;
+        const { companyId } = req.user;
 
-        const profile = await TrainingProfile.findById(id).populate('user');
+        const profile = await TrainingProfile.findOne({ _id: id, companyId }).populate('user');
         if (!profile || !profile.user) {
             return res.status(404).json({ success: false, message: "Trainee profile not found." });
         }
@@ -602,8 +603,9 @@ export const getDashboardAnalytics = async (req, res) => {
 export const deleteTraineeRecord = async (req, res) => {
     try {
         const { id } = req.params;
+        const { companyId } = req.user;
 
-        const profile = await TrainingProfile.findById(id);
+        const profile = await TrainingProfile.findOne({ _id: id, companyId });
         if (!profile) {
             return res.status(404).json({ success: false, message: "Profile not found." });
         }
@@ -714,6 +716,32 @@ export const getModules = async (req, res) => {
             // Fetch all
         } else {
             query.isActive = true;
+        }
+
+        if (req.query.search) {
+            query.title = { $regex: req.query.search, $options: 'i' };
+        }
+
+        // Pagination is opt-in via ?page= — the Question Bank's module tab
+        // bar calls this endpoint expecting every matching module back at
+        // once (it renders them as tabs, not a paginated table), so that
+        // caller must keep working unchanged.
+        if (req.query.page) {
+            const page = Math.max(1, parseInt(req.query.page) || 1);
+            const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 12));
+            const skip = (page - 1) * limit;
+
+            const [modules, total] = await Promise.all([
+                Module.find(query).sort({ sequenceOrder: 1 }).skip(skip).limit(limit),
+                Module.countDocuments(query),
+            ]);
+
+            return res.status(200).json({
+                success: true,
+                count: modules.length,
+                data: modules,
+                pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+            });
         }
 
         const modules = await Module.find(query).sort({ sequenceOrder: 1 });

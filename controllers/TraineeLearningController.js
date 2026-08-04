@@ -258,6 +258,12 @@ export const submitTest = async (req, res) => {
         if (!attempt || attempt.finishedAt) {
             return res.status(400).json({ success: false, message: "Invalid or already submitted test." });
         }
+        // Without this, anyone who obtains another trainee's in-progress
+        // testAttemptId could submit answers on their behalf before they
+        // finish, corrupting that trainee's real attempt.
+        if (attempt.user.toString() !== userId.toString()) {
+            return res.status(403).json({ success: false, message: "This test attempt does not belong to you." });
+        }
 
         const TEST_TIME_LIMIT_MS = 20 * 60 * 1000; 
         const GRACE_PERIOD_MS = 60 * 1000; 
