@@ -631,7 +631,7 @@ export const deleteTraineeRecord = async (req, res) => {
 // --- CONTROLLER: CREATE TRAINING MODULE ---
 export const createTrainingModule = async (req, res) => {
     try {
-        const { title, description, category, sequenceOrder, assignedDepartment } = req.body;
+        const { title, description, category, sequenceOrder, assignedDepartment, testDurationMinutes } = req.body;
         const { role, companyId, _id: authorityId } = req.user;
 
         const isTopAdmin = TOP_LEVEL_ADMINS.includes(role);
@@ -682,6 +682,7 @@ export const createTrainingModule = async (req, res) => {
             category,
             sequenceOrder: parseInt(sequenceOrder),
             contents,
+            testDurationMinutes: Math.max(1, parseInt(testDurationMinutes) || 20),
             createdBy: authorityId
         });
 
@@ -767,7 +768,7 @@ export const deactivateModule = async (req, res) => {
 export const updateTrainingModule = async (req, res) => {
     try {
         const { id } = req.params;
-        const { title, description, category, sequenceOrder } = req.body;
+        const { title, description, category, sequenceOrder, testDurationMinutes } = req.body;
         const { companyId, role } = req.user;
 
         if (!TOP_LEVEL_ADMINS.includes(role) && !DEPT_HEADS.includes(role)) {
@@ -776,7 +777,10 @@ export const updateTrainingModule = async (req, res) => {
 
         const updatedModule = await Module.findOneAndUpdate(
             { _id: id, companyId },
-            { title, description, category, sequenceOrder: parseInt(sequenceOrder) },
+            {
+                title, description, category, sequenceOrder: parseInt(sequenceOrder),
+                testDurationMinutes: Math.max(1, parseInt(testDurationMinutes) || 20)
+            },
             { new: true, runValidators: true }
         );
 
@@ -843,6 +847,41 @@ export const addMediaToModule = async (req, res) => {
 
     } catch (error) {
         console.error("Error adding media:", error);
+        res.status(500).json({ success: false, message: "Server error", error: error.message });
+    }
+};
+
+// Update a content item's minimum watch time without re-uploading the file.
+export const updateMediaWatchTime = async (req, res) => {
+    try {
+        const { moduleId, contentId } = req.params;
+        const { minWatchTime } = req.body;
+        const { companyId, role } = req.user;
+
+        if (!TOP_LEVEL_ADMINS.includes(role) && !DEPT_HEADS.includes(role)) {
+            return res.status(403).json({ success: false, message: "Unauthorized to edit modules." });
+        }
+
+        const module = await Module.findOne({ _id: moduleId, companyId });
+        if (!module) {
+            return res.status(404).json({ success: false, message: "Module not found." });
+        }
+
+        const mediaItem = module.contents.id(contentId);
+        if (!mediaItem) {
+            return res.status(404).json({ success: false, message: "Media item not found in this module." });
+        }
+
+        mediaItem.minWatchTime = Math.max(0, parseInt(minWatchTime) || 0);
+        await module.save();
+
+        res.status(200).json({
+            success: true,
+            message: "Minimum watch time updated.",
+            data: module
+        });
+    } catch (error) {
+        console.error("Error updating watch time:", error);
         res.status(500).json({ success: false, message: "Server error", error: error.message });
     }
 };

@@ -177,6 +177,24 @@ export const markContentCompleted = async (req, res) => {
 };
 
 // ==========================================
+// Lightweight lookup for the "Ready to begin?" screen — just the configured
+// duration, so it can show the real per-module time instead of a hardcoded
+// number before start-test (which actually creates the attempt) is called.
+// ==========================================
+export const getModuleTestInfo = async (req, res) => {
+    try {
+        const { moduleId } = req.params;
+        const module = await Module.findById(moduleId).select('testDurationMinutes').lean();
+        if (!module) {
+            return res.status(404).json({ success: false, message: "Module not found." });
+        }
+        res.status(200).json({ success: true, testDurationMinutes: module.testDurationMinutes || 20 });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Server error" });
+    }
+};
+
+// ==========================================
 // 4. START TEST (Anti-Cheat & Timer Setup)
 // ==========================================
 // ==========================================
@@ -199,6 +217,9 @@ export const startTest = async (req, res) => {
         if (previousAttempts.length >= 2) {
             return res.status(403).json({ success: false, message: "Maximum attempts reached. You are not eligible to retake this test." });
         }
+
+        const moduleDoc = await Module.findById(moduleId).select('testDurationMinutes').lean();
+        const testDurationSeconds = Math.max(60, (moduleDoc?.testDurationMinutes || 20) * 60);
 
         const questions = await Question.find({ module: moduleId }).lean();
         const TEST_QUESTION_LIMIT = 10;
@@ -229,15 +250,17 @@ export const startTest = async (req, res) => {
             user: userId,
             module: moduleId,
             attemptNumber,
-            startedAt: Date.now(), 
-            randomizedQuestionSet: selectedQuestions.map(q => q._id)
+            startedAt: Date.now(),
+            randomizedQuestionSet: selectedQuestions.map(q => q._id),
+            testDurationSeconds
         });
 
-        res.status(200).json({ 
-            success: true, 
-            testAttemptId: newAttempt._id, 
+        res.status(200).json({
+            success: true,
+            testAttemptId: newAttempt._id,
             attemptNumber,
-            questions: sanitizedQuestions 
+            questions: sanitizedQuestions,
+            durationSeconds: testDurationSeconds
         });
 
     } catch (error) {
@@ -265,8 +288,11 @@ export const submitTest = async (req, res) => {
             return res.status(403).json({ success: false, message: "This test attempt does not belong to you." });
         }
 
-        const TEST_TIME_LIMIT_MS = 20 * 60 * 1000; 
-        const GRACE_PERIOD_MS = 60 * 1000; 
+        // Snapshotted on the attempt at start-test time from the module's
+        // own configured duration — not the module's *current* setting, so
+        // an admin changing it later never affects an attempt already running.
+        const TEST_TIME_LIMIT_MS = (attempt.testDurationSeconds || 1200) * 1000;
+        const GRACE_PERIOD_MS = 60 * 1000;
         const timeTakenMs = Date.now() - new Date(attempt.startedAt).getTime();
 
         let isTimeExpired = timeTakenMs > (TEST_TIME_LIMIT_MS + GRACE_PERIOD_MS);

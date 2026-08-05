@@ -47,15 +47,19 @@ const moduleSchema = new mongoose.Schema({
     enum: ['Induction', 'SOP', 'Reporting', 'ERP Usage', 'Professional / Behavioral', 'Task Management', 'Skill', 'Safety', 'Customer Relationship', 'Sales', 'Product', 'Demo'],
     required: true
   },
-  sequenceOrder: { type: Number, required: true }, 
-  
+  sequenceOrder: { type: Number, required: true },
+
   // Requirement #4 & #13: Content Format & Watch Requirements
   contents: [{
     contentType: { type: String, enum: ['Video', 'PDF', 'PPT'], required: true },
-    mediaUrl: { type: String, required: true }, 
+    mediaUrl: { type: String, required: true },
     minWatchTime: { type: Number, default: 0 } // Video skip control
   }],
-  
+
+  // Per-module test duration, set by whoever authors the module instead of
+  // the old hardcoded 20-minute limit every module previously shared.
+  testDurationMinutes: { type: Number, default: 20, min: 1 },
+
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   isActive: { type: Boolean, default: true }
 }, { 
@@ -120,7 +124,12 @@ const testAttemptSchema = new mongoose.Schema({
   isPassed: { type: Boolean }, 
   
   randomizedQuestionSet: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Question' }],
-  
+
+  // Snapshotted from Module.testDurationMinutes when the attempt starts, so
+  // a later change to the module's duration never affects an attempt that's
+  // already running. Seconds, to match the frontend countdown timer.
+  testDurationSeconds: { type: Number, default: 1200 },
+
   // 🔥 NEW: Track exactly what they answered for the Fail Analysis Dashboard
   submittedAnswers: [{
       questionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Question' },

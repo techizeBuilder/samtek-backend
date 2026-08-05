@@ -16,6 +16,7 @@ import {
   updateTrainingModule,
   deactivateModule,
   addMediaToModule,
+  updateMediaWatchTime,
   removeMediaFromModule,
   addQuestionToModule,
   getQuestions,
@@ -24,7 +25,7 @@ import {
   getDashboardAnalytics,
   downloadCertificate
 } from '../controllers/TrainingManagementController.js';
-import { getModuleLearningView, getMyDashboard, markContentCompleted, startTest, submitTest } from '../controllers/TraineeLearningController.js';
+import { getModuleLearningView, getMyDashboard, markContentCompleted, startTest, submitTest, getModuleTestInfo } from '../controllers/TraineeLearningController.js';
 
 const router = express.Router();
 
@@ -97,6 +98,9 @@ router.post('/modules/:id/media', authenticateToken, authorizeRoles(...ALL_MANAG
 // Remove specific media from a module
 router.delete('/modules/:moduleId/media/:contentId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), removeMediaFromModule);
 
+// Update a content item's minimum watch time without re-uploading the file
+router.put('/modules/:moduleId/media/:contentId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), updateMediaWatchTime);
+
 
 // ==========================================
 // C. QUESTION BANK ROUTES (Admin/Manager)
@@ -128,6 +132,9 @@ router.get('/my-learning/module/:moduleId', authenticateToken, getModuleLearning
 
 // 3. Tracking: Mark a specific video or PDF as completed
 router.post('/my-learning/module/mark-content-completed', authenticateToken, markContentCompleted);
+
+// 3b. Pre-Exam: Just the configured test duration, for the "Ready to begin?" screen
+router.get('/my-learning/module/:moduleId/test-info', authenticateToken, getModuleTestInfo);
 
 // 4. Exam Room: Start the test (Starts server timer and shuffles questions)
 router.post('/my-learning/module/:moduleId/start-test', authenticateToken, startTest);
