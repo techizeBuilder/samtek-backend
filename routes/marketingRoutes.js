@@ -1,11 +1,12 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
 import { marketingUpload } from '../middleware/marketingUpload.js';
+import { eventFlyerUpload } from '../middleware/eventFlyerUpload.js';
 import {
   getDashboard, getAssets, getAsset, createAsset, updateAsset, deleteAsset, shareAsset,
   getCategories, createCategory, updateCategory, deleteCategory,
-  getReports, getAuditLogs, getNotifications,
-  getItemFilters, getMarketingItems, uploadItemMedia,
+  getReports, getLeadReports, getAuditLogs, getNotifications,
+  getItemFilters, getMarketingItemFacets, getMarketingItems, uploadItemMedia,
 } from '../controllers/marketingController.js';
 import {
   createRequest, getMyRequests, getAllRequests,
@@ -15,6 +16,9 @@ import {
   getMarketingExpenseCategories, createMarketingExpense, getMarketingExpenses,
   getMarketingExpenseSummary, updateMarketingExpense, deleteMarketingExpense,
 } from '../controllers/marketingExpenseController.js';
+import {
+  getEventTypes, getEventFlyers, createEventFlyer, updateEventFlyer, deleteEventFlyer,
+} from '../controllers/marketingEventController.js';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -39,6 +43,7 @@ router.delete('/categories/:id', deleteCategory);
 // Item media — Group/Category/SubCategory filtered product picker (same
 // filter as Sales > Send Quotation) + image/video/brochure upload per item
 router.get('/item-filters', getItemFilters);
+router.get('/items/facets', getMarketingItemFacets);
 router.get('/items', getMarketingItems);
 router.post('/items/:id/media', marketingUpload.fields([
   { name: 'image', maxCount: 1 },
@@ -56,6 +61,7 @@ router.post('/requests/:id/reject', rejectRequest);
 
 // Reports, Audit, Notifications
 router.get('/reports', getReports);
+router.get('/reports/leads', getLeadReports);
 router.get('/audit-logs', getAuditLogs);
 router.get('/notifications', getNotifications);
 
@@ -66,5 +72,13 @@ router.get('/expenses', getMarketingExpenses);
 router.post('/expenses', createMarketingExpense);
 router.put('/expenses/:id', updateMarketingExpense);
 router.delete('/expenses/:id', deleteMarketingExpense);
+
+// Event Flyers — Marketing Head / Marketing Employee log Event Name, Event
+// Type & Event Date and upload the event's flyer/poster image
+router.get('/events/types', getEventTypes);
+router.get('/events', getEventFlyers);
+router.post('/events', eventFlyerUpload.single('image'), createEventFlyer);
+router.put('/events/:id', eventFlyerUpload.single('image'), updateEventFlyer);
+router.delete('/events/:id', deleteEventFlyer);
 
 export default router;

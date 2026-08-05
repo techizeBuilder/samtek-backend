@@ -1,8 +1,11 @@
+import mongoose from 'mongoose';
 import MarketingAsset from '../models/MarketingAsset.js';
 import MarketingCategory from '../models/MarketingCategory.js';
 import MarketingShareLog from '../models/MarketingShareLog.js';
 import { getFileType } from '../middleware/marketingUpload.js';
 import { Item, Group, Category } from '../models/Inventory.js';
+import Lead from '../models/Lead.js';
+import AdminSettings from '../models/AdminSettings.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -265,6 +268,116 @@ export const getReports = async (req, res) => {
   }
 };
 
+// ─── SALES / LEAD REPORT ────────────────────────────────────────────────────
+// Stage-wise lead counts, Won/Late totals, and a Source-wise performance
+// breakdown — scoped to the logged-in Marketing Head's own company (never
+// cross-company), matching the same cid(req) convention as the rest of this
+// controller. Stage order follows the company's own configured pipeline
+// (AdminSettings.leadStages) since stages/sources are per-company and
+// user-editable, not a fixed enum — see leadStagesCrud/leadSourcesCrud in
+// adminSettingsController.js.
+export const getLeadReports = async (req, res) => {
+  try {
+    const companyId = cid(req);
+    if (!companyId) return res.status(400).json({ success: false, message: 'User does not belong to a company.' });
+
+    const companyObjectId = new mongoose.Types.ObjectId(companyId);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    // "Won" = status is literally 'Won' (set by markLeadAsWon) — the stage
+    // field is a separate, freely-editable pipeline label and not a reliable
+    // won/lost indicator on its own.
+    const wonExpr = { $eq: ['$status', 'Won'] };
+    // "Late" = an open (not-Won) lead whose next follow-up date has already
+    // passed — the same definition already used by the "Pending Follow-up"
+    // filter on the Leads page (leadController.js getLeads).
+    const lateExpr = {
+      $and: [
+        { $ne: ['$status', 'Won'] },
+        { $ne: ['$nextFollowUpDate', null] },
+        { $lt: ['$nextFollowUpDate', todayStart] },
+      ],
+    };
+
+    const [byStage, bySource, totalsAgg, settings] = await Promise.all([
+      Lead.aggregate([
+        { $match: { companyId: companyObjectId } },
+        { $group: { _id: '$stage', total: { $sum: 1 }, won: { $sum: { $cond: [wonExpr, 1, 0] } } } },
+      ]),
+      Lead.aggregate([
+        { $match: { companyId: companyObjectId } },
+        {
+          $group: {
+            _id: '$source',
+            total: { $sum: 1 },
+            won: { $sum: { $cond: [wonExpr, 1, 0] } },
+            late: { $sum: { $cond: [lateExpr, 1, 0] } },
+            wonValue: { $sum: { $cond: [wonExpr, { $ifNull: ['$dealValue', 0] }, 0] } },
+          },
+        },
+        { $sort: { total: -1 } },
+      ]),
+      Lead.aggregate([
+        { $match: { companyId: companyObjectId } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            won: { $sum: { $cond: [wonExpr, 1, 0] } },
+            late: { $sum: { $cond: [lateExpr, 1, 0] } },
+            wonValue: { $sum: { $cond: [wonExpr, { $ifNull: ['$dealValue', 0] }, 0] } },
+          },
+        },
+      ]),
+      AdminSettings.findOne({ companyId }).select('leadStages').lean(),
+    ]);
+
+    // Order stage rows by the company's configured pipeline order. Any stage
+    // value not found in that list (legacy 'N/A' default, a since-renamed/
+    // deleted stage) sorts after the configured ones, by count desc.
+    const stageOrder = new Map(
+      (settings?.leadStages || [])
+        .slice()
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+        .map((s, i) => [s.name, i])
+    );
+    const byStageSorted = [...byStage].sort((a, b) => {
+      const ai = stageOrder.has(a._id) ? stageOrder.get(a._id) : Infinity;
+      const bi = stageOrder.has(b._id) ? stageOrder.get(b._id) : Infinity;
+      if (ai !== bi) return ai - bi;
+      return b.total - a.total;
+    });
+
+    const totals = totalsAgg[0] || { total: 0, won: 0, late: 0, wonValue: 0 };
+    const winRate = (won, total) => (total > 0 ? Math.round((won / total) * 1000) / 10 : 0);
+
+    res.json({
+      success: true,
+      data: {
+        totals: {
+          total: totals.total,
+          won: totals.won,
+          late: totals.late,
+          wonValue: totals.wonValue,
+          winRate: winRate(totals.won, totals.total),
+        },
+        byStage: byStageSorted.map(s => ({ stage: s._id || 'N/A', total: s.total, won: s.won })),
+        bySource: bySource.map(s => ({
+          source: s._id || 'Unknown',
+          total: s.total,
+          won: s.won,
+          late: s.late,
+          wonValue: s.wonValue,
+          winRate: winRate(s.won, s.total),
+        })),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ─── AUDIT LOGS ───────────────────────────────────────────────────────────────
 export const getAuditLogs = async (req, res) => {
   try {
@@ -324,19 +437,52 @@ export const getItemFilters = async (req, res) => {
   }
 };
 
-// All Product-type items for the company — client filters by
-// group/category/subCategory, same pattern as the Quotation page.
-export const getMarketingItems = async (req, res) => {
+// Lightweight, unpaginated group/category/subCategory values for every
+// Product-type item in the company — used only to populate the cascading
+// filter dropdowns (never for display), so it stays cheap even when the
+// paginated list below only returns one page of full item records.
+export const getMarketingItemFacets = async (req, res) => {
   try {
     const companyId = cid(req);
     if (!companyId) return res.json({ success: true, items: [] });
 
     const items = await Item.find({ store: companyId.toString(), type: 'Product' })
-      .select('name code group category subCategory image videoUrl brochureUrl unit')
-      .sort({ category: 1, name: 1 })
+      .select('group category subCategory')
       .lean();
 
     res.json({ success: true, items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// Product-type items for the company, filtered by group/category/subCategory
+// and paginated server-side (default 15 per page) — same
+// { data/total/page/pages } convention as getAssets above.
+export const getMarketingItems = async (req, res) => {
+  try {
+    const companyId = cid(req);
+    if (!companyId) return res.json({ success: true, items: [], total: 0, page: 1, pages: 1 });
+
+    const { group, category, subCategory, page = 1, limit = 15 } = req.query;
+    const query = { store: companyId.toString(), type: 'Product' };
+    if (group && group !== 'All') query.group = group;
+    if (category && category !== 'All') query.category = category;
+    if (subCategory && subCategory !== 'All') query.subCategory = subCategory;
+
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.max(1, parseInt(limit) || 15);
+    const skip = (pageNum - 1) * limitNum;
+
+    const [items, total] = await Promise.all([
+      Item.find(query)
+        .select('name code group category subCategory image videoUrl brochureUrl unit')
+        .sort({ category: 1, name: 1 })
+        .skip(skip).limit(limitNum).lean(),
+      Item.countDocuments(query),
+    ]);
+
+    res.json({ success: true, items, total, page: pageNum, pages: Math.max(1, Math.ceil(total / limitNum)) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
