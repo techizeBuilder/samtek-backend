@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const RDChangeRequestSchema = new mongoose.Schema({
   changeId: { type: String, unique: true },
-  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMachine', required: true },
+  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   machineName: { type: String, required: true },
   machineCode: { type: String, required: true },
   raisedBy: { type: String, required: true, trim: true },

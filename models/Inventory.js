@@ -25,6 +25,16 @@ const itemSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Inventory's own new classification fields (InventoryMasterOption-backed,
+  // "+"-addable) — deliberately separate from the existing category/subCategory
+  // above (which storeFlowService.js's Purchase-vs-Production routing depends
+  // on and is left untouched) and from Product/Motor Master's own lists.
+  // Client's "Item Type" classification (Raw Material/Tool/Readymade
+  // Material/Assets/Job Work) is handled via category/subCategory above
+  // instead — not a separate field.
+  itemCategories: [{ type: String, trim: true }], // multi-select, e.g. Fabrication, Sheet Metal, Machining
+  sourceType: { type: String, default: '', trim: true }, // e.g. Purchase, In House
+  itemSourceType: { type: String, default: '', trim: true }, // e.g. In House, Out Source, Both
   batch: {
     type: String,
     trim: true
@@ -49,10 +59,73 @@ const itemSchema = new mongoose.Schema({
     enum: ['Low', 'Normal', 'High', 'Critical'],
     default: 'Normal'
   },
+  // Internal/system classification — Product Master and Motor Master hardcode
+  // 'Product' here server-side (see productKind below); plain Inventory items
+  // pick from this fixed list. NOT the client's "Item Type" business
+  // classification (Raw Material/Tool/etc.) — that lives in category/subCategory.
   type: {
     type: String,
     required: true,
     enum: ['Product', 'Material', 'Spares', 'Assemblies']
+  },
+  // Only meaningful when type: 'Product' — distinguishes which "master" this
+  // sellable item is managed under (Product Master's machines vs Motor
+  // Master's motors). Everything genuinely shared (price, stock, purchase
+  // unit, specs, description, image) stays on the item's common fields above;
+  // only what's truly master-specific lives in the nested details below.
+  productKind: {
+    type: String,
+    enum: ['Machine', 'Motor', null],
+    default: null,
+  },
+  // Universal active/discontinued toggle — client asked for this on both
+  // Inventory items and Product Master machines ("Continue"/"Discontinue"),
+  // so it lives here as a genuinely common field rather than duplicated per kind.
+  isDiscontinued: { type: Boolean, default: false },
+  // Explicit dynamic "Source Type" field (Manufacturing/Purchase for Product
+  // Master) — kept as its own real field per the client's literal requirement,
+  // even though it drives the same purchase/internalManufacturing booleans
+  // itemPricingService already depends on. Never silently collapsed away.
+  productSourceType: { type: String, default: '', trim: true },
+  // Product Master (Machine) specific fields
+  machineDetails: {
+    variant: { type: String, default: '', trim: true },
+    productionRate: { type: String, default: '', trim: true }, // e.g. "200 Kg/hr"
+    powerSource: { type: String, default: '', trim: true }, // Motor / Gas / Engine
+    powerRequiredHP: { type: Number, default: null },
+    powerRequiredKWH: { type: Number, default: null },
+    powerRequiredRPM: { type: Number, default: null },
+    accessories: [{ type: String, trim: true }],
+    modelNumber: { type: String, default: '', trim: true },
+    machineType: { type: String, enum: ['Standard', 'Custom', 'Special Purpose Machine (SPM)'], default: 'Standard' },
+    // R&D workflow state — migrated as-is from the old RDMachine collection.
+    forwardToNextPhase: { type: Boolean, default: false },
+    designStatus: { type: String, enum: ['Draft', 'Testing', 'Approved', 'Rejected'], default: 'Draft' },
+    releaseStatus: { type: String, enum: ['Not Released', 'Released'], default: 'Not Released' },
+    rejectionNote: { type: String, default: '' },
+    // Set the first time a ProductionOrder for this machine reaches 'Completed'
+    // — see itemPricingService.js.
+    firstBuiltAt: { type: Date, default: null },
+  },
+  // R&D custom field templates (parent label -> sub-field name -> value),
+  // shaped per RDCustomFieldTemplate matching category+subCategory+productSourceType.
+  // Kept at the top level (not nested in machineDetails) since it's plain
+  // key/value data with no other Machine-only typing needs.
+  customFields: [{
+    groupLabel: { type: String, trim: true },
+    fieldName: { type: String, trim: true },
+    value: { type: String, trim: true, default: '' }
+  }],
+  // Motor Master specific fields
+  motorDetails: {
+    motorType: { type: String, default: '', trim: true },
+    modelNumber: { type: String, default: '', trim: true },
+    version: { type: String, default: '', trim: true },
+    hp: { type: Number, default: null },
+    kwh: { type: Number, default: null }, // auto-calculated from hp (see client formula)
+    rpm: { type: Number, default: null },
+    pole: { type: String, default: '', trim: true },
+    phase: { type: String, default: '', trim: true },
   },
   stdCost: {
     type: Number,
@@ -162,10 +235,34 @@ const itemSchema = new mongoose.Schema({
     trim: true,
     default: ''
   },
+  // Shared/universal — same real-world spec (e.g. SS304) regardless of whether
+  // it's an Inventory item or a Product Master machine, so Product Master's
+  // Material Grade dropdown (RDMasterOption field 'MaterialGrade') reads and
+  // writes this same top-level field rather than keeping its own copy.
+  materialGrade: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  modelNumber: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   size: {
     type: String,
     trim: true,
     default: ''
+  },
+  // Structured dimension breakdown (Inventory-specific — Product Master keeps
+  // its own simple free-text `size` field above for "6x12" style dimensions).
+  dimensions: {
+    length: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
+    height: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
+    width: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
+    diaOD: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
+    diaID: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
+    thickness: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
   },
   unitWeightValue: {
     type: Number,

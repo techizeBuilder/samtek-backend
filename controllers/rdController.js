@@ -1,4 +1,4 @@
-import RDMachine from '../models/RDMachine.js';
+import { Item } from '../models/Inventory.js';
 import RDBOM from '../models/RDBOM.js';
 import RDPrototype from '../models/RDPrototype.js';
 import RDChangeRequest from '../models/RDChangeRequest.js';
@@ -9,6 +9,7 @@ import RDRequest from '../models/RDRequest.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
+import RDPlant from '../models/RDPlant.js';
 import { computeBOMMaterialsMrpCost } from '../services/itemPricingService.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
@@ -32,6 +33,143 @@ async function generateChangeId(companyId) {
 }
 
 // ─── MACHINES ─────────────────────────────────────────────────────────────────
+// Product Master machines now live in the Item collection (type:'Product',
+// productKind:'Machine') instead of the old, separate RDMachine collection —
+// this is what actually eliminates the double-record problem (a Product
+// Master entry AND its own independently-created Inventory Item for the same
+// machine). Every existing consumer of this API (ProductMaster.jsx, BOM
+// Management's MaterialCodePicker/autofill, Prototype, Design Approval,
+// Change Management, Tool & Process, Quality Parameters) still sends/expects
+// the OLD flat field names (pType, category, pSourceType, designStatus,
+// releaseStatus, forwardToNextPhase, machineType, isDiscontinued,
+// rejectionNote, firstBuiltAt) — toMachineInput/toMachineResponse translate
+// between that flat shape and Item's real schema, so none of that code had
+// to change.
+//
+// Mapping: pType -> Item.category, category -> Item.subCategory,
+// pSourceType -> Item.productSourceType (Item's category/subCategory are only
+// 2 levels; Product Master needs 3, hence the extra productSourceType field).
+// inputUnit(Type) -> Item.purchaseUnit(Type), outputUnit(Type) -> Item.unit(Type)
+// (Product Master's Input/Output Unit were modeled to mirror these exactly).
+// designStatus/releaseStatus/forwardToNextPhase/machineType/rejectionNote/
+// firstBuiltAt live under Item.machineDetails. isDiscontinued is a common Item field.
+const toMachineResponse = (item) => ({
+  _id: item._id,
+  code: item.code,
+  name: item.name,
+  description: item.description || '',
+  pType: item.category || '',
+  category: item.subCategory || '',
+  pSourceType: item.productSourceType || '',
+  brand: item.brand || '',
+  metrology: item.metrology || '',
+  size: item.size || '',
+  unitWeightValue: item.unitWeightValue ?? null,
+  unitWeightUnitType: item.unitWeightUnitType || '',
+  unitWeightUnit: item.unitWeightUnit || '',
+  inputUnitType: item.purchaseUnitType || '',
+  inputUnit: item.purchaseUnit || '',
+  outputUnitType: item.unitType || '',
+  outputUnit: item.unit || '',
+  specifications: item.specifications || [],
+  customFields: item.customFields || [],
+  forwardToNextPhase: !!item.machineDetails?.forwardToNextPhase,
+  designStatus: item.machineDetails?.designStatus || 'Draft',
+  releaseStatus: item.machineDetails?.releaseStatus || 'Not Released',
+  machineType: item.machineDetails?.machineType || 'Standard',
+  isDiscontinued: !!item.isDiscontinued,
+  rejectionNote: item.machineDetails?.rejectionNote || '',
+  firstBuiltAt: item.machineDetails?.firstBuiltAt || null,
+  variant: item.machineDetails?.variant || '',
+  productionRate: item.machineDetails?.productionRate || '',
+  materialGrade: item.materialGrade || '',
+  powerSource: item.machineDetails?.powerSource || '',
+  powerRequiredHP: item.machineDetails?.powerRequiredHP ?? null,
+  powerRequiredKWH: item.machineDetails?.powerRequiredKWH ?? null,
+  powerRequiredRPM: item.machineDetails?.powerRequiredRPM ?? null,
+  accessories: item.machineDetails?.accessories || [],
+  modelNumber: item.machineDetails?.modelNumber || '',
+  // Applications uses Item's own shared `applications` array (same field/UI
+  // pattern as Inventory's DynamicListField) — not a machineDetails field,
+  // since this is one of the "common" fields shared across every item kind.
+  applications: item.applications || [],
+  // Pricing & Stock + purchase/internalManufacturing are Item's shared common
+  // fields (same as Inventory/Motor Master) — a Product Master machine IS the
+  // sellable/purchasable Item now, so this is the only place to set them.
+  purchase: item.purchase !== false,
+  internalManufacturing: !!item.internalManufacturing,
+  stdCost: item.stdCost ?? 0,
+  purchaseCost: item.purchaseCost ?? 0,
+  salePrice: item.salePrice ?? 0,
+  mrp: item.mrp ?? 0,
+  gst: item.gst ?? 0,
+  qty: item.qty ?? 0,
+  minStock: item.minStock ?? 0,
+  costSource: item.costSource || 'Manual',
+  costResolvedAt: item.costResolvedAt || null,
+  costResolutionIssue: item.costResolutionIssue || null,
+  company: item.companyId,
+  createdAt: item.createdAt,
+  updatedAt: item.updatedAt,
+  designFiles: item.designFiles || [],
+});
+
+// Translates the flat request body (from ProductMaster.jsx's Add/Edit form,
+// unchanged) into a partial Item update object using the mapping above.
+// Only fields actually present in the body get translated, so this is safe
+// to use for both create (full payload) and update (partial payload).
+const toMachineItemFields = (body) => {
+  const out = {};
+  if (body.code !== undefined) out.code = body.code;
+  if (body.name !== undefined) out.name = body.name;
+  if (body.description !== undefined) out.description = body.description || '';
+  if (body.pType !== undefined) out.category = body.pType;
+  if (body.category !== undefined) out.subCategory = body.category;
+  if (body.pSourceType !== undefined) out.productSourceType = body.pSourceType;
+  if (body.brand !== undefined) out.brand = body.brand || '';
+  if (body.metrology !== undefined) out.metrology = body.metrology || '';
+  if (body.materialGrade !== undefined) out.materialGrade = body.materialGrade || '';
+  if (body.size !== undefined) out.size = body.size || '';
+  if (body.unitWeightValue !== undefined) out.unitWeightValue = body.unitWeightValue !== '' ? Number(body.unitWeightValue) : null;
+  if (body.unitWeightUnitType !== undefined) out.unitWeightUnitType = body.unitWeightUnitType || '';
+  if (body.unitWeightUnit !== undefined) out.unitWeightUnit = body.unitWeightUnit || '';
+  if (body.inputUnitType !== undefined) out.purchaseUnitType = body.inputUnitType || '';
+  if (body.inputUnit !== undefined) out.purchaseUnit = body.inputUnit || '';
+  if (body.outputUnitType !== undefined) out.unitType = body.outputUnitType || '';
+  if (body.outputUnit !== undefined) out.unit = body.outputUnit || '';
+  if (body.specifications !== undefined) out.specifications = body.specifications || [];
+  if (body.customFields !== undefined) out.customFields = body.customFields || [];
+  if (body.isDiscontinued !== undefined) out.isDiscontinued = !!body.isDiscontinued;
+  if (body.applications !== undefined) out.applications = body.applications || [];
+  if (body.purchase !== undefined) out.purchase = !!body.purchase;
+  if (body.internalManufacturing !== undefined) out.internalManufacturing = !!body.internalManufacturing;
+  if (body.stdCost !== undefined) out.stdCost = Number(body.stdCost) || 0;
+  if (body.purchaseCost !== undefined) out.purchaseCost = Number(body.purchaseCost) || 0;
+  if (body.salePrice !== undefined) out.salePrice = Number(body.salePrice) || 0;
+  if (body.mrp !== undefined) out.mrp = Number(body.mrp) || 0;
+  if (body.gst !== undefined) out.gst = Number(body.gst) || 0;
+  if (body.qty !== undefined) out.qty = Number(body.qty) || 0;
+  if (body.minStock !== undefined) out.minStock = Number(body.minStock) || 0;
+
+  const md = {};
+  if (body.forwardToNextPhase !== undefined) md.forwardToNextPhase = !!body.forwardToNextPhase;
+  if (body.designStatus !== undefined) md.designStatus = body.designStatus;
+  if (body.releaseStatus !== undefined) md.releaseStatus = body.releaseStatus;
+  if (body.machineType !== undefined) md.machineType = body.machineType;
+  if (body.rejectionNote !== undefined) md.rejectionNote = body.rejectionNote || '';
+  if (body.firstBuiltAt !== undefined) md.firstBuiltAt = body.firstBuiltAt;
+  if (body.variant !== undefined) md.variant = body.variant || '';
+  if (body.productionRate !== undefined) md.productionRate = body.productionRate || '';
+  if (body.powerSource !== undefined) md.powerSource = body.powerSource || '';
+  if (body.powerRequiredHP !== undefined) md.powerRequiredHP = body.powerRequiredHP !== '' ? Number(body.powerRequiredHP) : null;
+  if (body.powerRequiredKWH !== undefined) md.powerRequiredKWH = body.powerRequiredKWH !== '' ? Number(body.powerRequiredKWH) : null;
+  if (body.powerRequiredRPM !== undefined) md.powerRequiredRPM = body.powerRequiredRPM !== '' ? Number(body.powerRequiredRPM) : null;
+  if (body.accessories !== undefined) md.accessories = body.accessories || [];
+  if (body.modelNumber !== undefined) md.modelNumber = body.modelNumber || '';
+  Object.keys(md).forEach(k => { out[`machineDetails.${k}`] = md[k]; });
+
+  return out;
+};
 
 export const getMachines = async (req, res) => {
   try {
@@ -46,17 +184,17 @@ export const getMachines = async (req, res) => {
 
     // Base filter excludes designStatus so status-count aggregates below can
     // report totals per status regardless of which status tab is selected.
-    const baseQuery = { company: companyId };
+    const baseQuery = { companyId, type: 'Product', productKind: 'Machine' };
     if (discontinued === 'true') baseQuery.isDiscontinued = true;
     else if (discontinued === 'false') baseQuery.isDiscontinued = false;
-    if (forwardToNextPhase === 'true') baseQuery.forwardToNextPhase = true;
-    else if (forwardToNextPhase === 'false') baseQuery.forwardToNextPhase = false;
-    if (releaseStatus && releaseStatus !== 'All') baseQuery.releaseStatus = releaseStatus;
+    if (forwardToNextPhase === 'true') baseQuery['machineDetails.forwardToNextPhase'] = true;
+    else if (forwardToNextPhase === 'false') baseQuery['machineDetails.forwardToNextPhase'] = false;
+    if (releaseStatus && releaseStatus !== 'All') baseQuery['machineDetails.releaseStatus'] = releaseStatus;
     // Classification filters — lets R&D find every product under a P-Type/Category/P-Source Type
     // before renaming or deleting that option, so they can reassign items instead of hunting for them.
-    if (pType) baseQuery.pType = pType;
-    if (category) baseQuery.category = category;
-    if (pSourceType) baseQuery.pSourceType = pSourceType;
+    if (pType) baseQuery.category = pType;
+    if (category) baseQuery.subCategory = category;
+    if (pSourceType) baseQuery.productSourceType = pSourceType;
     if (search) {
       baseQuery.$or = [
         { code: { $regex: search, $options: 'i' } },
@@ -66,13 +204,13 @@ export const getMachines = async (req, res) => {
     }
 
     const query = { ...baseQuery };
-    if (designStatus && designStatus !== 'All') query.designStatus = designStatus;
+    if (designStatus && designStatus !== 'All') query['machineDetails.designStatus'] = designStatus;
 
     let statusCounts;
     if (withStatusCounts === 'true') {
-      const countsAgg = await RDMachine.aggregate([
+      const countsAgg = await Item.aggregate([
         { $match: baseQuery },
-        { $group: { _id: '$designStatus', count: { $sum: 1 } } },
+        { $group: { _id: '$machineDetails.designStatus', count: { $sum: 1 } } },
       ]);
       statusCounts = countsAgg.reduce((acc, c) => { acc[c._id] = c.count; return acc; }, {});
       statusCounts.All = countsAgg.reduce((sum, c) => sum + c.count, 0);
@@ -84,14 +222,14 @@ export const getMachines = async (req, res) => {
       const limitNum = Math.max(1, parseInt(limit, 10) || 20);
       const skip = (pageNum - 1) * limitNum;
       const [rows, total] = await Promise.all([
-        RDMachine.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
-        RDMachine.countDocuments(query),
+        Item.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+        Item.countDocuments(query),
       ]);
       machines = rows;
       pagination = { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) };
     } else {
       // 1. Fetch all machines for the company (.lean() makes it plain JSON so we can add properties)
-      machines = await RDMachine.find(query).sort({ createdAt: -1 }).lean();
+      machines = await Item.find(query).sort({ createdAt: -1 }).lean();
     }
 
     if (machines.length === 0) {
@@ -116,10 +254,9 @@ export const getMachines = async (req, res) => {
       docsByMachine[mId].push(doc);
     });
 
-    // 4. Attach the grouped documents to their respective machines
-    const enrichedMachines = machines.map(machine => ({
+    // 4. Attach the grouped documents to their respective machines, then translate to the response shape
+    const enrichedMachines = machines.map(machine => toMachineResponse({
       ...machine,
-      // This feeds the files directly into the frontend response
       designFiles: docsByMachine[machine._id.toString()] || []
     }));
 
@@ -146,7 +283,12 @@ export const createMachine = async (req, res) => {
       brand, machineType, metrology, size,
       unitWeightValue, unitWeightUnitType, unitWeightUnit,
       inputUnitType, inputUnit, outputUnitType, outputUnit,
-      specifications, customFields, forwardToNextPhase
+      specifications, customFields, forwardToNextPhase,
+      variant, productionRate, materialGrade, powerSource,
+      powerRequiredHP, powerRequiredKWH, powerRequiredRPM,
+      accessories, modelNumber, applications,
+      purchase, internalManufacturing,
+      stdCost, purchaseCost, salePrice, mrp, gst, qty, minStock,
     } = req.body;
 
     // Strict validation for required fields
@@ -160,8 +302,9 @@ export const createMachine = async (req, res) => {
     // No DB-level unique index on code (some pre-existing data already violates
     // one), so guard against duplicates here instead — a second active machine
     // sharing a code silently shadows the first one everywhere it's looked up
-    // by code (BOM/R&D approval, autofill, etc.).
-    const existing = await RDMachine.findOne({ code: code.trim(), company: req.user.companyId, isDiscontinued: false });
+    // by code (BOM/R&D approval, autofill, etc.). Also covers Motor/Inventory
+    // codes now, since it's all one Item collection.
+    const existing = await Item.findOne({ code: code.trim(), companyId: req.user.companyId, isDiscontinued: false });
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -169,32 +312,63 @@ export const createMachine = async (req, res) => {
       });
     }
 
-    const machine = await RDMachine.create({
+    const machine = await Item.create({
       code,
       name,
       description: description || '',
-      category,
-      pType,
-      pSourceType,
+      type: 'Product',
+      productKind: 'Machine',
+      category: pType,
+      subCategory: category,
+      productSourceType: pSourceType,
       brand: brand || '',
       metrology: metrology || '',
       size: size || '',
       unitWeightValue: unitWeightValue !== undefined && unitWeightValue !== '' ? Number(unitWeightValue) : null,
       unitWeightUnitType: unitWeightUnitType || '',
       unitWeightUnit: unitWeightUnit || '',
-      inputUnitType: inputUnitType || '',
-      inputUnit: inputUnit || '',
-      outputUnitType: outputUnitType || '',
-      outputUnit: outputUnit || '',
-      machineType: machineType || 'Standard',
+      purchaseUnitType: inputUnitType || '',
+      purchaseUnit: inputUnit || '',
+      // Item.unit is required — Product Master's Output Unit is optional on
+      // the form, so fall back to a sensible default (matches existing data:
+      // machines without an explicit output unit are conventionally counted
+      // in Pieces) rather than blocking machine creation on it.
+      unitType: outputUnitType || 'Count Unit',
+      unit: outputUnit || 'Pieces',
       specifications: specifications || [],
       customFields: customFields || [],
-      forwardToNextPhase: !!forwardToNextPhase,
-      company: req.user.companyId,
-      createdBy: req.user._id,
+      applications: applications || [],
+      purchase: !!purchase,
+      internalManufacturing: !!internalManufacturing,
+      stdCost: Number(stdCost) || 0,
+      purchaseCost: Number(purchaseCost) || 0,
+      salePrice: Number(salePrice) || 0,
+      mrp: Number(mrp) || 0,
+      gst: Number(gst) || 0,
+      qty: Number(qty) || 0,
+      minStock: Number(minStock) || 0,
+      materialGrade: materialGrade || '',
+      machineDetails: {
+        forwardToNextPhase: !!forwardToNextPhase,
+        variant: variant || '',
+        productionRate: productionRate || '',
+        powerSource: powerSource || '',
+        powerRequiredHP: powerRequiredHP !== undefined && powerRequiredHP !== '' ? Number(powerRequiredHP) : null,
+        powerRequiredKWH: powerRequiredKWH !== undefined && powerRequiredKWH !== '' ? Number(powerRequiredKWH) : null,
+        powerRequiredRPM: powerRequiredRPM !== undefined && powerRequiredRPM !== '' ? Number(powerRequiredRPM) : null,
+        accessories: accessories || [],
+        modelNumber: modelNumber || '',
+      },
+      companyId: req.user.companyId,
+      // `store` is a separate, older company-scoping field several other
+      // modules key off directly instead of `companyId` (Sales' own item
+      // picker, Pricing Value — see their own comments) — inventoryController.js's
+      // createItem always syncs it too; this had been missing here, silently
+      // making every Product Master machine invisible to those modules.
+      store: req.user.companyId.toString(),
     });
 
-    res.status(201).json({ success: true, data: machine });
+    res.status(201).json({ success: true, data: toMachineResponse(machine.toObject()) });
   } catch (err) {
     // Handle potential duplicate code errors gracefully
     if (err.code === 11000) {
@@ -206,13 +380,15 @@ export const createMachine = async (req, res) => {
 
 export const updateMachine = async (req, res) => {
   try {
-    const machine = await RDMachine.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { ...req.body },
+    // Backfills `store` on save if it was missing (see createMachine) — lets
+    // editing an older machine self-heal without needing a separate migration.
+    const machine = await Item.findOneAndUpdate(
+      { _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' },
+      { $set: { ...toMachineItemFields(req.body), store: req.user.companyId.toString() } },
       { new: true }
-    );
+    ).lean();
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
-    res.json({ success: true, data: machine });
+    res.json({ success: true, data: toMachineResponse(machine) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -233,6 +409,13 @@ export const getDropdownOptions = async (req, res) => {
       PSourceType: options.filter(o => o.field === 'P-SourceType').map(toOption),
       Metrology: options.filter(o => o.field === 'Metrology').map(toOption),
       MaterialType: options.filter(o => o.field === 'MaterialType').map(toOption),
+      MotorCategory: options.filter(o => o.field === 'MotorCategory').map(toOption),
+      MotorSubCategory: options.filter(o => o.field === 'MotorSubCategory').map(toOption),
+      MotorType: options.filter(o => o.field === 'MotorType').map(toOption),
+      MaterialGrade: options.filter(o => o.field === 'MaterialGrade').map(toOption),
+      PowerSource: options.filter(o => o.field === 'PowerSource').map(toOption),
+      PlantCategory: options.filter(o => o.field === 'PlantCategory').map(toOption),
+      PlantSubCategory: options.filter(o => o.field === 'PlantSubCategory').map(toOption),
     };
 
     res.json({ success: true, data: groupedOptions });
@@ -247,7 +430,7 @@ export const addDropdownOption = async (req, res) => {
   try {
     const { field, value, parentValue } = req.body;
 
-    if (!['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType'].includes(field)) {
+    if (!['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType', 'MotorCategory', 'MotorSubCategory', 'MotorType', 'MaterialGrade', 'PowerSource', 'PlantCategory', 'PlantSubCategory'].includes(field)) {
       return res.status(400).json({ success: false, message: 'Invalid field type.' });
     }
     if (!value || value.trim() === '') {
@@ -255,6 +438,12 @@ export const addDropdownOption = async (req, res) => {
     }
     if (['Category', 'P-SourceType'].includes(field) && (!parentValue || !parentValue.trim())) {
       return res.status(400).json({ success: false, message: `Select the parent ${field === 'Category' ? 'P-Type' : 'Category'} before adding this option.` });
+    }
+    if (field === 'MotorSubCategory' && (!parentValue || !parentValue.trim())) {
+      return res.status(400).json({ success: false, message: 'Select the parent Motor Category before adding this option.' });
+    }
+    if (field === 'PlantSubCategory' && (!parentValue || !parentValue.trim())) {
+      return res.status(400).json({ success: false, message: 'Select the parent Plant Category before adding this option.' });
     }
 
     const newOption = await RDMasterOption.create({
@@ -273,10 +462,36 @@ export const addDropdownOption = async (req, res) => {
   }
 };
 
-// Field -> the RDMachine column it snapshots into, for cascading edits/usage checks
-const MACHINE_FIELD_MAP = { 'P-Type': 'pType', 'Category': 'category', 'P-SourceType': 'pSourceType', 'Metrology': 'metrology' };
+// Field -> the RDBOM material snapshot column it renders into. These snapshot
+// field names are independent legacy names (a point-in-time copy captured when
+// a BOM material's code matched a Product Master item) — they don't need to
+// match Item's own field names below.
+const BOM_SNAPSHOT_FIELD_MAP = { 'P-Type': 'pType', 'Category': 'category', 'P-SourceType': 'pSourceType', 'Metrology': 'metrology' };
+// Field -> the Item column (+ optional productKind scope) it's the live source
+// of truth for. P-Type/Category/P-SourceType are Product Master's own cascade
+// (now living on Item as category/subCategory/productSourceType, scoped to
+// productKind:'Machine'); Metrology is unscoped/shared. Item's category/
+// subCategory are shared column *names* across Inventory/Motor/Product Master,
+// so the productKind scope is required — without it a rename could bleed into
+// an unrelated kind's classification that happens to share the same text.
+const ITEM_FIELD_MAP = {
+  'P-Type': { field: 'category', productKind: 'Machine' },
+  'Category': { field: 'subCategory', productKind: 'Machine' },
+  'P-SourceType': { field: 'productSourceType', productKind: 'Machine' },
+  'Metrology': { field: 'metrology', productKind: null },
+  MotorCategory: { field: 'category', productKind: 'Motor' },
+  MotorSubCategory: { field: 'subCategory', productKind: 'Motor' },
+  MotorType: { field: 'motorDetails.motorType', productKind: 'Motor' },
+  // Unscoped like Metrology — Material Grade (e.g. SS304) is a universal spec
+  // shared with Inventory's own Material Grade dropdown, not Machine-specific.
+  MaterialGrade: { field: 'materialGrade', productKind: null },
+  PowerSource: { field: 'machineDetails.powerSource', productKind: 'Machine' },
+};
 // Field -> the child dropdown field whose parentValue chains off it
-const CHILD_FIELD_MAP = { 'P-Type': 'Category', 'Category': 'P-SourceType' };
+const CHILD_FIELD_MAP = { 'P-Type': 'Category', 'Category': 'P-SourceType', MotorCategory: 'MotorSubCategory', PlantCategory: 'PlantSubCategory' };
+// Field -> the RDPlant column it's the live source of truth for (Plant Master
+// is its own collection, not an Item, so it needs its own rename/delete target).
+const PLANT_FIELD_MAP = { PlantCategory: 'category', PlantSubCategory: 'subCategory' };
 
 // ─── 3b. UPDATE DROPDOWN OPTION (rename a value, cascading everywhere it's used) ─
 export const updateDropdownOption = async (req, res) => {
@@ -306,16 +521,27 @@ export const updateDropdownOption = async (req, res) => {
     option.value = newValue;
     await option.save();
 
-    const machineField = MACHINE_FIELD_MAP[option.field];
-    if (machineField) {
-      await RDMachine.updateMany(
-        { company: req.user.companyId, [machineField]: oldValue },
-        { $set: { [machineField]: newValue } }
-      );
+    const bomField = BOM_SNAPSHOT_FIELD_MAP[option.field];
+    if (bomField) {
       await RDBOM.updateMany(
-        { company: req.user.companyId, [`materials.${machineField}`]: oldValue },
-        { $set: { [`materials.$[elem].${machineField}`]: newValue } },
-        { arrayFilters: [{ [`elem.${machineField}`]: oldValue }] }
+        { company: req.user.companyId, [`materials.${bomField}`]: oldValue },
+        { $set: { [`materials.$[elem].${bomField}`]: newValue } },
+        { arrayFilters: [{ [`elem.${bomField}`]: oldValue }] }
+      );
+    }
+
+    const itemMap = ITEM_FIELD_MAP[option.field];
+    if (itemMap) {
+      const itemQuery = { companyId: req.user.companyId, [itemMap.field]: oldValue };
+      if (itemMap.productKind) itemQuery.productKind = itemMap.productKind; // unscoped (e.g. Metrology) applies to any kind
+      await Item.updateMany(itemQuery, { $set: { [itemMap.field]: newValue } });
+    }
+
+    const plantField = PLANT_FIELD_MAP[option.field];
+    if (plantField) {
+      await RDPlant.updateMany(
+        { company: req.user.companyId, [plantField]: oldValue },
+        { $set: { [plantField]: newValue } }
       );
     }
 
@@ -347,9 +573,17 @@ export const deleteDropdownOption = async (req, res) => {
     const option = await RDMasterOption.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!option) return res.status(404).json({ success: false, message: 'Option not found' });
 
-    const machineField = MACHINE_FIELD_MAP[option.field];
-    const productCount = machineField
-      ? await RDMachine.countDocuments({ company: req.user.companyId, [machineField]: option.value })
+    const itemMap = ITEM_FIELD_MAP[option.field];
+    let productCount = 0;
+    if (itemMap) {
+      const itemQuery = { companyId: req.user.companyId, [itemMap.field]: option.value };
+      if (itemMap.productKind) itemQuery.productKind = itemMap.productKind;
+      productCount = await Item.countDocuments(itemQuery);
+    }
+
+    const plantField = PLANT_FIELD_MAP[option.field];
+    const plantCount = plantField
+      ? await RDPlant.countDocuments({ company: req.user.companyId, [plantField]: option.value })
       : 0;
 
     const childField = CHILD_FIELD_MAP[option.field];
@@ -357,14 +591,15 @@ export const deleteDropdownOption = async (req, res) => {
       ? await RDMasterOption.countDocuments({ company: req.user.companyId, field: childField, parentValue: option.value })
       : 0;
 
-    if (productCount > 0 || childCount > 0) {
+    if (productCount > 0 || plantCount > 0 || childCount > 0) {
       const parts = [];
       if (productCount > 0) parts.push(`${productCount} product${productCount > 1 ? 's' : ''}`);
+      if (plantCount > 0) parts.push(`${plantCount} plant${plantCount > 1 ? 's' : ''}`);
       if (childCount > 0) parts.push(`${childCount} linked ${childField.replace('P-', 'P-')} value${childCount > 1 ? 's' : ''}`);
       return res.status(400).json({
         success: false,
         message: `Cannot delete "${option.value}" — still used by ${parts.join(' and ')}. Reassign or remove those first.`,
-        productCount, childCount
+        productCount, plantCount, childCount
       });
     }
 
@@ -422,20 +657,118 @@ export const deleteCustomFieldTemplate = async (req, res) => {
   }
 };
 
+// ─── PLANT MASTER ────────────────────────────────────────────────────────────
+// Plant Master is its own lightweight collection (RDPlant), not an Item — a
+// plant just groups existing Product Master machines / Motor Master motors by
+// id + quantity. Used later to build sales quotations off a plant's list.
+const PLANT_POPULATE = [
+  { path: 'machines.item', select: 'code name category subCategory isDiscontinued' },
+  { path: 'motors.item', select: 'code name category subCategory isDiscontinued' },
+];
+
+const cleanPlantRefList = (list) =>
+  (Array.isArray(list) ? list : [])
+    .filter(entry => entry && entry.item)
+    .map(entry => ({ item: entry.item, quantity: Math.max(1, Number(entry.quantity) || 1) }));
+
+export const getPlants = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const { search, discontinued, category, subCategory } = req.query;
+    const query = { company: companyId };
+    if (discontinued === 'true') query.isDiscontinued = true;
+    else if (discontinued === 'false') query.isDiscontinued = false;
+    if (category) query.category = category;
+    if (subCategory) query.subCategory = subCategory;
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } },
+        { subCategory: { $regex: search, $options: 'i' } },
+      ];
+    }
+    const plants = await RDPlant.find(query).populate(PLANT_POPULATE).sort({ createdAt: -1 }).lean();
+    res.json({ success: true, data: plants });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const createPlant = async (req, res) => {
+  try {
+    const { category, subCategory, name, productionRate, machines, motors } = req.body;
+    if (!category || !subCategory || !name) {
+      return res.status(400).json({ success: false, message: 'Category, Sub Category and Plant Name are required.' });
+    }
+    const plant = await RDPlant.create({
+      category, subCategory, name,
+      productionRate: productionRate || '',
+      machines: cleanPlantRefList(machines),
+      motors: cleanPlantRefList(motors),
+      company: req.user.companyId,
+      createdBy: req.user._id,
+    });
+    const populated = await RDPlant.findById(plant._id).populate(PLANT_POPULATE).lean();
+    res.status(201).json({ success: true, data: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const updatePlant = async (req, res) => {
+  try {
+    const { category, subCategory, name, productionRate, machines, motors } = req.body;
+    if ((category !== undefined && !category) || (subCategory !== undefined && !subCategory) || (name !== undefined && !name)) {
+      return res.status(400).json({ success: false, message: 'Category, Sub Category and Plant Name cannot be empty.' });
+    }
+    const update = {};
+    if (category !== undefined) update.category = category;
+    if (subCategory !== undefined) update.subCategory = subCategory;
+    if (name !== undefined) update.name = name;
+    if (productionRate !== undefined) update.productionRate = productionRate;
+    if (machines !== undefined) update.machines = cleanPlantRefList(machines);
+    if (motors !== undefined) update.motors = cleanPlantRefList(motors);
+
+    const plant = await RDPlant.findOneAndUpdate(
+      { _id: req.params.id, company: req.user.companyId },
+      { $set: update },
+      { new: true }
+    ).populate(PLANT_POPULATE).lean();
+    if (!plant) return res.status(404).json({ success: false, message: 'Plant not found' });
+    res.json({ success: true, data: plant });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const setPlantStatus = async (req, res) => {
+  try {
+    const plant = await RDPlant.findOneAndUpdate(
+      { _id: req.params.id, company: req.user.companyId },
+      { $set: { isDiscontinued: !!req.body.isDiscontinued } },
+      { new: true }
+    ).populate(PLANT_POPULATE).lean();
+    if (!plant) return res.status(404).json({ success: false, message: 'Plant not found' });
+    res.json({ success: true, data: plant });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 
 
 export const updateDesignStatus = async (req, res) => {
   try {
     const { status, note } = req.body;
-    const update = { designStatus: status };
-    if (status === 'Rejected') update.rejectionNote = note || '';
-    const machine = await RDMachine.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      update,
+    const update = { 'machineDetails.designStatus': status };
+    if (status === 'Rejected') update['machineDetails.rejectionNote'] = note || '';
+    const machine = await Item.findOneAndUpdate(
+      { _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' },
+      { $set: update },
       { new: true }
-    );
+    ).lean();
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
-    res.json({ success: true, data: machine });
+    res.json({ success: true, data: toMachineResponse(machine) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -444,13 +777,13 @@ export const updateDesignStatus = async (req, res) => {
 export const updateReleaseStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    const machine = await RDMachine.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { releaseStatus: status },
+    const machine = await Item.findOneAndUpdate(
+      { _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' },
+      { $set: { 'machineDetails.releaseStatus': status } },
       { new: true }
-    );
+    ).lean();
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
-    res.json({ success: true, data: machine });
+    res.json({ success: true, data: toMachineResponse(machine) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -458,13 +791,13 @@ export const updateReleaseStatus = async (req, res) => {
 
 export const discontinueMachine = async (req, res) => {
   try {
-    const machine = await RDMachine.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { isDiscontinued: true },
+    const machine = await Item.findOneAndUpdate(
+      { _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' },
+      { $set: { isDiscontinued: true } },
       { new: true }
-    );
+    ).lean();
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
-    res.json({ success: true, data: machine });
+    res.json({ success: true, data: toMachineResponse(machine) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -472,13 +805,13 @@ export const discontinueMachine = async (req, res) => {
 
 export const reactivateMachine = async (req, res) => {
   try {
-    const machine = await RDMachine.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId },
-      { isDiscontinued: false },
+    const machine = await Item.findOneAndUpdate(
+      { _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' },
+      { $set: { isDiscontinued: false } },
       { new: true }
-    );
+    ).lean();
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
-    res.json({ success: true, data: machine });
+    res.json({ success: true, data: toMachineResponse(machine) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -513,13 +846,13 @@ export const getBOMByMachineCode = async (req, res) => {
     const { code } = req.params;
     const companyId = req.user.companyId;
 
-    const machine = await RDMachine.findOne({ code, company: companyId }).lean();
+    const machine = await Item.findOne({ code, companyId, productKind: 'Machine' }).lean();
     if (!machine) {
       return res.json({ success: true, data: { machine: null, bom: null } });
     }
 
     const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();
-    res.json({ success: true, data: { machine, bom: bom || null } });
+    res.json({ success: true, data: { machine: toMachineResponse(machine), bom: bom || null } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -549,14 +882,14 @@ export const createBOM = async (req, res) => {
     if (!machineId) return res.status(400).json({ success: false, message: 'machineId is required' });
 
     // 1. Fetch Machine and Validate P-Source Type
-    const machine = await RDMachine.findOne({ _id: machineId, company: req.user.companyId });
+    const machine = await Item.findOne({ _id: machineId, companyId: req.user.companyId, productKind: 'Machine' });
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
 
     const validSources = ['In House Manufacturing', 'Out Source Manufactured'];
-    if (!validSources.includes(machine.pSourceType)) {
+    if (!validSources.includes(machine.productSourceType)) {
       return res.status(400).json({
         success: false,
-        message: `BOM creation blocked. P-Source Type must be In House or Out Source. Current: ${machine.pSourceType}`
+        message: `BOM creation blocked. P-Source Type must be In House or Out Source. Current: ${machine.productSourceType}`
       });
     }
 
@@ -594,13 +927,16 @@ export const addMaterial = async (req, res) => {
       });
     }
 
-    // BOM materials must reference an existing Product Master entry — no free-typed codes,
-    // even via direct API calls that bypass the frontend's MaterialCodePicker.
-    const sourceMachine = await RDMachine.findOne({ company: req.user.companyId, code: code.trim() });
-    if (!sourceMachine) {
+    // BOM materials must reference an existing Inventory item (raw material) —
+    // no free-typed codes, even via direct API calls that bypass the frontend's
+    // MaterialCodePicker. Product Master now holds finished-goods machines
+    // only, not raw materials, so materials come from plain Inventory
+    // (productKind: null) instead.
+    const sourceItem = await Item.findOne({ companyId: req.user.companyId, productKind: null, code: code.trim() });
+    if (!sourceItem) {
       return res.status(400).json({
         success: false,
-        message: `"${code}" does not match any Product Master item. BOM materials must be selected from Product Master.`
+        message: `"${code}" does not match any Inventory item. BOM materials must be selected from Inventory.`
       });
     }
 
@@ -656,11 +992,11 @@ export const updateMaterial = async (req, res) => {
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
 
     if (req.body.code && req.body.code.trim() !== mat.code) {
-      const sourceMachine = await RDMachine.findOne({ company: req.user.companyId, code: req.body.code.trim() });
-      if (!sourceMachine) {
+      const sourceItem = await Item.findOne({ companyId: req.user.companyId, productKind: null, code: req.body.code.trim() });
+      if (!sourceItem) {
         return res.status(400).json({
           success: false,
-          message: `"${req.body.code}" does not match any Product Master item. BOM materials must be selected from Product Master.`
+          message: `"${req.body.code}" does not match any Inventory item. BOM materials must be selected from Inventory.`
         });
       }
     }
@@ -1177,7 +1513,7 @@ export const createDocument = async (req, res) => {
     }
     let mCode = machineCode, mName = machineName;
     if (!mCode || !mName) {
-      const machine = await RDMachine.findById(machineId).select('code name');
+      const machine = await Item.findById(machineId).select('code name');
       mCode = machine?.code || '';
       mName = machine?.name || '';
     }
@@ -1420,8 +1756,8 @@ export const processRDRequest = async (req, res) => {
       // isDiscontinued: false — code isn't guaranteed unique (see createMachine's
       // duplicate-code guard), so an old discontinued duplicate must never shadow
       // the live machine this BOM/prototype actually belongs to.
-      const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId, isDiscontinued: false });
-      if (!machineProfile || machineProfile.releaseStatus !== 'Released') {
+      const machineProfile = await Item.findOne({ code: rdRequest.machineCode, companyId, productKind: 'Machine', isDiscontinued: false });
+      if (!machineProfile || machineProfile.machineDetails?.releaseStatus !== 'Released') {
         return res.status(400).json({ success: false, message: 'Machine profile missing or not released.' });
       }
 
@@ -1485,7 +1821,7 @@ export const getRDRequestReviewData = async (req, res) => {
 
     // 2. Fetch the corresponding R&D Machine Profile
     // isDiscontinued: false — see the same guard in processRDRequest's Initial BOM workflow.
-    const machineProfile = await RDMachine.findOne({ code: rdRequest.machineCode, company: companyId, isDiscontinued: false }).lean();
+    const machineProfile = await Item.findOne({ code: rdRequest.machineCode, companyId, productKind: 'Machine', isDiscontinued: false }).lean();
 
     // If R&D hasn't created the machine yet, return empty arrays so the frontend doesn't crash
     if (!machineProfile) {
@@ -1508,7 +1844,7 @@ export const getRDRequestReviewData = async (req, res) => {
     res.json({
       success: true,
       data: {
-        machine: machineProfile,
+        machine: toMachineResponse(machineProfile),
         bom: masterBOM,
         documents: designDocs
       }

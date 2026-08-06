@@ -510,7 +510,7 @@ export const getPurchaseStats = async (req, res) => {
   }
 };
 
-// Get inventory items for purchase (excluding Product type, only Material, Spares, Assemblies)
+// Get inventory items for purchase (excluding Product Master/Motor Master items, unless directly purchasable)
 export const getPurchaseItems = async (req, res) => {
   try {
     const { search = '', type = '', skip = 0, limit = 20 } = req.query;
@@ -525,11 +525,15 @@ export const getPurchaseItems = async (req, res) => {
 
     // Build filter query:
     // 1. Company filter (store matches user's companyId)
-    // 2. Type filter (Material, Spares, Assemblies) OR purchase: true (Trading Goods)
+    // 2. Not a Product Master machine / Motor Master item (productKind unset)
+    //    OR purchase: true (Trading Goods) — keyed off productKind rather than
+    //    the old fixed type list (Material/Spares/Assemblies) since Inventory
+    //    Item Type is now a dynamic, "+"-addable list (see InventoryMasterOption),
+    //    not a closed enum.
     let filter = {
       store: userCompanyIdString,
       $or: [
-        { type: { $in: ['Material', 'Spares', 'Assemblies'] } },
+        { productKind: null },
         { purchase: true }
       ]
     };

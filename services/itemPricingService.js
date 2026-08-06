@@ -1,5 +1,4 @@
 import { Item } from '../models/Inventory.js';
-import RDMachine from '../models/RDMachine.js';
 import RDBOM from '../models/RDBOM.js';
 import PurchaseInvoice from '../models/PurchaseInvoice.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
@@ -30,18 +29,19 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
     return { cost: null, issue: `Circular BOM reference detected at item ${item.code}` };
   }
 
-  const machine = await RDMachine.findOne({ code: item.code, company: item.companyId });
-  if (!machine) {
-    return { cost: null, issue: `No linked RDMachine found for Item code "${item.code}"` };
+  // Product Master machines now ARE Item documents (productKind:'Machine') —
+  // no separate RDMachine collection to cross-reference by code anymore.
+  if (item.productKind !== 'Machine') {
+    return { cost: null, issue: `Item "${item.code}" is not a Product Master machine — no BOM to build cost from.` };
   }
-  if (!machine.firstBuiltAt) {
+  if (!item.machineDetails?.firstBuiltAt) {
     // Machine has never completed production — R&D's manual value stands.
     return { cost: null, issue: null };
   }
 
-  const bom = await RDBOM.findOne({ machine: machine._id, company: item.companyId });
+  const bom = await RDBOM.findOne({ machine: item._id, company: item.companyId });
   if (!bom || !bom.materials || bom.materials.length === 0) {
-    return { cost: null, issue: `No BOM found for machine "${machine.code}"` };
+    return { cost: null, issue: `No BOM found for machine "${item.code}"` };
   }
 
   visiting.add(item._id.toString());
@@ -98,7 +98,7 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
  * entirely in that case (per product requirement: no BOM = no check).
  */
 export async function computeBOMMaterialsMrpCost(code, companyId) {
-  const machine = await RDMachine.findOne({ code, company: companyId }).lean();
+  const machine = await Item.findOne({ code, companyId, productKind: 'Machine' }).lean();
   if (!machine) return { found: false, totalCost: 0, materials: [] };
 
   const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();

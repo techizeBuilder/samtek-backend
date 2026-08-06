@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 
 const RDDocumentSchema = new mongoose.Schema({
-  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMachine', required: true },
+  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   machineCode: { type: String, required: true },
   machineName: { type: String, required: true },
   name: { type: String, required: true, trim: true },

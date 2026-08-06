@@ -8,7 +8,7 @@ import notificationService from '../services/notificationService.js';
 import Sale from '../models/Sale.js';
 import Order from '../models/Order.js';
 import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
-import { getOrderItemsReadiness } from '../services/storeFlowService.js';
+import { getOrderItemsReadiness, isMachineJobItem } from '../services/storeFlowService.js';
 
 const JOB_STATUSES = ['Pending', 'In Progress', 'Packed', 'Dispatched'];
 
@@ -92,10 +92,6 @@ async function enrichDispatchOrdersList(orders, companyId) {
     }
   }));
 }
-
-// Categories whose physical units each get their own packaging job + serial
-// number. Anything else (accessories/materials) packs as one job with qty.
-const PER_UNIT_CATEGORIES = ['purchase machine', 'manufacturing machine', 'finished good'];
 
 const now = () => new Date().toISOString();
 
@@ -277,9 +273,10 @@ export const getReadyForPackaging = async (req, res) => {
 
     // Fetch approved QC Jobs:
     // - Either non-Purchase source (covers Store, Production, QC_Rejected)
-    // - Or Purchase source where the category is a Purchase Machine or Manufacturing Machine
-    //   NOTE: Also include Purchase jobs whose category may have been mis-stored (e.g. "Raw Material")
-    //         but whose actual inventory item is a machine — we filter them below after item lookup.
+    // - Or Purchase source where the underlying Item is a Product Master
+    //   machine / Motor Master motor (Item.productKind) — a raw material
+    //   purchase restocks Inventory instead (see qcController.js) and never
+    //   belongs in the dispatch queue.
     const qcJobsRaw = await QCJob.find({
       company: cid,
       status: 'Approved',
@@ -289,38 +286,11 @@ export const getReadyForPackaging = async (req, res) => {
       .sort({ updatedAt: -1 })
       .lean();
 
-    const { Item } = await import('../models/Inventory.js');
-    const MACHINE_CATEGORIES = ['Purchase Machine', 'Manufacturing Machine'];
-
-    // For Purchase source: keep only machine-category items (check DB item if category looks wrong)
+    // For Purchase source: keep only machine/motor items
     const qcJobs = await Promise.all(qcJobsRaw.map(async (job) => {
       if (job.source !== 'Purchase') return job; // non-purchase always included
-
-      const catLower = (job.category || '').toLowerCase().trim();
-      const isMachineCat = MACHINE_CATEGORIES.map(c => c.toLowerCase()).includes(catLower);
-      if (isMachineCat) return job; // category already correct
-
-      // Category may be wrong (e.g. stored as "Raw Material") — verify via actual inventory item
-      try {
-        let inventoryItem = null;
-        if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
-          inventoryItem = await Item.findById(job.itemCode).lean();
-        }
-        if (!inventoryItem && job.itemCode) {
-          inventoryItem = await Item.findOne({ code: job.itemCode, store: cid.toString() }).lean();
-        }
-        if (!inventoryItem && job.itemName) {
-          inventoryItem = await Item.findOne({ name: job.itemName, store: cid.toString() }).lean();
-        }
-        if (inventoryItem && MACHINE_CATEGORIES.includes(inventoryItem.category)) {
-          console.log(`[PackagingQueue] Purchase QC job ${job.qcJobId} has category '${job.category}' but item is '${inventoryItem.category}' — including in packaging queue`);
-          return { ...job, category: inventoryItem.category }; // return with corrected category
-        }
-      } catch (e) {
-        console.error('[PackagingQueue] Error verifying item category for QC job:', job.qcJobId, e);
-      }
-
-      return null; // not a machine — exclude from packaging queue
+      const isMachine = await isMachineJobItem(job, cid);
+      return isMachine ? job : null; // not a machine/motor — exclude from packaging queue
     }));
 
     // Remove nulls (non-machine Purchase items filtered out)
@@ -358,8 +328,12 @@ export const getReadyForPackaging = async (req, res) => {
       }
 
       // How many packaging job units does this entry represent, and how many exist?
+      // 'Finished Good' is a synthetic category storeFlowService falls back to
+      // when it can't resolve a real Item at all — kept as a direct marker
+      // since there's no Item to check productKind against in that case.
       const isPerUnit = job.source === 'Production'
-        || PER_UNIT_CATEGORIES.includes((job.category || '').toLowerCase().trim());
+        || job.category === 'Finished Good'
+        || await isMachineJobItem(job, cid);
       const qty = Math.max(1, Number(job.quantity) || 1);
       const unitsTotal = isPerUnit ? qty : 1;
       const unitsCreated = await PackagingJob.countDocuments({ qcJobId: job._id, company: cid });
@@ -522,10 +496,12 @@ export const createPackagingJob = async (req, res) => {
       sourceSaleItemId = srcProdOrder?.saleItemId || null;
     } else if (actualQcJobId) {
       srcQcJob = await QCJob.findById(actualQcJobId)
-        .select('saleId purchaseRequestId saleItemId quantity category').lean();
+        .select('saleId purchaseRequestId saleItemId quantity category itemCode itemName').lean();
       sourceSaleItemId = srcQcJob?.saleItemId || null;
       const qty = Math.max(1, Number(srcQcJob?.quantity) || 1);
-      const isPerUnit = PER_UNIT_CATEGORIES.includes((srcQcJob?.category || '').toLowerCase().trim());
+      const isPerUnit = srcQcJob && (
+        srcQcJob.category === 'Finished Good' || await isMachineJobItem(srcQcJob, req.user.companyId)
+      );
       if (isPerUnit) {
         sourceUnits = qty;      // N machines → N jobs, 1 unit each
       } else {

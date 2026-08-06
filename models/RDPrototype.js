@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 const TEST_RESULT = ['Pass', 'Fail', 'Pending', 'In Progress'];
 
 const RDPrototypeSchema = new mongoose.Schema({
-  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMachine', required: true },
+  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   machineName: { type: String, required: true },
   machineCode: { type: String, required: true },
   prototypeName: { type: String, required: true, trim: true },

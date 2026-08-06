@@ -3,13 +3,9 @@ import { Item } from '../models/Inventory.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import Sale from '../models/Sale.js';
 import notificationService from '../services/notificationService.js';
-import RDMachine from '../models/RDMachine.js'; // Import R&D models
 import RDQualityParam from '../models/RDQualityParam.js';
 import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
-import { setSaleItemStatus } from '../services/storeFlowService.js';
-
-
-
+import { setSaleItemStatus, isMachineJobItem } from '../services/storeFlowService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -461,42 +457,7 @@ export const submitDecision = async (req, res) => {
       if (job.source === 'Stock') {
         shouldAddToInventory = true;
       } else if (job.source === 'Purchase') {
-        const MACHINE_CATS = ['purchase machine', 'manufacturing machine'];
-        const catLower = (job.category || '').toLowerCase().trim();
-
-        if (MACHINE_CATS.includes(catLower)) {
-          // Category stored correctly — machine, do not add to inventory
-          shouldAddToInventory = false;
-        } else {
-          // Category may be mis-stored — double-check against actual inventory item
-          let actualIsMachine = false;
-          try {
-            let chkItem = null;
-            if (job.itemCode && /^[0-9a-fA-F]{24}$/.test(job.itemCode)) {
-              chkItem = await Item.findById(job.itemCode).lean();
-            }
-            if (!chkItem && job.itemCode) {
-              chkItem = await Item.findOne({ code: job.itemCode, store: job.company.toString() }).lean();
-            }
-            if (!chkItem && job.itemName) {
-              chkItem = await Item.findOne({ name: job.itemName, store: job.company.toString() }).lean();
-            }
-            if (chkItem && MACHINE_CATS.includes((chkItem.category || '').toLowerCase().trim())) {
-              actualIsMachine = true;
-              // Also fix the stored category on the QC job so future lookups are correct
-              job.category = chkItem.category;
-              console.log(`[QC Approval] Fixed QC job category from '${catLower}' → '${chkItem.category}' for item '${job.itemName}'`);
-            }
-          } catch (chkErr) {
-            console.error('[QC Approval] Error verifying item category:', chkErr);
-          }
-
-          if (actualIsMachine) {
-            shouldAddToInventory = false; // It's a machine — goes to dispatch, no qty increment
-          } else {
-            shouldAddToInventory = true;  // Genuine raw material / spare — add to inventory
-          }
-        }
+        shouldAddToInventory = !(await isMachineJobItem(job, job.company));
       }
 
       if (shouldAddToInventory) {
@@ -718,8 +679,7 @@ export const submitDecision = async (req, res) => {
             }
 
             if (salePurch) {
-              const finalCatLower = (job.category || '').toLowerCase().trim();
-              const isMachine = finalCatLower === 'purchase machine' || finalCatLower === 'manufacturing machine';
+              const isMachine = await isMachineJobItem(job, job.company);
               const newStatus = isMachine ? 'Approved from QC' : 'Purchase Completed';
               // Multi-item: the Purchase Request carries the exact sale item
               const saleItemId = pr.saleItemId || job.saleItemId || null;

@@ -11,6 +11,7 @@ import { USER_ROLES } from '../shared/schema.js';
 import PriorityProduct from '../models/PriorityProduct.js';
 import CutoffTime from '../models/CutoffTime.js';
 import { sendPaymentReminderEmail, sendQuotationEmail } from '../services/emailService.js';
+import { getSellableItems } from '../services/sellableItemsService.js';
 
 export const getSales = async (req, res) => {
   try {
@@ -1097,10 +1098,13 @@ export const getSalespersonDamages = async (req, res) => {
   }
 };
 
-// Get items for salesperson (filtered by company location)
+// Get items for salesperson (filtered by company location).
+// The shared source of truth for "what this company sells": Product Master
+// machines + Motor Master motors — see services/sellableItemsService.js.
+// Plant Master is not part of this list (see that module's comment); pickers
+// filter this same list down to a plant's components themselves.
 export const getSalespersonItems = async (req, res) => {
   try {
-    const userId = req.user.id;
     const userRole = req.user.role;
     const userCompanyId = req.user.companyId;
 
@@ -1108,25 +1112,14 @@ export const getSalespersonItems = async (req, res) => {
       page = 1,
       limit = 20,
       search,
-      type,
-      group,
       category,
       subCategory,
-      lowStock,
-      sortBy = 'name',
-      sortOrder = 'asc'
     } = req.query;
 
-    // Remove pagination - show all items for sales users
-    const skip = 0; // No skip for sales
-    const actualLimit = 0; // No limit for sales
-    let query = {};
+    const scopedRoles = ['Sales', 'Sales Employee', 'Sales Head', 'Unit Manager', 'Unit Head'];
 
-    // Company location filtering - only show items from same company
-    if (userRole === 'Sales' || userRole === 'Sales Employee' || userRole === 'Sales Head' || userRole === 'Unit Manager' || userRole === 'Unit Head') {
-      if (userCompanyId) {
-        query.store = userCompanyId;
-      } else {
+    if (scopedRoles.includes(userRole)) {
+      if (!userCompanyId) {
         // If no company assigned, return empty results
         return res.json({
           success: true,
@@ -1140,13 +1133,33 @@ export const getSalespersonItems = async (req, res) => {
           message: 'No company assigned to user'
         });
       }
+
+      let entries = await getSellableItems({ companyId: userCompanyId, search });
+
+      if (category) entries = entries.filter((e) => e.category === category);
+      if (subCategory) entries = entries.filter((e) => e.subCategory === subCategory);
+
+      const company = await Company.findById(userCompanyId).select('name city state');
+      const storeLocation = company ? `${company.name} - ${company.city}, ${company.state}` : 'Unknown Location';
+      entries = entries.map((e) => ({ ...e, storeLocation, companyId: userCompanyId }));
+
+      return res.json({
+        success: true,
+        items: entries,
+        pagination: {
+          page: 1,
+          limit: entries.length,
+          total: entries.length,
+          pages: 1
+        }
+      });
     }
-    // Super Admin can see all items (no filtering)
 
-    // IMPORTANT: Only show items with type = "Product" for sales orders
-    query.type = "Product";
+    // Super Admin: no single company to scope to, so Plant bundles (which
+    // are always company-scoped) are left out of this cross-company view —
+    // keep the prior Item-only, all-companies behavior.
+    let query = { type: 'Product' };
 
-    // Search filter
     if (search) {
       query.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -1154,51 +1167,10 @@ export const getSalespersonItems = async (req, res) => {
         { description: { $regex: search, $options: 'i' } }
       ];
     }
+    if (category) query.category = category;
+    if (subCategory) query.subCategory = subCategory;
 
-    // Type filter (override to ensure only Product type)
-    if (type && type !== "Product") {
-      console.log(`🚫 Sales API: Overriding type filter ${type} to Product`);
-    }
-    // Force type to be Product regardless of query parameter
-
-    // Group filter
-    if (group) {
-      query.group = group;
-    }
-
-    // Category filter
-    if (category) {
-      query.category = category;
-    }
-
-    // Subcategory filter
-    if (subCategory) {
-      query.subCategory = subCategory;
-    }
-
-    // Low stock filter
-    if (lowStock === 'true') {
-      query.$expr = { $lte: ['$qty', '$minStock'] };
-    }
-
-    // Sort options - default to category A-Z for sales items
-    let sortOptions = { category: 1, name: 1 }; // Default: category A-Z, then name A-Z
-
-    if (sortBy && sortBy !== 'createdAt') {
-      if (sortBy === 'name') {
-        sortOptions.name = sortOrder === 'desc' ? -1 : 1;
-      } else if (sortBy === 'code') {
-        sortOptions.code = sortOrder === 'desc' ? -1 : 1;
-      } else if (sortBy === 'category') {
-        sortOptions.category = sortOrder === 'desc' ? -1 : 1;
-      } else if (sortBy === 'qty') {
-        sortOptions.qty = sortOrder === 'desc' ? -1 : 1;
-      }
-    }
-
-    const items = await Item.find(query)
-      .sort(sortOptions);
-    // No skip or limit - return all items
+    const items = await Item.find(query).sort({ category: 1, name: 1 });
 
     // Resolve company names for store locations
     const itemsWithCompanyNames = await Promise.all(
@@ -1208,9 +1180,9 @@ export const getSalespersonItems = async (req, res) => {
         // If store field contains an ObjectId, resolve the company name
         if (itemObj.store && itemObj.store.match(/^[0-9a-fA-F]{24}$/)) {
           try {
-            const company = await Company.findById(itemObj.store).select('name city state');
-            if (company) {
-              itemObj.storeLocation = `${company.name} - ${company.city}, ${company.state}`;
+            const itemCompany = await Company.findById(itemObj.store).select('name city state');
+            if (itemCompany) {
+              itemObj.storeLocation = `${itemCompany.name} - ${itemCompany.city}, ${itemCompany.state}`;
               itemObj.companyId = itemObj.store;
             } else {
               itemObj.storeLocation = 'Unknown Location';
@@ -1228,16 +1200,14 @@ export const getSalespersonItems = async (req, res) => {
       })
     );
 
-    const total = await Item.countDocuments(query);
-
     res.json({
       success: true,
       items: itemsWithCompanyNames,
       pagination: {
         page: 1,
-        limit: total, // Show actual total as limit
-        total,
-        pages: 1 // Only one page since all items are shown
+        limit: itemsWithCompanyNames.length,
+        total: itemsWithCompanyNames.length,
+        pages: 1
       }
     });
   } catch (error) {

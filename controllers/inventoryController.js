@@ -1,4 +1,5 @@
 import { Item, Category, CustomerCategory, Group, UnitType } from '../models/Inventory.js';
+import InventoryMasterOption from '../models/InventoryMasterOption.js';
 import { Company } from '../models/Company.js';
 import ProductDailySummary from '../models/ProductDailySummary.js';
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
@@ -18,6 +19,7 @@ import DefectiveInventory from '../models/DefectiveMaterial.js';
 
 import StoreTransferLog from '../models/StoreTransferLog.js';
 import MaterialReturnLog from '../models/MaterialReturnLog.js';
+import { getSellableItems as fetchSellableItems } from '../services/sellableItemsService.js';
 
 // Delivery Challan Order for Unit Head Inventory
 const DELIVERY_CHALLAN_ORDER = [
@@ -187,6 +189,28 @@ const generateItemCode = async (type) => {
 };
 
 // ITEM CONTROLLERS
+// Unified "what can this company sell" endpoint — Product Master machines +
+// Motor Master motors (see services/sellableItemsService.js), scoped to the
+// caller's own company. Used by ProductSelector.jsx for roles without a more
+// specific sales/admin item endpoint of their own.
+export const getSellableItemsForUser = async (req, res) => {
+  try {
+    const { search } = req.query;
+    const companyId = req.user.companyId;
+
+    if (!companyId) {
+      return res.json({ success: true, items: [] });
+    }
+
+    const items = await fetchSellableItems({ companyId, search });
+
+    res.json({ success: true, items });
+  } catch (error) {
+    console.error('Get sellable items error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 export const getItems = async (req, res) => {
   console.log('=== ITEMS API CALLED ===');
   console.log('User:', req.user?.username, 'Role:', req.user?.role, 'CompanyId:', req.user?.companyId);
@@ -202,6 +226,7 @@ export const getItems = async (req, res) => {
       limit = 20,
       search,
       type,
+      productKind,
       category,
       subCategory,
       store,
@@ -209,6 +234,7 @@ export const getItems = async (req, res) => {
       group,
       lowStock,
       quantity, // Add quantity filter
+      discontinued,
       sortBy = 'name',
       sortOrder = 'asc'
     } = req.query;
@@ -311,6 +337,29 @@ export const getItems = async (req, res) => {
     // Type filter - only allow if not Unit Head (Unit Head is auto-filtered to Products)
     if (type && req.user.role !== 'Unit Head') {
       query.type = type;
+    }
+
+    // productKind filter — distinguishes Machine (Product Master) vs Motor (Motor Master)
+    // within type:'Product'. Sent by the frontend as a query param, never exposed as a
+    // user-facing filter control (each master's own page hardcodes its own productKind).
+    // Special value 'none' means "exclude Machine/Motor" — the plain Inventory
+    // list (ModernInventoryUI.jsx) opts into this explicitly; every other
+    // existing caller (e.g. the Sales product picker, which needs machines/
+    // motors to show up as sellable products) keeps today's unfiltered
+    // behavior when it doesn't send productKind at all — deliberately NOT
+    // defaulted, so as not to silently change what they return.
+    if (productKind === 'none') {
+      query.productKind = null;
+    } else if (productKind) {
+      query.productKind = productKind;
+    }
+
+    // Discontinued filter — defaults to hiding discontinued items when not
+    // specified (matches Product/Motor/Plant Master's own list convention).
+    if (discontinued === 'true') {
+      query.isDiscontinued = true;
+    } else if (discontinued === 'false' || discontinued === undefined) {
+      query.isDiscontinued = { $ne: true };
     }
 
     // Category filter
@@ -876,6 +925,12 @@ export const updateItem = async (req, res) => {
     // 1. R&D Master Fields
     if (itemData.specifications !== undefined) sanitizedData.specifications = itemData.specifications;
     if (itemData.applications !== undefined) sanitizedData.applications = itemData.applications;
+    if (itemData.itemCategories !== undefined) sanitizedData.itemCategories = sanitizedData.itemCategories;
+    if (itemData.sourceType !== undefined) sanitizedData.sourceType = sanitizedData.sourceType;
+    if (itemData.itemSourceType !== undefined) sanitizedData.itemSourceType = sanitizedData.itemSourceType;
+    if (itemData.modelNumber !== undefined) sanitizedData.modelNumber = sanitizedData.modelNumber;
+    if (itemData.materialGrade !== undefined) sanitizedData.materialGrade = sanitizedData.materialGrade;
+    if (itemData.dimensions !== undefined) sanitizedData.dimensions = sanitizedData.dimensions;
 
     if (itemData.variants !== undefined) sanitizedData.variants = sanitizedData.variants;
 
@@ -1087,6 +1142,24 @@ const sanitizeItemData = (data) => {
   if (sanitized.internalNotes) sanitized.internalNotes = sanitized.internalNotes.trim();
   if (sanitized.brand) sanitized.brand = sanitized.brand.trim();
   if (sanitized.metrology) sanitized.metrology = sanitized.metrology.trim();
+  if (sanitized.materialGrade) sanitized.materialGrade = sanitized.materialGrade.trim();
+  if (sanitized.modelNumber) sanitized.modelNumber = sanitized.modelNumber.trim();
+  if (sanitized.sourceType) sanitized.sourceType = sanitized.sourceType.trim();
+  if (sanitized.itemSourceType) sanitized.itemSourceType = sanitized.itemSourceType.trim();
+  if (sanitized.itemCategories && Array.isArray(sanitized.itemCategories)) {
+    sanitized.itemCategories = sanitized.itemCategories.filter(c => c && c.trim()).map(c => c.trim());
+  }
+  if (sanitized.dimensions && typeof sanitized.dimensions === 'object') {
+    const dims = {};
+    for (const key of ['length', 'height', 'width', 'diaOD', 'diaID', 'thickness']) {
+      const d = sanitized.dimensions[key] || {};
+      dims[key] = {
+        value: d.value !== undefined && d.value !== null && d.value !== '' ? Number(d.value) : null,
+        unit: d.unit ? String(d.unit).trim() : '',
+      };
+    }
+    sanitized.dimensions = dims;
+  }
   if (sanitized.size) sanitized.size = sanitized.size.trim();
   if (sanitized.unitWeightValue !== undefined && sanitized.unitWeightValue !== null && sanitized.unitWeightValue !== '') {
     sanitized.unitWeightValue = Number(sanitized.unitWeightValue);
@@ -1978,8 +2051,9 @@ export const exportItemsToExcel = async (req, res) => {
   try {
     console.log('Starting Excel export for inventory items');
 
-    // Build query with company filtering for Unit Head
-    let query = {};
+    // Build query with company filtering for Unit Head. Exclude Product
+    // Master machines / Motor Master motors — this export is Inventory-only.
+    let query = { productKind: null };
     if (req.user.role === 'Unit Head' && req.user.companyId) {
       query.store = req.user.companyId;
     }
@@ -2628,8 +2702,9 @@ export const getLowStockItems = async (req, res) => {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
-    // Build query with company filtering for Unit Head
-    let query = { $expr: { $lte: ['$qty', '$minStock'] } };
+    // Build query with company filtering for Unit Head. Exclude Product
+    // Master machines / Motor Master motors — this is Inventory's own view.
+    let query = { $expr: { $lte: ['$qty', '$minStock'] }, productKind: null };
     if (req.user.role === 'Unit Head' && req.user.companyId) {
       query.store = req.user.companyId;
     }
@@ -2687,6 +2762,10 @@ export const getInventoryStats = async (req, res) => {
       };
     }
     // Super Admin / Super Admin sees all — no filter
+
+    // Inventory's own dashboard stats — exclude Product Master machines /
+    // Motor Master motors, same reasoning as getItems' productKind=none.
+    baseMatchStage.productKind = null;
 
     console.log('Debug - Base match stage:', JSON.stringify(baseMatchStage));
 
@@ -2915,6 +2994,124 @@ export const deleteGroup = async (req, res) => {
   } catch (error) {
     console.error('Delete group error:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ================================================================
+//   INVENTORY MASTER OPTIONS (ItemCategory / SourceType / ItemSourceType)
+//   "+"-addable dynamic dropdown values, scoped to Inventory only — see
+//   InventoryMasterOption.js for why these are kept separate from both the
+//   existing Category/Group system and R&D's RDMasterOption. Client's "Item
+//   Type" classification is handled via category/subCategory instead.
+// ================================================================
+
+// Item column each field is the live source of truth for. ItemCategory is the
+// only multi-select (array) — its rename/delete cascade needs $ positional /
+// arrayFilters instead of a plain $set like the other two (single-value) fields.
+const INVENTORY_ITEM_FIELD_MAP = {
+  SourceType: 'sourceType',
+  ItemSourceType: 'itemSourceType',
+};
+
+export const getInventoryDropdownOptions = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const options = await InventoryMasterOption.find({ companyId }).lean();
+    const toOption = (o) => ({ _id: o._id, value: o.value });
+    const grouped = {
+      ItemCategory: options.filter(o => o.field === 'ItemCategory').map(toOption),
+      SourceType: options.filter(o => o.field === 'SourceType').map(toOption),
+      ItemSourceType: options.filter(o => o.field === 'ItemSourceType').map(toOption),
+    };
+    res.json({ success: true, data: grouped });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const addInventoryDropdownOption = async (req, res) => {
+  try {
+    const { field, value } = req.body;
+    if (!['ItemCategory', 'SourceType', 'ItemSourceType'].includes(field)) {
+      return res.status(400).json({ success: false, message: 'Invalid field type.' });
+    }
+    if (!value || !value.trim()) {
+      return res.status(400).json({ success: false, message: 'Option value cannot be empty.' });
+    }
+    const option = await InventoryMasterOption.create({ field, value: value.trim(), companyId: req.user.companyId });
+    res.status(201).json({ success: true, data: option });
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({ success: false, message: 'This option already exists.' });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const updateInventoryDropdownOption = async (req, res) => {
+  try {
+    const { value } = req.body;
+    if (!value || !value.trim()) {
+      return res.status(400).json({ success: false, message: 'Option value cannot be empty.' });
+    }
+    const newValue = value.trim();
+    const companyId = req.user.companyId;
+
+    const option = await InventoryMasterOption.findOne({ _id: req.params.id, companyId });
+    if (!option) return res.status(404).json({ success: false, message: 'Option not found' });
+
+    const oldValue = option.value;
+    if (oldValue === newValue) return res.json({ success: true, data: option });
+
+    const duplicate = await InventoryMasterOption.findOne({ _id: { $ne: option._id }, companyId, field: option.field, value: newValue });
+    if (duplicate) return res.status(400).json({ success: false, message: 'This option already exists.' });
+
+    option.value = newValue;
+    await option.save();
+
+    if (option.field === 'ItemCategory') {
+      await Item.updateMany(
+        { companyId, itemCategories: oldValue },
+        { $set: { 'itemCategories.$[elem]': newValue } },
+        { arrayFilters: [{ elem: oldValue }] }
+      );
+    } else {
+      const itemField = INVENTORY_ITEM_FIELD_MAP[option.field];
+      if (itemField) await Item.updateMany({ companyId, [itemField]: oldValue }, { $set: { [itemField]: newValue } });
+    }
+
+    res.json({ success: true, data: option });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const deleteInventoryDropdownOption = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const option = await InventoryMasterOption.findOne({ _id: req.params.id, companyId });
+    if (!option) return res.status(404).json({ success: false, message: 'Option not found' });
+
+    let productCount;
+    if (option.field === 'ItemCategory') {
+      productCount = await Item.countDocuments({ companyId, itemCategories: option.value });
+    } else {
+      const itemField = INVENTORY_ITEM_FIELD_MAP[option.field];
+      productCount = itemField ? await Item.countDocuments({ companyId, [itemField]: option.value }) : 0;
+    }
+
+    if (productCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete "${option.value}" — still used by ${productCount} item${productCount > 1 ? 's' : ''}. Reassign or remove those first.`,
+        productCount,
+      });
+    }
+
+    await option.deleteOne();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 

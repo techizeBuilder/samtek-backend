@@ -23,11 +23,6 @@ const today = () => new Date().toISOString().split('T')[0];
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// Only 'Purchase Machine' items are bought from vendors; 'Manufacturing
-// Machine' (and everything else) is produced in-house — same rule as the
-// legacy checkInventoryForItem endpoint.
-const PURCHASED_CATEGORIES = ['purchase machine'];
-
 export async function generateQCJobId() {
   const year = new Date().getFullYear();
   const lastJob = await QCJob.findOne({ qcJobId: new RegExp(`^QC-${year}-`) })
@@ -77,12 +72,31 @@ export async function resolveInventoryItem(companyId, { itemRef, code, name }) {
   return null;
 }
 
-// Map an inventory item's category to the Store "Product Type" label.
+// Whether a QC job's underlying Item is a Product Master machine or Motor
+// Master motor (Item.productKind) — the reliable "finished/sellable good"
+// signal, in place of matching Item.category strings that no longer hold
+// 'Purchase Machine'/'Manufacturing Machine' values after the P-Type/
+// P-Source-Type refactor. Used by QC approval and the Packaging/Dispatch
+// queue to decide inventory-vs-dispatch routing and per-unit packaging.
+export async function isMachineJobItem(job, companyId) {
+  // resolveInventoryItem tries itemRef (validates ObjectId-ness itself), then
+  // code, then name — same fallback order the old inline lookups used.
+  const item = await resolveInventoryItem(companyId, { itemRef: job.itemCode, code: job.itemCode, name: job.itemName });
+  return !!item && ['Machine', 'Motor'].includes(item.productKind);
+}
+
+// Map an inventory item's Purchasable/Internal-Manufacturing radio choice
+// (Item.purchase / Item.internalManufacturing — set per item on Inventory,
+// Product Master and Motor Master's own forms) to the Store "Product Type"
+// label. internalManufacturing wins over purchase when both are set — same
+// precedence itemPricingService.js already uses for BOM-vs-Purchase costing.
+// Previously this checked Item.category === 'Purchase Machine', which only
+// ever matched Product Master items and silently misclassified every Motor
+// Master item (fixed category 'Motor') and plain Inventory material as
+// in-house regardless of their actual purchase/manufacturing setting.
 export function productTypeForItem(invItem) {
   if (!invItem) return 'In-house Manufactured';
-  return PURCHASED_CATEGORIES.includes((invItem.category || '').toLowerCase().trim())
-    ? 'Purchased (Trading Product)'
-    : 'In-house Manufactured';
+  return invItem.internalManufacturing ? 'In-house Manufactured' : 'Purchased (Trading Product)';
 }
 
 // Ensure a Sale exists for the order (Store's internal placeholder if Accounts

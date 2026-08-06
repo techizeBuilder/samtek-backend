@@ -26,15 +26,32 @@ export const getPricingItems = async (req, res) => {
     const companyId = req.user.companyId;
     if (!companyId) return res.status(400).json({ success: false, message: 'Company not assigned' });
 
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
     // Scoped by 'store' (not 'companyId') to match getSalespersonItems exactly —
     // some items only ever had 'store' set (companyId missing on them), so
     // filtering by companyId silently dropped them from this list.
-    const items = await Item.find({ store: companyId, ...sellableItemFilter() })
-      .select(PRICING_FIELDS)
-      .sort({ code: 1 })
-      .lean();
+    const query = { store: companyId, ...sellableItemFilter() };
+    const search = (req.query.search || '').trim();
+    if (search) {
+      query.$or = [
+        { code: { $regex: search, $options: 'i' } },
+        { name: { $regex: search, $options: 'i' } },
+      ];
+    }
 
-    res.json({ success: true, items });
+    const [items, total] = await Promise.all([
+      Item.find(query).select(PRICING_FIELDS).sort({ code: 1 }).skip(skip).limit(limit).lean(),
+      Item.countDocuments(query),
+    ]);
+
+    res.json({
+      success: true,
+      items,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

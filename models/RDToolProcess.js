@@ -18,7 +18,7 @@ const ProcessSchema = new mongoose.Schema({
 });
 
 const RDToolProcessSchema = new mongoose.Schema({
-  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMachine', required: true },
+  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   tools: { type: [ToolSchema], default: [] },
   processes: { type: [ProcessSchema], default: [] },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },

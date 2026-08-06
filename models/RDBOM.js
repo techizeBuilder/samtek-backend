@@ -34,7 +34,10 @@ const MaterialSchema = new mongoose.Schema({
 });
 
 const RDBOMSchema = new mongoose.Schema({
-  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMachine', required: true },
+  // Product Master machines now live in the Item collection (productKind:'Machine')
+  // instead of the old separate RDMachine collection — see rdController.js's
+  // toMachineResponse for the field-name translation this implies on read.
+  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   variant: { type: String, default: 'Standard' }, // Added Machine Variant
   version: { type: String, default: 'v1.0' },
   isLocked: { type: Boolean, default: false },

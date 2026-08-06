@@ -12,7 +12,7 @@ const QCItemSchema = new mongoose.Schema({
 });
 
 const RDQualityParamSchema = new mongoose.Schema({
-  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMachine', required: true },
+  machine: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   machineName: { type: String, required: true },
   parameters: { type: [ParameterSchema], default: [] },
   qcChecklist: { type: [QCItemSchema], default: [] },

@@ -4,7 +4,11 @@ const RDMasterOptionSchema = new mongoose.Schema({
     // The dropdown this option belongs to
     field: {
         type: String,
-        enum: ['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType'],
+        // MotorCategory/MotorSubCategory: Motor Master's own scoped, cascading
+        // classification (MotorSubCategory.parentValue -> a MotorCategory value) —
+        // deliberately separate from Product Master's Category so the two lists
+        // never mix, same reasoning as Category vs MaterialType above.
+        enum: ['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType', 'MotorCategory', 'MotorSubCategory', 'MotorType', 'MaterialGrade', 'PowerSource', 'PlantCategory', 'PlantSubCategory'],
         required: true
     },
     // The actual text value in the dropdown

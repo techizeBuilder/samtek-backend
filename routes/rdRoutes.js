@@ -21,6 +21,10 @@ import {
   getCustomFieldTemplates,
   saveCustomFieldTemplate,
   deleteCustomFieldTemplate,
+  getPlants,
+  createPlant,
+  updatePlant,
+  setPlantStatus,
 } from '../controllers/rdController.js';
 import {
   getRDExpenseCategories,
@@ -111,5 +115,11 @@ router.delete('/master-options/:id', deleteDropdownOption);
 router.get('/custom-field-templates', getCustomFieldTemplates);
 router.post('/custom-field-templates', saveCustomFieldTemplate);
 router.delete('/custom-field-templates/:id', deleteCustomFieldTemplate);
+
+// ── Plant Master ──────────────────────────────────────────────────────────────
+router.get('/plants', getPlants);
+router.post('/plants', createPlant);
+router.put('/plants/:id', updatePlant);
+router.put('/plants/:id/status', setPlantStatus);
 
 export default router;

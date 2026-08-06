@@ -60,7 +60,14 @@ import {
   getDefectiveInventory,
   repairDefectiveInventory,
   scrapDefectiveInventory,
-  getVariantsByItemCode
+  getVariantsByItemCode,
+  getSellableItemsForUser,
+
+  // Inventory master-option routes (ItemType/ItemCategory/SourceType/ItemSourceType)
+  getInventoryDropdownOptions,
+  addInventoryDropdownOption,
+  updateInventoryDropdownOption,
+  deleteInventoryDropdownOption,
 } from '../controllers/inventoryController.js';
 
 const router = express.Router();
@@ -68,6 +75,7 @@ const router = express.Router();
 // Item routes (temporarily remove permission check for Sales order creation)
 router.get('/items/by-code', auth, getItemByCode);
 router.get('/items/variants-prefill', auth, getVariantsByItemCode);
+router.get('/items/sellable', auth, getSellableItemsForUser);
 router.get('/items', auth, getItems);
 router.get('/items/:id', auth, getItemById);
 router.post('/items', auth, createItem);
@@ -107,6 +115,12 @@ router.get('/inventory/unit-types', auth, getUnitTypes);
 router.post('/inventory/unit-types', auth, createUnitType);
 router.put('/inventory/unit-types/:id', auth, updateUnitType);
 router.delete('/inventory/unit-types/:id', auth, deleteUnitType);
+
+// Inventory master-option routes (ItemType/ItemCategory/SourceType/ItemSourceType)
+router.get('/inventory/master-options', auth, getInventoryDropdownOptions);
+router.post('/inventory/master-options', auth, addInventoryDropdownOption);
+router.put('/inventory/master-options/:id', auth, updateInventoryDropdownOption);
+router.delete('/inventory/master-options/:id', auth, deleteInventoryDropdownOption);
 
 // Utility routes
 router.get('/inventory/low-stock', auth, getLowStockItems);

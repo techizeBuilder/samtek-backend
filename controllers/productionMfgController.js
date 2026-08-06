@@ -5,7 +5,6 @@ import QCJob from '../models/QCJob.js';
 import notificationService from '../services/notificationService.js';
 import RDRequest from '../models/RDRequest.js'
 import RDBOM from '../models/RDBOM.js';
-import RDMachine from '../models/RDMachine.js';
 import mongoose from 'mongoose';
 import { Item } from '../models/Inventory.js'; // Adjust path
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
@@ -1091,21 +1090,24 @@ export const approveQC = async (req, res) => {
         console.error('❌ Error updating Sale storeQCStatus on production completion:', saleUpdateErr);
       }
 
-      // 🏗️ Mark RDMachine as built + recalculate its Item's manufacturing
-      // cost from the BOM (runs on every completion so cost stays fresh)
+      // 🏗️ Mark the machine as built + recalculate its manufacturing cost from
+      // the BOM (runs on every completion so cost stays fresh). Product Master
+      // machines now ARE Item documents (productKind:'Machine') — one lookup
+      // covers both what used to be a separate RDMachine record and its Item.
       try {
-        const rdMachine = await RDMachine.findOne({ code: order.machineCode, company: order.company });
-        if (rdMachine && !rdMachine.firstBuiltAt) {
-          rdMachine.firstBuiltAt = new Date();
-          await rdMachine.save();
-        }
-
         const mfgItem = await Item.findOne({
           $or: [{ code: order.machineCode }, { name: order.machineName }],
           companyId: order.company
         });
-        if (mfgItem && mfgItem.internalManufacturing) {
-          await recalculateItemPricing(mfgItem);
+        if (mfgItem) {
+          if (mfgItem.productKind === 'Machine' && !mfgItem.machineDetails?.firstBuiltAt) {
+            mfgItem.machineDetails = mfgItem.machineDetails || {};
+            mfgItem.machineDetails.firstBuiltAt = new Date();
+            await mfgItem.save();
+          }
+          if (mfgItem.internalManufacturing) {
+            await recalculateItemPricing(mfgItem);
+          }
         }
       } catch (pricingErr) {
         console.error('❌ Error recalculating item pricing on production completion:', pricingErr);

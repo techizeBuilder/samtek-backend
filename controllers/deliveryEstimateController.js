@@ -1,5 +1,4 @@
 import { Item } from '../models/Inventory.js';
-import RDMachine from '../models/RDMachine.js';
 import RDBOM from '../models/RDBOM.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import ItemLeadTimeStats from '../models/ItemLeadTimeStats.js';
@@ -155,7 +154,7 @@ async function predictOneItem(companyId, itemCode, quantity) {
   let materialDelayDays = 0;
   const shortMaterials = [];
 
-  const rdMachine = await RDMachine.findOne({ code: itemCode, company: companyId }).select('_id').lean();
+  const rdMachine = await Item.findOne({ code: itemCode, companyId, productKind: 'Machine' }).select('_id').lean();
   if (rdMachine) {
     const bom = await RDBOM.findOne({ machine: rdMachine._id, company: companyId }).select('materials').lean();
     const materials = (bom?.materials || []).filter(m => !m.isDiscontinued);

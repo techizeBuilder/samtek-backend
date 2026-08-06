@@ -2093,11 +2093,11 @@ const checkInventoryForItem = async (req, res) => {
     const neededQty = parseFloat(requiredQty) || 1;
     const availableQty = item.qty || 0;
 
-    // Map item category -> productType label
-    // Category 'Purchase Machine' -> 'Purchased (Trading Product)', others -> 'In-house Manufactured'
-    const productType = item.category === 'Purchase Machine'
-      ? 'Purchased (Trading Product)'
-      : 'In-house Manufactured';
+    // Same rule as storeFlowService.js's productTypeForItem — Item.internalManufacturing
+    // wins over Item.purchase when both are set.
+    const productType = item.internalManufacturing
+      ? 'In-house Manufactured'
+      : 'Purchased (Trading Product)';
 
     // Check if enough stock exists
     const isAvailableInInventory = availableQty >= neededQty ? 'Available' : 'Not Available';
