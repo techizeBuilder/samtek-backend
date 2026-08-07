@@ -69,6 +69,8 @@ import {
 
 import {
   getPurchaseItems,
+  getPurchaseInventoryItems,
+  updatePurchaseItemCost,
   createPurchase,
   getPurchases,
   getPurchaseById,
@@ -233,6 +235,19 @@ accountsRouter.get(
   '/purchases/items',
   authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
   getPurchaseItems
+);
+
+// Purchase > Inventory tabs (Tools & Raw Material / Product Master / Motor Master)
+// — set/update purchaseCost per item, scoped by productKind + purchase:true
+accountsRouter.get(
+  '/purchases/inventory',
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
+  getPurchaseInventoryItems
+);
+accountsRouter.put(
+  '/purchases/inventory/:id/purchase-cost',
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
+  updatePurchaseItemCost
 );
 
 import {

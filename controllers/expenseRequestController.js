@@ -85,6 +85,7 @@ export const getTeamExpenseRequests = async (
 ) => {
   try {
     const managerId = req.user._id;
+    const { search, status, page, limit } = req.query;
 
     // 🔹 manager ke under employees
     const teamEmployees = await User.find({ reportingManager: managerId }, "_id fullName username email");
@@ -92,19 +93,37 @@ export const getTeamExpenseRequests = async (
     const employeeIds = teamEmployees.map((e) => e._id);
 
     // 🔹 unhi employees ke expenses
-    const fetchedExpenses = await Expense.find({
-      employee: { $in: employeeIds },
-    })
+    const filter = { employee: { $in: employeeIds } };
+    if (status && status !== 'all') filter.status = status;
+
+    const fetchedExpenses = await Expense.find(filter)
       .populate("employee", "fullName username email")
       .sort({ createdAt: -1 })
       .lean();
 
-    const expenses = fetchedExpenses.map(e => {
+    let expenses = fetchedExpenses.map(e => {
       if (e.employee) {
         e.employee.name = e.employee.fullName || e.employee.username || 'Unknown';
       }
       return e;
     });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      expenses = expenses.filter((e) => re.test(e.employee?.name || ''));
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = expenses.length;
+      const pageItems = expenses.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.status(200).json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.status(200).json(expenses);
   } catch (error) {

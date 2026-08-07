@@ -138,25 +138,44 @@ export const deleteAttendanceRequest = async (req, res) => {
 export const getTeamAttendanceRequests = async (req, res) => {
   try {
     const managerId = req.user._id;
+    const { search, status, page, limit } = req.query;
 
     // 1️⃣ Get team members
     const teamMembers = await User.find({ reportingManager: managerId }, "_id fullName username email role");
     const teamIds = teamMembers.map((u) => u._id);
 
     // 2️⃣ Get attendance requests for those members
-    const fetchedRequests = await AttendanceRequest.find({
-      user: { $in: teamIds },
-    })
+    const filter = { user: { $in: teamIds } };
+    if (status && status !== 'all') filter.status = status;
+
+    const fetchedRequests = await AttendanceRequest.find(filter)
       .populate("user", "fullName username email role")
       .sort({ createdAt: -1 })
       .lean();
 
-    const requests = fetchedRequests.map(r => {
+    let requests = fetchedRequests.map(r => {
       if (r.user) {
         r.user.name = r.user.fullName || r.user.username || 'Unknown';
       }
       return r;
     });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      requests = requests.filter((r) => re.test(r.user?.name || '') || re.test(r.type || ''));
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = requests.length;
+      const pageItems = requests.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(requests);
   } catch (error) {
@@ -233,6 +252,7 @@ export const updateAttendanceRequestStatus = async (req, res) => {
 /* ================= ADMIN / HR: GET ALL REQUESTS ================= */
 export const getAllAttendanceRequests = async (req, res) => {
   try {
+    const { search, status, page, limit } = req.query;
     const filter = {};
 
     // If user is not a global Super Admin, filter by their company
@@ -242,18 +262,36 @@ export const getAllAttendanceRequests = async (req, res) => {
       const userIds = usersInCompany.map(u => u._id);
       filter.user = { $in: userIds };
     }
+    if (status && status !== 'all') filter.status = status;
 
     const fetchedRequests = await AttendanceRequest.find(filter)
       .populate("user", "fullName username email role")
       .sort({ createdAt: -1 })
       .lean();
 
-    const requests = fetchedRequests.map(r => {
+    let requests = fetchedRequests.map(r => {
       if (r.user) {
         r.user.name = r.user.fullName || r.user.username || 'Unknown';
       }
       return r;
     });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      requests = requests.filter((r) => re.test(r.user?.name || '') || re.test(r.type || ''));
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = requests.length;
+      const pageItems = requests.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(requests);
   } catch (error) {

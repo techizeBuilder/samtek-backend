@@ -47,6 +47,7 @@ export const addJobOpening = async (req, res) => {
  */
 export const getAllJobOpenings = async (req, res) => {
   try {
+    const { search, page, limit } = req.query;
     const filter = {};
 
     if (req.user.role === 'Super Admin') {
@@ -60,7 +61,26 @@ export const getAllJobOpenings = async (req, res) => {
       }
     }
 
-    const jobs = await JobOpenings.find(filter).populate("recruitingManager", "fullName username email").sort({ createdAt: -1 });
+    if (search) {
+      filter.jobTitle = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    }
+
+    const query = JobOpenings.find(filter).populate("recruitingManager", "fullName username email").sort({ createdAt: -1 });
+
+    // Pagination is opt-in via `page` — AddJobOpeningModal/ViewEditCandidateModal
+    // call this with no params for their dropdown and still need the full array.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = await JobOpenings.countDocuments(filter);
+      const jobs = await query.skip((pageNum - 1) * limitNum).limit(limitNum);
+      return res.json({
+        data: jobs,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
+
+    const jobs = await query;
     res.json(jobs);
   } catch (error) {
     res.status(500).json({

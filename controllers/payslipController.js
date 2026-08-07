@@ -135,6 +135,7 @@ export const generatePayslipsFromPayroll = async (
 /* ================= HR: GET ALL PAYSLIPS ================= */
 export const getAllPayslips = async (req, res) => {
   try {
+    const { month, search, page, limit } = req.query;
     const filter = {};
 
     // Company-wise isolation
@@ -144,18 +145,41 @@ export const getAllPayslips = async (req, res) => {
       filter.user = { $in: companyUsers.map(u => u._id) };
     }
 
+    // month is stored as "YYYY-MM" — filter server-side instead of fetching
+    // every payslip ever issued and filtering client-side.
+    if (month) filter.month = month;
+
     const payslips = await Payslip.find(filter)
       .populate("user", "fullName username email role")
       .populate("payroll")
       .sort({ createdAt: -1 });
 
-    const formattedPayslips = payslips.map(p => {
+    let formattedPayslips = payslips.map(p => {
       const pObj = p.toObject();
       if (pObj.user) {
         pObj.user.name = pObj.user.fullName || pObj.user.username || 'Unknown';
       }
       return pObj;
     });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      formattedPayslips = formattedPayslips.filter(
+        (p) => re.test(p.user?.name || '') || re.test(p.user?.email || '')
+      );
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = formattedPayslips.length;
+      const pageItems = formattedPayslips.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(formattedPayslips);
   } catch (error) {
@@ -223,7 +247,7 @@ export const sendPayslipToEmployee = async (req, res) => {
 export const getMyPayslips = async (req, res) => {
   try {
     const userId = req.user._id || req.user.userId || req.user.id;
-    const { month, year } = req.query;
+    const { month, year, page, limit } = req.query;
 
     // month is stored as "YYYY-MM"; filter here instead of fetching every
     // payslip ever issued and filtering client-side.
@@ -234,6 +258,20 @@ export const getMyPayslips = async (req, res) => {
       query.month = { $regex: `^${year}-` };
     } else if (month) {
       query.month = { $regex: `-${String(month).padStart(2, '0')}$` };
+    }
+
+    // Pagination is opt-in via `page`, same convention as getMyLeaves etc.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const [payslips, total] = await Promise.all([
+        Payslip.find(query).populate("payroll").sort({ month: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
+        Payslip.countDocuments(query),
+      ]);
+      return res.json({
+        data: payslips,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
     }
 
     const payslips = await Payslip.find(query)

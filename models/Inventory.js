@@ -210,6 +210,16 @@ const itemSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  // R&D classification used to bucket an item across Inventory (null),
+  // Product Master (Machine) and Motor Master (Motor) — same Item
+  // collection, filtered by this field. See inventoryController.getItems
+  // and purchaseController.getPurchaseInventoryItems.
+  productKind: {
+    type: String,
+    enum: ['Machine', 'Motor', null],
+    default: null,
+    trim: true
+  },
   purchaseUnitType: {
     type: String,
     trim: true
@@ -482,6 +492,7 @@ customerCategorySchema.index({ name: 1, companyId: 1 }, { unique: true });
 itemSchema.index({ name: 1, code: 1 });
 itemSchema.index({ category: 1, subCategory: 1 });
 itemSchema.index({ type: 1 });
+itemSchema.index({ productKind: 1, purchase: 1 });
 itemSchema.index({ qty: 1, minStock: 1 });
 itemSchema.index({ order: 1 });
 itemSchema.index({ companyId: 1 });

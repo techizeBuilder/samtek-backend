@@ -165,6 +165,7 @@ export const getTeamOvertimeRequests = async (
 ) => {
   try {
     const managerId = req.user._id;
+    const { search, status, page, limit } = req.query;
 
     // 1️⃣ find team members (jinka reportingManager = logged-in manager)
     const teamMembers = await User.find({ reportingManager: managerId }, "_id fullName username email role");
@@ -172,19 +173,37 @@ export const getTeamOvertimeRequests = async (
     const teamIds = teamMembers.map((u) => u._id);
 
     // 2️⃣ un employees ki overtime requests
-    const fetchedRequests = await Overtime.find({
-      employee: { $in: teamIds },
-    })
+    const filter = { employee: { $in: teamIds } };
+    if (status && status !== 'all') filter.status = status;
+
+    const fetchedRequests = await Overtime.find(filter)
       .populate("employee", "fullName username email role")
       .sort({ createdAt: -1 })
       .lean();
 
-    const requests = fetchedRequests.map(r => {
+    let requests = fetchedRequests.map(r => {
       if (r.employee) {
         r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
       }
       return r;
     });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      requests = requests.filter((r) => re.test(r.employee?.name || ''));
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = requests.length;
+      const pageItems = requests.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(requests);
   } catch (error) {

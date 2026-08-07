@@ -3,7 +3,7 @@ import User from "../models/User.js";
 
 export const getStatutoryReports = async (req, res) => {
   try {
-    const { month } = req.query;
+    const { month, search, page, limit } = req.query;
 
     if (!month) {
       return res.status(400).json({ message: "Month is required" });
@@ -22,7 +22,7 @@ export const getStatutoryReports = async (req, res) => {
       .populate("user", "fullName username email")
       .lean();
 
-    const reports = payslips.map((p) => {
+    let reports = payslips.map((p) => {
       let employeeName = "Unknown";
       let employeeEmail = "";
       if (p.user) {
@@ -45,6 +45,23 @@ export const getStatutoryReports = async (req, res) => {
         netSalary: p.netSalary || 0,
       };
     });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      reports = reports.filter((r) => re.test(r.employee.name) || re.test(r.employee.email));
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = reports.length;
+      const pageItems = reports.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(reports);
   } catch (error) {

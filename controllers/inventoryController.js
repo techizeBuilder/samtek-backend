@@ -392,6 +392,12 @@ export const getItems = async (req, res) => {
       query.$expr = { $lte: ['$qty', '$minStock'] };
     }
 
+    // Product kind filter — 'none'/'null' means plain inventory items with
+    // no productKind set (also matches legacy docs missing the field).
+    if (productKind !== undefined && productKind !== '') {
+      query.productKind = (productKind === 'none' || productKind === 'null') ? null : productKind;
+    }
+
 
     // Sort options - default to order ASC, then category A-Z for Unit Head
     let sortOptions = {};

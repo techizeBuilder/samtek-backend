@@ -151,23 +151,42 @@ export const getManagerTravelRequests = async (
 ) => {
   try {
     const managerId = req.user._id;
+    const { search, status, page, limit } = req.query;
 
     const team = await User.find({ reportingManager: managerId }, "_id");
     const employeeIds = team.map((u) => u._id);
 
-    const fetchedRequests = await TravelRequest.find({
-      employee: { $in: employeeIds },
-    })
+    const filter = { employee: { $in: employeeIds } };
+    if (status && status !== 'all') filter.status = status;
+
+    const fetchedRequests = await TravelRequest.find(filter)
       .populate("employee", "fullName username email")
       .sort({ createdAt: -1 })
       .lean();
 
-    const requests = fetchedRequests.map(r => {
+    let requests = fetchedRequests.map(r => {
       if (r.employee) {
         r.employee.name = r.employee.fullName || r.employee.username || 'Unknown';
       }
       return r;
     });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      requests = requests.filter((r) => re.test(r.employee?.name || ''));
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = requests.length;
+      const pageItems = requests.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(requests);
   } catch (error) {
