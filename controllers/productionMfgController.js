@@ -948,6 +948,7 @@ export const startProcess = async (req, res) => {
 
     procs[idx].status = 'In Progress';
     procs[idx].startDate = today(); // Assuming today() is defined in your file
+    procs[idx].startedAt = new Date(); // precise timestamp, see ProcessStepSchema comment
     order.status = 'In Progress';
 
     await order.save();
@@ -984,6 +985,7 @@ export const markProcessComplete = async (req, res) => {
 
     proc.status = 'QC Pending';
     proc.endDate = today();
+    proc.completedAt = new Date(); // precise timestamp, see ProcessStepSchema comment
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
@@ -1034,8 +1036,11 @@ export const approveQC = async (req, res) => {
         const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
         const units = [order.processes, ...order.extraUnits.map(u => u.processes)];
         for (const unitProcs of units) {
-          const starts = unitProcs.map(p => p.startDate).filter(Boolean).map(d => new Date(d).getTime());
-          const ends = unitProcs.map(p => p.endDate).filter(Boolean).map(d => new Date(d).getTime());
+          // Prefer the precise startedAt/completedAt timestamps; fall back to
+          // the date-only startDate/endDate strings for any step that was
+          // started before this field existed (in-flight orders at deploy time).
+          const starts = unitProcs.map(p => p.startedAt || p.startDate).filter(Boolean).map(d => new Date(d).getTime());
+          const ends = unitProcs.map(p => p.completedAt || p.endDate).filter(Boolean).map(d => new Date(d).getTime());
           if (!starts.length || !ends.length) continue;
           const durationDays = Math.max(0, (Math.max(...ends) - Math.min(...starts)) / (1000 * 60 * 60 * 24));
           await recordLeadTimeSample(order.company, order.machineCode, order.machineName, 'Production', durationDays);

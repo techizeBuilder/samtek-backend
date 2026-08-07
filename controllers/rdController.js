@@ -913,9 +913,8 @@ export const addMaterial = async (req, res) => {
   try {
     // 1. Extract 'code' alongside the new fields
     const {
-      code, childPart, subChildPart, item, itemType, quantity, unit,
-      category, pType, pSourceType, brand, description, metrology, specifications, customFields,
-      size, unitWeightValue, unitWeightUnitType, unitWeightUnit,
+      code, childPart, subChildPart, childPartCode, subChildPartCode, item, itemType, quantity, unit,
+      pType, pSourceType, customFields,
       inputUnitType, inputUnit, outputUnitType, outputUnit
     } = req.body;
 
@@ -940,6 +939,14 @@ export const addMaterial = async (req, res) => {
       });
     }
 
+    // Price and every other BOM_FIELD_CATALOG field are pulled straight from
+    // the validated Inventory item server-side, never trusted from the
+    // client — "Price fetch by Purchase item wise and auto calculate", and
+    // whatever fields BOM Format & Modification later enables as columns
+    // always have real, authoritative data behind them.
+    const unitPrice = sourceItem.purchaseCost || 0;
+    const totalPrice = Math.round(unitPrice * Number(quantity) * 100) / 100;
+
     // 3. Push all fields to the materials array
     const bom = await RDBOM.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId, isLocked: false },
@@ -949,26 +956,46 @@ export const addMaterial = async (req, res) => {
             code, // Injecting explicit material code
             childPart,
             subChildPart,
+            childPartCode: childPartCode || '',
+            subChildPartCode: subChildPartCode || '',
             item,
             itemType: itemType || '',
             quantity: Number(quantity),
             unit,
-            // Product Master snapshot, captured client-side when the code matched
-            category: category || '',
+            unitPrice,
+            totalPrice,
+            // Inventory snapshot — authoritative, from sourceItem (see above),
+            // field-for-field with BOM_FIELD_CATALOG / SimpleInventoryForm.jsx.
+            category: sourceItem.category || '',
+            subCategory: sourceItem.subCategory || '',
+            sourceType: sourceItem.sourceType || '',
+            itemSourceType: sourceItem.itemSourceType || '',
+            itemCategories: sourceItem.itemCategories || [],
+            stdCost: sourceItem.stdCost ?? null,
+            salePrice: sourceItem.salePrice ?? null,
+            mrp: sourceItem.mrp ?? null,
+            hsn: sourceItem.hsn || '',
+            gst: sourceItem.gst ?? null,
+            brand: sourceItem.brand || '',
+            description: sourceItem.description || '',
+            modelNumber: sourceItem.modelNumber || '',
+            metrology: sourceItem.metrology || '',
+            materialGrade: sourceItem.materialGrade || '',
+            size: sourceItem.size || '',
+            unitWeightValue: sourceItem.unitWeightValue ?? null,
+            unitWeightUnitType: sourceItem.unitWeightUnitType || '',
+            unitWeightUnit: sourceItem.unitWeightUnit || '',
+            dimensions: sourceItem.dimensions || {},
+            applications: sourceItem.applications || [],
+            specifications: sourceItem.specifications || [],
+            // Legacy Product-Master-only fields — kept for older BOMs that
+            // still reference them; never populated from Inventory items.
             pType: pType || '',
             pSourceType: pSourceType || '',
-            brand: brand || '',
-            description: description || '',
-            metrology: metrology || '',
-            size: size || '',
-            unitWeightValue: unitWeightValue !== undefined && unitWeightValue !== '' ? Number(unitWeightValue) : null,
-            unitWeightUnitType: unitWeightUnitType || '',
-            unitWeightUnit: unitWeightUnit || '',
             inputUnitType: inputUnitType || '',
             inputUnit: inputUnit || '',
             outputUnitType: outputUnitType || '',
             outputUnit: outputUnit || '',
-            specifications: specifications || [],
             customFields: customFields || [],
           }
         }
@@ -991,17 +1018,46 @@ export const updateMaterial = async (req, res) => {
     const mat = bom.materials.id(req.params.materialId);
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
 
-    if (req.body.code && req.body.code.trim() !== mat.code) {
-      const sourceItem = await Item.findOne({ companyId: req.user.companyId, productKind: null, code: req.body.code.trim() });
-      if (!sourceItem) {
-        return res.status(400).json({
-          success: false,
-          message: `"${req.body.code}" does not match any Inventory item. BOM materials must be selected from Inventory.`
-        });
-      }
+    const newCode = req.body.code ? req.body.code.trim() : mat.code;
+    const sourceItem = await Item.findOne({ companyId: req.user.companyId, productKind: null, code: newCode });
+    if (!sourceItem) {
+      return res.status(400).json({
+        success: false,
+        message: `"${req.body.code || newCode}" does not match any Inventory item. BOM materials must be selected from Inventory.`
+      });
     }
 
     Object.assign(mat, req.body);
+
+    // Price and every other BOM_FIELD_CATALOG field are re-pulled from the
+    // validated Inventory item server-side, never trusted from the client —
+    // same as addMaterial, so editing a material always reflects Inventory's
+    // current data rather than whatever the client happened to send.
+    mat.unitPrice = sourceItem.purchaseCost || 0;
+    mat.totalPrice = Math.round(mat.unitPrice * (mat.quantity || 0) * 100) / 100;
+    mat.category = sourceItem.category || '';
+    mat.subCategory = sourceItem.subCategory || '';
+    mat.sourceType = sourceItem.sourceType || '';
+    mat.itemSourceType = sourceItem.itemSourceType || '';
+    mat.itemCategories = sourceItem.itemCategories || [];
+    mat.stdCost = sourceItem.stdCost ?? null;
+    mat.salePrice = sourceItem.salePrice ?? null;
+    mat.mrp = sourceItem.mrp ?? null;
+    mat.hsn = sourceItem.hsn || '';
+    mat.gst = sourceItem.gst ?? null;
+    mat.brand = sourceItem.brand || '';
+    mat.description = sourceItem.description || '';
+    mat.modelNumber = sourceItem.modelNumber || '';
+    mat.metrology = sourceItem.metrology || '';
+    mat.materialGrade = sourceItem.materialGrade || '';
+    mat.size = sourceItem.size || '';
+    mat.unitWeightValue = sourceItem.unitWeightValue ?? null;
+    mat.unitWeightUnitType = sourceItem.unitWeightUnitType || '';
+    mat.unitWeightUnit = sourceItem.unitWeightUnit || '';
+    mat.dimensions = sourceItem.dimensions || {};
+    mat.applications = sourceItem.applications || [];
+    mat.specifications = sourceItem.specifications || [];
+
     await bom.save();
     res.json({ success: true, data: bom });
   } catch (err) {

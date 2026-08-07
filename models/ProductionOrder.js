@@ -38,6 +38,12 @@ const ProcessStepSchema = new mongoose.Schema({
   assignedTeam: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionTeam', default: null },
   startDate: { type: String, default: null },
   endDate: { type: String, default: null },
+  // Precise timestamps alongside the display-only date strings above — used
+  // only by the delivery-date estimator's lead-time measurement
+  // (recordLeadTimeSample in approveQC), which needs real sub-day precision.
+  // startDate/endDate stay plain YYYY-MM-DD strings for existing UI display.
+  startedAt: { type: Date, default: null },
+  completedAt: { type: Date, default: null },
   qcStatus: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
   qcBy: { type: String, default: null },
   qcDate: { type: String, default: null },
@@ -57,6 +63,8 @@ function buildProcessSteps() {
     assignedTeam: null,
     startDate: null,
     endDate: null,
+    startedAt: null,
+    completedAt: null,
     qcStatus: 'Pending',
     qcBy: null,
     qcDate: null,

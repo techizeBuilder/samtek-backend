@@ -34,6 +34,19 @@ import {
   updateRDExpense,
   deleteRDExpense,
 } from '../controllers/rdExpenseController.js';
+import {
+  getChildParts,
+  generateChildPartCode,
+  createChildPart,
+  updateChildPart,
+  generateSubChildPartCode,
+  addSubChildPart,
+  updateSubChildPart,
+} from '../controllers/rdChildPartController.js';
+import {
+  getBOMFieldConfig,
+  saveBOMFieldConfig,
+} from '../controllers/rdBOMFieldConfigController.js';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -121,5 +134,18 @@ router.get('/plants', getPlants);
 router.post('/plants', createPlant);
 router.put('/plants/:id', updatePlant);
 router.put('/plants/:id/status', setPlantStatus);
+
+// ── Child Parts (BOM Management: Child Part Creation) ───────────────────────
+router.get('/child-parts', getChildParts);
+router.get('/child-parts/generate-code', generateChildPartCode);
+router.post('/child-parts', createChildPart);
+router.put('/child-parts/:id', updateChildPart);
+router.get('/child-parts/:id/sub-parts/generate-code', generateSubChildPartCode);
+router.post('/child-parts/:id/sub-parts', addSubChildPart);
+router.put('/child-parts/:id/sub-parts/:subId', updateSubChildPart);
+
+// ── BOM Format & Modification ────────────────────────────────────────────────
+router.get('/bom-field-config', getBOMFieldConfig);
+router.put('/bom-field-config', saveBOMFieldConfig);
 
 export default router;
