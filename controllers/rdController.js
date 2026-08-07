@@ -662,8 +662,8 @@ export const deleteCustomFieldTemplate = async (req, res) => {
 // plant just groups existing Product Master machines / Motor Master motors by
 // id + quantity. Used later to build sales quotations off a plant's list.
 const PLANT_POPULATE = [
-  { path: 'machines.item', select: 'code name category subCategory isDiscontinued' },
-  { path: 'motors.item', select: 'code name category subCategory isDiscontinued' },
+  { path: 'machines.item', select: 'code name category subCategory isDiscontinued mrp' },
+  { path: 'motors.item', select: 'code name category subCategory isDiscontinued mrp' },
 ];
 
 const cleanPlantRefList = (list) =>
@@ -1831,13 +1831,33 @@ export const processRDRequest = async (req, res) => {
         .select('orderQuantity').lean();
       const buildQty = Math.max(1, Number(prodOrderForQty?.orderQuantity) || 1);
 
-      const demandsToPush = masterBOM.materials.map(mat => ({
-        materialCode: mat.code,
-        materialName: mat.item,
-        bomQuantity: mat.quantity,
-        quantity: mat.quantity * buildQty,
-        unit: mat.unit,
-        status: 'Requested'
+      // The same Inventory item is often used across multiple Child Part /
+      // Sub Child Part BOM lines (e.g. the same bolt in several
+      // sub-assemblies). Store's transfer/receive/return and Production's
+      // Add Demand all locate a demand by materialCode alone — one
+      // materialDemands entry per code, not per BOM line — so duplicate-code
+      // lines are merged here, summing their per-unit quantities, before
+      // being pushed. The per-part breakdown isn't lost: it still lives in
+      // RDBOM.materials (source for Production's "Bill of Materials by
+      // Part"); only this transaction-tracking list is deduplicated.
+      const mergedByCode = new Map();
+      for (const mat of masterBOM.materials) {
+        const existing = mergedByCode.get(mat.code);
+        if (existing) {
+          existing.bomQuantity += mat.quantity;
+        } else {
+          mergedByCode.set(mat.code, {
+            materialCode: mat.code,
+            materialName: mat.item,
+            bomQuantity: mat.quantity,
+            unit: mat.unit,
+            status: 'Requested'
+          });
+        }
+      }
+      const demandsToPush = Array.from(mergedByCode.values()).map(d => ({
+        ...d,
+        quantity: d.bomQuantity * buildQty
       }));
 
       const docsToPush = designDocs.map(doc => ({ name: doc.name, fileUrl: doc.fileUrl, version: doc.version }));
