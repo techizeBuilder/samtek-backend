@@ -858,6 +858,12 @@ export const reactivateMachine = async (req, res) => {
 export const getBOMs = async (req, res) => {
   try {
     const boms = await RDBOM.find({ company: req.user.companyId }).populate('machine', 'code name');
+    // BOM Management (the frontend page) reads BOMs from this list endpoint,
+    // not getBOMForMachine/getBOMByMachineCode — the material price refresh
+    // has to happen here too, or its "Price" column stays stale.
+    for (const bom of boms) {
+      await refreshBOMMaterialPrices(bom, req.user.companyId);
+    }
     res.json({ success: true, data: boms });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
