@@ -29,24 +29,26 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
     return { cost: null, issue: `Circular BOM reference detected at item ${item.code}` };
   }
 
-  // Product Master machines now ARE Item documents (productKind:'Machine') —
-  // no separate RDMachine collection to cross-reference by code anymore.
-  if (item.productKind !== 'Machine') {
-    return { cost: null, issue: `Item "${item.code}" is not a Product Master machine — no BOM to build cost from.` };
+  // Product Master machines and Motor Master motors now ARE Item documents
+  // (productKind:'Machine'/'Motor') — no separate RDMachine collection to
+  // cross-reference by code anymore.
+  if (item.productKind !== 'Machine' && item.productKind !== 'Motor') {
+    return { cost: null, issue: `Item "${item.code}" is not a Product Master machine or Motor Master motor — no BOM to build cost from.` };
   }
-  if (!item.machineDetails?.firstBuiltAt) {
-    // Machine has never completed production — R&D's manual value stands.
+  const detailsKey = item.productKind === 'Machine' ? 'machineDetails' : 'motorDetails';
+  if (!item[detailsKey]?.firstBuiltAt) {
+    // Never completed production — R&D's manual value stands.
     return { cost: null, issue: null };
   }
 
   const bom = await RDBOM.findOne({ machine: item._id, company: item.companyId });
   if (!bom || !bom.materials || bom.materials.length === 0) {
-    return { cost: null, issue: `No BOM found for machine "${item.code}"` };
+    return { cost: null, issue: `No BOM found for "${item.code}"` };
   }
 
   visiting.add(item._id.toString());
   try {
-    let total = 0;
+    let materialsTotal = 0;
     for (const mat of bom.materials) {
       if (mat.isDiscontinued) continue;
 
@@ -77,12 +79,17 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
         lineUnitCost = matItem.purchaseCost || matItem.stdCost || 0;
       }
 
-      total += lineUnitCost * (mat.quantity || 0);
+      materialsTotal += lineUnitCost * (mat.quantity || 0);
     }
 
-    if (!(total > 0)) {
-      return { cost: null, issue: `Computed BOM cost is zero for "${item.code}" — check linked material costs` };
+    if (!(materialsTotal > 0)) {
+      return { cost: null, issue: `Computed BOM material cost is zero for "${item.code}" — check linked material costs` };
     }
+
+    // Total build cost = material roll-up + this build's labor/job-work
+    // (productionCost) + any other one-off production expense — see
+    // RDBOM.productionCost/productionExpense.
+    const total = materialsTotal + (bom.productionCost || 0) + (bom.productionExpense || 0);
     return { cost: total, issue: null };
   } finally {
     visiting.delete(item._id.toString());
@@ -186,6 +193,8 @@ export async function resolvePurchaseItemCost(item) {
  * to a resolved cost and persists it onto the Item. Never overwrites a
  * manual value when cost is unusable. Unset profit%/discount% (null) counts
  * as 0 — no markup/discount, MRP and Sale Price just show cost.
+ * MRP = cost + cost×profit%. Sale Price = MRP − MRP×discount% (discount is
+ * taken off MRP, not off the raw cost).
  */
 export async function applyPricingToItem(item, cost, source) {
   if (!(cost > 0)) return false;
@@ -196,8 +205,9 @@ export async function applyPricingToItem(item, cost, source) {
   const profitPercent = item.profitPercent || 0;
   const discountPercent = item.discountPercent || 0;
 
-  item.mrp = round2(cost + (cost * profitPercent) / 100);
-  item.salePrice = round2(cost - (cost * discountPercent) / 100);
+  const mrp = round2(cost + (cost * profitPercent) / 100);
+  item.mrp = mrp;
+  item.salePrice = round2(mrp - (mrp * discountPercent) / 100);
   item.costSource = source;
   item.costResolvedAt = new Date();
   item.costResolutionIssue = null;
@@ -249,9 +259,10 @@ export async function reapplyItemPricingFormula(itemId) {
   const profitPercent = item.profitPercent || 0;
   const discountPercent = item.discountPercent || 0;
 
+  const mrp = round2(cost + (cost * profitPercent) / 100);
   await Item.updateOne({ _id: itemId }, {
-    mrp: round2(cost + (cost * profitPercent) / 100),
-    salePrice: round2(cost - (cost * discountPercent) / 100)
+    mrp,
+    salePrice: round2(mrp - (mrp * discountPercent) / 100)
   });
   return { updated: true };
 }

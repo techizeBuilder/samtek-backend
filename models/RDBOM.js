@@ -76,6 +76,19 @@ const RDBOMSchema = new mongoose.Schema({
   isLocked: { type: Boolean, default: false },
   lockedAt: { type: String, default: null },
   materials: { type: [MaterialSchema], default: [] },
+  // Cost of actually building this machine/motor (labor, job-work, etc. — not
+  // material cost, which is Σ(material.unitPrice × qty) above) and any other
+  // one-off production expense, folded into the BOM's total cost (see
+  // itemPricingService.resolveManufacturingItemCost). Before the item has
+  // ever been built, R&D fills these in as a manual estimate; once Production
+  // completes a build, Process Execution overwrites them with the real
+  // figures from that build (latest build always wins — see approveQC).
+  productionCost: { type: Number, default: null, min: 0 },
+  productionExpense: { type: Number, default: null, min: 0 },
+  // 'Manual' = R&D's pre-build estimate; 'Actual' = auto-filled from the most
+  // recently completed build of this machine/motor in Process Execution.
+  productionCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
+  productionCostUpdatedAt: { type: Date, default: null },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });

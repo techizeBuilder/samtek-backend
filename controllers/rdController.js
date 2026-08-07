@@ -10,7 +10,7 @@ import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
 import RDPlant from '../models/RDPlant.js';
-import { computeBOMMaterialsMrpCost } from '../services/itemPricingService.js';
+import { computeBOMMaterialsMrpCost, recalculateItemPricing } from '../services/itemPricingService.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
@@ -19,6 +19,39 @@ import path from 'path';
 
 
 const today = () => new Date().toISOString().split('T')[0];
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Keeps a BOM's material unitPrice/totalPrice snapshots in sync with each
+// material Item's LIVE purchaseCost — addMaterial/updateMaterial already
+// pull purchaseCost fresh at write time, but a material's Item can have its
+// purchaseCost changed later (e.g. Purchase > Inventory) without anyone
+// touching the BOM again, which used to leave the BOM's displayed Price
+// column stale. Called on every BOM read; only writes back if something
+// actually changed. Takes a real (non-lean) Mongoose document so it can save.
+async function refreshBOMMaterialPrices(bom, companyId) {
+  if (!bom || !bom.materials || bom.materials.length === 0) return bom;
+  let changed = false;
+  for (const mat of bom.materials) {
+    if (mat.isDiscontinued) continue;
+    const sourceItem = await Item.findOne({
+      companyId,
+      productKind: null,
+      code: { $regex: new RegExp(`^${escapeRegex(mat.code)}$`, 'i') }
+    }).select('purchaseCost').lean();
+    if (!sourceItem) continue;
+    const liveUnitPrice = sourceItem.purchaseCost || 0;
+    if (mat.unitPrice !== liveUnitPrice) {
+      mat.unitPrice = liveUnitPrice;
+      mat.totalPrice = Math.round(liveUnitPrice * (mat.quantity || 0) * 100) / 100;
+      changed = true;
+    }
+  }
+  if (changed) await bom.save();
+  return bom;
+}
 
 async function generateChangeId(companyId) {
   const year = new Date().getFullYear();
@@ -79,7 +112,10 @@ const toMachineResponse = (item) => ({
   machineType: item.machineDetails?.machineType || 'Standard',
   isDiscontinued: !!item.isDiscontinued,
   rejectionNote: item.machineDetails?.rejectionNote || '',
-  firstBuiltAt: item.machineDetails?.firstBuiltAt || null,
+  // Motor Master motors reuse this same response shape (getBOMByMachineCode
+  // is cross-department, keyed by Item code regardless of productKind) —
+  // firstBuiltAt lives in motorDetails for those instead of machineDetails.
+  firstBuiltAt: item.machineDetails?.firstBuiltAt || item.motorDetails?.firstBuiltAt || null,
   variant: item.machineDetails?.variant || '',
   productionRate: item.machineDetails?.productionRate || '',
   materialGrade: item.materialGrade || '',
@@ -822,6 +858,12 @@ export const reactivateMachine = async (req, res) => {
 export const getBOMs = async (req, res) => {
   try {
     const boms = await RDBOM.find({ company: req.user.companyId }).populate('machine', 'code name');
+    // BOM Management (the frontend page) reads BOMs from this list endpoint,
+    // not getBOMForMachine/getBOMByMachineCode — the material price refresh
+    // has to happen here too, or its "Price" column stays stale.
+    for (const bom of boms) {
+      await refreshBOMMaterialPrices(bom, req.user.companyId);
+    }
     res.json({ success: true, data: boms });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -831,6 +873,7 @@ export const getBOMs = async (req, res) => {
 export const getBOMForMachine = async (req, res) => {
   try {
     const bom = await RDBOM.findOne({ machine: req.params.machineId, company: req.user.companyId });
+    await refreshBOMMaterialPrices(bom, req.user.companyId);
     res.json({ success: true, data: bom || null });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -846,13 +889,15 @@ export const getBOMByMachineCode = async (req, res) => {
     const { code } = req.params;
     const companyId = req.user.companyId;
 
-    const machine = await Item.findOne({ code, companyId, productKind: 'Machine' }).lean();
+    const machine = await Item.findOne({ code, companyId, productKind: { $in: ['Machine', 'Motor'] } }).lean();
     if (!machine) {
       return res.json({ success: true, data: { machine: null, bom: null } });
     }
 
-    const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();
-    res.json({ success: true, data: { machine: toMachineResponse(machine), bom: bom || null } });
+    const bomDoc = await RDBOM.findOne({ machine: machine._id, company: companyId });
+    await refreshBOMMaterialPrices(bomDoc, companyId);
+    const bom = bomDoc ? bomDoc.toObject() : null;
+    res.json({ success: true, data: { machine: toMachineResponse(machine), bom } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -881,15 +926,26 @@ export const createBOM = async (req, res) => {
     const { machineId, variant } = req.body;
     if (!machineId) return res.status(400).json({ success: false, message: 'machineId is required' });
 
-    // 1. Fetch Machine and Validate P-Source Type
-    const machine = await Item.findOne({ _id: machineId, companyId: req.user.companyId, productKind: 'Machine' });
+    // 1. Fetch the manufacturing product (Product Master machine or Motor
+    // Master motor) and validate it's actually flagged as manufactured.
+    const machine = await Item.findOne({ _id: machineId, companyId: req.user.companyId, productKind: { $in: ['Machine', 'Motor'] } });
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
 
-    const validSources = ['In House Manufacturing', 'Out Source Manufactured'];
-    if (!validSources.includes(machine.productSourceType)) {
+    if (machine.productKind === 'Machine') {
+      const validSources = ['In House Manufacturing', 'Out Source Manufactured'];
+      if (!validSources.includes(machine.productSourceType)) {
+        return res.status(400).json({
+          success: false,
+          message: `BOM creation blocked. P-Source Type must be In House or Out Source. Current: ${machine.productSourceType}`
+        });
+      }
+    } else if (!machine.internalManufacturing) {
+      // Motor Master doesn't have a P-Source Type field — it uses the same
+      // internalManufacturing flag Inventory items do (see MotorMaster.jsx's
+      // Purchasable/In House toggle).
       return res.status(400).json({
         success: false,
-        message: `BOM creation blocked. P-Source Type must be In House or Out Source. Current: ${machine.productSourceType}`
+        message: 'BOM creation blocked. This motor is marked Purchasable, not In House manufactured.'
       });
     }
 
@@ -904,6 +960,48 @@ export const createBOM = async (req, res) => {
     });
 
     res.status(201).json({ success: true, data: bom });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// R&D's pre-build cost estimate — set/update the BOM's productionCost
+// (labor/job-work to build one unit) and productionExpense (other one-off
+// costs). Always tagged 'Manual' here since this is a person typing an
+// estimate; once Production actually completes a build, Process Execution's
+// approveQC overwrites these same fields with the real figures and tags
+// 'Actual' instead (see productionMfgController.js). Feeds directly into
+// resolveManufacturingItemCost's BOM total once the item has been built.
+export const updateBOMProductionCost = async (req, res) => {
+  try {
+    const { productionCost, productionExpense } = req.body;
+    const toNonNegNumber = (v) => {
+      if (v === '' || v === null || v === undefined) return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : undefined; // undefined = invalid
+    };
+    const cost = toNonNegNumber(productionCost);
+    const expense = toNonNegNumber(productionExpense);
+    if (cost === undefined || expense === undefined) {
+      return res.status(400).json({ success: false, message: 'productionCost and productionExpense must be non-negative numbers' });
+    }
+
+    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+
+    bom.productionCost = cost;
+    bom.productionExpense = expense;
+    bom.productionCostSource = 'Manual';
+    bom.productionCostUpdatedAt = new Date();
+    await bom.save();
+
+    // Harmless no-op if the item hasn't been built yet (resolveManufacturingItemCost
+    // returns cost:null pre-build) — keeps mrp/salePrice fresh once it has.
+    if (bom.machine?.internalManufacturing) {
+      await recalculateItemPricing(bom.machine);
+    }
+
+    res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
