@@ -97,12 +97,15 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
 }
 
 /**
- * Computes a finished item's BOM material cost using each material's MRP
- * (not purchaseCost/stdCost) — used by the Sales Order Form to enforce a
- * minimum Billing Amount. Flat sum, no recursive sub-BOM walk:
- * Σ(material.mrp × qty). Returns { found: false } when there's no
- * RDMachine/BOM for this code at all — callers should skip validation
- * entirely in that case (per product requirement: no BOM = no check).
+ * Computes a finished item's PER-UNIT BOM cost using each material's MRP
+ * (not purchaseCost/stdCost), plus the BOM's own productionCost/productionExpense
+ * — used by the Sales Order Form to enforce a minimum Billing Amount. Flat
+ * sum, no recursive sub-BOM walk: Σ(material.mrp × qty) + productionCost +
+ * productionExpense. Returns { found: false } when there's no BOM for this
+ * code at all — callers should skip validation entirely in that case (per
+ * product requirement: no BOM = no check). This is a PER-UNIT figure — the
+ * caller (Sales Order Form) is responsible for multiplying by however many
+ * units of this machine are actually being ordered.
  */
 export async function computeBOMMaterialsMrpCost(code, companyId) {
   const machine = await Item.findOne({ code, companyId, productKind: 'Machine' }).lean();
@@ -118,15 +121,19 @@ export async function computeBOMMaterialsMrpCost(code, companyId) {
   }).select('code mrp').lean();
   const mrpByCode = new Map(items.map(it => [it.code.toLowerCase(), it.mrp || 0]));
 
-  let totalCost = 0;
+  let materialsCost = 0;
   const materials = activeMaterials.map(m => {
     const mrp = mrpByCode.get((m.code || '').toLowerCase()) || 0;
     const lineTotal = round2(mrp * (m.quantity || 0));
-    totalCost += lineTotal;
+    materialsCost += lineTotal;
     return { code: m.code, item: m.item, quantity: m.quantity, unit: m.unit, mrp, lineTotal };
   });
 
-  return { found: true, totalCost: round2(totalCost), materials };
+  const productionCost = bom.productionCost || 0;
+  const productionExpense = bom.productionExpense || 0;
+  const totalCost = round2(materialsCost + productionCost + productionExpense);
+
+  return { found: true, totalCost, materialsCost: round2(materialsCost), productionCost, productionExpense, materials };
 }
 
 /**
