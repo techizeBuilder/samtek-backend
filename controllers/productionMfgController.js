@@ -999,8 +999,27 @@ export const approveQC = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
-    const { qcBy } = req.body;
+    const { qcBy, productionCost, productionExpense } = req.body;
     if (!qcBy) return res.status(400).json({ success: false, message: 'qcBy is required' });
+
+    // 'Final Testing' (the last step) completing means THIS physical unit is
+    // now built — capture its real production cost/expense right here,
+    // regardless of whether other units in a multi-unit order are still in
+    // progress. Required only at this step; earlier steps don't touch cost.
+    const isFinalStep = idx === PROCESS_STEPS.length - 1;
+    let finalCost, finalExpense;
+    if (isFinalStep) {
+      const toNonNegNumber = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? n : undefined;
+      };
+      finalCost = toNonNegNumber(productionCost);
+      finalExpense = toNonNegNumber(productionExpense);
+      if (finalCost === undefined || finalExpense === undefined) {
+        return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to complete Final Testing' });
+      }
+    }
+
     const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
@@ -1020,6 +1039,42 @@ export const approveQC = async (req, res) => {
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+
+    // 🏗️ This unit just finished Final Testing — mark the machine/motor as
+    // built (first time only) and push this build's real cost/expense into
+    // its BOM, overwriting whatever was there before (a later unit's build
+    // always wins over an earlier one — see RDBOM.productionCost). Product
+    // Master machines and Motor Master motors now ARE Item documents
+    // (productKind:'Machine'/'Motor') — one lookup covers both.
+    if (isFinalStep) {
+      try {
+        const mfgItem = await Item.findOne({
+          $or: [{ code: order.machineCode }, { name: order.machineName }],
+          companyId: order.company
+        });
+        if (mfgItem && (mfgItem.productKind === 'Machine' || mfgItem.productKind === 'Motor')) {
+          const detailsKey = mfgItem.productKind === 'Machine' ? 'machineDetails' : 'motorDetails';
+          if (!mfgItem[detailsKey]?.firstBuiltAt) {
+            mfgItem[detailsKey] = mfgItem[detailsKey] || {};
+            mfgItem[detailsKey].firstBuiltAt = new Date();
+            await mfgItem.save();
+          }
+          if (mfgItem.internalManufacturing) {
+            const bom = await RDBOM.findOne({ machine: mfgItem._id, company: order.company });
+            if (bom) {
+              bom.productionCost = finalCost;
+              bom.productionExpense = finalExpense;
+              bom.productionCostSource = 'Actual';
+              bom.productionCostUpdatedAt = new Date();
+              await bom.save();
+            }
+            await recalculateItemPricing(mfgItem);
+          }
+        }
+      } catch (pricingErr) {
+        console.error('❌ Error recalculating item pricing on unit completion:', pricingErr);
+      }
+    }
 
     // 📊 Feed the delivery-date estimator: ONE sample PER PHYSICAL UNIT, not
     // one lump sample for the whole (possibly multi-unit) order. Each unit's
@@ -1095,28 +1150,10 @@ export const approveQC = async (req, res) => {
         console.error('❌ Error updating Sale storeQCStatus on production completion:', saleUpdateErr);
       }
 
-      // 🏗️ Mark the machine as built + recalculate its manufacturing cost from
-      // the BOM (runs on every completion so cost stays fresh). Product Master
-      // machines now ARE Item documents (productKind:'Machine') — one lookup
-      // covers both what used to be a separate RDMachine record and its Item.
-      try {
-        const mfgItem = await Item.findOne({
-          $or: [{ code: order.machineCode }, { name: order.machineName }],
-          companyId: order.company
-        });
-        if (mfgItem) {
-          if (mfgItem.productKind === 'Machine' && !mfgItem.machineDetails?.firstBuiltAt) {
-            mfgItem.machineDetails = mfgItem.machineDetails || {};
-            mfgItem.machineDetails.firstBuiltAt = new Date();
-            await mfgItem.save();
-          }
-          if (mfgItem.internalManufacturing) {
-            await recalculateItemPricing(mfgItem);
-          }
-        }
-      } catch (pricingErr) {
-        console.error('❌ Error recalculating item pricing on production completion:', pricingErr);
-      }
+      // (firstBuiltAt + BOM production cost + pricing recalculation now
+      // happen per-unit, right when THAT unit's Final Testing completes —
+      // see the isFinalStep block above. That covers this whole-order
+      // completion too, since it's only reached once every unit is done.)
 
       // 🏭 Auto-create QC Job for completed production order
       try {

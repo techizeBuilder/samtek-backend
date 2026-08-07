@@ -5,6 +5,7 @@ import PurchaseRequest from '../models/PurchaseRequest.js';
 import { Company } from '../models/Company.js';
 import { sendPurchaseOrderEmail } from '../services/emailService.js';
 import { USER_ROLES } from '../shared/schema.js';
+import { applyPricingToItem } from '../services/itemPricingService.js';
 
 export const getPurchases = async (req, res) => {
   try {
@@ -685,7 +686,7 @@ export const getPurchaseInventoryItems = async (req, res) => {
     }
 
     const items = await Item.find(filter)
-      .select('_id name code category subCategory unit qty purchaseCost productKind updatedAt')
+      .select('_id name code category subCategory unit qty purchaseCost mrp salePrice profitPercent discountPercent productKind updatedAt')
       .sort({ name: 1 })
       .lean();
 
@@ -716,8 +717,11 @@ export const updatePurchaseItemCost = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Item not found' });
     }
 
-    item.purchaseCost = Number(purchaseCost);
-    await item.save();
+    // Sets purchaseCost and recalculates mrp/salePrice from the item's own
+    // profitPercent/discountPercent (Company Admin > Pricing Value) in one
+    // step — same formula every other purchase-cost-driven recalculation
+    // uses (see itemPricingService.js).
+    await applyPricingToItem(item, Number(purchaseCost), 'Purchase');
 
     res.json({
       success: true,
@@ -731,6 +735,8 @@ export const updatePurchaseItemCost = async (req, res) => {
         unit: item.unit,
         qty: item.qty,
         purchaseCost: item.purchaseCost,
+        mrp: item.mrp,
+        salePrice: item.salePrice,
         productKind: item.productKind,
         updatedAt: item.updatedAt
       }

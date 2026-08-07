@@ -126,6 +126,9 @@ const itemSchema = new mongoose.Schema({
     rpm: { type: Number, default: null },
     pole: { type: String, default: '', trim: true },
     phase: { type: String, default: '', trim: true },
+    // Set the first time a ProductionOrder for this motor reaches 'Completed'
+    // — mirrors machineDetails.firstBuiltAt, see itemPricingService.js.
+    firstBuiltAt: { type: Date, default: null },
   },
   stdCost: {
     type: Number,
@@ -209,16 +212,6 @@ const itemSchema = new mongoose.Schema({
   purchase: {
     type: Boolean,
     default: true
-  },
-  // R&D classification used to bucket an item across Inventory (null),
-  // Product Master (Machine) and Motor Master (Motor) — same Item
-  // collection, filtered by this field. See inventoryController.getItems
-  // and purchaseController.getPurchaseInventoryItems.
-  productKind: {
-    type: String,
-    enum: ['Machine', 'Motor', null],
-    default: null,
-    trim: true
   },
   purchaseUnitType: {
     type: String,
