@@ -24,7 +24,7 @@ export const createDesignation = async (req, res) => {
 };
 
 export const getDesignations = async (req, res) => {
-  const { companyId, departmentId } = req.query;
+  const { companyId, departmentId, search, page, limit } = req.query;
 
   const filter = {};
 
@@ -40,11 +40,31 @@ export const getDesignations = async (req, res) => {
 
   if (departmentId) filter.departmentId = departmentId;
 
-  const data = await Designation.find(filter)
+  if (search) {
+    filter.name = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  }
+
+  const query = Designation.find(filter)
     .populate("companyId", "name")
     .populate("departmentId", "name")
     .sort({ createdAt: -1 });
 
+  // Pagination is opt-in via `page` — dropdown consumers (DesignationModal's
+  // department picker etc.) call this with no params and still need the
+  // full plain array back.
+  if (page) {
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.max(1, parseInt(limit) || 15);
+    const total = await Designation.countDocuments(filter);
+    const data = await query.skip((pageNum - 1) * limitNum).limit(limitNum);
+    return res.json({
+      success: true,
+      data,
+      pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+    });
+  }
+
+  const data = await query;
   res.json(data);
 };
 

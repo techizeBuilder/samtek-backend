@@ -28,7 +28,7 @@ export const createDepartment = async (req, res) => {
 
 /* GET ALL */
 export const getDepartments = async (req, res) => {
-  const { branchId, companyId } = req.query;
+  const { branchId, companyId, search, page, limit } = req.query;
   const filter = {};
 
   if (req.user && req.user.role === 'Super Admin') {
@@ -43,11 +43,32 @@ export const getDepartments = async (req, res) => {
 
   if (branchId) filter.branchId = branchId;
 
-  const departments = await Department.find(filter)
+  if (search) {
+    filter.name = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  }
+
+  const query = Department.find(filter)
     .populate("companyId", "name unitName")
     .populate("branchId", "name")
-    .populate("headEmployeeId", "fullName name email");
+    .populate("headEmployeeId", "fullName name email")
+    .sort({ createdAt: -1 });
 
+  // Pagination is opt-in via `page` — dropdown consumers (CostCenterModal,
+  // DesignationModal) call this with no params and still need the full
+  // plain array back.
+  if (page) {
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.max(1, parseInt(limit) || 15);
+    const total = await Department.countDocuments(filter);
+    const departments = await query.skip((pageNum - 1) * limitNum).limit(limitNum);
+    return res.json({
+      success: true,
+      data: departments,
+      pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+    });
+  }
+
+  const departments = await query;
   res.json(departments);
 };
 

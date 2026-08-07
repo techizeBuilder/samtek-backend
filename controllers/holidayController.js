@@ -71,13 +71,32 @@ export const getAllHolidays = async (req, res) => {
         // Opt-in month filter ("YYYY-MM") — only narrows the query when a
         // caller (e.g. the attendance calendar) explicitly asks for one
         // month; other consumers of this endpoint keep getting the full list.
-        const { month } = req.query;
+        const { month, search, page, limit } = req.query;
         if (month) {
             const [y, m] = month.split('-').map(Number);
             filter.date = { $gte: new Date(y, m - 1, 1), $lt: new Date(y, m, 1) };
         }
 
-        const holidays = await Holiday.find(filter).sort({ date: 1 });
+        if (search) {
+            filter.title = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        }
+
+        const query = Holiday.find(filter).sort({ date: 1 });
+
+        // Pagination is opt-in via `page` — AttendanceReport.tsx/WorkingDays.tsx
+        // need the full holiday list and call this with no params.
+        if (page) {
+            const pageNum = Math.max(1, parseInt(page) || 1);
+            const limitNum = Math.max(1, parseInt(limit) || 15);
+            const total = await Holiday.countDocuments(filter);
+            const holidays = await query.skip((pageNum - 1) * limitNum).limit(limitNum);
+            return res.json({
+                data: holidays,
+                pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+            });
+        }
+
+        const holidays = await query;
         res.json(holidays);
     } catch (error) {
         res.status(500).json({

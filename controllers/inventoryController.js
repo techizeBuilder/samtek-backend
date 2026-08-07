@@ -209,6 +209,7 @@ export const getItems = async (req, res) => {
       group,
       lowStock,
       quantity, // Add quantity filter
+      productKind,
       sortBy = 'name',
       sortOrder = 'asc'
     } = req.query;
@@ -341,6 +342,12 @@ export const getItems = async (req, res) => {
     // Low stock filter
     if (lowStock === 'true') {
       query.$expr = { $lte: ['$qty', '$minStock'] };
+    }
+
+    // Product kind filter — 'none'/'null' means plain inventory items with
+    // no productKind set (also matches legacy docs missing the field).
+    if (productKind !== undefined && productKind !== '') {
+      query.productKind = (productKind === 'none' || productKind === 'null') ? null : productKind;
     }
 
 

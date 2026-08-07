@@ -255,6 +255,7 @@ export const deleteLeave = async (req, res) => {
 export const getTodayTeamLeaves = async (req, res) => {
   try {
     const managerId = req.user._id;
+    const { search, page, limit } = req.query;
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -273,12 +274,34 @@ export const getTodayTeamLeaves = async (req, res) => {
       .lean();
 
     // ❗ populate ke baad null employees hata do
-    const filteredLeaves = leaves.filter((leave) => leave.employee).map(l => {
+    let filteredLeaves = leaves.filter((leave) => leave.employee).map(l => {
       if (l.employee) {
         l.employee.name = l.employee.fullName || l.employee.username || 'Unknown';
       }
       return l;
     });
+
+    // Search by employee name or leave type — was previously done client-side.
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filteredLeaves = filteredLeaves.filter(
+        (l) => re.test(l.employee?.name || '') || re.test(l.leaveType || '')
+      );
+    }
+
+    // Pagination is opt-in via `page` — this "who's out today" widget is
+    // naturally small (bounded by team size + a single day), so callers
+    // that don't paginate still get the full list back.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = filteredLeaves.length;
+      const pageItems = filteredLeaves.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(filteredLeaves);
   } catch (error) {
@@ -292,6 +315,7 @@ export const getTodayTeamLeaves = async (req, res) => {
 export const getAllLeaveRequests = async (req, res) => {
   try {
     const managerId = req.user._id;
+    const { search, status, page, limit } = req.query;
 
     // 🔹 Step 1: manager ke under ke employees
     const teamEmployees = await User.find({ reportingManager: managerId }, "_id");
@@ -299,19 +323,40 @@ export const getAllLeaveRequests = async (req, res) => {
     const employeeIds = teamEmployees.map((e) => e._id);
 
     // 🔹 Step 2: un employees ki leave requests
-    const fetchedLeaves = await Leave.find({
-      employee: { $in: employeeIds },
-    })
+    const filter = { employee: { $in: employeeIds } };
+    if (status && status !== 'all') filter.status = status;
+
+    const fetchedLeaves = await Leave.find(filter)
       .populate("employee", "fullName username email role")
       .sort({ createdAt: -1 })
       .lean();
 
-    const leaves = fetchedLeaves.map(l => {
+    let leaves = fetchedLeaves.map(l => {
       if (l.employee) {
         l.employee.name = l.employee.fullName || l.employee.username || 'Unknown';
       }
       return l;
     });
+
+    // Search by employee name or leave type.
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      leaves = leaves.filter((l) => re.test(l.employee?.name || '') || re.test(l.leaveType || ''));
+    }
+
+    // Pagination is opt-in via `page` — LeavesEmployee.tsx's summary counts
+    // still need the full unpaged array, so it can keep calling this with
+    // no params.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = leaves.length;
+      const pageItems = leaves.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.status(200).json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.status(200).json(leaves);
   } catch (error) {
@@ -388,8 +433,9 @@ export const getAllEmployeesLeaveRequests = async (
   res
 ) => {
   try {
+    const { search, status, page, limit } = req.query;
     const filter = {};
-    
+
     // If user is not a global Super Admin, filter by their company
     if (req.user.role !== 'Super Admin' && req.user.role !== 'Superadmin' && req.user.companyId) {
       // Find all users in the same company
@@ -397,17 +443,39 @@ export const getAllEmployeesLeaveRequests = async (
       const userIds = usersInCompany.map(u => u._id);
       filter.employee = { $in: userIds };
     }
+    if (status && status !== 'all') filter.status = status;
+
     const fetchedLeaves = await Leave.find(filter)
       .populate("employee", "fullName username email role")
       .sort({ createdAt: -1 })
       .lean();
 
-    const leaves = fetchedLeaves.map(l => {
+    let leaves = fetchedLeaves.map(l => {
       if (l.employee) {
         l.employee.name = l.employee.fullName || l.employee.username || 'Unknown';
       }
       return l;
     });
+
+    // Search by employee name or leave type.
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      leaves = leaves.filter((l) => re.test(l.employee?.name || '') || re.test(l.leaveType || ''));
+    }
+
+    // Pagination is opt-in via `page` — PayrollRun.tsx also depends on this
+    // endpoint for a full array (approved-leave-day counts per employee),
+    // so it can keep calling with no params.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = leaves.length;
+      const pageItems = leaves.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.status(200).json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.status(200).json(leaves);
   } catch (error) {

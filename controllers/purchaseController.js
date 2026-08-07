@@ -620,6 +620,123 @@ export const getPurchaseItems = async (req, res) => {
   }
 };
 
+// ==================== PURCHASE > INVENTORY (cost-setting) ====================
+// Powers the "Inventory" tab set under Accounts > Purchases: three read
+// views (Tools & Raw Material / Product Master / Motor Master) over the
+// same Item collection R&D uses, bucketed by productKind, restricted to
+// items flagged purchase:true. Purpose here is narrow — list + let
+// Purchase set/update purchaseCost per item — not full item CRUD.
+const PURCHASE_INVENTORY_KIND_PARAMS = ['none', 'Machine', 'Motor'];
+
+const purchaseInventoryProductKindFilter = (productKind) => {
+  const kind = PURCHASE_INVENTORY_KIND_PARAMS.includes(productKind) ? productKind : 'none';
+  return kind === 'none' ? null : kind;
+};
+
+// Company scoping helper — same "$or over store/companyId, string and
+// ObjectId form" pattern getItems already uses for Store/R&D roles
+// (inventoryController.js), because Item.store has documented legacy rows
+// that are missing/non-ObjectId while companyId is set, and vice versa.
+// Returns null when the user has no companyId at all, so callers can fail
+// closed (never leak un-scoped items) instead of querying store: null,
+// which would match every legacy item with no store backfilled.
+const companyScopeFilter = (req) => {
+  const companyId = req.user.companyId;
+  if (!companyId) return null;
+  const companyIdStr = companyId.toString();
+  return {
+    $or: [
+      { store: companyIdStr },
+      { store: companyId },
+      { companyId: companyIdStr },
+      { companyId }
+    ]
+  };
+};
+
+// GET /api/accounts/purchases/inventory?productKind=none|Machine|Motor&search=
+export const getPurchaseInventoryItems = async (req, res) => {
+  try {
+    const { productKind, search = '' } = req.query;
+    const scope = companyScopeFilter(req);
+
+    // No company on this user => no items, never leak un-scoped data.
+    if (!scope) {
+      return res.json({ success: true, items: [] });
+    }
+
+    const filter = {
+      ...scope,
+      purchase: true,
+      productKind: purchaseInventoryProductKindFilter(productKind)
+    };
+
+    if (search) {
+      const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$and = [
+        { $or: scope.$or },
+        { $or: [{ name: { $regex: escapedSearch, $options: 'i' } }, { code: { $regex: escapedSearch, $options: 'i' } }] }
+      ];
+      delete filter.$or;
+    }
+
+    const items = await Item.find(filter)
+      .select('_id name code category subCategory unit qty purchaseCost productKind updatedAt')
+      .sort({ name: 1 })
+      .lean();
+
+    res.json({ success: true, items });
+  } catch (error) {
+    console.error('❌ Get purchase inventory items error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch inventory items', error: error.message });
+  }
+};
+
+// PUT /api/accounts/purchases/inventory/:id/purchase-cost
+export const updatePurchaseItemCost = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { purchaseCost } = req.body;
+
+    if (purchaseCost === undefined || purchaseCost === null || purchaseCost === '' || isNaN(purchaseCost) || Number(purchaseCost) < 0) {
+      return res.status(400).json({ success: false, message: 'A valid, non-negative purchase cost is required' });
+    }
+
+    const scope = companyScopeFilter(req);
+    if (!scope) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    const item = await Item.findOne({ _id: id, purchase: true, ...scope });
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    item.purchaseCost = Number(purchaseCost);
+    await item.save();
+
+    res.json({
+      success: true,
+      message: 'Purchase cost updated successfully',
+      item: {
+        _id: item._id,
+        name: item.name,
+        code: item.code,
+        category: item.category,
+        subCategory: item.subCategory,
+        unit: item.unit,
+        qty: item.qty,
+        purchaseCost: item.purchaseCost,
+        productKind: item.productKind,
+        updatedAt: item.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error('❌ Update purchase item cost error:', error);
+    res.status(500).json({ success: false, message: 'Failed to update purchase cost', error: error.message });
+  }
+};
+
 export const sendPOToVendor = async (req, res) => {
   try {
     const { id } = req.params;

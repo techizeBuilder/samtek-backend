@@ -54,6 +54,7 @@ export const addSalaryStructure = async (req, res) => {
  */
 export const getAllSalaryStructures = async (req, res) => {
   try {
+    const { search, page, limit } = req.query;
     let userIds;
 
     if (req.user.role === 'Super Admin') {
@@ -73,7 +74,7 @@ export const getAllSalaryStructures = async (req, res) => {
 
     const filter = userIds ? { employee: { $in: userIds } } : {};
 
-    const salaryList = await SalaryStructure.find(filter)
+    let salaryList = await SalaryStructure.find(filter)
       .populate({
         path: "employee",
         select: "fullName email mobile role employeeId joiningDate designationId departmentId branchId",
@@ -84,6 +85,25 @@ export const getAllSalaryStructures = async (req, res) => {
         ],
       })
       .sort({ createdAt: -1 });
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      salaryList = salaryList.filter(
+        (s) => re.test(s.employee?.fullName || '') || re.test(s.employee?.email || '') || re.test(s.employee?.employeeId || '')
+      );
+    }
+
+    // Pagination is opt-in via `page`.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = salaryList.length;
+      const pageItems = salaryList.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      return res.json({
+        data: pageItems,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
 
     res.json(salaryList);
   } catch (error) {

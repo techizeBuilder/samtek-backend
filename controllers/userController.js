@@ -1,8 +1,37 @@
 import User from '../models/User.js';
 import { Company } from '../models/Company.js';
+import Department from '../models/Department.js';
+import Designation from '../models/Designation.js';
 import { USER_ROLES } from '../shared/schema.js';
 import bcrypt from 'bcryptjs';
 import { generateEmployeeId } from '../utils/employeeUtils.js';
+
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// "01/2024" or "2024-01" style free-text → a [start, end) month range for
+// matching a Date field. Returns null if it can't be parsed, so the filter
+// is safely skipped rather than crashing.
+const parseMonthYearRange = (value) => {
+  const mmYYYY = value.match(/^(\d{1,2})\/(\d{4})$/);
+  if (mmYYYY) {
+    const month = parseInt(mmYYYY[1], 10) - 1;
+    const year = parseInt(mmYYYY[2], 10);
+    return { $gte: new Date(year, month, 1), $lt: new Date(year, month + 1, 1) };
+  }
+  const yyyyMM = value.match(/^(\d{4})-(\d{1,2})$/);
+  if (yyyyMM) {
+    const year = parseInt(yyyyMM[1], 10);
+    const month = parseInt(yyyyMM[2], 10) - 1;
+    return { $gte: new Date(year, month, 1), $lt: new Date(year, month + 1, 1) };
+  }
+  const asDate = new Date(value);
+  if (!isNaN(asDate.getTime())) {
+    const start = new Date(asDate.getFullYear(), asDate.getMonth(), asDate.getDate());
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    return { $gte: start, $lt: end };
+  }
+  return null;
+};
 
 export const getNextEmployeeId = async (req, res) => {
   try {
@@ -27,7 +56,18 @@ export const getUsers = async (req, res) => {
       status,
       companyId, // Extract companyId from frontend
       sortBy = 'createdAt',
-      sortOrder = 'desc'
+      sortOrder = 'desc',
+      // Employee.tsx filter panel — wired to existing User/Company/Branch/
+      // Department/Designation fields (see Employee.tsx filters state)
+      designation,
+      company,
+      branch,
+      department,
+      manager,
+      joiningDate,
+      employmentType,
+      contact,
+      gender
     } = req.query;
 
     const skip = (page - 1) * parseInt(limit);
@@ -65,7 +105,8 @@ export const getUsers = async (req, res) => {
       query.$or = [
         { username: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
-        { fullName: { $regex: search, $options: 'i' } }
+        { fullName: { $regex: search, $options: 'i' } },
+        { employeeId: { $regex: search, $options: 'i' } }
       ];
     }
 
@@ -79,6 +120,68 @@ export const getUsers = async (req, res) => {
 
     if (status && status !== 'all') {
       query.isActive = status === 'active';
+    }
+
+    // 2b. Employee.tsx filter panel — designation/branch/department/manager/
+    // company are ObjectId refs but the filter panel is free-text, so we
+    // resolve name → ids first. An empty match array correctly yields zero
+    // results (the filter really doesn't match anything) rather than being
+    // silently ignored.
+    if (gender) {
+      query.gender = new RegExp(`^${escapeRegex(gender)}$`, 'i');
+    }
+
+    if (contact) {
+      const contactRe = new RegExp(escapeRegex(contact), 'i');
+      query.$and = (query.$and || []).concat([{ $or: [{ mobile: contactRe }, { email: contactRe }] }]);
+    }
+
+    if (employmentType) {
+      query.employeeType = new RegExp(escapeRegex(employmentType), 'i');
+    }
+
+    if (joiningDate) {
+      const range = parseMonthYearRange(joiningDate);
+      if (range) query.joiningDate = range;
+    }
+
+    if (designation) {
+      const ids = await Designation.find({ name: new RegExp(escapeRegex(designation), 'i') }).distinct('_id');
+      query.designationId = { $in: ids };
+    }
+
+    // Note: no separate `branch` handling here — the "Unit" filter is
+    // already served by the pre-existing `unit` (plain string) match above.
+    // User.branchId isn't a real Branch document (AddUser.tsx sets it to the
+    // selected Company's own _id) and User.unit is never populated by the
+    // current employee-creation flow either, so we can't safely tell which
+    // one is reliably populated across existing records — stacking an
+    // additional branchId condition on top of the existing `unit` match
+    // risks AND-ing together two filters that disagree and silently zeroing
+    // out results for a filter that already works today.
+
+    if (department) {
+      const ids = await Department.find({ name: new RegExp(escapeRegex(department), 'i') }).distinct('_id');
+      query.departmentId = { $in: ids };
+    }
+
+    // Only apply the manager-name filter if the role-isolation block above
+    // didn't already pin reportingManager to the current Manager's own id.
+    if (manager && !query.reportingManager) {
+      const managerRe = new RegExp(escapeRegex(manager), 'i');
+      const ids = await User.find({ $or: [{ fullName: managerRe }, { username: managerRe }] }).distinct('_id');
+      query.reportingManager = { $in: ids };
+    }
+
+    // Only apply the free-text company-name filter if companyId isn't
+    // already pinned to one value (own-company scoping, or the Super Admin
+    // company dropdown) — narrowing an already-exact match further by name
+    // would rarely be intentional and risks an impossible AND.
+    if (company && !query.companyId) {
+      const ids = await Company.find({
+        $or: [{ name: new RegExp(escapeRegex(company), 'i') }, { unitName: new RegExp(escapeRegex(company), 'i') }]
+      }).distinct('_id');
+      query.companyId = { $in: ids };
     }
 
     // 3. Execute Query

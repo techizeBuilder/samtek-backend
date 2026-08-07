@@ -8,7 +8,7 @@ import mongoose from "mongoose";
 export const getTeamPerformanceMetrics = async (req, res) => {
   try {
     const managerId = req.user._id;
-    const { month, year } = req.query;
+    const { month, year, search, page, limit } = req.query;
 
     if (!month || !year) {
       return res.status(400).json({ message: "Month and Year are required" });
@@ -108,6 +108,23 @@ export const getTeamPerformanceMetrics = async (req, res) => {
       { name: "Poor (D)", value: processedTeam.filter(m => m.score < 2.5).length, color: "#f43f5e" },
     ];
 
+    // Search/pagination apply only to the `report` table — stats/distribution
+    // above are already computed from the full team and stay unaffected.
+    let report = processedTeam;
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      report = report.filter((m) => re.test(m.name || ''));
+    }
+
+    let reportPagination;
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = report.length;
+      reportPagination = { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total };
+      report = report.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+    }
+
     res.json({
       stats: {
         teamStrength: teamMembers.length,
@@ -116,7 +133,8 @@ export const getTeamPerformanceMetrics = async (req, res) => {
         topPerformer: topPerformer ? topPerformer.name : "N/A",
       },
       distribution,
-      report: processedTeam,
+      report,
+      ...(reportPagination ? { pagination: reportPagination } : {}),
     });
   } catch (error) {
     console.error("Error in getTeamPerformanceMetrics:", error);

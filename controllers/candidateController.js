@@ -48,6 +48,7 @@ export const addCandidate = async (req, res) => {
  */
 export const getAllCandidates = async (req, res) => {
   try {
+    const { search, page, limit } = req.query;
     const filter = {};
 
     if (req.user.role === 'Super Admin') {
@@ -61,7 +62,12 @@ export const getAllCandidates = async (req, res) => {
       }
     }
 
-    const candidates = await Candidate.find(filter)
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ name: re }, { email: re }, { jobTitle: re }];
+    }
+
+    const query = Candidate.find(filter)
       .populate({
         path: "jobId",
         populate: {
@@ -70,6 +76,21 @@ export const getAllCandidates = async (req, res) => {
         },
       })
       .sort({ createdAt: -1 });
+
+    // Pagination is opt-in via `page` — InterviewPipeline.tsx needs the full
+    // list for its status-grouped board and calls this with no params.
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = await Candidate.countDocuments(filter);
+      const candidates = await query.skip((pageNum - 1) * limitNum).limit(limitNum);
+      return res.json({
+        data: candidates,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
+
+    const candidates = await query;
     res.json(candidates);
   } catch (error) {
     res.status(500).json({
@@ -168,6 +189,7 @@ export const deleteCandidate = async (req, res) => {
 export const getCandidatesForManager = async (req, res) => {
   try {
     const managerId = req.user._id;
+    const { search, page, limit } = req.query;
 
     // Company-wise scope filter
     const companyFilter = {};
@@ -180,16 +202,33 @@ export const getCandidatesForManager = async (req, res) => {
     const jobIds = jobs.map((job) => job._id);
 
     // 2. Find candidates for these jobs OR directly assigned candidates (within company)
-    const candidates = await Candidate.find({
+    const candidateFilter = {
       ...companyFilter,
       $or: [
         { jobId: { $in: jobIds } },
         { recruitingManager: managerId },
       ],
-    })
-      .populate("jobId")
-      .sort({ createdAt: -1 });
+    };
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      candidateFilter.$and = [{ $or: candidateFilter.$or }, { $or: [{ name: re }, { email: re }, { jobTitle: re }] }];
+      delete candidateFilter.$or;
+    }
 
+    const query = Candidate.find(candidateFilter).populate("jobId").sort({ createdAt: -1 });
+
+    if (page) {
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      const limitNum = Math.max(1, parseInt(limit) || 15);
+      const total = await Candidate.countDocuments(candidateFilter);
+      const candidates = await query.skip((pageNum - 1) * limitNum).limit(limitNum);
+      return res.json({
+        data: candidates,
+        pagination: { current: pageNum, total: Math.ceil(total / limitNum) || 1, count: total },
+      });
+    }
+
+    const candidates = await query;
     res.json(candidates);
   } catch (error) {
     res.status(500).json({
