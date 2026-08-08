@@ -288,6 +288,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const leadRouter = (await import('./routes/leadRoutes.js')).default;
             app.use('/api/leads', leadRouter);
             console.log('Lead routes registered at /api/leads');
+            const emailRouter = (await import('./routes/emailRoutes.js')).default;
+            app.use('/api/email', emailRouter);
+            console.log('Email routes registered at /api/email');
             const whatsappRouter = (await import('./routes/whatsappRoutes.js')).default;
             app.use('/api/whatsapp', whatsappRouter);
             console.log('WhatsApp routes registered at /api/whatsapp');
