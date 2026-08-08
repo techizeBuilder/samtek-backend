@@ -31,6 +31,11 @@ const MaterialSchema = new mongoose.Schema({
   // locked BOM stays stable even if the underlying Inventory item changes.
   category: { type: String, default: '' },
   subCategory: { type: String, default: '' },
+  // Snapshot of Item.itemType (the client's Raw Material/Tool/Readymade
+  // Material/Assets classification) — named inventoryItemType, not itemType,
+  // to avoid colliding with the unrelated legacy `itemType` field above
+  // ("MaterialType", form no longer collects it).
+  inventoryItemType: { type: String, default: '' },
   sourceType: { type: String, default: '' },
   itemSourceType: { type: String, default: '' },
   itemCategories: [{ type: String }],

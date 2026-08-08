@@ -229,6 +229,9 @@ export const getItems = async (req, res) => {
       productKind,
       category,
       subCategory,
+      itemType,
+      sourceType,
+      itemSourceType,
       store,
       location,
       group,
@@ -372,6 +375,20 @@ export const getItems = async (req, res) => {
       query.subCategory = subCategory;
     }
 
+    // Item Type filter (the client's Raw Material/Tool/Readymade Material/
+    // Assets classification — see Item.itemType)
+    if (itemType) {
+      query.itemType = itemType;
+    }
+
+    // Source Type / Item Source Type filters
+    if (sourceType) {
+      query.sourceType = sourceType;
+    }
+    if (itemSourceType) {
+      query.itemSourceType = itemSourceType;
+    }
+
     // Group filter
     if (group) {
       query.group = group;
@@ -417,6 +434,8 @@ export const getItems = async (req, res) => {
         sortOptions.code = sortOrder === 'desc' ? -1 : 1;
       } else if (sortBy === 'category') {
         sortOptions.category = sortOrder === 'desc' ? -1 : 1;
+      } else if (sortBy === 'itemType') {
+        sortOptions.itemType = sortOrder === 'desc' ? -1 : 1;
       } else if (sortBy === 'qty' || sortBy === 'quantity') { // Use quantity instead of quality
         sortOptions.qty = sortOrder === 'desc' ? -1 : 1;
       }
@@ -1029,16 +1048,19 @@ export const updateItem = async (req, res) => {
 };
 
 // ── 4. ENHANCED VALIDATION HELPER FUNCTION ──
+// isUpdate: PUT /items/:id is also used for lightweight partial updates (e.g.
+// the Discontinue/Continue toggle, which sends only { isDiscontinued }) — a
+// required field is only enforced on update if the caller actually included
+// it in the payload; omitted fields are left as-is by the DB layer, so there's
+// nothing to validate. On create (isUpdate: false) every required field is
+// always checked, since the item doesn't exist yet.
 const validateItemData = (data, isUpdate = false) => {
   const errors = {};
+  const has = (key) => !isUpdate || Object.prototype.hasOwnProperty.call(data, key);
 
   // Required fields validation
-  if (!data.name || typeof data.name !== 'string' || data.name.trim().length < 2) {
+  if (has('name') && (!data.name || typeof data.name !== 'string' || data.name.trim().length < 2)) {
     errors.name = 'Item name must be at least 2 characters';
-  }
-
-  if (!data.category || typeof data.category !== 'string' || data.category.trim().length === 0) {
-    errors.category = 'Category is required';
   }
 
   if (data.customerCategory && typeof data.customerCategory !== 'string') {
@@ -1053,15 +1075,15 @@ const validateItemData = (data, isUpdate = false) => {
     errors.quality = 'Quality must be a valid string';
   }
 
-  if (!data.unit || typeof data.unit !== 'string' || data.unit.trim().length === 0) {
+  if (has('unit') && (!data.unit || typeof data.unit !== 'string' || data.unit.trim().length === 0)) {
     errors.unit = 'Unit is required';
   }
 
-  if (!data.type || typeof data.type !== 'string' || data.type.trim().length === 0) {
+  if (has('type') && (!data.type || typeof data.type !== 'string' || data.type.trim().length === 0)) {
     errors.type = 'Item type is required';
   }
 
-  if (!data.importance || typeof data.importance !== 'string' || data.importance.trim().length === 0) {
+  if (has('importance') && (!data.importance || typeof data.importance !== 'string' || data.importance.trim().length === 0)) {
     errors.importance = 'Importance level is required';
   }
 
@@ -2827,14 +2849,36 @@ export const getInventoryStats = async (req, res) => {
     });
     const categoryQtyStats = await Item.aggregate(categoryQtyPipeline);
 
+    // Item Type stats (client's Raw Material/Tool/Readymade Material/Assets
+    // classification, Item.itemType) — the new form no longer collects
+    // category/subCategory, so this is what ModernInventoryUI's stat cards
+    // use in place of the old Category count.
+    const itemTypePipeline = [];
+    if (hasFilter) itemTypePipeline.push({ $match: baseMatchStage });
+    itemTypePipeline.push(
+      { $match: { itemType: { $nin: [null, ''] } } },
+      { $group: { _id: '$itemType', count: { $sum: 1 } } }
+    );
+    const itemTypeStats = await Item.aggregate(itemTypePipeline);
+
+    // Discontinued count — Item Status is now a real, form-editable field
+    // (see SimpleInventoryForm.jsx), so this is meaningful going forward.
+    const discontinuedPipeline = [];
+    if (hasFilter) discontinuedPipeline.push({ $match: baseMatchStage });
+    discontinuedPipeline.push({ $match: { isDiscontinued: true } }, { $count: 'count' });
+    const discontinuedResult = await Item.aggregate(discontinuedPipeline);
+
     res.json({
       stats: {
         ...stats[0] || { totalItems: 0, totalValue: 0, totalQty: 0, lowStockCount: 0 },
-        totalCategories: categoryStats.length
+        totalCategories: categoryStats.length,
+        totalItemTypes: itemTypeStats.length,
+        discontinuedCount: discontinuedResult[0]?.count || 0
       },
       categoryStats,
       typeStats,
-      categoryQtyStats
+      categoryQtyStats,
+      itemTypeStats
     });
   } catch (error) {
     console.error('Get inventory stats error:', error);
@@ -3004,19 +3048,19 @@ export const deleteGroup = async (req, res) => {
 };
 
 // ================================================================
-//   INVENTORY MASTER OPTIONS (ItemCategory / SourceType / ItemSourceType)
-//   "+"-addable dynamic dropdown values, scoped to Inventory only — see
-//   InventoryMasterOption.js for why these are kept separate from both the
-//   existing Category/Group system and R&D's RDMasterOption. Client's "Item
-//   Type" classification is handled via category/subCategory instead.
+//   INVENTORY MASTER OPTIONS (ItemCategory / SourceType / ItemSourceType /
+//   ItemType) "+"-addable dynamic dropdown values, scoped to Inventory only
+//   — see InventoryMasterOption.js for why these are kept separate from both
+//   the Category/Group system and R&D's RDMasterOption.
 // ================================================================
 
 // Item column each field is the live source of truth for. ItemCategory is the
 // only multi-select (array) — its rename/delete cascade needs $ positional /
-// arrayFilters instead of a plain $set like the other two (single-value) fields.
+// arrayFilters instead of a plain $set like the other single-value fields.
 const INVENTORY_ITEM_FIELD_MAP = {
   SourceType: 'sourceType',
   ItemSourceType: 'itemSourceType',
+  ItemType: 'itemType',
 };
 
 export const getInventoryDropdownOptions = async (req, res) => {
@@ -3028,6 +3072,7 @@ export const getInventoryDropdownOptions = async (req, res) => {
       ItemCategory: options.filter(o => o.field === 'ItemCategory').map(toOption),
       SourceType: options.filter(o => o.field === 'SourceType').map(toOption),
       ItemSourceType: options.filter(o => o.field === 'ItemSourceType').map(toOption),
+      ItemType: options.filter(o => o.field === 'ItemType').map(toOption),
     };
     res.json({ success: true, data: grouped });
   } catch (err) {
@@ -3038,7 +3083,7 @@ export const getInventoryDropdownOptions = async (req, res) => {
 export const addInventoryDropdownOption = async (req, res) => {
   try {
     const { field, value } = req.body;
-    if (!['ItemCategory', 'SourceType', 'ItemSourceType'].includes(field)) {
+    if (!['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType'].includes(field)) {
       return res.status(400).json({ success: false, message: 'Invalid field type.' });
     }
     if (!value || !value.trim()) {

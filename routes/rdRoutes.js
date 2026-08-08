@@ -5,7 +5,7 @@ import {
   getMachines, createMachine, updateMachine,
   updateDesignStatus, updateReleaseStatus, discontinueMachine, reactivateMachine,
   getBOMs, getBOMForMachine, getBOMByMachineCode, getBOMCostByMachineCode, createBOM, addMaterial, updateMaterial, deleteMaterial,
-  lockBOM, discontinueMaterial, reactivateMaterial, updateBOMProductionCost,
+  lockBOM, downloadBOMPdf, discontinueMaterial, reactivateMaterial, updateBOMProductionCost,
   getPrototypes, createPrototype, updatePrototype,
   getChangeRequests, createChangeRequest, resolveChangeRequest,
   getToolProcesses, addTool, removeTool, discontinueTool, reactivateTool, addProcess, removeProcess,
@@ -78,6 +78,7 @@ router.post('/boms/:id/materials', addMaterial);
 router.put('/boms/:id/materials/:materialId', updateMaterial);
 router.delete('/boms/:id/materials/:materialId', deleteMaterial);
 router.put('/boms/:id/lock', lockBOM);
+router.get('/boms/:id/download', downloadBOMPdf);
 router.put('/boms/:id/materials/:materialId/discontinue', discontinueMaterial);
 router.put('/boms/:id/materials/:materialId/reactivate', reactivateMaterial);
 router.put('/boms/:id/production-cost', updateBOMProductionCost);

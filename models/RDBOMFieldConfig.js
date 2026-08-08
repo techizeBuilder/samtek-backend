@@ -2,35 +2,28 @@ import mongoose from 'mongoose';
 
 // The fixed catalog of Inventory item fields BOM columns can be drawn from —
 // deliberately bounded to what actually exists on Inventory's own create/edit
-// form (SimpleInventoryForm.jsx), field-for-field, so BOM Format &
-// Modification never offers something that isn't really there. Importance,
-// Warranty, stock fields (Available Stock/Min Stock/Qty-per-Batch) and Lead
-// Time are on that form too but deliberately excluded — not relevant to BOM.
+// form (SimpleInventoryForm.jsx) right now, field-for-field, so BOM Format &
+// Modification never offers something that isn't really there. Listed in the
+// same order as the form. Category/Sub Category, Size (freeform),
+// Specifications/Applications/Warranty, and Pricing & Tax (Standard
+// Cost/Purchase Cost/Sale Price/MRP/GST/HSN) were removed from here when they
+// were removed from that form — they still exist on RDBOM.MaterialSchema for
+// older BOMs' historical data, just not offered as a column choice anymore.
 export const BOM_FIELD_CATALOG = [
+  { key: 'itemType', label: 'Item Type' },
   { key: 'name', label: 'Item Name' },
   { key: 'code', label: 'Item Code' },
-  { key: 'description', label: 'Description' },
-  { key: 'brand', label: 'Brand' },
   { key: 'modelNumber', label: 'Model Number' },
-  { key: 'size', label: 'Size' },
+  { key: 'brand', label: 'Brand' },
+  { key: 'itemCategories', label: 'Item Category' },
+  { key: 'sourceType', label: 'Source Type' },
+  { key: 'itemSourceType', label: 'Item Source Type' },
   { key: 'metrology', label: 'Metrology' },
   { key: 'materialGrade', label: 'Material Grade' },
   { key: 'unitWeightValue', label: 'Unit Weight' },
+  { key: 'unit', label: 'Used Unit' },
   { key: 'dimensions', label: 'Dimensions' },
-  { key: 'category', label: 'Category' },
-  { key: 'subCategory', label: 'Sub Category' },
-  { key: 'sourceType', label: 'Source Type' },
-  { key: 'itemSourceType', label: 'Item Source Type' },
-  { key: 'unit', label: 'Unit' },
-  { key: 'itemCategories', label: 'Item Category' },
-  { key: 'specifications', label: 'Specifications' },
-  { key: 'applications', label: 'Applications' },
-  { key: 'stdCost', label: 'Standard Cost' },
-  { key: 'purchaseCost', label: 'Purchase Cost' },
-  { key: 'salePrice', label: 'Sale Price' },
-  { key: 'mrp', label: 'MRP' },
-  { key: 'gst', label: 'GST %' },
-  { key: 'hsn', label: 'HSN Code' },
+  { key: 'description', label: 'Description' },
 ];
 
 // One config document per company — which of the fields above show up as
@@ -40,7 +33,7 @@ const RDBOMFieldConfigSchema = new mongoose.Schema({
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true, unique: true },
   enabledFields: {
     type: [String],
-    default: ['code', 'name', 'category', 'unit', 'purchaseCost'],
+    default: ['code', 'name', 'itemType', 'unit'],
     validate: {
       validator: (arr) => arr.every(k => BOM_FIELD_CATALOG.some(f => f.key === k)),
       message: 'enabledFields must only contain keys from BOM_FIELD_CATALOG',

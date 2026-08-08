@@ -16,22 +16,31 @@ const itemSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Legacy classification pair — still shared, productKind-scoped storage for
+  // Product Master ("P-Type"/"Category") and Motor Master ("MotorCategory"/
+  // "MotorSubCategory"); see rdController.js. No longer required/shown on the
+  // plain-Inventory form (superseded there by itemType below) — old items and
+  // other productKind's data keep working untouched.
   category: {
     type: String,
-    required: true,
+    default: '',
     trim: true,
   },
   subCategory: {
     type: String,
     trim: true
   },
+  // The client's real "Item Type" business classification (Raw Material/
+  // Tool/Readymade Material/Assets) — Inventory-own, dynamic ("+"-addable),
+  // InventoryMasterOption-backed, same pattern as sourceType/itemSourceType
+  // below. Deliberately separate from the internal `type` field further down
+  // (system classification: Product/Material/Spares/Assemblies, hidden from
+  // this form, governs Pricing Value/QC/Sales/codegen — untouched by this).
+  itemType: { type: String, default: '', trim: true },
   // Inventory's own new classification fields (InventoryMasterOption-backed,
-  // "+"-addable) — deliberately separate from the existing category/subCategory
-  // above (which storeFlowService.js's Purchase-vs-Production routing depends
-  // on and is left untouched) and from Product/Motor Master's own lists.
-  // Client's "Item Type" classification (Raw Material/Tool/Readymade
-  // Material/Assets/Job Work) is handled via category/subCategory above
-  // instead — not a separate field.
+  // "+"-addable) — deliberately separate from the Category Management system
+  // above (which Product/Motor Master's own dropdowns and Sales/Quotation
+  // filtering still use) and from Product/Motor Master's own lists.
   itemCategories: [{ type: String, trim: true }], // multi-select, e.g. Fabrication, Sheet Metal, Machining
   sourceType: { type: String, default: '', trim: true }, // e.g. Purchase, In House
   itemSourceType: { type: String, default: '', trim: true }, // e.g. In House, Out Source, Both
