@@ -323,7 +323,7 @@ export const createMachine = async (req, res) => {
       variant, productionRate, materialGrade, powerSource,
       powerRequiredHP, powerRequiredKWH, powerRequiredRPM,
       accessories, modelNumber, applications,
-      purchase, internalManufacturing,
+      purchase, internalManufacturing, isDiscontinued,
       stdCost, purchaseCost, salePrice, mrp, gst, qty, minStock,
     } = req.body;
 
@@ -376,6 +376,7 @@ export const createMachine = async (req, res) => {
       applications: applications || [],
       purchase: !!purchase,
       internalManufacturing: !!internalManufacturing,
+      isDiscontinued: !!isDiscontinued,
       stdCost: Number(stdCost) || 0,
       purchaseCost: Number(purchaseCost) || 0,
       salePrice: Number(salePrice) || 0,
@@ -710,7 +711,13 @@ const cleanPlantRefList = (list) =>
 export const getPlants = async (req, res) => {
   try {
     const companyId = req.user.companyId;
-    const { search, discontinued, category, subCategory } = req.query;
+    // Opt-in pagination, same convention as getMachines — several consumers
+    // (Quotation's Plant filter, Leads' plant picker, Plant Master's own
+    // machine/motor selectors) rely on this endpoint returning the FULL
+    // unfiltered array with no params; only paginate when page/limit is
+    // explicitly sent (Plant Master's own list view).
+    const { search, discontinued, category, subCategory, page, limit } = req.query;
+    const isPaginated = !!(page || limit);
     const query = { company: companyId };
     if (discontinued === 'true') query.isDiscontinued = true;
     else if (discontinued === 'false') query.isDiscontinued = false;
@@ -723,6 +730,22 @@ export const getPlants = async (req, res) => {
         { subCategory: { $regex: search, $options: 'i' } },
       ];
     }
+
+    if (isPaginated) {
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+      const skip = (pageNum - 1) * limitNum;
+      const [plants, total] = await Promise.all([
+        RDPlant.find(query).populate(PLANT_POPULATE).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
+        RDPlant.countDocuments(query),
+      ]);
+      return res.json({
+        success: true,
+        data: plants,
+        pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
+      });
+    }
+
     const plants = await RDPlant.find(query).populate(PLANT_POPULATE).sort({ createdAt: -1 }).lean();
     res.json({ success: true, data: plants });
   } catch (err) {
@@ -732,7 +755,7 @@ export const getPlants = async (req, res) => {
 
 export const createPlant = async (req, res) => {
   try {
-    const { category, subCategory, name, productionRate, machines, motors } = req.body;
+    const { category, subCategory, name, productionRate, machines, motors, isDiscontinued } = req.body;
     if (!category || !subCategory || !name) {
       return res.status(400).json({ success: false, message: 'Category, Sub Category and Plant Name are required.' });
     }
@@ -741,6 +764,7 @@ export const createPlant = async (req, res) => {
       productionRate: productionRate || '',
       machines: cleanPlantRefList(machines),
       motors: cleanPlantRefList(motors),
+      isDiscontinued: !!isDiscontinued,
       company: req.user.companyId,
       createdBy: req.user._id,
     });
@@ -753,7 +777,7 @@ export const createPlant = async (req, res) => {
 
 export const updatePlant = async (req, res) => {
   try {
-    const { category, subCategory, name, productionRate, machines, motors } = req.body;
+    const { category, subCategory, name, productionRate, machines, motors, isDiscontinued } = req.body;
     if ((category !== undefined && !category) || (subCategory !== undefined && !subCategory) || (name !== undefined && !name)) {
       return res.status(400).json({ success: false, message: 'Category, Sub Category and Plant Name cannot be empty.' });
     }
@@ -764,6 +788,7 @@ export const updatePlant = async (req, res) => {
     if (productionRate !== undefined) update.productionRate = productionRate;
     if (machines !== undefined) update.machines = cleanPlantRefList(machines);
     if (motors !== undefined) update.motors = cleanPlantRefList(motors);
+    if (isDiscontinued !== undefined) update.isDiscontinued = !!isDiscontinued;
 
     const plant = await RDPlant.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId },
@@ -1066,6 +1091,7 @@ export const addMaterial = async (req, res) => {
             // field-for-field with BOM_FIELD_CATALOG / SimpleInventoryForm.jsx.
             category: sourceItem.category || '',
             subCategory: sourceItem.subCategory || '',
+            inventoryItemType: sourceItem.itemType || '',
             sourceType: sourceItem.sourceType || '',
             itemSourceType: sourceItem.itemSourceType || '',
             itemCategories: sourceItem.itemCategories || [],
@@ -1135,6 +1161,7 @@ export const updateMaterial = async (req, res) => {
     mat.totalPrice = Math.round(mat.unitPrice * (mat.quantity || 0) * 100) / 100;
     mat.category = sourceItem.category || '';
     mat.subCategory = sourceItem.subCategory || '';
+    mat.inventoryItemType = sourceItem.itemType || '';
     mat.sourceType = sourceItem.sourceType || '';
     mat.itemSourceType = sourceItem.itemSourceType || '';
     mat.itemCategories = sourceItem.itemCategories || [];
@@ -1178,6 +1205,86 @@ export const deleteMaterial = async (req, res) => {
 };
 
 
+// Shared BOM PDF content writer — used both by lockBOM's auto-upload-to-
+// Documentation flow and the on-demand GET /boms/:id/download endpoint, so
+// both paths always produce the same, properly formatted document. Mirrors
+// productionMfgController.js's downloadMaterialListPDF layout/branding
+// (same header/metadata/table style already established for the Material
+// Ledger PDF) instead of inventing a new look.
+const writeBOMPdf = (doc, bom) => {
+  const machine = bom.machine || {};
+
+  // ── BRAND IDENTITY HEADER ──
+  doc.fillColor('#1e293b').fontSize(22).font('Helvetica-Bold').text('SAMTEK MACHINERY', 50, 50);
+  doc.fillColor('#64748b').fontSize(9).font('Helvetica').text('Master Bill of Materials', 50, 75);
+  doc.moveTo(50, 92).lineTo(562, 92).strokeColor('#e2e8f0').lineWidth(1).stroke();
+
+  // ── METADATA PROFILE BLOCK ──
+  doc.fillColor('#0f172a').fontSize(12).font('Helvetica-Bold').text(`Machine: ${machine.code || ''} — ${machine.name || ''}`, 50, 115);
+  doc.fillColor('#334155').fontSize(9).font('Helvetica');
+  doc.text(`Variant: ${bom.variant || 'Standard'}`, 50, 135);
+  doc.text(`Version: ${bom.version || 'v1.0'}`, 50, 150);
+  doc.text(`Status: ${bom.isLocked ? `Locked on ${bom.lockedAt || today()}` : 'Draft (not yet locked)'}`, 50, 165);
+  doc.text(`Generated Date: ${new Date().toLocaleDateString()}`, 50, 180);
+
+  // ── MATERIALS TABLE ──
+  doc.fillColor('#1e3a8a').fontSize(11).font('Helvetica-Bold').text('Materials', 50, 215);
+
+  const tableTop = 235;
+  doc.rect(50, tableTop, 512, 22).fill('#f8fafc');
+  doc.fillColor('#475569').fontSize(9).font('Helvetica-Bold');
+  doc.text('Code', 60, tableTop + 6, { width: 65 });
+  doc.text('Item', 130, tableTop + 6, { width: 150 });
+  doc.text('Child / Sub Child Part', 285, tableTop + 6, { width: 140 });
+  doc.text('Qty', 430, tableTop + 6, { width: 50, align: 'center' });
+  doc.text('Unit', 485, tableTop + 6, { width: 70, align: 'right' });
+
+  let currentY = tableTop + 22;
+  const materials = bom.materials || [];
+
+  if (materials.length === 0) {
+    doc.fillColor('#94a3b8').fontSize(9).font('Helvetica').text('No materials added yet.', 60, currentY + 7);
+  }
+
+  materials.forEach((mat) => {
+    if (currentY > 700) {
+      doc.addPage();
+      currentY = 50;
+    }
+    doc.moveTo(50, currentY + 22).lineTo(562, currentY + 22).strokeColor('#f1f5f9').lineWidth(1).stroke();
+
+    const hierarchy = [mat.childPart, mat.subChildPart].filter(Boolean).join(' > ') || '—';
+
+    doc.fillColor('#334155').fontSize(9).font('Helvetica');
+    doc.text(mat.code || '', 60, currentY + 7, { width: 65 });
+    doc.text(mat.item || '', 130, currentY + 7, { width: 150 });
+    doc.text(hierarchy, 285, currentY + 7, { width: 140 });
+    doc.text(`${mat.quantity ?? 0}`, 430, currentY + 7, { width: 50, align: 'center' });
+    doc.text(mat.unit || '', 485, currentY + 7, { width: 70, align: 'right' });
+
+    currentY += 22;
+  });
+};
+
+// GET /api/rd/boms/:id/download — on-demand PDF, no disk save, no
+// RDDocument created (distinct from lockBOM's auto-upload-to-Documentation
+// flow below). Works whether the BOM is locked or still being edited.
+export const downloadBOMPdf = async (req, res) => {
+  try {
+    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine').lean();
+    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
+
+    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=BOM_${bom.machine?.code || 'machine'}_${bom.version || 'v1.0'}.pdf`);
+    doc.pipe(res);
+    writeBOMPdf(doc, bom);
+    doc.end();
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const lockBOM = async (req, res) => {
   try {
     // 1. Fetch BOM with Machine Details
@@ -1189,29 +1296,12 @@ export const lockBOM = async (req, res) => {
     const filename = `BOM_${bom.machine.code}_${Date.now()}.pdf`;
     const filepath = path.join(process.cwd(), 'uploads', 'rd-docs', filename);
 
-    const doc = new PDFDocument({ margin: 50 });
+    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
     const stream = fs.createWriteStream(filepath);
     doc.pipe(stream);
 
-    // 3. Write PDF Header
-    doc.fontSize(20).text(`Master Bill of Materials`, { align: 'center' });
-    doc.moveDown();
-    doc.fontSize(12).text(`Machine Code: ${bom.machine.code}`);
-    doc.text(`Machine Name: ${bom.machine.name}`);
-    doc.text(`Variant: ${bom.variant}`);
-    doc.text(`Version: ${bom.version}`);
-    doc.text(`Date Locked: ${today()}`);
-    doc.moveDown();
-
-    // 4. Write PDF Rows
-    doc.fontSize(14).text('Items:', { underline: true });
-    doc.fontSize(10);
-    bom.materials.forEach((mat, idx) => {
-      // Formats nicely: 1. Body > Door | Sheet Metal | Laser Cutting | 2 pcs
-      const hierarchy = [mat.childPart, mat.subChildPart].filter(Boolean).join(' > ');
-      const prefix = hierarchy ? `${hierarchy} | ` : '';
-      doc.text(`${idx + 1}. ${prefix}${mat.item} (${mat.itemType}) - ${mat.quantity} ${mat.unit}`);
-    });
+    // 3. Write the same shared content used by the on-demand download endpoint
+    writeBOMPdf(doc, bom);
 
     doc.end();
 

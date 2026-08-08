@@ -5,16 +5,15 @@ import mongoose from 'mongoose';
 // genuinely Inventory-specific concepts with no equivalent elsewhere:
 // ItemCategory (multi-select: Fabrication/Sheet Metal/Machining/Job Work/
 // Assembly), SourceType (Purchase/In House), ItemSourceType (In House/Out
-// Source/Both). Client's "Item Type" classification (Raw Material/Tool/
-// Readymade Material/Assets/Job Work) is handled via the existing
-// category/subCategory system instead, not here.
+// Source/Both), ItemType (the client's real business classification — Raw
+// Material/Tool/Readymade Material/Assets).
 // Deliberately NOT reusing the existing Category/Group models — those are a
-// different, already-live system (storeFlowService.js depends on Category's
-// exact values) that this work intentionally leaves untouched.
+// different, already-live system used by Product/Motor Master's own
+// dropdowns and Sales/Quotation filtering, left untouched by this.
 const InventoryMasterOptionSchema = new mongoose.Schema({
   field: {
     type: String,
-    enum: ['ItemCategory', 'SourceType', 'ItemSourceType'],
+    enum: ['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType'],
     required: true,
   },
   value: { type: String, required: true, trim: true },

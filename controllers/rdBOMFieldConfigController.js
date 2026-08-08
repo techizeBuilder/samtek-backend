@@ -7,7 +7,7 @@ export const getBOMFieldConfig = async (req, res) => {
       success: true,
       data: {
         catalog: BOM_FIELD_CATALOG,
-        enabledFields: config?.enabledFields || ['code', 'name', 'category', 'unit', 'purchaseCost'],
+        enabledFields: config?.enabledFields || ['code', 'name', 'itemType', 'unit'],
       },
     });
   } catch (err) {
