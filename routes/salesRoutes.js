@@ -1,6 +1,7 @@
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { itemUpload } from '../middleware/itemUpload.js';
+import { checkPermission } from '../middleware/permissions.js';
 import {
   getSalespersonCustomers,
   getSalespersonDeliveries,
@@ -155,6 +156,22 @@ salesRouter.get('/products-summary', authorizeRoles('Sales', 'Sales Head', 'Sale
 // Apply role-based authorization for other sales routes only
 salesRouter.use(authorizeRoles('Sales', 'Sales Head', 'Sales Employee', 'Unit Manager', 'Superadmin'));
 
+const salesMyCustomersView = checkPermission('sales', 'myCustomers', 'view');
+const salesMyDeliveriesView = checkPermission('sales', 'myDeliveries', 'view');
+const salesMyInvoicesView = checkPermission('sales', 'myInvoices', 'view');
+const salesReturnsView = checkPermission('sales', 'returns', 'view');
+const salesReturnsAdd = checkPermission('sales', 'returns', 'add');
+const salesReturnsEdit = checkPermission('sales', 'returns', 'edit');
+const salesReturnsDelete = checkPermission('sales', 'returns', 'delete');
+const salesDamagesView = checkPermission('sales', 'damages', 'view');
+const salesDamagesAdd = checkPermission('sales', 'damages', 'add');
+const salesDamagesEdit = checkPermission('sales', 'damages', 'edit');
+const salesDamagesDelete = checkPermission('sales', 'damages', 'delete');
+const salesOrdersView = checkPermission('sales', 'orders', 'view');
+const salesOrdersAdd = checkPermission('sales', 'orders', 'add');
+const salesOrdersEdit = checkPermission('sales', 'orders', 'edit');
+const salesOrdersDelete = checkPermission('sales', 'orders', 'delete');
+
 // MOVED: Only Unit Managers and Super Admins can update product summary
 salesRouter.post('/update-product-summary', authorizeRoles('Unit Manager', 'Superadmin'), (req, res) => {
   console.log('🔍 POST /update-product-summary called');
@@ -175,40 +192,40 @@ salesRouter.post('/update-product-summary', authorizeRoles('Unit Manager', 'Supe
 
 
 // Sales-specific dashboard routes
-salesRouter.get('/summary', getSalesSummary);
-salesRouter.get('/recent-orders', getSalesRecentOrders);
+salesRouter.get('/summary', salesOrdersView, getSalesSummary);
+salesRouter.get('/recent-orders', salesOrdersView, getSalesRecentOrders);
 
 // Sales-specific order routes (filtered by individual salesperson)
-salesRouter.get('/orders', getSalesOrders);
+salesRouter.get('/orders', salesOrdersView, getSalesOrders);
 
 // Priority Products routes
-salesRouter.get('/priority-products', getPriorityProducts);
-salesRouter.post('/priority-products', addPriorityProduct);
-salesRouter.delete('/priority-products/:id', removePriorityProduct);
-salesRouter.post('/priority-products/usage', updatePriorityProductUsage);
+salesRouter.get('/priority-products', salesOrdersView, getPriorityProducts);
+salesRouter.post('/priority-products', salesOrdersAdd, addPriorityProduct);
+salesRouter.delete('/priority-products/:id', salesOrdersDelete, removePriorityProduct);
+salesRouter.post('/priority-products/usage', salesOrdersEdit, updatePriorityProductUsage);
 
 // Cutoff time status for sales persons
-salesRouter.get('/cutoff-time-status', getSalesCutoffTimeStatus);
+salesRouter.get('/cutoff-time-status', salesOrdersView, getSalesCutoffTimeStatus);
 
 // Sales-specific customer routes (filtered by salesperson assignment)
-salesRouter.get('/customers', getSalespersonCustomers);
+salesRouter.get('/customers', salesMyCustomersView, getSalespersonCustomers);
 
 // Other salesperson-specific routes
-salesRouter.get('/my-customers', getSalespersonCustomers);
-salesRouter.get('/my-deliveries', getSalespersonDeliveries);
-salesRouter.get('/my-invoices', getSalespersonInvoices);
-salesRouter.get('/refund-return', getSalespersonRefundReturns);
-salesRouter.get('/returns', getSalespersonReturns);
-salesRouter.get('/damages', getSalespersonDamages);
-salesRouter.post('/create-return', createSalespersonReturn);
-salesRouter.put('/update-return/:id', updateSalespersonReturn);
-salesRouter.delete('/delete-return/:id', deleteSalespersonReturn);
-salesRouter.post('/create-damage', createSalespersonDamage);
-salesRouter.put('/update-damage/:id', updateSalespersonDamage);
-salesRouter.delete('/delete-damage/:id', deleteSalespersonDamage);
-salesRouter.get('/items', getSalespersonItems);
-salesRouter.post('/create-item', itemUpload.fields([{ name: 'image', maxCount: 1 }, { name: 'brochure', maxCount: 1 }]), createSalespersonItem);
-salesRouter.get('/invoice/:id/pdf', downloadInvoicePDF);
-salesRouter.post('/send-quotation-email', sendQuotationEmailHandler);
+salesRouter.get('/my-customers', salesMyCustomersView, getSalespersonCustomers);
+salesRouter.get('/my-deliveries', salesMyDeliveriesView, getSalespersonDeliveries);
+salesRouter.get('/my-invoices', salesMyInvoicesView, getSalespersonInvoices);
+salesRouter.get('/refund-return', salesReturnsView, getSalespersonRefundReturns);
+salesRouter.get('/returns', salesReturnsView, getSalespersonReturns);
+salesRouter.get('/damages', salesDamagesView, getSalespersonDamages);
+salesRouter.post('/create-return', salesReturnsAdd, createSalespersonReturn);
+salesRouter.put('/update-return/:id', salesReturnsEdit, updateSalespersonReturn);
+salesRouter.delete('/delete-return/:id', salesReturnsDelete, deleteSalespersonReturn);
+salesRouter.post('/create-damage', salesDamagesAdd, createSalespersonDamage);
+salesRouter.put('/update-damage/:id', salesDamagesEdit, updateSalespersonDamage);
+salesRouter.delete('/delete-damage/:id', salesDamagesDelete, deleteSalespersonDamage);
+salesRouter.get('/items', salesOrdersView, getSalespersonItems);
+salesRouter.post('/create-item', salesOrdersAdd, itemUpload.fields([{ name: 'image', maxCount: 1 }, { name: 'brochure', maxCount: 1 }]), createSalespersonItem);
+salesRouter.get('/invoice/:id/pdf', salesOrdersView, downloadInvoicePDF);
+salesRouter.post('/send-quotation-email', salesOrdersEdit, sendQuotationEmailHandler);
 
 export default salesRouter;

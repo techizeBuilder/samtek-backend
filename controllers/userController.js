@@ -472,6 +472,18 @@ export const updateUser = async (req, res) => {
       }
     }
 
+    // Changing ANYONE's role or module permissions is an admin-only action —
+    // without this, any authenticated user (e.g. a Sales Employee) could
+    // PATCH a colleague's account to role: 'Superadmin' with full access.
+    const ADMIN_TIER_ROLES = ['Superadmin', 'Super Admin', 'HR-Admin', 'Company Admin'];
+    const isAdminTier = ADMIN_TIER_ROLES.includes(req.user.role);
+    if (!isAdminTier && ((role !== undefined && role !== user.role) || permissions !== undefined)) {
+      return res.status(403).json({
+        message: 'Access denied. Only an admin can change a user\'s role or module permissions.',
+        success: false
+      });
+    }
+
     // Validate fields ONLY if they are provided
     if (email) {
       // Check for duplicate email (excluding current user)

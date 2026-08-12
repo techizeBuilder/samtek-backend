@@ -3,8 +3,13 @@
 import express from 'express';
 import User from '../models/User.js';
 import { Company } from '../models/Company.js';
+import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 
 const router = express.Router();
+
+// Both routes below can read any user's data and reassign their company —
+// restrict to Superadmin only.
+router.use(authenticateToken, authorizeRoles('Superadmin', 'Super Admin'));
 
 // Check user company assignment
 router.get('/check-user-company/:username', async (req, res) => {

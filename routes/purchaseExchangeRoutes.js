@@ -1,5 +1,6 @@
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
+import { checkPermission } from '../middleware/permissions.js';
 import {
   getExchangeByToken,
   acceptExchangeByToken,
@@ -17,7 +18,10 @@ router.post('/token/:token/accept', acceptExchangeByToken);
 // ── Protected routes (Accounts / Purchase / Admin only) ─────────────────────
 router.use(authenticateToken);
 
-router.get('/', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), getPurchaseExchanges);
-router.put('/:id/assign-vendor', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), assignExchangeVendor);
+const purchasesView = checkPermission('accounts', 'purchases', 'view');
+const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
+
+router.get('/', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseExchanges);
+router.put('/:id/assign-vendor', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, assignExchangeVendor);
 
 export default router;

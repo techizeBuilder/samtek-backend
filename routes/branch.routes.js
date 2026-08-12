@@ -9,15 +9,21 @@ import {
   deleteBranch,
 } from "../controllers/branchController.js";
 import { authenticateToken as authMiddleware } from "../middleware/auth.js";
+import { checkPermission } from "../middleware/permissions.js";
 
 const BranchRouter = Router();
 
 BranchRouter.use(authMiddleware); // JWT protect
 
-BranchRouter.post("/", createBranch);
-BranchRouter.get("/", getAllBranches);
-BranchRouter.get("/:id", getBranchById);
-BranchRouter.put("/:id", updateBranch);
-BranchRouter.delete("/:id", deleteBranch);
+const operatingUnitsView = checkPermission("hrms", "operatingUnits", "view");
+const operatingUnitsAdd = checkPermission("hrms", "operatingUnits", "add");
+const operatingUnitsEdit = checkPermission("hrms", "operatingUnits", "edit");
+const operatingUnitsDelete = checkPermission("hrms", "operatingUnits", "delete");
+
+BranchRouter.post("/", operatingUnitsAdd, createBranch);
+BranchRouter.get("/", operatingUnitsView, getAllBranches);
+BranchRouter.get("/:id", operatingUnitsView, getBranchById);
+BranchRouter.put("/:id", operatingUnitsEdit, updateBranch);
+BranchRouter.delete("/:id", operatingUnitsDelete, deleteBranch);
 
 export default BranchRouter;

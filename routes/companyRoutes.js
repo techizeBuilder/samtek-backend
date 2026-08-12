@@ -187,7 +187,16 @@ router.get('/:id/cash-password', async (req, res) => {
   }
 });
 
-// Company routes
+// Company routes — every one of these controllers already calls its own
+// checkCompanyPermission(req.user, action) internally (Superadmin/HR-Admin/
+// Unit Head/Company Admin, or an explicit permissions.Company.<action> grant),
+// and getCompanyById additionally lets any user fetch their own company by
+// id. That's a different, older permission scheme than roleModulesConfig's
+// modules[] array, so gating these with checkPermission('superAdmin', ...)
+// on top would 403 HR-Admin/Company Admin and self-company lookups (used by
+// Accounts/Store pages like NocRequest.jsx, StoreOrders.jsx) since none of
+// them hold the 'superAdmin' permissions module. Left on the existing
+// in-controller checks rather than layering a second, stricter scheme.
 router.get('/dropdown', getCompaniesDropdown);
 router.get('/stats', getCompanyStats);
 router.get('/', getCompanies);
