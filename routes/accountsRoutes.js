@@ -72,6 +72,7 @@ import {
   getPurchaseItems,
   getPurchaseInventoryItems,
   updatePurchaseItemCost,
+  updateWeightUnitPrice,
   createPurchase,
   getPurchases,
   getPurchaseById,
@@ -307,6 +308,12 @@ accountsRouter.put(
   authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
   purchasesEdit,
   updatePurchaseItemCost
+);
+accountsRouter.put(
+  '/purchases/inventory/:id/weight-unit-price',
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
+  purchasesEdit,
+  updateWeightUnitPrice
 );
 
 import {

@@ -1,4 +1,6 @@
 import { Item } from '../models/Inventory.js';
+import FabricationMaster from '../models/FabricationMaster.js';
+import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 import RDBOM from '../models/RDBOM.js';
 import RDPrototype from '../models/RDPrototype.js';
 import RDChangeRequest from '../models/RDChangeRequest.js';
@@ -1032,13 +1034,43 @@ export const updateBOMProductionCost = async (req, res) => {
   }
 };
 
+// Resolves a BOM line's fabrication weight — null when the source Item isn't
+// a Fabrication Master pick (fabricationRef unset), in which case the caller
+// falls back to the plain purchaseCost x quantity pricing unchanged.
+// Category + density are read from the Item's own dimensionVariants[0]
+// (every variant of one Item shares the same category/density — see
+// Inventory.js) with a FabricationMaster lookup as a fallback for the rare
+// case dimensionVariants is empty. bomDimensions are THIS BOM line's own
+// entered values (mm), not the Item's stock dimensions — see RDBOM.js's
+// bomDimensions field comment.
+async function resolveFabricationWeight(sourceItem, bomDimensions) {
+  if (!sourceItem.fabricationRef) return null;
+
+  let category = sourceItem.dimensionVariants?.[0]?.category;
+  let densityValue = sourceItem.dimensionVariants?.[0]?.densityValue;
+  let densityUnit = sourceItem.dimensionVariants?.[0]?.densityUnit;
+
+  if (!category || densityValue == null) {
+    const fabItem = await FabricationMaster.findById(sourceItem.fabricationRef).select('category density').lean();
+    if (!fabItem) return null;
+    category = category || fabItem.category;
+    densityValue = densityValue ?? fabItem.density?.value;
+    densityUnit = densityUnit || fabItem.density?.unit;
+  }
+  if (!category || densityValue == null) return null;
+
+  const { weightPerPieceKg } = calculateFabricationWeight(category, bomDimensions, densityValue, densityUnit);
+  return { fabricationCategory: category, weightPerPieceKg };
+}
+
 export const addMaterial = async (req, res) => {
   try {
     // 1. Extract 'code' alongside the new fields
     const {
       code, childPart, subChildPart, childPartCode, subChildPartCode, item, itemType, quantity, unit,
       pType, pSourceType, customFields,
-      inputUnitType, inputUnit, outputUnitType, outputUnit
+      inputUnitType, inputUnit, outputUnitType, outputUnit,
+      bomDimensions
     } = req.body;
 
     // 2. Validate that 'code' is present
@@ -1067,7 +1099,16 @@ export const addMaterial = async (req, res) => {
     // client — "Price fetch by Purchase item wise and auto calculate", and
     // whatever fields BOM Format & Modification later enables as columns
     // always have real, authoritative data behind them.
-    const unitPrice = sourceItem.purchaseCost || 0;
+    //
+    // Fabrication Master materials (sourceItem.fabricationRef set) price by
+    // weight instead — this BOM line's own entered dimensions x the source
+    // item's density gives the weight, x its weightUnitPrice (₹/kg) gives
+    // the price. Every other material keeps the flat purchaseCost x qty
+    // pricing unchanged.
+    const fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions);
+    const unitPrice = fabWeight
+      ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
+      : (sourceItem.purchaseCost || 0);
     const totalPrice = Math.round(unitPrice * Number(quantity) * 100) / 100;
 
     // 3. Push all fields to the materials array
@@ -1087,6 +1128,9 @@ export const addMaterial = async (req, res) => {
             unit,
             unitPrice,
             totalPrice,
+            fabricationCategory: fabWeight?.fabricationCategory || '',
+            bomDimensions: fabWeight ? (bomDimensions || {}) : {},
+            computedWeightPerPieceKg: fabWeight?.weightPerPieceKg ?? null,
             // Inventory snapshot — authoritative, from sourceItem (see above),
             // field-for-field with BOM_FIELD_CATALOG / SimpleInventoryForm.jsx.
             category: sourceItem.category || '',
@@ -1157,7 +1201,19 @@ export const updateMaterial = async (req, res) => {
     // validated Inventory item server-side, never trusted from the client —
     // same as addMaterial, so editing a material always reflects Inventory's
     // current data rather than whatever the client happened to send.
-    mat.unitPrice = sourceItem.purchaseCost || 0;
+    //
+    // Fabrication Master materials price by weight — see addMaterial's
+    // matching comment. mat.bomDimensions was just set from req.body above
+    // by Object.assign; fabricationCategory/computedWeightPerPieceKg/
+    // unitPrice/totalPrice are recomputed authoritatively here regardless of
+    // whatever the client sent for them.
+    const fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions);
+    mat.fabricationCategory = fabWeight?.fabricationCategory || '';
+    mat.bomDimensions = fabWeight ? (mat.bomDimensions || {}) : {};
+    mat.computedWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
+    mat.unitPrice = fabWeight
+      ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
+      : (sourceItem.purchaseCost || 0);
     mat.totalPrice = Math.round(mat.unitPrice * (mat.quantity || 0) * 100) / 100;
     mat.category = sourceItem.category || '';
     mat.subCategory = sourceItem.subCategory || '';

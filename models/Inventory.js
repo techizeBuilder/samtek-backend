@@ -157,6 +157,20 @@ const itemSchema = new mongoose.Schema({
     min: 0,
     default: 0
   },
+  // ₹ per kg — fabrication items only (fabricationRef set). purchaseCost above
+  // is structurally ₹-per-base-unit (piece) and stays that way for every item;
+  // it can't double as a weight rate because one fabrication Item can carry
+  // multiple dimensionVariants (different sizes) with different per-piece
+  // weights — only a ₹/kg rate is constant across all of them. Populated the
+  // same two ways purchaseCost is: automatically from the raw pre-conversion
+  // PurchaseInvoice unit price (itemPricingService.resolvePurchaseItemCost),
+  // or manually by Accounts on first purchase (Purchase > Inventory). Hidden
+  // from the Inventory form, like purchaseCost/stdCost.
+  weightUnitPrice: {
+    type: Number,
+    min: 0,
+    default: null
+  },
   salePrice: {
     type: Number,
     min: 0,

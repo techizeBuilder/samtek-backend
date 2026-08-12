@@ -57,6 +57,21 @@ const MaterialSchema = new mongoose.Schema({
   // each {value,unit}) — kept as Mixed since it's a read-only snapshot, not
   // something this form edits field-by-field.
   dimensions: { type: mongoose.Schema.Types.Mixed, default: {} },
+  // Fabrication Master materials only (sourceItem.fabricationRef set) — this
+  // BOM LINE's own dimension input, independent of the Item's own stock
+  // dimensionVariants: "how much of this raw material is being consumed
+  // here" (e.g. a 500x300mm cut off a full sheet), not "what size is in
+  // stock". fabricationCategory snapshots which of FABRICATION_CATEGORIES
+  // this material is (fabricationCategories.js) so the right field set /
+  // formula is known without a live lookup; bomDimensions holds the entered
+  // values for those fields (mm); computedWeightPerPieceKg is the result of
+  // calculateFabricationWeight(fabricationCategory, bomDimensions, ...) —
+  // server-authoritative, recomputed on every add/edit, and what unitPrice
+  // (weight x sourceItem.weightUnitPrice) and the machine-cost rollup
+  // (itemPricingService.resolveManufacturingItemCost) both read from.
+  fabricationCategory: { type: String, default: '' },
+  bomDimensions: { type: mongoose.Schema.Types.Mixed, default: {} },
+  computedWeightPerPieceKg: { type: Number, default: null },
   applications: [{ type: String }],
   specifications: [{ key: String, value: String }],
   // Legacy Product-Master-only fields — no longer populated (Inventory items

@@ -686,7 +686,7 @@ export const getPurchaseInventoryItems = async (req, res) => {
     }
 
     const items = await Item.find(filter)
-      .select('_id name code category subCategory unit qty purchaseCost mrp salePrice profitPercent discountPercent productKind updatedAt')
+      .select('_id name code category subCategory unit qty purchaseCost weightUnitPrice fabricationRef dimensionVariants mrp salePrice profitPercent discountPercent productKind updatedAt')
       .sort({ name: 1 })
       .lean();
 
@@ -744,6 +744,52 @@ export const updatePurchaseItemCost = async (req, res) => {
   } catch (error) {
     console.error('❌ Update purchase item cost error:', error);
     res.status(500).json({ success: false, message: 'Failed to update purchase cost', error: error.message });
+  }
+};
+
+// PUT /api/accounts/purchases/inventory/:id/weight-unit-price
+// Fabrication items (Item.fabricationRef set) only — see Inventory.js's
+// weightUnitPrice field comment for why purchaseCost can't represent this.
+// Manual fallback for the same automated path itemPricingService.js's
+// resolvePurchaseItemCost/applyPricingToItem already covers once a real
+// PurchaseInvoice exists; this is what Accounts sets on a first purchase,
+// mirroring updatePurchaseItemCost above field-for-field.
+export const updateWeightUnitPrice = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { weightUnitPrice } = req.body;
+
+    if (weightUnitPrice === undefined || weightUnitPrice === null || weightUnitPrice === '' || isNaN(weightUnitPrice) || Number(weightUnitPrice) < 0) {
+      return res.status(400).json({ success: false, message: 'A valid, non-negative price per kg is required' });
+    }
+
+    const scope = companyScopeFilter(req);
+    if (!scope) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    const item = await Item.findOne({ _id: id, purchase: true, fabricationRef: { $ne: null }, ...scope });
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Fabrication item not found' });
+    }
+
+    item.weightUnitPrice = Math.round(Number(weightUnitPrice) * 100) / 100;
+    await item.save();
+
+    res.json({
+      success: true,
+      message: 'Price per kg updated successfully',
+      item: {
+        _id: item._id,
+        name: item.name,
+        code: item.code,
+        weightUnitPrice: item.weightUnitPrice,
+        updatedAt: item.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error('❌ Update weight unit price error:', error);
+    res.status(500).json({ success: false, message: 'Failed to update price per kg', error: error.message });
   }
 };
 

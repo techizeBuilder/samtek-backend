@@ -62,7 +62,13 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
       }
 
       let lineUnitCost;
-      if (matItem.internalManufacturing) {
+      if (mat.computedWeightPerPieceKg != null) {
+        // Fabrication material (RDBOM.MaterialSchema) — priced by this BOM
+        // line's own committed weight (from its entered dimensions, not the
+        // Item's current stock dimensions) × the Item's ₹/kg rate, not by
+        // purchaseCost/stdCost — see Inventory.js's weightUnitPrice comment.
+        lineUnitCost = mat.computedWeightPerPieceKg * (matItem.weightUnitPrice || 0);
+      } else if (matItem.internalManufacturing) {
         const sub = await resolveManufacturingItemCost(matItem, visiting, depth + 1);
         if (sub.cost == null) {
           // Fall back to the sub-part's own last-known value only if it has
@@ -168,14 +174,26 @@ async function findPurchaseToBaseFactor(item, invoiceNotes) {
   return null;
 }
 
+// Converts a "price per {unit}" figure into "price per kg" — mirrors the
+// frontend's static Mass Unit list (client/src/utils/unitTypes.js:
+// 'Mass Unit': ['Gram', 'Kilogram', 'Tonne']). Returns null for anything
+// else (Pieces, Meter, ...) since it isn't a weight rate at all.
+const MASS_UNIT_TO_KG_MULTIPLIER = { Gram: 1000, Kilogram: 1, Tonne: 1 / 1000 };
+function priceToPerKg(pricePerUnit, unit) {
+  const multiplier = MASS_UNIT_TO_KG_MULTIPLIER[unit];
+  return multiplier ? pricePerUnit * multiplier : null;
+}
+
 /**
  * Resolves a purchase Item's cost from the most recent PurchaseInvoice line
- * that references it. Returns { cost: number|null }.
+ * that references it. Returns { cost: number|null, rawPurchaseUnitPrice }.
  *
  * The invoice unitPrice is per PURCHASE unit (the vendor's bid unit, e.g. per
  * Meter / per Kg), but stdCost/purchaseCost and BOM quantities are in the
  * item's base/storage unit (e.g. Centimeter / Pieces) — so the price must go
- * through the same conversion the received quantity did.
+ * through the same conversion the received quantity did. `rawPurchaseUnitPrice`
+ * is that pre-conversion figure, kept around for fabrication items' ₹/kg
+ * weightUnitPrice — see applyPricingToItem.
  */
 export async function resolvePurchaseItemCost(item) {
   const rows = await PurchaseInvoice.aggregate([
@@ -187,12 +205,12 @@ export async function resolvePurchaseItemCost(item) {
     { $project: { unitPrice: '$items.unitPrice', notes: 1 } }
   ]);
 
-  const cost = rows[0]?.unitPrice;
-  if (!(cost > 0)) return { cost: null };
+  const rawPurchaseUnitPrice = rows[0]?.unitPrice;
+  if (!(rawPurchaseUnitPrice > 0)) return { cost: null, rawPurchaseUnitPrice: null };
 
   const factor = await findPurchaseToBaseFactor(item, rows[0].notes);
-  if (factor > 0) return { cost: cost * factor };
-  return { cost };
+  const cost = factor > 0 ? rawPurchaseUnitPrice * factor : rawPurchaseUnitPrice;
+  return { cost, rawPurchaseUnitPrice };
 }
 
 /**
@@ -202,12 +220,24 @@ export async function resolvePurchaseItemCost(item) {
  * as 0 — no markup/discount, MRP and Sale Price just show cost.
  * MRP = cost + cost×profit%. Sale Price = MRP − MRP×discount% (discount is
  * taken off MRP, not off the raw cost).
+ *
+ * `rawPurchaseUnitPrice` (Purchase source only): the pre-conversion ₹-per-
+ * purchase-unit figure — for fabrication items (Item.fabricationRef set)
+ * bought in a Mass Unit, this doubles as their ₹/kg weightUnitPrice, which
+ * purchaseCost (always ₹-per-base-unit/piece) can't represent — see
+ * Inventory.js's weightUnitPrice field comment.
  */
-export async function applyPricingToItem(item, cost, source) {
+export async function applyPricingToItem(item, cost, source, rawPurchaseUnitPrice = null) {
   if (!(cost > 0)) return false;
 
   if (source === 'BOM') item.stdCost = round2(cost);
-  if (source === 'Purchase') item.purchaseCost = round2(cost);
+  if (source === 'Purchase') {
+    item.purchaseCost = round2(cost);
+    if (item.fabricationRef && rawPurchaseUnitPrice > 0) {
+      const perKg = priceToPerKg(rawPurchaseUnitPrice, item.purchaseUnit);
+      if (perKg > 0) item.weightUnitPrice = round2(perKg);
+    }
+  }
 
   const profitPercent = item.profitPercent || 0;
   const discountPercent = item.discountPercent || 0;
@@ -243,9 +273,9 @@ export async function recalculateItemPricing(item) {
     return { updated };
   }
 
-  const { cost } = await resolvePurchaseItemCost(item);
+  const { cost, rawPurchaseUnitPrice } = await resolvePurchaseItemCost(item);
   if (cost == null) return { updated: false };
-  const updated = await applyPricingToItem(item, cost, 'Purchase');
+  const updated = await applyPricingToItem(item, cost, 'Purchase', rawPurchaseUnitPrice);
   return { updated };
 }
 
