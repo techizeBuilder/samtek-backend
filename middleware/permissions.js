@@ -1,13 +1,33 @@
+// Find a module in a user's permissions, tolerating the same naming
+// variance the frontend's usePermissions.hasFeatureAccess already tolerates
+// (case, e.g. 'Store' vs 'store', and singular/plural, e.g. 'dispatch' vs
+// 'dispatches') so this check doesn't 403 a legitimately-permissioned user
+// over a naming mismatch between how a role was provisioned and how a route
+// was wired up.
+const findUserModule = (modules, moduleName) => {
+  if (!Array.isArray(modules) || !moduleName) return null;
+
+  const exact = modules.find(m => m.name === moduleName);
+  if (exact) return exact;
+
+  const lower = moduleName.toLowerCase();
+  const caseInsensitive = modules.find(m => (m.name || '').toLowerCase() === lower);
+  if (caseInsensitive) return caseInsensitive;
+
+  const alternate = lower.endsWith('s') ? lower.slice(0, -1) : lower + 's';
+  return modules.find(m => (m.name || '').toLowerCase() === alternate) || null;
+};
+
 // Middleware to check action-level permissions
 export const checkPermission = (module, feature, action) => {
   return (req, res, next) => {
     try {
       const user = req.user;
-      
+
       if (!user) {
-        return res.status(401).json({ 
+        return res.status(401).json({
           message: 'Authentication required',
-          success: false 
+          success: false
         });
       }
 
@@ -23,19 +43,19 @@ export const checkPermission = (module, feature, action) => {
 
       // Check if user has permissions structure
       if (!user.permissions || !user.permissions.modules) {
-        return res.status(403).json({ 
+        return res.status(403).json({
           message: 'Access denied - No permissions configured',
-          success: false 
+          success: false
         });
       }
 
       // Find the module in user permissions
-      const userModule = user.permissions.modules.find(m => m.name === module);
-      
+      const userModule = findUserModule(user.permissions.modules, module);
+
       if (!userModule) {
-        return res.status(403).json({ 
+        return res.status(403).json({
           message: `Access denied - No access to ${module} module`,
-          success: false 
+          success: false
         });
       }
 

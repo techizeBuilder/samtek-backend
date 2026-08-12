@@ -1,5 +1,6 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
+import { checkPermission } from '../middleware/permissions.js';
 import {
   createOrder,
   getOrders,
@@ -29,33 +30,38 @@ const router = express.Router();
 
 router.use(authenticateToken);
 
-router.post('/', createOrder);
-router.get('/', getOrders);
-router.get('/deal-verifications', getDealVerifications);
-// NOC Request & Gate Pass Generation Flow
-router.get('/noc-requests', getNOCRequests);
-router.post('/approve-noc/:saleId', approveNOC);
-router.get('/noc-details/:saleId', getNOCDetails);
+const ordersView = checkPermission('sales', 'orders', 'view');
+const ordersAdd = checkPermission('sales', 'orders', 'add');
+const ordersEdit = checkPermission('sales', 'orders', 'edit');
+const ordersDelete = checkPermission('sales', 'orders', 'delete');
 
-router.get('/get-tracking', getOrderTracking);
-router.get('/check-existing', checkExistingOrder);
-router.get('/check-inventory', checkInventoryForItem);
-router.get('/by-lead/:leadId', getOrderByLeadId);
-router.get('/:id', getOrderById);
-router.put('/:id', updateOrder);
-router.patch('/:id/status', updateOrderStatus);
-router.patch('/:id/service-verify', verifyServiceOrder);
-router.patch('/:id/account-approve', approveAccountOrder);
-router.post('/gate-pass/:saleId', generateGatePass);
-router.post('/approve-sale/:saleId', approveSaleOrder);
-router.post('/:id/payment-evidence', addPaymentEvidence);
-router.patch('/:orderId/store-info', updateOrderStoreInfo);
-router.patch('/sale/:saleId/store-info', updateSaleStoreInfo);
-router.patch('/order/:orderId/store-info', updateOrderStoreInfo);
+router.post('/', ordersAdd, createOrder);
+router.get('/', ordersView, getOrders);
+router.get('/deal-verifications', ordersView, getDealVerifications);
+// NOC Request & Gate Pass Generation Flow
+router.get('/noc-requests', ordersView, getNOCRequests);
+router.post('/approve-noc/:saleId', ordersEdit, approveNOC);
+router.get('/noc-details/:saleId', ordersView, getNOCDetails);
+
+router.get('/get-tracking', ordersView, getOrderTracking);
+router.get('/check-existing', ordersView, checkExistingOrder);
+router.get('/check-inventory', ordersView, checkInventoryForItem);
+router.get('/by-lead/:leadId', ordersView, getOrderByLeadId);
+router.get('/:id', ordersView, getOrderById);
+router.put('/:id', ordersEdit, updateOrder);
+router.patch('/:id/status', ordersEdit, updateOrderStatus);
+router.patch('/:id/service-verify', ordersEdit, verifyServiceOrder);
+router.patch('/:id/account-approve', ordersEdit, approveAccountOrder);
+router.post('/gate-pass/:saleId', ordersEdit, generateGatePass);
+router.post('/approve-sale/:saleId', ordersEdit, approveSaleOrder);
+router.post('/:id/payment-evidence', ordersEdit, addPaymentEvidence);
+router.patch('/:orderId/store-info', ordersEdit, updateOrderStoreInfo);
+router.patch('/sale/:saleId/store-info', ordersEdit, updateSaleStoreInfo);
+router.patch('/order/:orderId/store-info', ordersEdit, updateOrderStoreInfo);
 
 // One-time repair endpoint — fixes Sales stuck at 'Goes to Purchase' after QC approval
-router.post('/repair-store-status', repairStoreQCStatus);
+router.post('/repair-store-status', ordersEdit, repairStoreQCStatus);
 
-router.delete('/:id', deleteOrder);
+router.delete('/:id', ordersDelete, deleteOrder);
 
 export default router;

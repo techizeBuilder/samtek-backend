@@ -1,5 +1,6 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
+import { checkPermission } from '../middleware/permissions.js';
 import {
   getProductionShiftData,
   getProductionGroupShiftDetails,
@@ -23,6 +24,20 @@ const router = express.Router();
 // Apply authentication to all routes
 router.use(authenticateToken);
 
+const expensesView = checkPermission('production', 'expenses', 'view');
+const expensesAdd = checkPermission('production', 'expenses', 'add');
+const expensesEdit = checkPermission('production', 'expenses', 'edit');
+const expensesDelete = checkPermission('production', 'expenses', 'delete');
+
+// NOTE: Dashboard / Reports / Production-Shift / Ungrouped-Items routes below are
+// intentionally left WITHOUT checkPermission — the 'production' module's grantable
+// feature catalogue (roleModulesConfig.js) only defines: orders, repairProduction,
+// workPlanning, processQc, jobCards, manpower, expenses, lms. There is no 'dashboard'
+// or generic overview feature key, and the frontend sidebar entry for '/production/dashboard'
+// carries no `feature` at all (see moduleRoutes.js), confirming this is an intentionally
+// ungated overview. Gating these with an invented key would 403 them for every non-Superadmin
+// user. Flagged for a product decision rather than guessed.
+
 // Production Dashboard
 router.get('/dashboard', getProductionDashboard);
 
@@ -39,11 +54,11 @@ router.get('/production-shift/:groupId', getProductionGroupShiftDetails);
 router.put('/ungrouped-items/production', updateUngroupedItemProduction);
 
 // Production Expenses (labor, tools, job work, raw material, etc.)
-router.get('/expenses/categories', getProductionExpenseCategories);
-router.get('/expenses/summary', getProductionExpenseSummary);
-router.get('/expenses', getProductionExpenses);
-router.post('/expenses', createProductionExpense);
-router.put('/expenses/:id', updateProductionExpense);
-router.delete('/expenses/:id', deleteProductionExpense);
+router.get('/expenses/categories', expensesView, getProductionExpenseCategories);
+router.get('/expenses/summary', expensesView, getProductionExpenseSummary);
+router.get('/expenses', expensesView, getProductionExpenses);
+router.post('/expenses', expensesAdd, createProductionExpense);
+router.put('/expenses/:id', expensesEdit, updateProductionExpense);
+router.delete('/expenses/:id', expensesDelete, deleteProductionExpense);
 
 export default router;

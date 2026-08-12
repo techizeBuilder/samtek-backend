@@ -44,6 +44,14 @@ const itemSchema = new mongoose.Schema({
   itemCategories: [{ type: String, trim: true }], // multi-select, e.g. Fabrication, Sheet Metal, Machining
   sourceType: { type: String, default: '', trim: true }, // e.g. Purchase, In House
   itemSourceType: { type: String, default: '', trim: true }, // e.g. In House, Out Source, Both
+  // Item Process Type — dynamic ("+"-addable), InventoryMasterOption-backed
+  // like itemType/sourceType above. 'Fabrication Item' is the one value with
+  // special frontend behavior (opens the Fabrication Master picker); every
+  // other value is just a plain tag, same as the fields above.
+  itemProcessType: { type: String, default: '', trim: true },
+  // Set when this Item was created by picking a Fabrication Master entry —
+  // traceability back to the catalog item; see FabricationMaster.js.
+  fabricationRef: { type: mongoose.Schema.Types.ObjectId, ref: 'FabricationMaster', default: null },
   batch: {
     type: String,
     trim: true
@@ -276,6 +284,22 @@ const itemSchema = new mongoose.Schema({
     diaID: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
     thickness: { value: { type: Number, default: null }, unit: { type: String, default: '', trim: true } },
   },
+  // Populated when this Item is created from a Fabrication Master pick — a
+  // per-Item COPY of the catalog entry's dimensions (see FabricationMaster.js),
+  // each with its own `subStock` since stock is tracked here, not on the
+  // catalog. Left empty ([]) for every other Item; the fixed `dimensions`
+  // object above is what those use.
+  dimensionVariants: [{
+    category: { type: String, trim: true },
+    // Mixed, not Map — see FabricationMaster.js's dimensions.values comment.
+    values: { type: mongoose.Schema.Types.Mixed, default: {} },
+    designation: { type: String, default: '', trim: true },
+    densityValue: { type: Number, default: null },
+    densityUnit: { type: String, default: 'kg/m3', trim: true },
+    weightPerMeterKg: { type: Number, default: null },
+    weightPerPieceKg: { type: Number, default: null },
+    subStock: { type: Number, default: 0 },
+  }],
   unitWeightValue: {
     type: Number,
     default: null

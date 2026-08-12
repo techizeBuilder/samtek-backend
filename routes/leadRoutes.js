@@ -31,6 +31,7 @@ import {
 } from '../controllers/leadController.js';
 import { scheduleMeeting, getMeeting, getMeetings, completeMeeting } from '../controllers/meetingController.js';
 import { leadDocumentUpload } from '../middleware/leadDocumentUpload.js';
+import { checkPermission } from '../middleware/permissions.js';
 
 const router = express.Router();
 
@@ -45,43 +46,48 @@ router.post('/facebook-webhook',   receiveFacebookWebhook);
 // ─── Authenticated Routes ─────────────────────────────────────────────────────
 router.use(authenticateToken);
 
-router.post('/',                          createLead);
-router.get('/',                           getLeads);
-router.get('/check',                      checkExistingLead);
-router.get('/users',                      getAssignableUsers);
+const leadsView = checkPermission('sales', 'leads', 'view');
+const leadsAdd = checkPermission('sales', 'leads', 'add');
+const leadsEdit = checkPermission('sales', 'leads', 'edit');
+const leadsDelete = checkPermission('sales', 'leads', 'delete');
+
+router.post('/',                          leadsAdd, createLead);
+router.get('/',                           leadsView, getLeads);
+router.get('/check',                      leadsView, checkExistingLead);
+router.get('/users',                      leadsView, getAssignableUsers);
 
 // API Settings
-router.get('/api-settings',              getApiSettings);
-router.post('/api-settings',             saveApiSettings);
+router.get('/api-settings',              leadsView, getApiSettings);
+router.post('/api-settings',             leadsEdit, saveApiSettings);
 
 // Sync Routes
-router.post('/sync-indiamart',           syncIndiamartLeads);
-router.post('/sync-ivr',                 syncIvrLeads);
-router.post('/click-to-call',            clickToCall);
+router.post('/sync-indiamart',           leadsAdd, syncIndiamartLeads);
+router.post('/sync-ivr',                 leadsAdd, syncIvrLeads);
+router.post('/click-to-call',            leadsEdit, clickToCall);
 
 // Lead-specific routes
-router.get('/:id/quotation',              getLeadQuotation);
-router.get('/:id',                        getLeadById);
-router.put('/:id',                        updateLead);
-router.put('/:id/payment-check',          updatePaymentCheckStatus);
-router.post('/:id/request-payment-check', requestPaymentCheck);
-router.post('/:id/send-to-account',       sendLeadToAccount);
-router.post('/:id/upload-documents',      leadDocumentUpload.fields([
+router.get('/:id/quotation',              leadsView, getLeadQuotation);
+router.get('/:id',                        leadsView, getLeadById);
+router.put('/:id',                        leadsEdit, updateLead);
+router.put('/:id/payment-check',          leadsEdit, updatePaymentCheckStatus);
+router.post('/:id/request-payment-check', leadsEdit, requestPaymentCheck);
+router.post('/:id/send-to-account',       leadsEdit, sendLeadToAccount);
+router.post('/:id/upload-documents',      leadsEdit, leadDocumentUpload.fields([
   { name: 'po', maxCount: 1 },
   { name: 'paymentProof', maxCount: 1 },
   { name: 'quotation', maxCount: 1 }
 ]), uploadLeadDocuments);
-router.post('/:id/add-document',          leadDocumentUpload.single('file'), addLeadDocument);
-router.post('/:id/won',                   markLeadAsWon);
-router.delete('/:id',                     deleteLead);
-router.get('/:id/call-logs',              getCallLogs);
+router.post('/:id/add-document',          leadsEdit, leadDocumentUpload.single('file'), addLeadDocument);
+router.post('/:id/won',                   leadsEdit, markLeadAsWon);
+router.delete('/:id',                     leadsDelete, deleteLead);
+router.get('/:id/call-logs',              leadsView, getCallLogs);
 
 // Meeting routes
-router.post('/:id/meeting',              scheduleMeeting);
-router.put('/:id/meeting',               scheduleMeeting);
-router.get('/:id/meeting',               getMeeting);
-router.get('/:id/meetings',              getMeetings);
-router.put('/:id/meeting/:meetingId/complete', completeMeeting);
+router.post('/:id/meeting',              leadsAdd, scheduleMeeting);
+router.put('/:id/meeting',               leadsEdit, scheduleMeeting);
+router.get('/:id/meeting',               leadsView, getMeeting);
+router.get('/:id/meetings',              leadsView, getMeetings);
+router.put('/:id/meeting/:meetingId/complete', leadsEdit, completeMeeting);
 
 export default router;
 

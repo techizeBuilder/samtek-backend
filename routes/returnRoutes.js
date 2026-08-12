@@ -10,8 +10,14 @@ import {
   getReturnStats
 } from '../controllers/returnController.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { checkPermission } from '../middleware/permissions.js';
 
 const router = express.Router();
+
+const returnsView = checkPermission('sales', 'returns', 'view');
+const returnsAdd = checkPermission('sales', 'returns', 'add');
+const returnsEdit = checkPermission('sales', 'returns', 'edit');
+const returnsDelete = checkPermission('sales', 'returns', 'delete');
 
 // Validation rules for return creation
 const createReturnValidation = [
@@ -123,12 +129,12 @@ const updateReturnValidation = [
 ];
 
 // Routes
-router.get('/stats', authenticateToken, getReturnStats);
-router.get('/', authenticateToken, getAllReturns);
-router.get('/:id', authenticateToken, getReturnById);
-router.post('/', authenticateToken, createReturnValidation, createReturn);
-router.put('/:id', authenticateToken, updateReturnValidation, updateReturn);
-router.patch('/:id/status', authenticateToken, updateReturnStatus);
-router.delete('/:id', authenticateToken, deleteReturn);
+router.get('/stats', authenticateToken, returnsView, getReturnStats);
+router.get('/', authenticateToken, returnsView, getAllReturns);
+router.get('/:id', authenticateToken, returnsView, getReturnById);
+router.post('/', authenticateToken, returnsAdd, createReturnValidation, createReturn);
+router.put('/:id', authenticateToken, returnsEdit, updateReturnValidation, updateReturn);
+router.patch('/:id/status', authenticateToken, returnsEdit, updateReturnStatus);
+router.delete('/:id', authenticateToken, returnsDelete, deleteReturn);
 
 export default router;

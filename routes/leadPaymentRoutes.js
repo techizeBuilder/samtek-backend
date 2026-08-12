@@ -1,5 +1,6 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
+import { checkPermission } from '../middleware/permissions.js';
 import {
   getLeadsForPayment,
   addLeadPayment,
@@ -13,22 +14,28 @@ const router = express.Router();
 
 router.use(authenticateToken);
 
+// Lead payments live under Accounts' "Sales" area (same feature key as
+// NOC Requests, Packed Orders, Order Forms, etc. in roleModulesConfig.js).
+const salesView = checkPermission('accounts', 'sales', 'view');
+const salesAdd = checkPermission('accounts', 'sales', 'add');
+const salesEdit = checkPermission('accounts', 'sales', 'edit');
+
 // Get leads sent to account for payment processing
-router.get('/leads', getLeadsForPayment);
+router.get('/leads', salesView, getLeadsForPayment);
 
 // Get bank accounts for payment selection
-router.get('/bank-accounts', getBankAccounts);
+router.get('/bank-accounts', salesView, getBankAccounts);
 
 // Add advanced payment for a lead
-router.post('/', addLeadPayment);
+router.post('/', salesAdd, addLeadPayment);
 
 // Get all lead payments
-router.get('/', getLeadPayments);
+router.get('/', salesView, getLeadPayments);
 
 // Get payment summary for a specific lead
-router.get('/lead/:leadId', getLeadPaymentSummary);
+router.get('/lead/:leadId', salesView, getLeadPaymentSummary);
 
 // Update payment status (verify/reject)
-router.put('/:id/status', updateLeadPaymentStatus);
+router.put('/:id/status', salesEdit, updateLeadPaymentStatus);
 
 export default router;

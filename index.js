@@ -288,6 +288,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const leadRouter = (await import('./routes/leadRoutes.js')).default;
             app.use('/api/leads', leadRouter);
             console.log('Lead routes registered at /api/leads');
+            const emailRouter = (await import('./routes/emailRoutes.js')).default;
+            app.use('/api/email', emailRouter);
+            console.log('Email routes registered at /api/email');
             const whatsappRouter = (await import('./routes/whatsappRoutes.js')).default;
             app.use('/api/whatsapp', whatsappRouter);
             console.log('WhatsApp routes registered at /api/whatsapp');
@@ -364,6 +367,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const rdRoutes = (await import('./routes/rdRoutes.js')).default;
             app.use('/api/rd', rdRoutes);
             console.log('R&D routes registered at /api/rd');
+            // Fabrication Master routes
+            const fabricationMasterRoutes = (await import('./routes/fabricationMasterRoutes.js')).default;
+            app.use('/api/fabrication-master', fabricationMasterRoutes);
+            console.log('Fabrication Master routes registered at /api/fabrication-master');
             // Packaging & Dispatch routes
             const packagingDispatchRoutes = (await import('./routes/packagingDispatchRoutes.js')).default;
             app.use('/api/packaging-dispatch', packagingDispatchRoutes);

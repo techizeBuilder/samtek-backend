@@ -1,6 +1,6 @@
 import express from 'express';
 import User from './models/User.js';
-import { generateToken, authenticateToken } from './middleware/auth.js';
+import { generateToken, authenticateToken, authorizeRoles } from './middleware/auth.js';
 
 import {
   getUsers,
@@ -366,17 +366,26 @@ const verifyToken = authenticateToken;
 // Profile routes are now handled by dedicated profile routes
 
 // User Management Routes (Super User Only) - These come AFTER profile routes
+//
+// Creating/deleting a user or resetting someone else's password has no
+// legitimate non-admin use case, so those are restricted to admin-tier
+// roles here. Plain update (name/mobile/job info) stays open — Managers use
+// it for their own team — but userController.updateUser itself rejects any
+// role/permissions change from a non-admin caller, which is the actual
+// privilege-escalation vector this closes.
+const ADMIN_TIER_ROLES = ['Superadmin', 'Super Admin', 'HR-Admin', 'Company Admin'];
+
 router.get('/users', verifyToken, getUsers);
 router.get('/users/generate-employee-id', verifyToken, getNextEmployeeId);
 router.get('/users/:id', verifyToken, getUserById);
 // profileUpload.single() parses multipart/form-data so req.body is populated
-router.post('/users', verifyToken, profileUpload.single('profilePicture'), createUser);
+router.post('/users', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), profileUpload.single('profilePicture'), createUser);
 router.put('/users/:id', verifyToken, profileUpload.single('profilePicture'), updateUser);
 router.patch('/users/:id', verifyToken, profileUpload.single('profilePicture'), updateUser);
 router.patch('/users/:id/profile-picture', verifyToken, profileUpload.single('profilePicture'), updateUser);
-router.delete('/users/:id', verifyToken, deleteUser);
-router.post('/users/:id/reset-password', verifyToken, resetUserPassword);
-router.put('/users/:id/password', verifyToken, updateUserPassword);
+router.delete('/users/:id', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), deleteUser);
+router.post('/users/:id/reset-password', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), resetUserPassword);
+router.put('/users/:id/password', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), updateUserPassword);
 
 
 // Settings Routes (Super Admin Only)
