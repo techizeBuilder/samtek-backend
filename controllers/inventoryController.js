@@ -280,6 +280,26 @@ export const getItems = async (req, res) => {
       console.log('🔬 R&D user filtering applied: company =', rdCompanyIdStr);
     }
 
+    // Default company filtering for every other role (Complaint Management /
+    // Service technicians, Sales, Accounts, Production, QC, Packaging, etc.).
+    // The four blocks above only cover specific roles that needed their own
+    // extra logic (Unit Head → Products only, etc.) — anything not already
+    // scoped by one of them fell through with NO company filter at all,
+    // meaning any authenticated user could see every company's inventory.
+    // There is no cross-company "Super Admin" role in this app anymore
+    // (every user always belongs to exactly one company), so this is a
+    // straight default, not an opt-in.
+    if (!query.$or && !query.store && req.user.companyId) {
+      const cid = req.user.companyId.toString();
+      query.$or = [
+        { store: cid },
+        { store: req.user.companyId },
+        { companyId: cid },
+        { companyId: req.user.companyId }
+      ];
+      console.log('🏢 Default company filtering applied: company =', cid);
+    }
+
     // Search filter with improved partial matching
     if (search) {
       try {

@@ -453,11 +453,41 @@ export const submitDecision = async (req, res) => {
       // - 'Store' source     → item was from store order (qty already deducted) → dispatch, no add
       // - 'QC_Rejected'      → item re-made for original order → dispatch, no add
 
+      // Purchase-sourced jobs need the linked PurchaseRequest/Sale/sale-item
+      // resolved before the inventory-vs-dispatch decision below (surplus
+      // split) — resolved once here, reused in step 2 (Link QC Job back to
+      // Sale) instead of querying it twice.
+      let purchaseSaleCtx = null;
+
       let shouldAddToInventory = false;
+      let inventoryAddQty = job.quantity || 1;
       if (job.source === 'Stock') {
         shouldAddToInventory = true;
       } else if (job.source === 'Purchase') {
-        shouldAddToInventory = !(await isMachineJobItem(job, job.company));
+        purchaseSaleCtx = await resolvePurchaseSaleContext(job);
+        const isMachine = await isMachineJobItem(job, job.company);
+        if (!isMachine) {
+          shouldAddToInventory = true; // raw material — unchanged, always adds
+        } else if (purchaseSaleCtx.saleItem) {
+          // Machine/Motor purchase: Purchase can legitimately buy more than
+          // the linked order needs (vendor MOQ, buying ahead). Only the
+          // surplus beyond what the sale item still needs should land in
+          // inventory (e.g. Motor Master stock) — the rest still dispatches.
+          const remainingNeeded = Math.max(0, (purchaseSaleCtx.saleItem.quantity || 0) - (purchaseSaleCtx.saleItem.approvedQty || 0));
+          const surplusQty = Math.max(0, (job.quantity || 0) - remainingNeeded);
+          if (surplusQty > 0) {
+            shouldAddToInventory = true;
+            inventoryAddQty = surplusQty;
+            // Shrink the job's own quantity to just the dispatch-bound
+            // portion — the Sale approvedQty update below and the Packaging
+            // queue's per-unit job count both read job.quantity fresh, so
+            // this one change is enough to keep dispatch in sync too.
+            job.quantity -= surplusQty;
+          }
+        }
+        // No linked sale item found (e.g. a standalone purchase not tied to
+        // any order) → fall back to the pre-fix behavior: nothing added,
+        // whole qty treated as dispatch-bound.
       }
 
       if (shouldAddToInventory) {
@@ -487,7 +517,7 @@ export const submitDecision = async (req, res) => {
 
           if (inventoryItem) {
             const prevQty = inventoryItem.qty || 0;
-            inventoryItem.qty = prevQty + (job.quantity || 1);
+            inventoryItem.qty = prevQty + inventoryAddQty;
             await inventoryItem.save();
             console.log(`✅ [QC Approval - ${job.source}] Inventory updated for ${inventoryItem.name}. Prev: ${prevQty}, New: ${inventoryItem.qty}`);
           } else {
@@ -496,7 +526,7 @@ export const submitDecision = async (req, res) => {
               name: job.itemName,
               code: newCode,
               category: job.category || 'Raw Material',
-              qty: job.quantity || 1,
+              qty: inventoryAddQty,
               unit: job.unit || 'pcs',
               store: job.company.toString(),
               companyId: job.company,
@@ -626,63 +656,24 @@ export const submitDecision = async (req, res) => {
         console.log(`[QC Approval - Stock] Inventory updated. No sale/dispatch update.`);
 
       } else if (job.source === 'Purchase') {
-        // Purchase source — update storeQCStatus on linked sale
+        // Purchase source — update storeQCStatus on linked sale. Context
+        // (PurchaseRequest + Sale) was already resolved above in the
+        // inventory-vs-dispatch split; re-resolve only if that branch was
+        // skipped for some reason.
         try {
-          const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
-
-          // Strategy 1: Use direct purchaseRequestId reference (most reliable)
-          let pr = null;
-          if (job.purchaseRequestId) {
-            pr = await PurchaseRequest.findById(job.purchaseRequestId);
-          }
-
-          // Strategy 2: Fall back to searching by requestId / itemCode
-          if (!pr) {
-            pr = await PurchaseRequest.findOne({
-              $or: [
-                { requestId: job.sourceRefId },
-                { requestId: job.itemCode },
-                { itemId: job.sourceRefId },
-                { itemId: job.itemCode }
-              ]
-            });
-          }
-
-          // Strategy 3: Search by PO number
-          if (!pr && job.sourceRefId) {
-            const Purchase = (await import('../models/Purchase.js')).default;
-            const po = await Purchase.findOne({ purchaseOrderNumber: job.sourceRefId });
-            if (po) {
-              pr = await PurchaseRequest.findOne({ purchaseOrder: po._id });
-            }
-          }
+          const { pr, sale: salePurch } = purchaseSaleCtx || await resolvePurchaseSaleContext(job);
 
           console.log(`[QC Approval - Purchase] PR lookup result:`, pr ? `Found PR ${pr.requestId}, storeOrderId: ${pr.storeOrderId}` : 'Not found');
 
           if (pr && pr.storeOrderId) {
-            // storeOrderId can be an Order _id OR a Sale _id — try both
-            let salePurch = await Sale.findOne({
-              $or: [
-                { order: pr.storeOrderId },
-                { _id: pr.storeOrderId }
-              ]
-            });
-
-            // Also try matching by the itemId stored on the PR
-            if (!salePurch && pr.itemId) {
-              salePurch = await Sale.findOne({
-                $or: [
-                  { invoiceNumber: pr.itemId },
-                  { _id: /^[0-9a-fA-F]{24}$/.test(pr.itemId) ? pr.itemId : null }
-                ]
-              });
-            }
-
             if (salePurch) {
               const isMachine = await isMachineJobItem(job, job.company);
               const newStatus = isMachine ? 'Approved from QC' : 'Purchase Completed';
               // Multi-item: the Purchase Request carries the exact sale item
               const saleItemId = pr.saleItemId || job.saleItemId || null;
+              // job.quantity was already shrunk above to just the
+              // dispatch-bound portion when Purchase bought more than this
+              // sale item needed, so approvedQty only accumulates that much.
               const perItem = await setSaleItemStatus(salePurch, saleItemId, newStatus, { qty: job.quantity });
               console.log(`✅ [QC Approval - Purchase ${isMachine ? 'Machine' : 'Material'}] '${newStatus}' for Sale ${salePurch._id}${perItem ? ` (item ${saleItemId})` : ' (sale-level)'}`);
             } else {
@@ -885,6 +876,61 @@ async function createRejectedProductionOrder(qcJob, user, qty) {
 
 // Restore `qty` units to inventory for a Store-sourced job (partial or full
 // reject) — the item was deducted from stock when it was sent to QC.
+// Resolves a Purchase-sourced QC job back to its originating PurchaseRequest,
+// the Sale it belongs to, and the exact Sale.items[] subdocument it fulfils —
+// the same 3-strategy PR lookup the "link back to Sale" step already used,
+// pulled into one place so the inventory-vs-dispatch surplus split and that
+// step can share one resolution instead of querying it twice.
+async function resolvePurchaseSaleContext(job) {
+  const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+
+  // Strategy 1: direct purchaseRequestId reference (most reliable)
+  let pr = null;
+  if (job.purchaseRequestId) {
+    pr = await PurchaseRequest.findById(job.purchaseRequestId);
+  }
+
+  // Strategy 2: fall back to searching by requestId / itemCode
+  if (!pr) {
+    pr = await PurchaseRequest.findOne({
+      $or: [
+        { requestId: job.sourceRefId },
+        { requestId: job.itemCode },
+        { itemId: job.sourceRefId },
+        { itemId: job.itemCode }
+      ]
+    });
+  }
+
+  // Strategy 3: search by PO number
+  if (!pr && job.sourceRefId) {
+    const Purchase = (await import('../models/Purchase.js')).default;
+    const po = await Purchase.findOne({ purchaseOrderNumber: job.sourceRefId });
+    if (po) {
+      pr = await PurchaseRequest.findOne({ purchaseOrder: po._id });
+    }
+  }
+
+  let sale = null;
+  if (pr && pr.storeOrderId) {
+    // storeOrderId can be an Order _id OR a Sale _id — try both
+    sale = await Sale.findOne({ $or: [{ order: pr.storeOrderId }, { _id: pr.storeOrderId }] });
+    if (!sale && pr.itemId) {
+      sale = await Sale.findOne({
+        $or: [
+          { invoiceNumber: pr.itemId },
+          { _id: /^[0-9a-fA-F]{24}$/.test(pr.itemId) ? pr.itemId : null }
+        ]
+      });
+    }
+  }
+
+  const saleItemId = pr?.saleItemId || job.saleItemId || null;
+  const saleItem = (sale && saleItemId) ? sale.items.id(saleItemId) : null;
+
+  return { pr, sale, saleItem };
+}
+
 async function restoreStoreInventoryQty(job, qty) {
   try {
     let inventoryItem = null;

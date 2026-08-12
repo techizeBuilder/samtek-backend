@@ -1133,8 +1133,23 @@ export const startVisit = async (req, res) => {
 };
 
 // 13. Complete Visit
+//
+// Does NOT use a Mongo multi-document transaction — the deployment this app
+// runs against is a standalone mongod, not a replica set, and transactions
+// hard-require one (fails with "Transaction numbers are only allowed on a
+// replica set member or mongos" / "does not support retryable writes"
+// regardless of connection-string flags). Every other write flow in this
+// codebase (QC approval, Store flow, etc.) already avoids transactions for
+// the same reason, relying instead on a per-document atomic conditional
+// update (`qty: {$gte: needed}` + `$inc`) for concurrency safety. Same
+// pattern here: each part's stock deduction is atomic on its own, and if a
+// later part fails after earlier ones already succeeded, the earlier
+// deductions are compensated (incremented back) best-effort before
+// returning the error — not a true rollback, but correct in the normal
+// (non-concurrent-double-submit) case, which is what the stock guard above
+// is already mainly protecting against.
 export const completeVisit = async (req, res) => {
-    const session = await mongoose.startSession();
+    const deductedParts = []; // parts whose stock was actually decremented, for compensation on a later failure
     try {
         if (!req.user || !req.user.companyId) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
@@ -1199,9 +1214,9 @@ export const completeVisit = async (req, res) => {
 
         // 🚧 STOCK GUARD — never let a part consumption push inventory
         // negative. Checked up front here for a friendly, named error, AND
-        // re-enforced atomically inside the transaction below (qty: {$gte})
-        // so a concurrent completion touching the same item can't slip
-        // through in the gap between this check and the actual write.
+        // re-enforced atomically in each item's own update below (qty:
+        // {$gte}) so a concurrent completion touching the same item can't
+        // slip through in the gap between this check and the actual write.
         if (formattedParts.length > 0) {
             const items = await Item.find({
                 _id: { $in: formattedParts.map(p => p.item) },
@@ -1238,21 +1253,20 @@ export const completeVisit = async (req, res) => {
             });
         }
 
-        session.startTransaction();
-
         // Deduct each item ONLY if it still has enough stock at write time —
-        // if anything fails this atomic check, throw and abort the whole
-        // transaction so nothing gets deducted and the ticket stays
-        // untouched (In Progress), instead of half-completing.
+        // each update is atomic on its own document. `deductedParts` tracks
+        // what actually succeeded so the catch block below can compensate
+        // (re-increment) it if anything later fails — the loop itself, or
+        // ticket.save()/User.findByIdAndUpdate() after it.
         for (const part of formattedParts) {
             const result = await Item.updateOne(
                 { _id: part.item, companyId: req.user.companyId, qty: { $gte: part.quantity } },
-                { $inc: { qty: -part.quantity } },
-                { session }
+                { $inc: { qty: -part.quantity } }
             );
             if (result.modifiedCount !== 1) {
                 throw new Error('Stock changed while completing this visit — please re-check available quantity and try again.');
             }
+            deductedParts.push(part);
         }
 
         currentVisit.visitEnd = new Date();
@@ -1278,12 +1292,10 @@ export const completeVisit = async (req, res) => {
             newStatus: 'Resolved'
         });
 
-        await ticket.save({ session });
+        await ticket.save();
 
         // Free up the technician so they appear 'Available' to the dispatcher
-        await User.findByIdAndUpdate(req.user._id, { currentStatus: 'Available' }, { session });
-
-        await session.commitTransaction();
+        await User.findByIdAndUpdate(req.user._id, { currentStatus: 'Available' });
 
         res.status(200).json({
             success: true,
@@ -1292,14 +1304,24 @@ export const completeVisit = async (req, res) => {
         });
 
     } catch (error) {
-        if (session.inTransaction()) {
-            await session.abortTransaction();
+        // Best-effort compensation for whatever stock was actually deducted
+        // before this failure — see the function comment: no transaction to
+        // roll back automatically here, so this restores it manually.
+        if (deductedParts.length > 0) {
+            try {
+                await Item.bulkWrite(deductedParts.map(p => ({
+                    updateOne: {
+                        filter: { _id: p.item, companyId: req.user.companyId },
+                        update: { $inc: { qty: p.quantity } }
+                    }
+                })));
+            } catch (compensationError) {
+                console.error('Failed to compensate deducted stock after completeVisit error:', compensationError);
+            }
         }
         console.error('Error completing visit:', error);
         const status = /stock changed/i.test(error.message || '') ? 409 : 500;
         res.status(status).json({ success: false, message: error.message || 'Server error while completing visit.' });
-    } finally {
-        session.endSession();
     }
 };
 
