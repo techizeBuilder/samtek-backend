@@ -13,7 +13,7 @@ import mongoose from 'mongoose';
 const InventoryMasterOptionSchema = new mongoose.Schema({
   field: {
     type: String,
-    enum: ['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType'],
+    enum: ['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType', 'ItemProcessType'],
     required: true,
   },
   value: { type: String, required: true, trim: true },

@@ -1174,6 +1174,19 @@ const sanitizeItemData = (data) => {
   if (sanitized.modelNumber) sanitized.modelNumber = sanitized.modelNumber.trim();
   if (sanitized.sourceType) sanitized.sourceType = sanitized.sourceType.trim();
   if (sanitized.itemSourceType) sanitized.itemSourceType = sanitized.itemSourceType.trim();
+  if (sanitized.itemProcessType) sanitized.itemProcessType = sanitized.itemProcessType.trim();
+  if (sanitized.dimensionVariants && Array.isArray(sanitized.dimensionVariants)) {
+    sanitized.dimensionVariants = sanitized.dimensionVariants.map((dv) => ({
+      category: dv.category ? String(dv.category).trim() : '',
+      values: dv.values && typeof dv.values === 'object' ? dv.values : {},
+      designation: dv.designation ? String(dv.designation).trim() : '',
+      densityValue: dv.densityValue !== undefined && dv.densityValue !== null && dv.densityValue !== '' ? Number(dv.densityValue) : null,
+      densityUnit: dv.densityUnit ? String(dv.densityUnit).trim() : 'kg/m3',
+      weightPerMeterKg: dv.weightPerMeterKg !== undefined && dv.weightPerMeterKg !== null && dv.weightPerMeterKg !== '' ? Number(dv.weightPerMeterKg) : null,
+      weightPerPieceKg: dv.weightPerPieceKg !== undefined && dv.weightPerPieceKg !== null && dv.weightPerPieceKg !== '' ? Number(dv.weightPerPieceKg) : null,
+      subStock: Number(dv.subStock) || 0,
+    }));
+  }
   if (sanitized.itemCategories && Array.isArray(sanitized.itemCategories)) {
     sanitized.itemCategories = sanitized.itemCategories.filter(c => c && c.trim()).map(c => c.trim());
   }
