@@ -350,6 +350,9 @@ export const createRFQ = async (req, res) => {
       productName: pr.productName,
       quantity: rfqQuantity,
       quantityUnit: rfqQuantityUnit,
+      // Fabrication Master items only — read-only breakdown of what makes up
+      // rfqQuantity, shown to vendors as context; never a separate bid line.
+      fabricationDimensionLines: pr.fabricationDimensionLines || [],
       requiredByDate: requiredByDate ? new Date(requiredByDate) : null,
       vendors: matchedVendors.map(v => v._id),
       notes: enrichedNotes, // <-- Has user notes + specs injected
@@ -384,6 +387,7 @@ export const createRFQ = async (req, res) => {
         vendorName: vendor.supplierName,
         productName: pr.productName,
         quantity: rfqQuantity,
+        fabricationDimensionLines: pr.fabricationDimensionLines || [],
         unitPrice: 0,
         totalPrice: 0,
         deliveryDays: 7,
@@ -405,6 +409,7 @@ export const createRFQ = async (req, res) => {
           productName: pr.productName,
           quantity: rfqQuantity,
           quantityUnit: rfqQuantityUnit,
+          fabricationDimensionLines: pr.fabricationDimensionLines || [],
           requiredByDate: requiredByDate,
           bidLink,
           companyName,
@@ -567,6 +572,7 @@ export const resendVendorBidEmail = async (req, res) => {
       productName: rfq.productName,
       quantity: rfq.quantity,
       quantityUnit: rfq.quantityUnit,
+      fabricationDimensionLines: rfq.fabricationDimensionLines || [],
       requiredByDate: rfq.requiredByDate,
       bidLink,
       companyName,
@@ -685,7 +691,13 @@ export const selectVendor = async (req, res) => {
       unitPrice,
       totalPrice: totalAmount,
       receivedQuantity: 0,
-      pendingQuantity: orderQty
+      pendingQuantity: orderQty,
+      // Fabrication Master items only — read-only breakdown snapshot, for
+      // the (separately deferred) Store-receiving flow to reconcile a
+      // delivered bulk weight back into per-dimension stock. Never affects
+      // quantity/unitPrice/totalPrice above, which stay against the single
+      // aggregate orderQty.
+      fabricationDimensionLines: rfq.fabricationDimensionLines || pr.fabricationDimensionLines || []
     };
     if (inventoryItemId) {
       poLineItem.item = inventoryItemId;
@@ -727,6 +739,7 @@ export const selectVendor = async (req, res) => {
         poNumber: po.purchaseOrderNumber,
         productName: pr.productName,
         quantity: orderQty,
+        fabricationDimensionLines: poLineItem.fabricationDimensionLines,
         unitPrice,
         deliveryDays: winningBid.deliveryDays,
         warrantyMonths: winningBid.warrantyMonths,
@@ -811,6 +824,7 @@ export const getBidByToken = async (req, res) => {
         productName: bid.productName,
         quantity: bid.quantity,
         quantityUnit: bid.rfq.quantityUnit || null,
+        fabricationDimensionLines: bid.fabricationDimensionLines || [],
         requiredByDate: bid.rfq.requiredByDate,
         notes: bid.rfq.notes,
         vendorName: bid.vendor.supplierName,

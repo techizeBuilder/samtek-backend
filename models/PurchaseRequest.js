@@ -99,6 +99,44 @@ const purchaseRequestSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // Fabrication Master items only — Store can request several catalog
+  // dimensionVariants of the same item in one consolidated request (e.g.
+  // 20kg worth of one sheet size + 10kg of another). Each line's values must
+  // match an existing catalog dimensionVariant — never a leftover variant,
+  // see Item.dimensionVariants[].isLeftover. Purchase edits this same array
+  // (adding/removing/adjusting lines) from the "Send RFQ" form before the
+  // request goes out — see rfqController.js's createRFQ. Empty array for
+  // every non-fabrication request. The vendor never sees these as separate
+  // line items — only the aggregate top-level quantity/unit (below) is what's
+  // actually negotiated/billed; these are read-only breakdown context.
+  fabricationDimensionLines: {
+    type: [{
+      values: { type: mongoose.Schema.Types.Mixed, required: true },
+      quantity: { type: Number, required: true, min: 1 },
+      weightPerPieceKg: { type: Number, default: null },
+      lineWeightKg: { type: Number, default: null },
+    }],
+    default: []
+  },
+  // Fabrication Master items only — what Store actually recorded at receive
+  // time (server/controllers/purchaseRequestController.js's
+  // receiveFabricationPurchase), same shape as fabricationDimensionLines
+  // above but may differ from it — the vendor can ship a different size mix
+  // than what was ordered/quoted, including a dimension not in the item's
+  // catalog at all (see Item.dimensionVariants[].isLeftover — an off-catalog
+  // receipt is credited as stock but flagged isLeftover, same as a Store-cut
+  // leftover). fabricationDimensionLines stays untouched as "what was
+  // ordered"; this is "what was received." Empty for every non-fabrication
+  // request and for a fabrication request not yet received.
+  receivedFabricationLines: {
+    type: [{
+      values: { type: mongoose.Schema.Types.Mixed, required: true },
+      quantity: { type: Number, required: true, min: 1 },
+      weightPerPieceKg: { type: Number, default: null },
+      lineWeightKg: { type: Number, default: null },
+    }],
+    default: []
+  },
   // ── Unit-conversion purchase flow (items with a defined Purchase Unit) ──
   purchaseUnitType: {
     type: String,

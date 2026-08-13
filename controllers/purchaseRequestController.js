@@ -3,11 +3,155 @@ import StagedPurchase from '../models/StagedPurchase.js';
 import Sale from '../models/Sale.js';
 import Order from '../models/Order.js';
 import QCJob from '../models/QCJob.js';
+import RFQ from '../models/RFQ.js';
 
 import fs from 'fs';
 import path from 'path';
 import notificationService from '../services/notificationService.js';
 import { Item } from '../models/Inventory.js';
+import { dimensionSignature, resolveFabricationWeight } from '../services/fabricationDemandService.js';
+import { MASS_UNIT_TO_KG_MULTIPLIER } from '../services/itemPricingService.js';
+
+// Validates + weight-resolves a set of fabrication dimension lines against an
+// Item's actual catalog dimensionVariants (never a leftover cut — Purchase
+// only ever reorders original catalog sizes, same rule Store's own picker
+// enforces), and predicts the total order quantity in the item's own
+// Purchase Unit when that's a Mass Unit — the vendor is ultimately paid for
+// weight, not piece count, regardless of how many distinct cut sizes make up
+// the order (e.g. 20kg of one size + 10kg of another = 30kg ordered).
+// Shared by createPurchaseRequest, previewFabricationTotal, editFabricationLines,
+// and receiveFabricationPurchase so they can never compute this differently.
+//
+// requireCatalogMatch defaults true (ordering/editing a request — Purchase
+// only ever orders an existing catalog size). receiveFabricationPurchase
+// passes false: Store may receive a dimension the vendor shipped that isn't
+// in the catalog at all — still weight-computable (only needs the item's
+// category+density, not catalog membership), the caller is responsible for
+// flagging it isLeftover when crediting stock (see qcController.js).
+async function resolveFabricationLines(masterItem, rawLines, { requireCatalogMatch = true } = {}) {
+  if (!Array.isArray(rawLines) || rawLines.length === 0) {
+    throw new Error('At least one dimension line is required.');
+  }
+  const catalogVariants = (masterItem.dimensionVariants || []).filter(v => !v.isLeftover);
+
+  const lines = [];
+  let totalWeightKg = 0;
+  for (const raw of rawLines) {
+    const qty = Number(raw.quantity);
+    if (!(qty > 0)) throw new Error('Every dimension line needs a quantity greater than 0.');
+
+    const match = catalogVariants.find(v => dimensionSignature(v.values) === dimensionSignature(raw.values));
+    if (!match && requireCatalogMatch) {
+      throw new Error(`Dimension ${JSON.stringify(raw.values)} is not a known catalog size for this item.`);
+    }
+    const valuesToUse = match ? match.values : raw.values;
+
+    const fabWeight = await resolveFabricationWeight(masterItem, valuesToUse);
+    const weightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
+    const lineWeightKg = weightPerPieceKg != null ? Math.round(weightPerPieceKg * qty * 1000) / 1000 : null;
+    if (lineWeightKg != null) totalWeightKg += lineWeightKg;
+
+    lines.push({ values: valuesToUse, quantity: qty, weightPerPieceKg, lineWeightKg });
+  }
+
+  totalWeightKg = Math.round(totalWeightKg * 1000) / 1000;
+
+  const isMassUnit = masterItem.purchaseUnitType === 'Mass Unit' && !!MASS_UNIT_TO_KG_MULTIPLIER[masterItem.purchaseUnit];
+  let resolvedQuantity = null;
+  let resolvedUnit = null;
+  if (isMassUnit && totalWeightKg > 0) {
+    resolvedQuantity = Math.round(totalWeightKg * MASS_UNIT_TO_KG_MULTIPLIER[masterItem.purchaseUnit] * 1000) / 1000;
+    resolvedUnit = masterItem.purchaseUnit;
+  }
+
+  return { lines, totalWeightKg, resolvedQuantity, resolvedUnit, isMassUnit };
+}
+
+// Creates the QC Job for a just-Received purchase request, unless one
+// already exists for it (exchange-replacement requests reuse the original
+// PO, so matching on sourceRefId alone would collide with the original
+// request's already-closed QC job and wrongly skip creating a new one —
+// matching on purchaseRequestId instead avoids that). `quantityOverride`
+// lets receiveFabricationPurchase pass the total pieces across its
+// dimension breakdown instead of the generic convertedQuantity/quantity
+// fallback (which doesn't apply — a fabrication request's own `quantity` is
+// the aggregate purchase-unit weight, not a piece count).
+// Shared by updatePurchaseRequestStatus and receiveFabricationPurchase.
+async function createPurchaseQCJob(request, req, quantityOverride = null) {
+  try {
+    const sourceRefId = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
+
+    const existingQC = await QCJob.findOne({
+      source: 'Purchase',
+      purchaseRequestId: request._id,
+      company: request.companyId
+    });
+    if (existingQC) return;
+
+    const qcJobId = await generateQCJobId();
+
+    let qcCategory = 'Raw Material';
+    let qcBaseUnit = request.unit || 'pcs';
+    try {
+      const inventoryItem = await Item.findOne({
+        name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
+        companyId: request.companyId
+      });
+      if (inventoryItem && inventoryItem.category) {
+        qcCategory = inventoryItem.category;
+      }
+      if (inventoryItem && inventoryItem.unit) {
+        qcBaseUnit = inventoryItem.unit;
+      }
+    } catch (invLookupErr) {
+      console.error('Error looking up inventory item for QC job category:', invLookupErr);
+    }
+
+    // Multi-item: resolve the sales orderCode for grouping in QC screens
+    let qcOrderCode = '';
+    try {
+      if (request.storeOrderId) {
+        const OrderModel = (await import('../models/Order.js')).default;
+        const linkedOrder = await OrderModel.findById(request.storeOrderId).select('orderCode').lean();
+        qcOrderCode = linkedOrder?.orderCode || '';
+      }
+    } catch (_) { /* optional */ }
+
+    await QCJob.create({
+      qcJobId,
+      source: 'Purchase',
+      sourceRefId: sourceRefId,
+      purchaseRequestId: request._id,   // ← direct PR ref for reliable Sale lookup
+      saleItemId: request.saleItemId || null, // ← exact order item this purchase fulfils
+      orderCode: qcOrderCode,
+      sourceDepartment: 'Store',
+      sentBy: req.user.fullName || req.user.username || 'Store Dept',
+      itemName: request.productName,
+      itemCode: request.itemId || request.requestId,
+      category: qcCategory,
+      // Converted base-unit qty when the order was placed in a purchase unit
+      // (e.g. 20 kg received ÷ 1 kg/pc = 20 pcs) — QC approval adds this qty to inventory
+      quantity: quantityOverride ?? (request.convertedQuantity || request.quantity || 1),
+      unit: qcBaseUnit,
+      receivedDate: today(),
+      status: 'Pending',
+      company: request.companyId,
+      createdBy: req.user._id,
+      notes: `Automatically created from Store Purchase Requisition: ${request.requestId}`
+    });
+    console.log(`✅ QC Job ${qcJobId} automatically created for Purchase Request ${request.requestId} with category ${qcCategory}`);
+
+    try {
+      await notificationService.triggerQCNotification({
+        action: 'qc_job_created',
+        data: { qcJobId, itemName: request.productName, requestId: request.requestId, quantity: request.quantity },
+        targetCompanyId: request.companyId,
+      });
+    } catch (e) { console.error('QC job notification error:', e); }
+  } catch (qcError) {
+    console.error('❌ Error creating QC job from Purchase Request:', qcError);
+  }
+}
 
 // Generate a unique requestId safely (avoids E11000 duplicate key errors)
 async function generateUniqueRequestId() {
@@ -179,7 +323,7 @@ export const getPurchaseRequests = async (req, res) => {
           { code: pr.itemId },
           { name: { $regex: new RegExp(`^${pr.productName}$`, 'i') } }
         ]
-      }).select('name code specifications warranty unit unitType purchaseUnit purchaseUnitType');
+      }).select('name code specifications warranty unit unitType purchaseUnit purchaseUnitType fabricationRef dimensionVariants');
 
       if (masterItem) {
         pr.item = masterItem; // Attaches to PR so the frontend UI can read it
@@ -284,7 +428,8 @@ export const createBulkPurchaseRequests = async (req, res) => {
         source: resolvedSource,
         storeApproved: resolvedStoreApproved,
         unit: item.unit || null,
-        materialCode: item.materialCode || null
+        materialCode: item.materialCode || null,
+        fabricationDimensionLines: Array.isArray(item.fabricationDimensionLines) ? item.fabricationDimensionLines : []
       });
 
       createdRequests.push(newRequest);
@@ -325,7 +470,7 @@ export const createBulkPurchaseRequests = async (req, res) => {
 // Create a new purchase request
 export const createPurchaseRequest = async (req, res) => {
   try {
-    const { productName, quantity, requestFromDepartment, priority, storeOrderId, itemId, source, unit, materialCode } = req.body;
+    const { productName, quantity, requestFromDepartment, priority, storeOrderId, itemId, source, unit, materialCode, fabricationDimensionLines } = req.body;
     const companyId = req.user.companyId;
 
     if (!companyId) {
@@ -335,6 +480,7 @@ export const createPurchaseRequest = async (req, res) => {
     // ─────────────────────────────────────────────────────────────
     // STRICT R&D COMPLIANCE CHECK (The Gatekeeper)
     // ─────────────────────────────────────────────────────────────
+    let masterItem;
     try {
       const searchCriteria = [{ name: { $regex: new RegExp(`^${productName.trim()}$`, 'i') } }];
       if (itemId) searchCriteria.push({ code: itemId });
@@ -345,7 +491,7 @@ export const createPurchaseRequest = async (req, res) => {
         searchCriteria.push({ _id: itemId });
       }
 
-      const masterItem = await Item.findOne({
+      masterItem = await Item.findOne({
         companyId,
         $or: searchCriteria
       });
@@ -374,6 +520,34 @@ export const createPurchaseRequest = async (req, res) => {
     }
     // ─────────────────────────────────────────────────────────────
 
+    // Fabrication Master items only — Store may request several catalog
+    // dimensions of the same item in one consolidated request. Resolve/
+    // validate the lines and predict the aggregate order quantity (in kg or
+    // whichever Mass Unit the item is purchased in) the same way Purchase's
+    // own "Send RFQ" form will later recompute it.
+    let resolvedFabricationLines = [];
+    let resolvedQuantity = quantity;
+    let resolvedUnit = unit || null;
+    if (Array.isArray(fabricationDimensionLines) && fabricationDimensionLines.length > 0) {
+      try {
+        const resolved = await resolveFabricationLines(masterItem, fabricationDimensionLines);
+        resolvedFabricationLines = resolved.lines;
+        if (resolved.isMassUnit) {
+          resolvedQuantity = resolved.resolvedQuantity;
+          resolvedUnit = resolved.resolvedUnit;
+        } else {
+          // Non-Mass-Unit purchase unit (e.g. Pieces, Meter) — there's no
+          // sound way to auto-total mixed dimensions, so fall back to the
+          // sum of requested pieces as a provisional placeholder. Purchase
+          // must review/replace this in the "Send RFQ" form before sending.
+          resolvedQuantity = resolvedFabricationLines.reduce((sum, l) => sum + l.quantity, 0);
+          resolvedUnit = masterItem.purchaseUnit || masterItem.unit || unit || null;
+        }
+      } catch (dimErr) {
+        return res.status(400).json({ success: false, message: dimErr.message });
+      }
+    }
+
     const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
 
     // Determine source: explicit source field, or infer from role
@@ -389,7 +563,7 @@ export const createPurchaseRequest = async (req, res) => {
     const newRequest = await PurchaseRequest.create({
       requestId,
       productName,
-      quantity,
+      quantity: resolvedQuantity,
       requestFromDepartment: isStoreUser ? 'Store' : (requestFromDepartment || 'Production'),
       priority: priority || 'Medium',
       companyId,
@@ -397,8 +571,9 @@ export const createPurchaseRequest = async (req, res) => {
       itemId,
       source: resolvedSource,
       storeApproved: resolvedStoreApproved,
-      unit: unit || null,
-      materialCode: materialCode || null
+      unit: resolvedUnit,
+      materialCode: materialCode || null,
+      fabricationDimensionLines: resolvedFabricationLines
     });
 
     res.status(201).json({ success: true, data: newRequest });
@@ -416,6 +591,124 @@ export const createPurchaseRequest = async (req, res) => {
 
   } catch (error) {
     console.error('Error creating purchase request:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+};
+
+// POST /api/purchase-requests/preview-fabrication-total
+// Shared, no-persist preview of resolveFabricationLines — used by Store's
+// multi-dimension request dialog and Purchase's "Send RFQ" edit form so both
+// always show the exact weight/quantity total that will actually be saved.
+export const previewFabricationTotal = async (req, res) => {
+  try {
+    const { itemId, materialCode, lines, allowNonCatalogDimensions } = req.body;
+    const companyId = req.user.companyId;
+
+    const searchCriteria = [];
+    if (materialCode) searchCriteria.push({ code: materialCode });
+    if (itemId) {
+      searchCriteria.push({ code: itemId });
+      if (/^[0-9a-fA-F]{24}$/.test(itemId)) searchCriteria.push({ _id: itemId });
+    }
+    if (searchCriteria.length === 0) {
+      return res.status(400).json({ success: false, message: 'itemId or materialCode is required' });
+    }
+
+    const masterItem = await Item.findOne({ companyId, $or: searchCriteria });
+    if (!masterItem) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
+    const resolved = await resolveFabricationLines(masterItem, lines, { requireCatalogMatch: !allowNonCatalogDimensions });
+    res.json({
+      success: true,
+      data: {
+        lines: resolved.lines,
+        totalWeightKg: resolved.totalWeightKg,
+        isMassUnit: resolved.isMassUnit,
+        resolvedQuantity: resolved.resolvedQuantity,
+        resolvedUnit: resolved.resolvedUnit,
+        purchaseUnit: masterItem.purchaseUnit || null,
+        purchaseUnitType: masterItem.purchaseUnitType || null,
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message || 'Failed to compute preview' });
+  }
+};
+
+// PATCH /api/purchase-requests/:id/fabrication-lines
+// Purchase-dept-only: lets Purchase re-target which catalog dimensions/
+// quantities make up a still-Pending fabrication request, and finalize the
+// aggregate order quantity, before it's sent as an RFQ. This is the "same
+// editable form" the Send RFQ dialog PATCHes right before calling
+// rfqController.js's createRFQ, which independently checks for an existing
+// RFQ the same way this endpoint's lock-check does (so a race between two
+// Purchase users can't double-send).
+export const editFabricationLines = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.user.companyId;
+    const { lines, quantity, unit } = req.body;
+
+    const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
+    if (isStoreUser) {
+      return res.status(403).json({ success: false, message: 'Only Purchase/Accounts users can edit a request here.' });
+    }
+
+    const request = await PurchaseRequest.findOne({ _id: id, companyId });
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Purchase request not found' });
+    }
+    if (!request.fabricationDimensionLines || request.fabricationDimensionLines.length === 0) {
+      return res.status(400).json({ success: false, message: 'This request has no fabrication dimensions to edit.' });
+    }
+    if (request.status !== 'Pending') {
+      return res.status(400).json({ success: false, message: 'Only a Pending request can still be edited.' });
+    }
+    const existingRFQ = await RFQ.findOne({ purchaseRequest: id, companyId });
+    if (existingRFQ) {
+      return res.status(400).json({ success: false, message: `An RFQ (${existingRFQ.rfqNo}) already exists for this request — it can no longer be edited here.` });
+    }
+
+    const searchCriteria = [{ name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') } }];
+    if (request.materialCode) searchCriteria.push({ code: request.materialCode });
+    if (request.itemId) {
+      searchCriteria.push({ code: request.itemId });
+      if (/^[0-9a-fA-F]{24}$/.test(request.itemId)) searchCriteria.push({ _id: request.itemId });
+    }
+    const masterItem = await Item.findOne({ companyId, $or: searchCriteria });
+    if (!masterItem) {
+      return res.status(404).json({ success: false, message: 'Source inventory item could not be resolved.' });
+    }
+
+    let resolved;
+    try {
+      resolved = await resolveFabricationLines(masterItem, lines);
+    } catch (dimErr) {
+      return res.status(400).json({ success: false, message: dimErr.message });
+    }
+
+    request.fabricationDimensionLines = resolved.lines;
+
+    if (Number(quantity) > 0) {
+      // Purchase explicitly set/overrode the final order quantity.
+      request.quantity = Number(quantity);
+      request.unit = unit || resolved.resolvedUnit || masterItem.purchaseUnit || masterItem.unit || request.unit;
+    } else if (resolved.isMassUnit) {
+      request.quantity = resolved.resolvedQuantity;
+      request.unit = resolved.resolvedUnit;
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: `Enter the Order Quantity${masterItem.purchaseUnit ? ` (${masterItem.purchaseUnit})` : ''} — it can't be auto-predicted for this item's purchase unit.`
+      });
+    }
+
+    await request.save();
+    res.json({ success: true, data: request });
+  } catch (error) {
+    console.error('Error editing fabrication dimension lines:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
   }
 };
@@ -762,85 +1055,7 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       // ─────────────────────────────────────────────────────────────────────────
 
       // 1. Generate QC Job
-      try {
-        const sourceRefId = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
-
-        // Check if a QC job for THIS specific purchase request already exists.
-        // (Exchange-replacement requests reuse the original PO, so matching on
-        // sourceRefId alone collides with the original request's already-closed
-        // QC job and wrongly skips creating a new one.)
-        const existingQC = await QCJob.findOne({
-          source: 'Purchase',
-          purchaseRequestId: request._id,
-          company: request.companyId
-        });
-
-        if (!existingQC) {
-          const qcJobId = await generateQCJobId();
-
-          let qcCategory = 'Raw Material';
-          let qcBaseUnit = request.unit || 'pcs';
-          try {
-            const inventoryItem = await Item.findOne({
-              name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
-              companyId: request.companyId
-            });
-            if (inventoryItem && inventoryItem.category) {
-              qcCategory = inventoryItem.category;
-            }
-            if (inventoryItem && inventoryItem.unit) {
-              qcBaseUnit = inventoryItem.unit;
-            }
-          } catch (invLookupErr) {
-            console.error('Error looking up inventory item for QC job category:', invLookupErr);
-          }
-
-          // Multi-item: resolve the sales orderCode for grouping in QC screens
-          let qcOrderCode = '';
-          try {
-            if (request.storeOrderId) {
-              const OrderModel = (await import('../models/Order.js')).default;
-              const linkedOrder = await OrderModel.findById(request.storeOrderId).select('orderCode').lean();
-              qcOrderCode = linkedOrder?.orderCode || '';
-            }
-          } catch (_) { /* optional */ }
-
-          await QCJob.create({
-            qcJobId,
-            source: 'Purchase',
-            sourceRefId: sourceRefId,
-            purchaseRequestId: request._id,   // ← direct PR ref for reliable Sale lookup
-            saleItemId: request.saleItemId || null, // ← exact order item this purchase fulfils
-            orderCode: qcOrderCode,
-            sourceDepartment: 'Store',
-            sentBy: req.user.fullName || req.user.username || 'Store Dept',
-            itemName: request.productName,
-            itemCode: request.itemId || request.requestId,
-            category: qcCategory,
-            // Converted base-unit qty when the order was placed in a purchase unit
-            // (e.g. 20 kg received ÷ 1 kg/pc = 20 pcs) — QC approval adds this qty to inventory
-            quantity: request.convertedQuantity || request.quantity || 1,
-            unit: qcBaseUnit,
-            receivedDate: today(),
-            status: 'Pending',
-            company: request.companyId,
-            createdBy: req.user._id,
-            notes: `Automatically created from Store Purchase Requisition: ${request.requestId}`
-          });
-          console.log(`✅ QC Job ${qcJobId} automatically created for Purchase Request ${request.requestId} with category ${qcCategory}`);
-
-          // 🔔 Notify QC team about new QC job
-          try {
-            await notificationService.triggerQCNotification({
-              action: 'qc_job_created',
-              data: { qcJobId, itemName: request.productName, requestId: request.requestId, quantity: request.quantity },
-              targetCompanyId: request.companyId,
-            });
-          } catch (e) { console.error('QC job notification error:', e); }
-        }
-      } catch (qcError) {
-        console.error('❌ Error creating QC job from Purchase Request:', qcError);
-      }
+      await createPurchaseQCJob(request, req);
 
       // 2. Generate Purchase Invoice ONLY if one doesn't already exist for this PO
       //    (Invoice is now created at PO generation time via RFQ flow — avoid duplicate)
@@ -906,6 +1121,128 @@ export const updatePurchaseRequestStatus = async (req, res) => {
     res.status(200).json({ success: true, data: request });
   } catch (error) {
     console.error('Error updating purchase request:', error);
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+};
+
+// PATCH /api/purchase-requests/:id/receive-fabrication
+// Store-only: records the actual per-dimension breakdown of a fabrication
+// purchase as it's received — separate from updatePurchaseRequestStatus
+// since a fabrication receive needs none of that endpoint's Serial
+// Number/Warranty/single-conversion-factor fields (raw material sheets/pipes
+// don't have serial numbers), and needs its own dimension-line validation.
+//
+// Stock (dimensionVariants[].subStock) is NOT credited here — same QC gate
+// every other material already goes through (qcController.js's
+// submitDecision, on a Pass). Pricing (weightUnitPrice/purchaseCost) DOES
+// update here, same timing as every other item — see the conversionFactor
+// comment below.
+export const receiveFabricationPurchase = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.user.companyId;
+    const { lines } = req.body;
+
+    const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
+    if (!isStoreUser) {
+      return res.status(403).json({ success: false, message: 'Only Store users can receive a purchase.' });
+    }
+
+    const request = await PurchaseRequest.findOne({ _id: id, companyId }).populate('purchaseOrder');
+    if (!request) {
+      return res.status(404).json({ success: false, message: 'Purchase request not found' });
+    }
+    if (!request.fabricationDimensionLines?.length) {
+      return res.status(400).json({ success: false, message: 'This request has no fabrication dimensions — use the standard Mark Received flow.' });
+    }
+    if (request.status !== 'Ordered') {
+      return res.status(400).json({ success: false, message: 'Only an Ordered request can be received.' });
+    }
+
+    const searchCriteria = [{ name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') } }];
+    if (request.materialCode) searchCriteria.push({ code: request.materialCode });
+    if (request.itemId) {
+      searchCriteria.push({ code: request.itemId });
+      if (/^[0-9a-fA-F]{24}$/.test(request.itemId)) searchCriteria.push({ _id: request.itemId });
+    }
+    const masterItem = await Item.findOne({ companyId, $or: searchCriteria });
+    if (!masterItem) {
+      return res.status(404).json({ success: false, message: 'Source inventory item could not be resolved.' });
+    }
+
+    // Store may have received a size the vendor shipped that isn't in the
+    // catalog at all — still weight-computable, not rejected here (see
+    // qcController.js's Pass handling, which flags such a line isLeftover
+    // when crediting stock rather than blocking the receive outright).
+    let resolved;
+    try {
+      resolved = await resolveFabricationLines(masterItem, lines, { requireCatalogMatch: false });
+    } catch (dimErr) {
+      return res.status(400).json({ success: false, message: dimErr.message });
+    }
+
+    const totalPieces = resolved.lines.reduce((sum, l) => sum + l.quantity, 0);
+    const totalWeightKg = resolved.totalWeightKg;
+
+    request.receivedFabricationLines = resolved.lines;
+    request.status = 'Received';
+    request.receivedAt = new Date();
+    // Feeds the existing purchase-to-base conversion pipeline
+    // (itemPricingService.js's findPurchaseToBaseFactor/resolvePurchaseItemCost)
+    // exactly the way a normal Purchase-Unit item's Store-entered
+    // conversionFactor already does — here it's the weighted-average kg per
+    // piece across everything actually received, since a fabrication item's
+    // pieces don't all weigh the same. cost = rawPurchaseUnitPrice(₹/kg) ×
+    // conversionFactor(kg/pc) = ₹/pc, computed below via recalculateItemPricing.
+    request.receivedQuantity = totalWeightKg;
+    request.conversionFactor = totalPieces > 0 ? Math.round((totalWeightKg / totalPieces) * 1000000) / 1000000 : null;
+    await request.save();
+
+    // Needed by findPurchaseToBaseFactor's fallback lookup (same field the
+    // generic receive flow sets) — serial/warranty are skipped entirely,
+    // they don't apply to raw fabrication stock.
+    try {
+      masterItem.receivedFromPurchaseRequest = request._id;
+      await masterItem.save();
+    } catch (invErr) {
+      console.error('❌ Error updating inventory item on fabrication receive:', invErr);
+    }
+
+    await createPurchaseQCJob(request, req, totalPieces);
+
+    try {
+      const { createAutoPurchaseInvoice } = await import('./purchaseInvoiceController.js');
+      const PurchaseInvoice = (await import('../models/PurchaseInvoice.js')).default;
+
+      let invoiceAlreadyExists = false;
+      if (request.purchaseOrder) {
+        const poNumber = request.purchaseOrder?.purchaseOrderNumber || '';
+        const vendorId = request.purchaseOrder?.supplier?._id || request.purchaseOrder?.supplier;
+        if (vendorId && poNumber) {
+          const existingInvoice = await PurchaseInvoice.findOne({
+            vendor: vendorId,
+            notes: { $regex: request.requestId, $options: 'i' }
+          });
+          if (existingInvoice) invoiceAlreadyExists = true;
+        }
+      }
+      if (!invoiceAlreadyExists) {
+        await createAutoPurchaseInvoice(request, req.user);
+      }
+    } catch (invoiceError) {
+      console.error('❌ Error creating purchase invoice on fabrication receipt:', invoiceError);
+    }
+
+    try {
+      const { recalculateItemPricing } = await import('../services/itemPricingService.js');
+      await recalculateItemPricing(masterItem);
+    } catch (pricingErr) {
+      console.error('❌ Error recalculating fabrication item pricing on receipt:', pricingErr);
+    }
+
+    res.status(200).json({ success: true, data: request });
+  } catch (error) {
+    console.error('Error receiving fabrication purchase:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
   }
 };

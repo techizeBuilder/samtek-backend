@@ -6,6 +6,7 @@ import notificationService from '../services/notificationService.js';
 import RDQualityParam from '../models/RDQualityParam.js';
 import { resolveSalesOrderCodeForQCJob } from '../utils/resolveSalesOrderCode.js';
 import { setSaleItemStatus, isMachineJobItem } from '../services/storeFlowService.js';
+import { dimensionSignature } from '../services/fabricationDemandService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -515,7 +516,40 @@ export const submitDecision = async (req, res) => {
             });
           }
 
-          if (inventoryItem) {
+          // Fabrication Master items only — Store recorded a per-dimension
+          // breakdown at receive time (PurchaseRequest.receivedFabricationLines,
+          // see purchaseRequestController.js's receiveFabricationPurchase).
+          // These items don't use flat Item.qty as their real stock measure —
+          // dimensionVariants[].subStock already is — so credit each line
+          // instead. A line matching an existing catalog/leftover variant
+          // just increments it; a line the vendor shipped that isn't in the
+          // catalog at all creates a new variant flagged isLeftover (usable
+          // stock, never offered as a reorderable catalog size again).
+          const receivedLines = job.source === 'Purchase' ? purchaseSaleCtx?.pr?.receivedFabricationLines : null;
+          if (inventoryItem && receivedLines?.length > 0 && inventoryItem.fabricationRef) {
+            for (const line of receivedLines) {
+              const existingVariant = inventoryItem.dimensionVariants.find(
+                dv => dimensionSignature(dv.values) === dimensionSignature(line.values)
+              );
+              if (existingVariant) {
+                existingVariant.subStock = (existingVariant.subStock || 0) + line.quantity;
+              } else {
+                inventoryItem.dimensionVariants.push({
+                  category: inventoryItem.dimensionVariants?.[0]?.category || '',
+                  values: line.values,
+                  designation: '',
+                  densityValue: inventoryItem.dimensionVariants?.[0]?.densityValue ?? null,
+                  densityUnit: inventoryItem.dimensionVariants?.[0]?.densityUnit || 'kg/m3',
+                  weightPerMeterKg: null,
+                  weightPerPieceKg: line.weightPerPieceKg ?? null,
+                  subStock: line.quantity,
+                  isLeftover: true,
+                });
+              }
+            }
+            await inventoryItem.save();
+            console.log(`✅ [QC Approval - ${job.source}] Fabrication dimension stock credited for ${inventoryItem.name} (${receivedLines.length} line(s))`);
+          } else if (inventoryItem) {
             const prevQty = inventoryItem.qty || 0;
             inventoryItem.qty = prevQty + inventoryAddQty;
             await inventoryItem.save();

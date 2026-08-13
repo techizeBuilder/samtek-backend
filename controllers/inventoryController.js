@@ -20,6 +20,9 @@ import DefectiveInventory from '../models/DefectiveMaterial.js';
 import StoreTransferLog from '../models/StoreTransferLog.js';
 import MaterialReturnLog from '../models/MaterialReturnLog.js';
 import { getSellableItems as fetchSellableItems } from '../services/sellableItemsService.js';
+import { dimensionSignature, resolveFabricationWeight } from '../services/fabricationDemandService.js';
+import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
+import { getCategoryByKey } from '../utils/fabricationCategories.js';
 
 // Delivery Challan Order for Unit Head Inventory
 const DELIVERY_CHALLAN_ORDER = [
@@ -3248,6 +3251,9 @@ export const getMaterialIssueLogs = async (req, res) => {
               _id: '$_id',
               materialCode: '$materialCode',
               materialName: '$materialName',
+              sourceItemCode: '$sourceItemCode',
+              fabricationCategory: '$fabricationCategory',
+              bomDimensions: '$bomDimensions',
               quantityIssued: '$quantityIssued',
               unit: '$unit',
               issuedTo: '$issuedTo',
@@ -3344,10 +3350,30 @@ export const transferMaterialToProduction = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Valid material code and quantity are required.' });
     }
 
+    // Resolve the demand FIRST — a fabrication demand's materialCode is a
+    // synthetic per-cut tracking key (see MaterialDemandSchema's comment),
+    // not a real Inventory code, so it must never be used directly against
+    // Item. The real code lives in demand.sourceItemCode. Fabrication
+    // demands are handled by their own dedicated endpoint
+    // (transferFabricationMaterialToProduction) instead, since fulfilling
+    // them needs Store to pick which stock cut to use, not just a flat
+    // quantity against Item.qty (fabrication stock lives in
+    // dimensionVariants, not qty).
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+    const demand = order.materialDemands.find(m => m.materialCode === materialCode);
+    if (!demand) {
+      return res.status(404).json({ success: false, message: 'Material not requested on this order.' });
+    }
+    if (demand.fabricationCategory) {
+      return res.status(400).json({ success: false, message: 'This is a fabrication material — use the dimension-based transfer instead.' });
+    }
+    const sourceCode = demand.sourceItemCode || materialCode;
+
     // 1. ATOMIC DEDUCTION (The Store Gatekeeper)
     // Only deduct if we have enough stock. This prevents race conditions.
     const item = await Item.findOneAndUpdate(
-      { code: materialCode, companyId: companyId, qty: { $gte: transferQty } },
+      { code: sourceCode, companyId: companyId, qty: { $gte: transferQty } },
       { $inc: { qty: -transferQty } },
       { new: true }
     );
@@ -3357,14 +3383,7 @@ export const transferMaterialToProduction = async (req, res) => {
     }
 
     // 2. UPDATE ORDER
-    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
     const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
-
-    if (demandIndex === -1) {
-      // Rollback: Add stock back
-      await Item.findOneAndUpdate({ code: materialCode, companyId: companyId }, { $inc: { qty: transferQty } });
-      return res.status(404).json({ success: false, message: 'Material not requested on this order.' });
-    }
 
     // Update quantities
     order.materialDemands[demandIndex].transferredQuantity = (order.materialDemands[demandIndex].transferredQuantity || 0) + transferQty;
@@ -3378,9 +3397,140 @@ export const transferMaterialToProduction = async (req, res) => {
       orderId: order.orderId,
       machineCode: order.machineCode,
       materialCode: materialCode,
+      sourceItemCode: sourceCode,
       materialName: order.materialDemands[demandIndex].materialName,
       quantityTransferred: transferQty,
       unit: order.materialDemands[demandIndex].unit,
+      transferredBy: req.user._id,
+      company: companyId
+    });
+
+    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── 2b. TRANSFER FABRICATION MATERIAL TO PRODUCTION ──────────────────
+// Fabrication demands (demand.fabricationCategory set) can't use the flat
+// quantity-only transfer above — the real stock is a set of distinct cut
+// sizes (Item.dimensionVariants[]), so Store has to pick which one to cut
+// from. If the picked variant isn't already the exact size the BOM needs,
+// Store may optionally record what's left as a new variant (manual entry —
+// a rectangle cut from a rectangle isn't generally another clean rectangle,
+// so only the person physically cutting it knows the remaining shape).
+// Leaving the leftover fields blank means the offcut is scrap.
+// POST /api/inventory/transfer-fabrication-material/:id
+export const transferFabricationMaterialToProduction = async (req, res) => {
+  try {
+    const { materialCode, sourceVariantId, quantity, leftoverDimensions } = req.body;
+    const orderId = req.params.id;
+    const companyId = req.user.companyId;
+    const transferQty = Number(quantity);
+
+    if (!materialCode || !sourceVariantId || !transferQty || transferQty <= 0) {
+      return res.status(400).json({ success: false, message: 'Material, source variant, and a valid quantity are required.' });
+    }
+
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+
+    const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
+    if (demandIndex === -1) {
+      return res.status(404).json({ success: false, message: 'Material not requested on this order.' });
+    }
+    const demand = order.materialDemands[demandIndex];
+    if (!demand.fabricationCategory) {
+      return res.status(400).json({ success: false, message: 'This material is not a fabrication item — use the standard transfer instead.' });
+    }
+
+    const sourceItem = await Item.findOne({ code: demand.sourceItemCode, companyId });
+    if (!sourceItem) {
+      return res.status(400).json({ success: false, message: `Source item "${demand.sourceItemCode}" not found in Inventory.` });
+    }
+
+    const sourceVariant = sourceItem.dimensionVariants.id(sourceVariantId);
+    if (!sourceVariant) {
+      return res.status(404).json({ success: false, message: 'Chosen stock size not found on this item.' });
+    }
+    if ((sourceVariant.subStock || 0) < transferQty) {
+      return res.status(400).json({ success: false, message: `Insufficient stock in the chosen size — only ${sourceVariant.subStock || 0} available.` });
+    }
+
+    // Snapshot before mutating — used for the audit log and the leftover calc.
+    const sourceValuesSnapshot = { ...(sourceVariant.values || {}) };
+
+    // Deduct the transferred quantity from the chosen stock size regardless
+    // of whether cutting is needed.
+    sourceVariant.subStock -= transferQty;
+
+    const isExactMatch = dimensionSignature(sourceValuesSnapshot) === dimensionSignature(demand.bomDimensions);
+    let leftoverValuesRecorded = null;
+
+    if (!isExactMatch && leftoverDimensions && Object.keys(leftoverDimensions).length > 0) {
+      const category = getCategoryByKey(demand.fabricationCategory);
+      if (!category) {
+        return res.status(400).json({ success: false, message: 'Unknown fabrication category for this material.' });
+      }
+      // Only the fields a straight cut can actually change (length, and
+      // width for flat sheets) come from the client — everything else
+      // (thickness, wall thickness, OD, leg length...) is taken straight
+      // from the source variant's own values, never trusted from the
+      // request, so a leftover can never end up with a different
+      // cross-section than what it was actually cut from.
+      const editableKeys = category.fields
+        .filter(f => f.key === 'length' || (category.calcType === 'sheet' && f.key === 'width'))
+        .map(f => f.key);
+      const leftoverValues = { ...sourceValuesSnapshot };
+      for (const key of editableKeys) {
+        if (leftoverDimensions[key] !== undefined && leftoverDimensions[key] !== '') {
+          leftoverValues[key] = leftoverDimensions[key];
+        }
+      }
+
+      const existingLeftover = sourceItem.dimensionVariants.find(
+        dv => dv.isLeftover && dimensionSignature(dv.values) === dimensionSignature(leftoverValues)
+      );
+      if (existingLeftover) {
+        existingLeftover.subStock = (existingLeftover.subStock || 0) + transferQty;
+      } else {
+        const { weightPerMeterKg, weightPerPieceKg } = calculateFabricationWeight(
+          demand.fabricationCategory, leftoverValues, sourceVariant.densityValue, sourceVariant.densityUnit
+        );
+        sourceItem.dimensionVariants.push({
+          category: demand.fabricationCategory,
+          values: leftoverValues,
+          designation: '',
+          densityValue: sourceVariant.densityValue,
+          densityUnit: sourceVariant.densityUnit,
+          weightPerMeterKg,
+          weightPerPieceKg,
+          subStock: transferQty,
+          isLeftover: true,
+        });
+      }
+      leftoverValuesRecorded = leftoverValues;
+    }
+
+    await sourceItem.save();
+
+    // Update the demand — identical to the standard transfer from here.
+    demand.transferredQuantity = (demand.transferredQuantity || 0) + transferQty;
+    demand.status = 'In Transit';
+    await order.save();
+
+    await StoreTransferLog.create({
+      productionOrderId: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      materialCode: demand.materialCode,
+      sourceItemCode: demand.sourceItemCode,
+      materialName: demand.materialName,
+      quantityTransferred: transferQty,
+      unit: demand.unit,
+      fromDimensions: sourceValuesSnapshot,
+      toDimensions: demand.bomDimensions,
+      leftoverDimensions: leftoverValuesRecorded,
       transferredBy: req.user._id,
       company: companyId
     });
@@ -3404,6 +3554,7 @@ export const bulkTransferOrderMaterials = async (req, res) => {
 
     const shortfalls = [];
     let orderUpdated = false;
+    let skippedFabricationCount = 0;
 
     for (let demand of order.materialDemands) {
       if (demand.status !== 'Requested') continue;
@@ -3411,7 +3562,19 @@ export const bulkTransferOrderMaterials = async (req, res) => {
       const neededQty = demand.quantity - (demand.transferredQuantity || 0);
       if (neededQty <= 0) continue;
 
-      const storeItem = await Item.findOne({ code: demand.materialCode, companyId: companyId });
+      // Fabrication materials need Store to pick which stock cut to use (and
+      // optionally record a leftover) — not something a fully-automatic bulk
+      // transfer can decide. Skip entirely: not auto-transferred, and not
+      // staged as a shortfall either (it isn't necessarily out of stock, it
+      // just needs a human) — Store handles these individually via
+      // transferFabricationMaterialToProduction instead.
+      if (demand.fabricationCategory) {
+        skippedFabricationCount++;
+        continue;
+      }
+
+      const sourceCode = demand.sourceItemCode || demand.materialCode;
+      const storeItem = await Item.findOne({ code: sourceCode, companyId: companyId });
       const availableStock = storeItem ? Math.max(0, storeItem.qty) : 0;
 
       // PATH 1: Stock is completely empty (This is what hit your "metal sheet" item)
@@ -3435,7 +3598,7 @@ export const bulkTransferOrderMaterials = async (req, res) => {
       const transferQty = Math.min(neededQty, availableStock);
 
       const deductedItem = await Item.findOneAndUpdate(
-        { code: demand.materialCode, companyId: companyId, qty: { $gte: transferQty } },
+        { code: sourceCode, companyId: companyId, qty: { $gte: transferQty } },
         { $inc: { qty: -transferQty } },
         { new: true }
       );
@@ -3467,6 +3630,7 @@ export const bulkTransferOrderMaterials = async (req, res) => {
         orderId: order.orderId,
         machineCode: order.machineCode,
         materialCode: demand.materialCode,
+        sourceItemCode: sourceCode,
         materialName: demand.materialName,
         quantityTransferred: transferQty,
         unit: demand.unit,
@@ -3507,7 +3671,8 @@ export const bulkTransferOrderMaterials = async (req, res) => {
     res.json({
       success: true,
       message: 'Bulk transfer operation executed completely and queue updated.',
-      shortfallsCount: shortfalls.length
+      shortfallsCount: shortfalls.length,
+      skippedFabricationCount
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -3560,9 +3725,13 @@ export const getStoreTransferLogs = async (req, res) => {
             $push: {
               _id: '$_id',
               materialCode: '$materialCode',
+              sourceItemCode: '$sourceItemCode',
               materialName: '$materialName',
               quantityTransferred: '$quantityTransferred',
               unit: '$unit',
+              fromDimensions: '$fromDimensions',
+              toDimensions: '$toDimensions',
+              leftoverDimensions: '$leftoverDimensions',
               transferredBy: '$transferredBy',
               transferredByName: { $ifNull: ['$transferrerData.fullName', '$transferrerData.username'] },
               createdAt: '$createdAt'
@@ -3664,6 +3833,9 @@ export const getReturnedMaterials = async (req, res) => {
             $push: {
               _id: '$_id',
               materialCode: '$materialCode',
+              sourceItemCode: '$sourceItemCode',
+              fabricationCategory: '$fabricationCategory',
+              bomDimensions: '$bomDimensions',
               materialName: '$materialName',
               quantityReturned: '$quantityReturned',
               unit: '$unit',
@@ -3770,6 +3942,9 @@ export const getPendingReturns = async (req, res) => {
       groupedOrdersMap[pOrderId].pendingMaterials.push({
         logId: log._id, // Required to pass into req.body when clicking "Accept" or "Reject"
         materialCode: log.materialCode,
+        sourceItemCode: log.sourceItemCode,
+        fabricationCategory: log.fabricationCategory,
+        bomDimensions: log.bomDimensions,
         materialName: log.materialName,
         quantityReturned: log.quantityReturned,
         unit: log.unit,
@@ -3811,6 +3986,11 @@ export const confirmReturn = async (req, res) => {
 
     if (action === 'Accept') {
 
+      // log.materialCode is a fabrication demand's synthetic per-cut key for
+      // Defective grouping (fine — it's just a bucket label there), but the
+      // real Inventory Item must be resolved via sourceItemCode, not
+      // materialCode directly — see MaterialDemandSchema's comment.
+      const sourceCode = log.sourceItemCode || log.materialCode;
       if (log.returnType === 'Defect') {
 
         // 🎯 AUTOMATIC INITIALIZATION OR UPDATE (UPSERT)
@@ -3827,10 +4007,41 @@ export const confirmReturn = async (req, res) => {
           { upsert: true, new: true }
         );
 
+      } else if (demand.fabricationCategory) {
+        // Fabrication materials don't use Item.qty for stock — the piece
+        // being returned is already cut to the exact size Store transferred
+        // (demand.bomDimensions), so credit it back into a matching
+        // dimensionVariant instead. Flagged isLeftover, same as an
+        // uncut-remainder piece — an ad-hoc BOM-driven size isn't a real
+        // catalog SKU Purchase should be able to reorder, even though it's
+        // perfectly good stock for a future Production transfer.
+        const sourceItem = await Item.findOne({ code: sourceCode, companyId });
+        if (sourceItem) {
+          const existingVariant = sourceItem.dimensionVariants.find(
+            dv => dimensionSignature(dv.values) === dimensionSignature(demand.bomDimensions)
+          );
+          if (existingVariant) {
+            existingVariant.subStock = (existingVariant.subStock || 0) + log.quantityReturned;
+          } else {
+            const fabWeight = await resolveFabricationWeight(sourceItem, demand.bomDimensions);
+            sourceItem.dimensionVariants.push({
+              category: demand.fabricationCategory,
+              values: demand.bomDimensions,
+              designation: '',
+              densityValue: sourceItem.dimensionVariants?.[0]?.densityValue ?? null,
+              densityUnit: sourceItem.dimensionVariants?.[0]?.densityUnit || 'kg/m3',
+              weightPerMeterKg: null,
+              weightPerPieceKg: fabWeight?.weightPerPieceKg ?? null,
+              subStock: log.quantityReturned,
+              isLeftover: true,
+            });
+          }
+          await sourceItem.save();
+        }
       } else {
         // If it's 'Excess', route back to main warehouse stock
         await Item.findOneAndUpdate(
-          { code: log.materialCode, companyId: companyId },
+          { code: sourceCode, companyId: companyId },
           { $inc: { qty: log.quantityReturned } }
         );
       }

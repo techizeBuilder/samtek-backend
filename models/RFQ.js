@@ -23,6 +23,19 @@ const rfqSchema = new mongoose.Schema({
     type: String,   // unit the quantity is quoted in (purchase unit when defined)
     default: null
   },
+  // Fabrication Master items only — read-only snapshot of the dimension
+  // breakdown that makes up `quantity` (e.g. 20kg of one size + 10kg of
+  // another = quantity 30). Copied from PurchaseRequest.fabricationDimensionLines
+  // at RFQ-creation time. Shown to vendors as context only — never a separate
+  // bid line, the vendor always bids against the single `quantity` above.
+  fabricationDimensionLines: {
+    type: [{
+      values: { type: mongoose.Schema.Types.Mixed, required: true },
+      quantity: { type: Number, required: true },
+      lineWeightKg: { type: Number, default: null },
+    }],
+    default: []
+  },
   requiredByDate: {
     type: Date
   },

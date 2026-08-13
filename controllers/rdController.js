@@ -1,6 +1,5 @@
 import { Item } from '../models/Inventory.js';
-import FabricationMaster from '../models/FabricationMaster.js';
-import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
+import { resolveFabricationWeight, dimensionSignature } from '../services/fabricationDemandService.js';
 import RDBOM from '../models/RDBOM.js';
 import RDPrototype from '../models/RDPrototype.js';
 import RDChangeRequest from '../models/RDChangeRequest.js';
@@ -27,12 +26,19 @@ function escapeRegex(s) {
 }
 
 // Keeps a BOM's material unitPrice/totalPrice snapshots in sync with each
-// material Item's LIVE purchaseCost — addMaterial/updateMaterial already
-// pull purchaseCost fresh at write time, but a material's Item can have its
-// purchaseCost changed later (e.g. Purchase > Inventory) without anyone
-// touching the BOM again, which used to leave the BOM's displayed Price
-// column stale. Called on every BOM read; only writes back if something
-// actually changed. Takes a real (non-lean) Mongoose document so it can save.
+// material Item's LIVE price — addMaterial/updateMaterial already pull the
+// price fresh at write time, but a material's Item can have its price
+// changed later (e.g. Purchase > Inventory) without anyone touching the BOM
+// again, which used to leave the BOM's displayed Price column stale. Called
+// on every BOM read; only writes back if something actually changed. Takes
+// a real (non-lean) Mongoose document so it can save.
+//
+// Fabrication Master materials (mat.fabricationCategory set) price by
+// weight, not purchaseCost — see addMaterial's matching comment. Recomputes
+// from the material line's own committed bomDimensions x the Item's
+// current weightUnitPrice, mirroring addMaterial/updateMaterial exactly, so
+// this "keep it live" refresh can't silently undo the fabrication pricing
+// those two already compute at add/edit time.
 async function refreshBOMMaterialPrices(bom, companyId) {
   if (!bom || !bom.materials || bom.materials.length === 0) return bom;
   let changed = false;
@@ -42,12 +48,23 @@ async function refreshBOMMaterialPrices(bom, companyId) {
       companyId,
       productKind: null,
       code: { $regex: new RegExp(`^${escapeRegex(mat.code)}$`, 'i') }
-    }).select('purchaseCost').lean();
+    }).select('purchaseCost fabricationRef weightUnitPrice dimensionVariants').lean();
     if (!sourceItem) continue;
-    const liveUnitPrice = sourceItem.purchaseCost || 0;
-    if (mat.unitPrice !== liveUnitPrice) {
+
+    let liveUnitPrice;
+    let liveWeightPerPieceKg = mat.computedWeightPerPieceKg;
+    if (mat.fabricationCategory) {
+      const fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions);
+      liveUnitPrice = fabWeight ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100 : 0;
+      liveWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
+    } else {
+      liveUnitPrice = sourceItem.purchaseCost || 0;
+    }
+
+    if (mat.unitPrice !== liveUnitPrice || mat.computedWeightPerPieceKg !== liveWeightPerPieceKg) {
       mat.unitPrice = liveUnitPrice;
       mat.totalPrice = Math.round(liveUnitPrice * (mat.quantity || 0) * 100) / 100;
+      mat.computedWeightPerPieceKg = liveWeightPerPieceKg;
       changed = true;
     }
   }
@@ -1033,35 +1050,6 @@ export const updateBOMProductionCost = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
-
-// Resolves a BOM line's fabrication weight — null when the source Item isn't
-// a Fabrication Master pick (fabricationRef unset), in which case the caller
-// falls back to the plain purchaseCost x quantity pricing unchanged.
-// Category + density are read from the Item's own dimensionVariants[0]
-// (every variant of one Item shares the same category/density — see
-// Inventory.js) with a FabricationMaster lookup as a fallback for the rare
-// case dimensionVariants is empty. bomDimensions are THIS BOM line's own
-// entered values (mm), not the Item's stock dimensions — see RDBOM.js's
-// bomDimensions field comment.
-async function resolveFabricationWeight(sourceItem, bomDimensions) {
-  if (!sourceItem.fabricationRef) return null;
-
-  let category = sourceItem.dimensionVariants?.[0]?.category;
-  let densityValue = sourceItem.dimensionVariants?.[0]?.densityValue;
-  let densityUnit = sourceItem.dimensionVariants?.[0]?.densityUnit;
-
-  if (!category || densityValue == null) {
-    const fabItem = await FabricationMaster.findById(sourceItem.fabricationRef).select('category density').lean();
-    if (!fabItem) return null;
-    category = category || fabItem.category;
-    densityValue = densityValue ?? fabItem.density?.value;
-    densityUnit = densityUnit || fabItem.density?.unit;
-  }
-  if (!category || densityValue == null) return null;
-
-  const { weightPerPieceKg } = calculateFabricationWeight(category, bomDimensions, densityValue, densityUnit);
-  return { fabricationCategory: category, weightPerPieceKg };
-}
 
 export const addMaterial = async (req, res) => {
   try {
@@ -2084,18 +2072,41 @@ export const processRDRequest = async (req, res) => {
       // being pushed. The per-part breakdown isn't lost: it still lives in
       // RDBOM.materials (source for Production's "Bill of Materials by
       // Part"); only this transaction-tracking list is deduplicated.
+      //
+      // Fabrication materials (mat.fabricationCategory set) are the one
+      // exception: the same raw-material Item code can legitimately appear
+      // in several BOM lines with DIFFERENT bomDimensions (a 500x300mm cut
+      // for one Child Part, 200x150mm for another, off the same sheet) —
+      // merging those by code alone would silently collapse two different
+      // cuts into one flat quantity, losing which sizes are actually
+      // needed. So fabrication lines merge by code + dimension signature
+      // instead — every distinct cut gets its own demand entry, with a
+      // synthetic per-cut materialCode (see MaterialDemandSchema's comment)
+      // so all the code/lookup places above still work unchanged (pure
+      // string equality). sourceItemCode carries the real Item code
+      // wherever it's actually needed — not yet wired into Store's
+      // transfer/return/purchase-request flows, that's the next phase.
       const mergedByCode = new Map();
       for (const mat of masterBOM.materials) {
-        const existing = mergedByCode.get(mat.code);
+        const isFabrication = !!mat.fabricationCategory;
+        const mergeKey = isFabrication ? `${mat.code}#${dimensionSignature(mat.bomDimensions)}` : mat.code;
+        const existing = mergedByCode.get(mergeKey);
         if (existing) {
           existing.bomQuantity += mat.quantity;
         } else {
-          mergedByCode.set(mat.code, {
-            materialCode: mat.code,
+          mergedByCode.set(mergeKey, {
+            materialCode: mergeKey,
+            sourceItemCode: mat.code,
             materialName: mat.item,
             bomQuantity: mat.quantity,
             unit: mat.unit,
-            status: 'Requested'
+            status: 'Requested',
+            ...(isFabrication ? {
+              bomDimensions: mat.bomDimensions || {},
+              fabricationCategory: mat.fabricationCategory,
+              computedWeightPerPieceKg: mat.computedWeightPerPieceKg ?? null,
+              unitPrice: mat.unitPrice ?? null,
+            } : {}),
           });
         }
       }

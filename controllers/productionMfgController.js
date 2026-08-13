@@ -9,6 +9,7 @@ import mongoose from 'mongoose';
 import { Item } from '../models/Inventory.js'; // Adjust path
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
 import { recalculateItemPricing } from '../services/itemPricingService.js';
+import { resolveFabricationWeight, dimensionSignature } from '../services/fabricationDemandService.js';
 
 import PDFDocument from 'pdfkit';
 
@@ -554,6 +555,9 @@ export const receiveMaterialInProduction = async (req, res) => {
       machineCode: order.machineCode,
       materialCode: demand.materialCode,
       materialName: demand.materialName,
+      sourceItemCode: demand.sourceItemCode || demand.materialCode,
+      fabricationCategory: demand.fabricationCategory || '',
+      bomDimensions: demand.bomDimensions || null,
       quantityIssued: recQty,
       unit: demand.unit,
       issuedTo: req.user._id,
@@ -579,7 +583,7 @@ export const receiveMaterialInProduction = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const addMaterialDemand = async (req, res) => {
   try {
-    const { materialCode, materialName, quantity, unit } = req.body;
+    const { materialCode, materialName, quantity, unit, bomDimensions, targetDemandCode } = req.body;
 
     if (!materialCode || !materialName || !quantity || !unit) {
       return res.status(400).json({ success: false, message: 'All material fields are required' });
@@ -591,9 +595,40 @@ export const addMaterialDemand = async (req, res) => {
     const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    const materialExists = order.materialDemands.find(m => m.materialCode === materialCode);
+    // materialCode may not match any real Inventory item at all — Production
+    // can request an ad-hoc/out-of-catalog material by name (existing
+    // behavior, unchanged: no Item required). Fabrication-aware pricing only
+    // kicks in when it DOES resolve to a fabrication-linked Item.
+    const sourceItem = await Item.findOne({ code: materialCode.trim(), companyId });
 
-    // 🚨 ONLY BLOCK: Prevent changing demand if the physical 
+    // Fabrication materials (sourceItem.fabricationRef set) are keyed by
+    // weight+cut, not a flat code — mirrors rdController.js's
+    // processRDRequest merge-key logic. targetDemandCode, when given, pins
+    // this request to one EXACT existing demand line (Production adjusting
+    // an already-demanded cut's quantity) instead of deriving a key from
+    // freshly-entered dimensions — avoids a mistyped dimension silently
+    // creating a duplicate line instead of updating the right one.
+    let demandMaterialCode = targetDemandCode || materialCode;
+    let fabricationFields = sourceItem ? { sourceItemCode: sourceItem.code } : {};
+
+    if (!targetDemandCode && sourceItem?.fabricationRef) {
+      const fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions);
+      if (!fabWeight || !(fabWeight.weightPerPieceKg > 0)) {
+        return res.status(400).json({ success: false, message: 'Could not resolve this fabrication item\'s dimensions — check all required dimension fields are filled in.' });
+      }
+      demandMaterialCode = `${sourceItem.code}#${dimensionSignature(bomDimensions)}`;
+      fabricationFields = {
+        sourceItemCode: sourceItem.code,
+        bomDimensions: bomDimensions || {},
+        fabricationCategory: fabWeight.fabricationCategory,
+        computedWeightPerPieceKg: fabWeight.weightPerPieceKg,
+        unitPrice: Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100,
+      };
+    }
+
+    const materialExists = order.materialDemands.find(m => m.materialCode === demandMaterialCode);
+
+    // 🚨 ONLY BLOCK: Prevent changing demand if the physical
     // material is actively being moved by the store right now.
     if (materialExists && materialExists.status === 'In Transit') {
       return res.status(400).json({
@@ -611,7 +646,7 @@ export const addMaterialDemand = async (req, res) => {
     let updatedOrder;
     if (materialExists) {
       updatedOrder = await ProductionOrder.findOneAndUpdate(
-        { _id: orderId, "materialDemands.materialCode": materialCode },
+        { _id: orderId, "materialDemands.materialCode": demandMaterialCode },
         {
           $set: {
             "materialDemands.$.status": "Pending R&D",
@@ -627,8 +662,9 @@ export const addMaterialDemand = async (req, res) => {
         {
           $push: {
             materialDemands: {
-              materialCode, materialName, bomQuantity: null,
-              quantity: Number(quantity), unit, status: 'Pending R&D'
+              materialCode: demandMaterialCode, materialName, bomQuantity: null,
+              quantity: Number(quantity), unit, status: 'Pending R&D',
+              ...fabricationFields,
             }
           }
         },
@@ -642,7 +678,7 @@ export const addMaterialDemand = async (req, res) => {
       machineName: order.machineName,
       requestType: 'Material Change',
       materialChangeDetails: {
-        materialCode,
+        materialCode: demandMaterialCode,
         materialName,
         bomQuantity: originalBomQty,
         requestedQuantity: Number(quantity),
@@ -704,6 +740,9 @@ export const returnMaterialToStore = async (req, res) => {
       orderId: order.orderId,
       machineCode: order.machineCode,
       materialCode: demand.materialCode,
+      sourceItemCode: demand.sourceItemCode || demand.materialCode,
+      fabricationCategory: demand.fabricationCategory || '',
+      bomDimensions: demand.bomDimensions || null,
       materialName: demand.materialName,
       quantityReturned: retQty,
       unit: demand.unit,
@@ -781,18 +820,25 @@ export const downloadMaterialListPDF = async (req, res) => {
 
     // ── INTERACTION LOOP FOR PRODUCTION ORDER DEMANDS ──
     order.materialDemands.forEach((item) => {
+      // Fabrication demand lines carry a synthetic per-cut materialCode
+      // (itemCode#dimensionSignature) used as a tracking key — the real
+      // Inventory code is sourceItemCode. The ledger should print the real
+      // code and show what size was cut, not the internal tracking key.
+      const hasCut = item.fabricationCategory && item.bomDimensions && Object.keys(item.bomDimensions).length > 0;
+      const rowHeight = hasCut ? 30 : 22;
+
       // Check for page overflow limits dynamically
-      if (currentY > 700) {
+      if (currentY + rowHeight > 700) {
         doc.addPage();
         currentY = 50; // Reset height position for additional pages
       }
 
       // Draw border line separator frame
-      doc.moveTo(50, currentY + 22).lineTo(562, currentY + 22).strokeColor('#f1f5f9').lineWidth(1).stroke();
+      doc.moveTo(50, currentY + rowHeight).lineTo(562, currentY + rowHeight).strokeColor('#f1f5f9').lineWidth(1).stroke();
 
       // Populate Item Text Strings
       doc.fillColor('#334155').fontSize(9).font('Helvetica');
-      doc.text(item.materialCode, 60, currentY + 7, { width: 80 });
+      doc.text(item.sourceItemCode || item.materialCode, 60, currentY + 7, { width: 80 });
       doc.text(item.materialName, 150, currentY + 7, { width: 160 });
       doc.text(`${item.quantity} ${item.unit}`, 320, currentY + 7, { width: 50, align: 'center' });
       doc.text(`${item.transferredQuantity} ${item.unit}`, 380, currentY + 7, { width: 65, align: 'center' });
@@ -803,7 +849,14 @@ export const downloadMaterialListPDF = async (req, res) => {
       doc.fillColor(statusColor).font('Helvetica-Bold');
       doc.text(item.status, 510, currentY + 7, { width: 45, align: 'right' });
 
-      currentY += 22;
+      if (hasCut) {
+        const dimsText = Object.entries(item.bomDimensions)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => `${k}:${v}`).join(', ');
+        doc.fillColor('#94a3b8').fontSize(7).font('Helvetica').text(`Cut: ${dimsText}`, 150, currentY + 19, { width: 300 });
+      }
+
+      currentY += rowHeight;
     });
 
     // Finalize compilation processing

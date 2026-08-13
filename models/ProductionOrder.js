@@ -85,8 +85,33 @@ const ExtraUnitSchema = new mongoose.Schema({
 }, { _id: false });
 
 const MaterialDemandSchema = new mongoose.Schema({
+  // For a fabrication material (see fabricationCategory below), this is a
+  // synthetic per-cut-unique key (`${itemCode}#${dimensionSignature}`), NOT
+  // a real Inventory code — see rdController.js's processRDRequest, which
+  // merges BOM lines by this exact key so two different cuts of the same
+  // raw material never collapse into one demand entry. Every other place
+  // that finds/updates a demand by materialCode (Store issue/transfer/
+  // return, Add Demand) treats it as an opaque unique string, so this needs
+  // no changes there. sourceItemCode below is the real Inventory code.
   materialCode: { type: String, required: true, trim: true },
   materialName: { type: String, required: true, trim: true },
+  // The real Inventory Item code — equal to materialCode for every
+  // non-fabrication demand (no behavior difference there). Only diverges
+  // from materialCode for fabrication lines, where materialCode is the
+  // synthetic per-cut key above. Wherever the real Item actually needs
+  // resolving (Store transfer/return, Purchase Request creation), this is
+  // the field to use — NOT YET WIRED into those (still keyed off
+  // materialCode directly as of this field's introduction; that's the next
+  // phase of this work, not this one).
+  sourceItemCode: { type: String, default: null, trim: true },
+  // Fabrication Master materials only (see RDBOM.MaterialSchema's matching
+  // fields, which these mirror) — this demand line's own committed cut
+  // dimensions/weight, so Production/Store can see what to prepare without
+  // a round-trip to R&D. Empty/null for every non-fabrication demand.
+  bomDimensions: { type: mongoose.Schema.Types.Mixed, default: {} },
+  fabricationCategory: { type: String, default: '' },
+  computedWeightPerPieceKg: { type: Number, default: null },
+  unitPrice: { type: Number, default: null },
   bomQuantity: { type: Number, default: null },
   quantity: { type: Number, required: true, min: 0 },
 

@@ -178,7 +178,7 @@ async function findPurchaseToBaseFactor(item, invoiceNotes) {
 // frontend's static Mass Unit list (client/src/utils/unitTypes.js:
 // 'Mass Unit': ['Gram', 'Kilogram', 'Tonne']). Returns null for anything
 // else (Pieces, Meter, ...) since it isn't a weight rate at all.
-const MASS_UNIT_TO_KG_MULTIPLIER = { Gram: 1000, Kilogram: 1, Tonne: 1 / 1000 };
+export const MASS_UNIT_TO_KG_MULTIPLIER = { Gram: 1000, Kilogram: 1, Tonne: 1 / 1000 };
 function priceToPerKg(pricePerUnit, unit) {
   const multiplier = MASS_UNIT_TO_KG_MULTIPLIER[unit];
   return multiplier ? pricePerUnit * multiplier : null;

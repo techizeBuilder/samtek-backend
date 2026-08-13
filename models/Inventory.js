@@ -313,6 +313,14 @@ const itemSchema = new mongoose.Schema({
     weightPerMeterKg: { type: Number, default: null },
     weightPerPieceKg: { type: Number, default: null },
     subStock: { type: Number, default: 0 },
+    // Set when Store creates this variant themselves by cutting a piece down
+    // to fulfil a Production demand and recording what's left (see
+    // inventoryController.js's transferFabricationMaterialToProduction) —
+    // as opposed to a variant that came from the original Fabrication
+    // Master catalog pick. Leftover variants are valid stock for a future
+    // Production transfer but must never be offered as a choice when Store
+    // raises a Purchase Request (Purchase only reorders catalog sizes).
+    isLeftover: { type: Boolean, default: false },
   }],
   unitWeightValue: {
     type: Number,

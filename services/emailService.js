@@ -1,4 +1,23 @@
 import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
+import { formatDims } from './fabricationDemandService.js';
+
+// Fabrication Master items only — read-only "this order covers ..." block
+// for vendor-facing emails (RFQ invite + winning-bid confirmation). The
+// vendor always bids/pays against the single combined quantity shown
+// separately — this is context only, never a distinct line to quote against.
+function fabricationBreakdownHtml(lines) {
+  if (!lines || lines.length === 0) return '';
+  const rows = lines.map(l => `
+    <tr style="border-top: 1px solid #e0e7ff;">
+      <td style="padding: 4px 0; color: #6b7280; font-size: 13px;">${formatDims(l.values)} × ${l.quantity}</td>
+      <td style="padding: 4px 0; color: #111827; text-align: right;">${l.lineWeightKg != null ? `${l.lineWeightKg} kg` : ''}</td>
+    </tr>`).join('');
+  return `
+    <div style="background: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px; padding: 14px; margin: 14px 0;">
+      <p style="color: #57534e; font-size: 12px; font-weight: bold; margin: 0 0 6px; text-transform: uppercase;">This order covers</p>
+      <table style="width: 100%; border-collapse: collapse;">${rows}</table>
+    </div>`;
+}
 
 /**
  * Send Cash Access OTP Email to the Company Admin.
@@ -289,7 +308,7 @@ export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, 
 /**
  * Send RFQ (Request for Quotation) Email to Vendor
  */
-export const sendRFQEmail = async ({ mailer, to, vendorName, rfqNo, productName, quantity, quantityUnit, requiredByDate, bidLink, companyName, notes }) => {
+export const sendRFQEmail = async ({ mailer, to, vendorName, rfqNo, productName, quantity, quantityUnit, fabricationDimensionLines, requiredByDate, bidLink, companyName, notes }) => {
   // A caller sending to several vendors at once (createRFQ) looks up the
   // Purchase mailbox once and passes it in here for every vendor, instead of
   // this function re-querying GlobalSmtpSettings + rebuilding a transporter
@@ -346,6 +365,8 @@ export const sendRFQEmail = async ({ mailer, to, vendorName, rfqNo, productName,
             </tr>` : ''}
           </table>
         </div>
+
+        ${fabricationBreakdownHtml(fabricationDimensionLines)}
 
         <p style="color: #374151; font-weight: bold; font-size: 15px;">Please submit your quotation including:</p>
         <ul style="color: #6b7280; line-height: 2; margin: 0 0 20px; padding-left: 20px;">
@@ -493,7 +514,7 @@ export const sendPurchaseExchangeEmail = async ({ to, vendorName, itemName, exch
 /**
  * Send Vendor Bid Confirmation Email (when vendor is selected as winner)
  */
-export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, poNumber, productName, quantity, unitPrice, deliveryDays, warrantyMonths, companyName }) => {
+export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, poNumber, productName, quantity, fabricationDimensionLines, unitPrice, deliveryDays, warrantyMonths, companyName }) => {
   const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send confirmation to: ${to}`);
@@ -554,6 +575,8 @@ export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, po
             </tr>
           </table>
         </div>
+
+        ${fabricationBreakdownHtml(fabricationDimensionLines)}
 
         <p style="color: #374151; font-weight: bold;">Important Instructions:</p>
         <ul style="color: #6b7280; line-height: 2; padding-left: 20px;">

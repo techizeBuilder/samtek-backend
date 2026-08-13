@@ -10,6 +10,12 @@ const MaterialIssueLogSchema = new mongoose.Schema({
     machineCode: { type: String, required: true },
     materialCode: { type: String, required: true },
     materialName: { type: String, required: true },
+    // For fabrication demands, materialCode is a synthetic per-cut tracking
+    // key (itemCode#dimensionSignature) — sourceItemCode carries the real
+    // Inventory Item code. Both equal materialCode for non-fabrication demands.
+    sourceItemCode: { type: String, default: null },
+    fabricationCategory: { type: String, default: '' },
+    bomDimensions: { type: mongoose.Schema.Types.Mixed, default: null },
     quantityIssued: {
         type: Number,
         required: true,

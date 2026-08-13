@@ -27,6 +27,19 @@ const vendorBidSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  // Fabrication Master items only — same read-only breakdown snapshot as
+  // RFQ.fabricationDimensionLines, copied per-vendor at invite time so this
+  // vendor's own bid record (and their public quote form) can show it
+  // without a populate back to the RFQ. Never affects unitPrice/totalPrice
+  // math, which is always against the single `quantity` above.
+  fabricationDimensionLines: {
+    type: [{
+      values: { type: mongoose.Schema.Types.Mixed, required: true },
+      quantity: { type: Number, required: true },
+      lineWeightKg: { type: Number, default: null },
+    }],
+    default: []
+  },
   // Bid details filled by vendor (via public form)
   unitPrice: {
     type: Number,

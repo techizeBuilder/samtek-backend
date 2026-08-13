@@ -5,6 +5,13 @@ const MaterialReturnLogSchema = new mongoose.Schema({
     orderId: { type: String, required: true },
     machineCode: { type: String, required: true },
     materialCode: { type: String, required: true },
+    // The real Inventory Item code — equal to materialCode for every
+    // non-fabrication return. Only diverges for fabrication demands, where
+    // materialCode is a synthetic per-cut tracking key (see
+    // ProductionOrder.js's MaterialDemandSchema comment).
+    sourceItemCode: { type: String, default: null },
+    fabricationCategory: { type: String, default: '' },
+    bomDimensions: { type: mongoose.Schema.Types.Mixed, default: null },
     materialName: { type: String, required: true },
     quantityReturned: { type: Number, required: true, min: 1 },
     // 🚨 FIX: Add status tracking to allow dashboard filtering

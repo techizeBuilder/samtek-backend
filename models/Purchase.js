@@ -36,6 +36,19 @@ const purchaseItemSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     min: 0
+  },
+  // Fabrication Master items only — read-only dimension-breakdown snapshot
+  // carried from the RFQ, for the (separately deferred) Store-receiving flow
+  // to eventually reconcile a delivered bulk weight back into per-dimension
+  // stock. Never affects unitPrice/totalPrice, which stay against the single
+  // aggregate `quantity` above.
+  fabricationDimensionLines: {
+    type: [{
+      values: { type: mongoose.Schema.Types.Mixed, required: true },
+      quantity: { type: Number, required: true },
+      lineWeightKg: { type: Number, default: null },
+    }],
+    default: []
   }
 });
 
