@@ -14,15 +14,21 @@ import {
 } from '../controllers/purchaseRequestController.js';
 import { authenticateToken as authenticateUser } from '../middleware/auth.js';
 import { warrantyUpload } from '../middleware/warrantyUpload.js';
-import { checkPermission } from '../middleware/permissions.js';
+import { checkAnyPermission } from '../middleware/permissions.js';
 
 const router = express.Router();
 
 router.use(authenticateUser);
 
-const purchasesView = checkPermission('accounts', 'purchases', 'view');
-const purchasesAdd = checkPermission('accounts', 'purchases', 'add');
-const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
+// Purchase Requests are worked on by both Accounts/Purchase dept (module
+// 'accounts', feature 'purchases') and Store (module 'Store', feature
+// 'purchaseOrders') — either grant is enough to pass the route; which
+// specific actions a role may perform is enforced inside the controllers
+// (see e.g. editFabricationLines/storeApproveRequest's own role checks).
+const purchaseRequestModules = [['accounts', 'purchases'], ['Store', 'purchaseOrders']];
+const purchasesView = checkAnyPermission(purchaseRequestModules, 'view');
+const purchasesAdd = checkAnyPermission(purchaseRequestModules, 'add');
+const purchasesEdit = checkAnyPermission(purchaseRequestModules, 'edit');
 
 router.get('/', purchasesView, getPurchaseRequests);
 router.get('/staged', purchasesView, getStagedPurchaseRequests);

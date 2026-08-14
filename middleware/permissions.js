@@ -89,6 +89,58 @@ export const checkPermission = (module, feature, action) => {
   };
 };
 
+// Like checkPermission, but for routes shared across roles that store their
+// grant under different module/feature keys (e.g. Accounts' purchases vs
+// Store's purchaseOrders both cover Purchase Requests) — passes if the user
+// has the given action on ANY of the provided [module, feature] pairs.
+// Fine-grained role restrictions within a shared route (e.g. "only Store can
+// approve") stay in the controller, same as they already do today.
+export const checkAnyPermission = (moduleFeaturePairs, action) => {
+  return (req, res, next) => {
+    try {
+      const user = req.user;
+
+      if (!user) {
+        return res.status(401).json({
+          message: 'Authentication required',
+          success: false
+        });
+      }
+
+      // Super Admin has all permissions (both variants)
+      if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') {
+        return next();
+      }
+
+      if (!user.permissions || !user.permissions.modules) {
+        return res.status(403).json({
+          message: 'Access denied - No permissions configured',
+          success: false
+        });
+      }
+
+      for (const [module, feature] of moduleFeaturePairs) {
+        const userModule = findUserModule(user.permissions.modules, module);
+        const userFeature = userModule?.features?.find(f => f.key === feature);
+        if (userFeature && userFeature[action]) {
+          return next();
+        }
+      }
+
+      return res.status(403).json({
+        message: `Access denied - No ${action} permission for this resource`,
+        success: false
+      });
+    } catch (error) {
+      console.error('Permission check error:', error);
+      res.status(500).json({
+        message: 'Internal server error during permission check',
+        success: false
+      });
+    }
+  };
+};
+
 // Get user modules based on role
 export const getUserModules = (role) => {
   const moduleMap = {

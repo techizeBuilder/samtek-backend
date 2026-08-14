@@ -3097,6 +3097,7 @@ const INVENTORY_ITEM_FIELD_MAP = {
   SourceType: 'sourceType',
   ItemSourceType: 'itemSourceType',
   ItemType: 'itemType',
+  ItemProcessType: 'itemProcessType',
 };
 
 export const getInventoryDropdownOptions = async (req, res) => {
@@ -3109,6 +3110,7 @@ export const getInventoryDropdownOptions = async (req, res) => {
       SourceType: options.filter(o => o.field === 'SourceType').map(toOption),
       ItemSourceType: options.filter(o => o.field === 'ItemSourceType').map(toOption),
       ItemType: options.filter(o => o.field === 'ItemType').map(toOption),
+      ItemProcessType: options.filter(o => o.field === 'ItemProcessType').map(toOption),
     };
     res.json({ success: true, data: grouped });
   } catch (err) {
@@ -3119,7 +3121,7 @@ export const getInventoryDropdownOptions = async (req, res) => {
 export const addInventoryDropdownOption = async (req, res) => {
   try {
     const { field, value } = req.body;
-    if (!['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType'].includes(field)) {
+    if (!['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType', 'ItemProcessType'].includes(field)) {
       return res.status(400).json({ success: false, message: 'Invalid field type.' });
     }
     if (!value || !value.trim()) {
