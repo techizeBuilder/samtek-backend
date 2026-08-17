@@ -17,9 +17,12 @@ function escapeRegex(s) {
 
 /**
  * Resolves a manufacturing Item's cost by recursively walking its RDBOM.
- * Returns { cost: number|null, issue: string|null }.
- * cost === null && issue === null means "not built yet" — a normal state,
- * not an error; the caller must leave the Item's manual value untouched.
+ * Returns { cost: number|null, issue: string|null }. Recalculated on every
+ * BOM change (material add/edit/remove, production cost/expense edit, lock)
+ * — does NOT wait for a completed production build; whatever the BOM totals
+ * right now (materials + productionCost + productionExpense) is the item's
+ * live stdCost/mrp/salePrice. A completed build still re-triggers this same
+ * resolution (productionMfgController.js), it just isn't the only trigger.
  */
 export async function resolveManufacturingItemCost(item, visiting = new Set(), depth = 0) {
   if (depth > MAX_BOM_DEPTH) {
@@ -34,11 +37,6 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
   // cross-reference by code anymore.
   if (item.productKind !== 'Machine' && item.productKind !== 'Motor') {
     return { cost: null, issue: `Item "${item.code}" is not a Product Master machine or Motor Master motor — no BOM to build cost from.` };
-  }
-  const detailsKey = item.productKind === 'Machine' ? 'machineDetails' : 'motorDetails';
-  if (!item[detailsKey]?.firstBuiltAt) {
-    // Never completed production — R&D's manual value stands.
-    return { cost: null, issue: null };
   }
 
   const bom = await RDBOM.findOne({ machine: item._id, company: item.companyId });
