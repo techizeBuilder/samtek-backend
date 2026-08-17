@@ -40,6 +40,7 @@ import {
   generateChildPartCode,
   createChildPart,
   updateChildPart,
+  uploadChildPartFile,
   generateSubChildPartCode,
   addSubChildPart,
   updateSubChildPart,
@@ -211,6 +212,7 @@ router.get('/child-parts', bomManagementView, getChildParts);
 router.get('/child-parts/generate-code', bomManagementView, generateChildPartCode);
 router.post('/child-parts', bomManagementAdd, createChildPart);
 router.put('/child-parts/:id', bomManagementEdit, updateChildPart);
+router.post('/child-parts/upload-file', bomManagementAdd, rdDocumentUpload.single('file'), uploadChildPartFile);
 router.get('/child-parts/:id/sub-parts/generate-code', bomManagementView, generateSubChildPartCode);
 router.post('/child-parts/:id/sub-parts', bomManagementAdd, addSubChildPart);
 router.put('/child-parts/:id/sub-parts/:subId', bomManagementEdit, updateSubChildPart);

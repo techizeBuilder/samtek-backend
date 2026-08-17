@@ -31,7 +31,7 @@ import {
 } from '../controllers/leadController.js';
 import { scheduleMeeting, getMeeting, getMeetings, completeMeeting } from '../controllers/meetingController.js';
 import { leadDocumentUpload } from '../middleware/leadDocumentUpload.js';
-import { checkPermission } from '../middleware/permissions.js';
+import { checkPermission, checkAnyPermission } from '../middleware/permissions.js';
 
 const router = express.Router();
 
@@ -51,8 +51,19 @@ const leadsAdd = checkPermission('sales', 'leads', 'add');
 const leadsEdit = checkPermission('sales', 'leads', 'edit');
 const leadsDelete = checkPermission('sales', 'leads', 'delete');
 
+// GET / (getLeads) and the payment-check update are also used by Accounts —
+// the Payment Verifications page (module 'accounts', feature 'sales', same
+// grant as leadPaymentRoutes.js) lists leads via this same endpoint and
+// updates their paymentCheckStatus. Either grant is enough to pass these two
+// routes; the controller itself already scopes what Accounts users can
+// see/do (see getLeads' isAccounts handling and updatePaymentCheckStatus).
+// Other lead routes stay on the plain sales.leads check.
+const leadOrAccountsSales = [['sales', 'leads'], ['accounts', 'sales']];
+const leadsViewOrAccountsSales = checkAnyPermission(leadOrAccountsSales, 'view');
+const paymentCheckEdit = checkAnyPermission(leadOrAccountsSales, 'edit');
+
 router.post('/',                          leadsAdd, createLead);
-router.get('/',                           leadsView, getLeads);
+router.get('/',                           leadsViewOrAccountsSales, getLeads);
 router.get('/check',                      leadsView, checkExistingLead);
 router.get('/users',                      leadsView, getAssignableUsers);
 
@@ -69,7 +80,7 @@ router.post('/click-to-call',            leadsEdit, clickToCall);
 router.get('/:id/quotation',              leadsView, getLeadQuotation);
 router.get('/:id',                        leadsView, getLeadById);
 router.put('/:id',                        leadsEdit, updateLead);
-router.put('/:id/payment-check',          leadsEdit, updatePaymentCheckStatus);
+router.put('/:id/payment-check',          paymentCheckEdit, updatePaymentCheckStatus);
 router.post('/:id/request-payment-check', leadsEdit, requestPaymentCheck);
 router.post('/:id/send-to-account',       leadsEdit, sendLeadToAccount);
 router.post('/:id/upload-documents',      leadsEdit, leadDocumentUpload.fields([

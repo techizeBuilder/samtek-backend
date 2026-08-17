@@ -91,6 +91,19 @@ export const updateChildPart = async (req, res) => {
   }
 };
 
+// Backs the Child Part Creation tab's Document field — accepts an image or a
+// PDF (via the shared rdDocumentUpload middleware) and just hands back the
+// stored URL; the child part itself is created/updated separately.
+export const uploadChildPartFile = async (req, res) => {
+  if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
+  res.json({
+    success: true,
+    url: `/uploads/rd-docs/${req.file.filename}`,
+    originalName: req.file.originalname,
+    mimeType: req.file.mimetype,
+  });
+};
+
 export const generateSubChildPartCode = async (req, res) => {
   try {
     const childPart = await RDChildPart.findOne({ _id: req.params.id, company: req.user.companyId }).lean();

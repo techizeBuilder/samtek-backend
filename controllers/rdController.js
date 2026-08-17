@@ -1157,9 +1157,15 @@ export const addMaterial = async (req, res) => {
         }
       },
       { new: true }
-    );
+    ).populate('machine');
 
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found or is locked' });
+
+    // Keeps stdCost/mrp/salePrice in sync the moment the BOM's materials
+    // total changes — mirrors updateBOMProductionCost's matching call.
+    if (bom.machine?.internalManufacturing) {
+      await recalculateItemPricing(bom.machine);
+    }
 
     res.json({ success: true, data: bom });
   } catch (err) {
@@ -1169,7 +1175,7 @@ export const addMaterial = async (req, res) => {
 
 export const updateMaterial = async (req, res) => {
   try {
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId });
+    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
     const mat = bom.materials.id(req.params.materialId);
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
@@ -1228,6 +1234,11 @@ export const updateMaterial = async (req, res) => {
     mat.specifications = sourceItem.specifications || [];
 
     await bom.save();
+
+    if (bom.machine?.internalManufacturing) {
+      await recalculateItemPricing(bom.machine);
+    }
+
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1240,8 +1251,13 @@ export const deleteMaterial = async (req, res) => {
       { _id: req.params.id, company: req.user.companyId, isLocked: false },
       { $pull: { materials: { _id: req.params.materialId } } },
       { new: true }
-    );
+    ).populate('machine');
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found or is locked' });
+
+    if (bom.machine?.internalManufacturing) {
+      await recalculateItemPricing(bom.machine);
+    }
+
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1378,6 +1394,12 @@ export const lockBOM = async (req, res) => {
     bom.lockedAt = today();
     await bom.save();
 
+    // Final true-up in case earlier material edits happened without a
+    // completed production run in between to trigger a recalc.
+    if (bom.machine?.internalManufacturing) {
+      await recalculateItemPricing(bom.machine);
+    }
+
     res.json({ success: true, data: bom, message: 'BOM locked and PDF generated successfully.' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1386,12 +1408,19 @@ export const lockBOM = async (req, res) => {
 
 export const discontinueMaterial = async (req, res) => {
   try {
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId });
+    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
     const mat = bom.materials.id(req.params.materialId);
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.isDiscontinued = true;
     await bom.save();
+
+    // Discontinued materials drop out of resolveManufacturingItemCost's total
+    // — recalculate so stdCost/mrp/salePrice reflect the remaining materials.
+    if (bom.machine?.internalManufacturing) {
+      await recalculateItemPricing(bom.machine);
+    }
+
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1400,12 +1429,17 @@ export const discontinueMaterial = async (req, res) => {
 
 export const reactivateMaterial = async (req, res) => {
   try {
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId });
+    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
     const mat = bom.materials.id(req.params.materialId);
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.isDiscontinued = false;
     await bom.save();
+
+    if (bom.machine?.internalManufacturing) {
+      await recalculateItemPricing(bom.machine);
+    }
+
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

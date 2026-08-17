@@ -15,11 +15,13 @@ import {
 const router = express.Router();
 router.use(authenticateToken);
 
-// Permission gates (module: 'rnd', feature: 'fabricationMaster') — matches
-// Samtek-Frontend/client/src/lib/roleModulesConfig.js's rnd.features entry.
-const fabricationMasterView = checkPermission('rnd', 'fabricationMaster', 'view');
-const fabricationMasterAdd = checkPermission('rnd', 'fabricationMaster', 'add');
-const fabricationMasterEdit = checkPermission('rnd', 'fabricationMaster', 'edit');
+// Permission gates (module: 'rnd', feature: 'inventory') — Fabrication Master
+// is reached from the Inventory page and isn't its own module/feature entry
+// in Samtek-Frontend/client/src/lib/roleModulesConfig.js; access rides on
+// whatever Inventory permission the user already has.
+const fabricationMasterView = checkPermission('rnd', 'inventory', 'view');
+const fabricationMasterAdd = checkPermission('rnd', 'inventory', 'add');
+const fabricationMasterEdit = checkPermission('rnd', 'inventory', 'edit');
 
 router.get('/categories', fabricationMasterView, getCategories);
 router.get('/sections/:family', fabricationMasterView, getSectionTableForFamily);
