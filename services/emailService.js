@@ -372,7 +372,7 @@ export const sendRFQEmail = async ({ mailer, to, vendorName, rfqNo, productName,
         <ul style="color: #6b7280; line-height: 2; margin: 0 0 20px; padding-left: 20px;">
           <li>Unit Price (₹ per unit)</li>
           <li>Delivery Time (in days)</li>
-          <li>Warranty Period (in months)</li>
+          ${fabricationDimensionLines?.length ? '' : '<li>Warranty Period (in months)</li>'}
           <li>Any additional remarks</li>
         </ul>
 
@@ -569,10 +569,11 @@ export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, po
               <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Delivery Expected Within</td>
               <td style="padding: 7px 0; color: #dc2626; font-weight: bold;">${deliveryDays} Days</td>
             </tr>
+            ${fabricationDimensionLines?.length ? '' : `
             <tr style="border-top: 1px solid #dcfce7;">
               <td style="padding: 7px 0; color: #6b7280; font-size: 14px;">Warranty Period</td>
               <td style="padding: 7px 0; color: #111827;">${warrantyMonths} Month(s)</td>
-            </tr>
+            </tr>`}
           </table>
         </div>
 
@@ -581,7 +582,7 @@ export const sendVendorBidConfirmationEmail = async ({ to, vendorName, rfqNo, po
         <p style="color: #374151; font-weight: bold;">Important Instructions:</p>
         <ul style="color: #6b7280; line-height: 2; padding-left: 20px;">
           <li>Please deliver within <strong>${deliveryDays} days</strong> as quoted</li>
-          <li>Include warranty card / documentation with delivery</li>
+          ${fabricationDimensionLines?.length ? '' : '<li>Include warranty card / documentation with delivery</li>'}
           <li>Mention PO Number <strong>${poNumber}</strong> on all dispatch documents</li>
           <li>Contact us immediately if any delivery delays are anticipated</li>
         </ul>

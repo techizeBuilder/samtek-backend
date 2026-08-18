@@ -23,9 +23,17 @@ const fabricationMasterView = checkPermission('rnd', 'inventory', 'view');
 const fabricationMasterAdd = checkPermission('rnd', 'inventory', 'add');
 const fabricationMasterEdit = checkPermission('rnd', 'inventory', 'edit');
 
-router.get('/categories', fabricationMasterView, getCategories);
-router.get('/sections/:family', fabricationMasterView, getSectionTableForFamily);
-router.post('/calculate-weight', fabricationMasterView, calculateWeight);
+// /categories, /sections/:family, and /calculate-weight are pure reference
+// data + stateless math — getCategories returns a hardcoded constant (no DB
+// read, no company scoping at all) and calculateWeight is a pure function
+// over the request body. No Fabrication Master catalog data is exposed by
+// either. Store (BOM/Production/Purchase-receiving dimension entry — none of
+// which have an 'rnd' permissions module) needs these same three, so they're
+// just authenticated, not gated behind R&D's own inventory permission like
+// the actual catalog CRUD below still is.
+router.get('/categories', getCategories);
+router.get('/sections/:family', getSectionTableForFamily);
+router.post('/calculate-weight', calculateWeight);
 router.get('/items', fabricationMasterView, getFabricationItems);
 router.get('/next-code', fabricationMasterView, suggestNextCode);
 router.post('/items', fabricationMasterAdd, createFabricationItem);
