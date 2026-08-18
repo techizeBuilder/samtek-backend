@@ -104,6 +104,18 @@ export const uploadChildPartFile = async (req, res) => {
   });
 };
 
+export const deleteChildPart = async (req, res) => {
+  try {
+    // subChildParts live as subdocuments on the Child Part itself, so
+    // deleting the parent document cascades them automatically.
+    const childPart = await RDChildPart.findOneAndDelete({ _id: req.params.id, company: req.user.companyId });
+    if (!childPart) return res.status(404).json({ success: false, message: 'Child Part not found' });
+    res.json({ success: true, data: childPart });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const generateSubChildPartCode = async (req, res) => {
   try {
     const childPart = await RDChildPart.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
@@ -143,6 +155,20 @@ export const updateSubChildPart = async (req, res) => {
     if (!sub) return res.status(404).json({ success: false, message: 'Sub Child Part not found' });
     if (name !== undefined) sub.name = name.trim();
     if (isDiscontinued !== undefined) sub.isDiscontinued = !!isDiscontinued;
+    await childPart.save();
+    res.json({ success: true, data: childPart });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const deleteSubChildPart = async (req, res) => {
+  try {
+    const childPart = await RDChildPart.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!childPart) return res.status(404).json({ success: false, message: 'Child Part not found' });
+    const sub = childPart.subChildParts.id(req.params.subId);
+    if (!sub) return res.status(404).json({ success: false, message: 'Sub Child Part not found' });
+    childPart.subChildParts.pull({ _id: req.params.subId });
     await childPart.save();
     res.json({ success: true, data: childPart });
   } catch (err) {
