@@ -1,10 +1,19 @@
 import FabricationMaster from '../models/FabricationMaster.js';
-import { FABRICATION_CATEGORIES, getCategoryByKey, DEFAULT_DENSITY_KG_M3 } from '../utils/fabricationCategories.js';
+import {
+  FABRICATION_CATEGORIES, FABRICATION_CATEGORY_GROUPS, MATERIAL_DENSITY_TABLE,
+  getCategoryByKey, DEFAULT_DENSITY_KG_M3,
+} from '../utils/fabricationCategories.js';
 import { getSectionTable } from '../utils/steelSectionTables.js';
 import { calculateFabricationWeight, densityToKgM3 } from '../utils/fabricationWeightCalc.js';
 
 export const getCategories = async (req, res) => {
-  res.json({ success: true, data: FABRICATION_CATEGORIES, defaultDensityKgM3: DEFAULT_DENSITY_KG_M3 });
+  res.json({
+    success: true,
+    data: FABRICATION_CATEGORIES,
+    groups: FABRICATION_CATEGORY_GROUPS,
+    materials: MATERIAL_DENSITY_TABLE,
+    defaultDensityKgM3: DEFAULT_DENSITY_KG_M3,
+  });
 };
 
 export const getSectionTableForFamily = async (req, res) => {
@@ -109,9 +118,21 @@ const buildDimensionsForSave = (category, density, rawDimensions) => {
       designation: dim.designation ? String(dim.designation).trim() : '',
       weightPerMeterKg,
       weightPerPieceKg,
+      pieces: dim.pieces !== undefined && dim.pieces !== null && dim.pieces !== '' ? Number(dim.pieces) || 1 : 1,
+      pricePerKg: dim.pricePerKg !== undefined && dim.pricePerKg !== null && dim.pricePerKg !== '' ? Number(dim.pricePerKg) : null,
     };
   });
 };
+
+// Trims each of the 6 Purchase/Used/Receive Unit strings, defaulting missing ones to ''.
+const sanitizeUnitFields = (body) => ({
+  purchaseUnitType: body.purchaseUnitType ? String(body.purchaseUnitType).trim() : '',
+  purchaseUnit: body.purchaseUnit ? String(body.purchaseUnit).trim() : '',
+  usedUnitType: body.usedUnitType ? String(body.usedUnitType).trim() : '',
+  usedUnit: body.usedUnit ? String(body.usedUnit).trim() : '',
+  receiveUnitType: body.receiveUnitType ? String(body.receiveUnitType).trim() : '',
+  receiveUnit: body.receiveUnit ? String(body.receiveUnit).trim() : '',
+});
 
 export const createFabricationItem = async (req, res) => {
   try {
@@ -153,6 +174,7 @@ export const createFabricationItem = async (req, res) => {
       category,
       density: densityIn,
       dimensions: finalDimensions,
+      ...sanitizeUnitFields(req.body),
       company: req.user.companyId,
       createdBy: req.user._id,
     });
@@ -199,6 +221,7 @@ export const updateFabricationItem = async (req, res) => {
         return res.status(400).json({ success: false, message: calcErr.message });
       }
     }
+    Object.assign(update, sanitizeUnitFields(req.body));
 
     const updated = await FabricationMaster.findByIdAndUpdate(existing._id, { $set: update }, { new: true });
     res.json({ success: true, data: updated });
