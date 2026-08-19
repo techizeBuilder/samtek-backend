@@ -49,13 +49,20 @@ const dealVerificationsEdit = checkAnyPermission([['sales', 'orders'], ['complai
 const storeOrdersView = checkAnyPermission([['sales', 'orders'], ['Store', 'orders']], 'view');
 const storeInfoEdit = checkAnyPermission([['sales', 'orders'], ['Store', 'orders']], 'edit');
 
+// Accounts' NOC Request / Gate Pass page also reads/writes orders through this
+// router under its own 'accounts' module 'sales' feature grant — same
+// cross-module situation as above (an Accounts Head has no 'sales' module
+// entry at all, only 'accounts' with a 'sales' feature key inside it).
+const nocView = checkAnyPermission([['sales', 'orders'], ['accounts', 'sales']], 'view');
+const nocEdit = checkAnyPermission([['sales', 'orders'], ['accounts', 'sales']], 'edit');
+
 router.post('/', ordersAdd, createOrder);
 router.get('/', ordersView, getOrders);
 router.get('/deal-verifications', dealVerificationsView, getDealVerifications);
 // NOC Request & Gate Pass Generation Flow
-router.get('/noc-requests', ordersView, getNOCRequests);
-router.post('/approve-noc/:saleId', ordersEdit, approveNOC);
-router.get('/noc-details/:saleId', ordersView, getNOCDetails);
+router.get('/noc-requests', nocView, getNOCRequests);
+router.post('/approve-noc/:saleId', nocEdit, approveNOC);
+router.get('/noc-details/:saleId', nocView, getNOCDetails);
 
 router.get('/get-tracking', storeOrdersView, getOrderTracking);
 router.get('/check-existing', ordersView, checkExistingOrder);
@@ -66,7 +73,7 @@ router.put('/:id', dealVerificationsEdit, updateOrder);
 router.patch('/:id/status', ordersEdit, updateOrderStatus);
 router.patch('/:id/service-verify', dealVerificationsEdit, verifyServiceOrder);
 router.patch('/:id/account-approve', ordersEdit, approveAccountOrder);
-router.post('/gate-pass/:saleId', ordersEdit, generateGatePass);
+router.post('/gate-pass/:saleId', nocEdit, generateGatePass);
 router.post('/approve-sale/:saleId', ordersEdit, approveSaleOrder);
 router.post('/:id/payment-evidence', ordersEdit, addPaymentEvidence);
 router.patch('/:orderId/store-info', storeInfoEdit, updateOrderStoreInfo);
