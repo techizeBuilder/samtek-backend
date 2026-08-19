@@ -5,6 +5,8 @@ import {
   getCategories,
   getSectionTableForFamily,
   calculateWeight,
+  getMaterials,
+  createMaterial,
   getFabricationItems,
   suggestNextCode,
   createFabricationItem,
@@ -34,6 +36,8 @@ const fabricationMasterEdit = checkPermission('rnd', 'inventory', 'edit');
 router.get('/categories', getCategories);
 router.get('/sections/:family', getSectionTableForFamily);
 router.post('/calculate-weight', calculateWeight);
+router.get('/materials', getMaterials);
+router.post('/materials', fabricationMasterAdd, createMaterial);
 router.get('/items', fabricationMasterView, getFabricationItems);
 router.get('/next-code', fabricationMasterView, suggestNextCode);
 router.post('/items', fabricationMasterAdd, createFabricationItem);

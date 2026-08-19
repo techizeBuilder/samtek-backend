@@ -19,9 +19,11 @@ Inventory's "Add Item" the same way dimensions already do when a Fabrication Ite
    Renders from `FABRICATION_CATEGORY_GROUPS` (see below).
 2. **`DimensionCalculatorModal`** (`client/src/components/fabrication/DimensionCalculatorModal.jsx`) — opens
    after a tile is picked. Shows a cross-section line diagram (`ShapeDiagram`), Material dropdown (drives
-   Density; MS/GI/SS202/SS304/SS316 table), Density value + kg/m³↔g/cm³ unit converter, a static "By Length"
-   badge (no By Weight anywhere, per requirement), the shape's dimension fields (each with its own mm/cm/
-   inch/m unit), Pieces, Price Per kg, a live weight preview, and Save/Calculate/Clear. **Save** appends the
+   Density; MS/GI/SS202/SS304/SS316 built-in + any company-added materials, see below), Density value +
+   kg/m³↔g/cm³ unit converter, a static "By Length" badge (no By Weight anywhere, per requirement), the
+   shape's dimension fields (each with its own mm/cm/inch/m unit), Pieces, Price Per kg, a live weight
+   preview, and Save/Calculate/Clear. **No shape ever shows a separate "type" dropdown** — see "No type
+   pickers" below for how Pipe/Square Tubing/Angle/Beam/Channel each resolve without one. **Save** appends the
    row to the parent form's `dimensions[]` and returns to the Add Fabrication Item modal — same as the old
    inline "Add Dimension" button did.
 
@@ -34,29 +36,47 @@ Both live in `client/src/pages/ResearchDevelopment/FabricationMaster.jsx`, which
   under the same shape — the data model still only supports one category per catalog item, many dimension
   rows (unchanged).
 
-## Category taxonomy: 11 tiles, 18 backend keys
+## Category taxonomy: 11 tiles, 18 backend keys, zero type pickers
 
 `server/utils/fabricationCategories.js` still has its precise per-formula keys (now 18, up from 16 — see
-below) — **existing saved items keep working unchanged**, nothing was renamed. Each entry now also carries a
-`group` field mapping it onto one of the 11 tiles:
+below) — **existing saved items keep working unchanged**, nothing was renamed. Each entry also carries a
+`group` field mapping it onto one of the 11 tiles. Earlier in this change, tiles covering more than one
+backend key showed a "type" sub-dropdown in the Dimension Calculator (e.g. Channel → GOST/UPN) — **that was
+removed**, per direct feedback, in favor of each tile resolving straight to fields with no extra picker:
 
-| Tile (group)     | Backend key(s)                                          | Sub-type picker shown in Modal 2? |
-|-------------------|----------------------------------------------------------|------------------------------------|
-| Round Bar         | `round_bar`                                               | no |
-| Pipe              | `pipe_circular`, `hss_circular`                            | no (identical formula, merged) |
-| Square Bar        | `square_bar`                                               | no |
-| Hexagonal Bar     | `hex_bar` **(new)**                                        | no |
-| Square Tubing     | `hss_square`, `hss_rectangular`                            | yes — "Tube Shape": Square/Rectangular |
-| Beam              | `beam_ipn`, `beam_ipe`, `beam_hea`, `beam_heb`             | yes — "Beam Type" |
-| T-Bar             | `t_bar` **(new)**                                          | no |
-| Channel           | `channel_gost`, `channel_upn`                              | yes — "Channel Type" |
-| Angle             | `equal_angle`, `unequal_angle`                             | yes — "Angle Type" |
-| Flat Bar          | `flat_bar`                                                 | no |
-| Sheet             | `sheet_plate`                                              | no |
+| Tile (group)   | Backend key(s) reachable from the tile                | How it resolves without a type picker |
+|----------------|----------------------------------------------------------|------------------------------------|
+| Round Bar      | `round_bar`                                               | only ever had one key |
+| Pipe           | `pipe_circular`                                            | `hss_circular` was already identical in fields *and* formula — just dropped from the picker (still valid for old items) |
+| Square Bar     | `square_bar`                                               | only ever had one key |
+| Hexagonal Bar  | `hex_bar` **(new)**                                        | only one key |
+| Square Tubing  | `hss_rectangular`                                          | always uses the rectangular field set (Width, Height, Wall Thickness) — reduces to the exact `hss_square` formula when Width = Height, so a square tube is just "enter the same value twice," no picker needed |
+| Beam           | `beam_ipn`, `beam_ipe`, `beam_hea`, `beam_heb`             | still 4 keys, but the Designation dropdown is now one flat list merging all 4 families' tables (see below) |
+| T-Bar          | `t_bar` **(new)**                                          | only one key |
+| Channel        | `channel_gost`, `channel_upn`                              | same merged-Designation-dropdown treatment as Beam |
+| Angle          | `unequal_angle`                                            | always uses the two-leg field set (Long Leg, Short Leg, Thickness) — reduces to the exact `equal_angle` formula when the two legs are equal |
+| Flat Bar       | `flat_bar`                                                 | only one key |
+| Sheet          | `sheet_plate`                                              | only one key |
 
-`FABRICATION_CATEGORY_GROUPS` (same file) is the single source of truth for this table — it's what
-`CategoryPickerModal` renders and what `GET /api/fabrication-master/categories` now also returns (`groups`
-key, alongside the existing `data` and the new `materials` key for the Material dropdown table).
+The reductions above are exact, not approximations — `hss_square(side, t)` and `hss_rectangular(width=height=side, t)`
+give bit-for-bit the same `weightPerMeterKg`, and likewise `equal_angle(legLength, t)` vs
+`unequal_angle(legA=legB=legLength, t)` (verified numerically while making this change). `hss_square` and
+`equal_angle` are still fully defined in `FABRICATION_CATEGORIES` and still work for viewing/editing
+pre-existing items saved under them — they're just not reachable from the tile picker for *new* items anymore.
+
+For Beam/Channel (lookup categories — weight comes from a standardized designation table, not raw dimensions,
+so there's no shared field set to generalize), `DimensionCalculatorModal` instead fetches all of the group's
+families' section tables in parallel and merges them into one flat Designation `<select>` (option values are
+encoded `categoryKey::designation`; picking one sets both the resolved category key and the designation in
+one step). GOST channel designations are bare numbers (`'5'`, `'6.5'`...) with no family prefix, unlike
+UPN/IPN/IPE/HEA/HEB which already embed one — the merged dropdown prefixes them `"GOST 5"` etc. for display
+only, the raw stored `designation` value sent to the backend is unprefixed. If the item's category is already
+locked (adding another size to an existing catalog item), the merge narrows to just that one locked family,
+since one catalog item can't mix e.g. an IPE row with an HEA row.
+
+`FABRICATION_CATEGORY_GROUPS` (same file) is the single source of truth for the tile list — it's what
+`CategoryPickerModal` renders and what `GET /api/fabrication-master/categories` returns (`groups` key,
+alongside the existing `data`).
 
 ## Two new categories: Hexagonal Bar, T-Bar
 
@@ -73,6 +93,28 @@ Neither existed before. Added to `fabricationCategories.js` + `fabricationWeight
 If these formulas need engineering sign-off before being trusted for real costing, treat that the same way
 `steelSectionTables.js`'s own comment already flags its lookup tables ("spot-check before relying on for real
 costing").
+
+## Wall Thickness from OD/ID (Pipe, Square Tubing)
+
+Pipe and Square Tubing both have a `wallThickness` field that, by default, is just typed directly (unchanged
+behavior). Both now also offer an optional checkbox — off by default — to derive it instead from an outer +
+inner measurement: `t = (outer − inner) / 2`. Toggling it on swaps the Wall Thickness input for an "Inside
+Diameter (ID)" (Pipe) or "Inner Width (A₁)" (Square Tubing) input; `wallThickness` is then computed
+automatically (see `THICKNESS_DERIVATION` config + the effect that watches it in
+`DimensionCalculatorModal.jsx`) and flows into the weight calculation exactly like a manually-typed value
+would. Nothing is sent to the backend differently — this is purely a frontend input-method convenience.
+
+## Material dropdown: built-in table + company-added materials
+
+The Material dropdown no longer has a "Custom" escape hatch for typing an unnamed density. Instead there's a
+"+" button beside it that opens a small inline form (name + density value + kg/m³/g/cm³ unit) — submitting it
+calls `POST /api/fabrication-master/materials`, which persists a new **company-scoped** material
+(`server/models/FabricationMaterial.js`: `name`, `densityKgM3`, unique per company) and immediately selects
+it. `GET /api/fabrication-master/materials` (auth-only, like `/categories`) returns the 5 built-ins from
+`MATERIAL_DENSITY_TABLE` plus this company's custom ones, uniformly shaped (`{key, label, densityKgM3}` —
+built-in `key`s are short codes like `'MS'`, custom ones are the Mongo `_id` string) so the frontend doesn't
+need to special-case either kind. Once a material is added it's available on every future Fabrication Item
+for that company, not just the one being created.
 
 ## Icons
 
@@ -119,7 +161,8 @@ product question, not answered by this change.
 
 | Concern | File |
 |---|---|
-| Category/group/material definitions, weight formulas | `server/utils/fabricationCategories.js`, `server/utils/fabricationWeightCalc.js` |
+| Category/group/built-in-material definitions, weight formulas | `server/utils/fabricationCategories.js`, `server/utils/fabricationWeightCalc.js` |
+| Company-added materials | `server/models/FabricationMaterial.js` |
 | FabricationMaster schema | `server/models/FabricationMaster.js` |
 | FabricationMaster API | `server/controllers/fabricationMasterController.js`, `server/routes/fabricationMasterRoutes.js` |
 | Item schema | `server/models/Inventory.js` |
