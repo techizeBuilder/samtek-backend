@@ -221,20 +221,36 @@ export const FABRICATION_CATEGORIES = [
 export const getCategoryByKey = (key) => FABRICATION_CATEGORIES.find((c) => c.key === key) || null;
 
 // The 11 shape tiles the "Select Category" picker renders, in screenshot
-// order. `keys` lists every FABRICATION_CATEGORIES entry belonging to this
-// tile — length 1 means the tile goes straight to the dimension fields;
-// length > 1 means the Dimension Calculator shows a sub-type dropdown first
-// (e.g. Channel -> GOST/UPN) to resolve which exact key/formula to use.
+// order. No tile shows a "type" sub-picker — each resolves straight to
+// fields:
+//   - Pipe, Square Tubing, Angle each used to offer 2 backend keys with a
+//     type dropdown between them (e.g. Square/Rectangular). Removed in favor
+//     of always using the more GENERAL key, since it's a strict superset:
+//     hss_rectangular(width,height,wallThickness) reduces to the
+//     hss_square formula exactly when width === height; unequal_angle
+//     (legA,legB,thickness) likewise reduces to equal_angle's formula when
+//     legA === legB. So one field set now covers both cases with no picker.
+//     (pipe_circular and hss_circular were already identical in fields AND
+//     formula — just kept the one key.) The now-unreachable-from-the-picker
+//     keys (hss_square, hss_rectangular's sibling hss_square, equal_angle,
+//     hss_circular) are still defined below and still fully work for
+//     editing/viewing pre-existing items saved under them.
+//   - Beam and Channel are lookup categories (designation -> standardized
+//     table weight, not computable from raw fields) so they can't be merged
+//     the same way — instead the Dimension Calculator merges all of a
+//     group's designation tables into ONE flat "Designation" dropdown
+//     (see DimensionCalculatorModal.jsx), so there's still no separate type
+//     picker even though `keys` here still lists all 4 (or 2) families.
 export const FABRICATION_CATEGORY_GROUPS = [
   { key: 'round_bar', label: 'Round Bar', keys: ['round_bar'] },
-  { key: 'pipe', label: 'Pipe', keys: ['pipe_circular', 'hss_circular'] },
+  { key: 'pipe', label: 'Pipe', keys: ['pipe_circular'] },
   { key: 'square_bar', label: 'Square Bar', keys: ['square_bar'] },
   { key: 'hex_bar', label: 'Hexagonal Bar', keys: ['hex_bar'] },
-  { key: 'square_tubing', label: 'Square Tubing', keys: ['hss_square', 'hss_rectangular'] },
+  { key: 'square_tubing', label: 'Square Tubing', keys: ['hss_rectangular'] },
   { key: 'beam', label: 'Beam', keys: ['beam_ipn', 'beam_ipe', 'beam_hea', 'beam_heb'] },
   { key: 't_bar', label: 'T-Bar', keys: ['t_bar'] },
   { key: 'channel', label: 'Channel', keys: ['channel_gost', 'channel_upn'] },
-  { key: 'angle', label: 'Angle', keys: ['equal_angle', 'unequal_angle'] },
+  { key: 'angle', label: 'Angle', keys: ['unequal_angle'] },
   { key: 'flat_bar', label: 'Flat Bar', keys: ['flat_bar'] },
   { key: 'sheet', label: 'Sheet', keys: ['sheet_plate'] },
 ];

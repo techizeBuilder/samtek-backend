@@ -1,4 +1,5 @@
 import FabricationMaster from '../models/FabricationMaster.js';
+import FabricationMaterial from '../models/FabricationMaterial.js';
 import {
   FABRICATION_CATEGORIES, FABRICATION_CATEGORY_GROUPS, MATERIAL_DENSITY_TABLE,
   getCategoryByKey, DEFAULT_DENSITY_KG_M3,
@@ -11,9 +12,55 @@ export const getCategories = async (req, res) => {
     success: true,
     data: FABRICATION_CATEGORIES,
     groups: FABRICATION_CATEGORY_GROUPS,
-    materials: MATERIAL_DENSITY_TABLE,
     defaultDensityKgM3: DEFAULT_DENSITY_KG_M3,
   });
+};
+
+// Material dropdown for the Dimension Calculator: the 5 built-in materials
+// plus whatever this company has added via the "+" (see createMaterial).
+export const getMaterials = async (req, res) => {
+  try {
+    const custom = await FabricationMaterial.find({ company: req.user.companyId }).sort({ name: 1 }).lean();
+    const data = [
+      ...MATERIAL_DENSITY_TABLE.map((m) => ({ key: m.key, label: m.label, densityKgM3: m.densityKgM3, custom: false })),
+      ...custom.map((m) => ({ key: String(m._id), label: m.name, densityKgM3: m.densityKgM3, custom: true })),
+    ];
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+export const createMaterial = async (req, res) => {
+  try {
+    const name = (req.body.name || '').trim();
+    const densityKgM3 = Number(req.body.densityKgM3);
+    if (!name) return res.status(400).json({ success: false, message: 'Material name is required.' });
+    if (!densityKgM3 || densityKgM3 <= 0) return res.status(400).json({ success: false, message: 'A valid density is required.' });
+
+    const clashesBuiltIn = MATERIAL_DENSITY_TABLE.some(
+      (m) => m.label.toLowerCase() === name.toLowerCase() || m.key.toLowerCase() === name.toLowerCase()
+    );
+    if (clashesBuiltIn) {
+      return res.status(400).json({ success: false, message: `"${name}" already exists as a built-in material.` });
+    }
+    const existing = await FabricationMaterial.findOne({
+      company: req.user.companyId,
+      name: { $regex: `^${escapeRegExp(name)}$`, $options: 'i' },
+    });
+    if (existing) {
+      return res.status(400).json({ success: false, message: `"${name}" has already been added.` });
+    }
+
+    const created = await FabricationMaterial.create({
+      name, densityKgM3, company: req.user.companyId, createdBy: req.user._id,
+    });
+    res.status(201).json({ success: true, data: { key: String(created._id), label: created.name, densityKgM3: created.densityKgM3, custom: true } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 export const getSectionTableForFamily = async (req, res) => {
