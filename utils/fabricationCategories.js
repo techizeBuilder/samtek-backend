@@ -1,4 +1,4 @@
-// Single source of truth for Fabrication Master's 16 shape categories — what
+// Single source of truth for Fabrication Master's shape categories — what
 // dimension fields each one needs, and how its weight is calculated.
 // Consumed by fabricationMasterController.js (calc + validation) and served
 // to the frontend via GET /api/fabrication-master/categories so the Add
@@ -15,11 +15,20 @@
 //   'lookup'   — weight/m comes from a standardized section table
 //                (steelSectionTables.js, keyed by `lookupFamily`) picked via
 //                a `designation` (e.g. "IPE 200"), not computed from fields.
+//
+// `group` maps each precise key onto one of the 11 shape tiles the "Select
+// Category" picker shows (Round Bar / Pipe / Square Bar / Hexagonal Bar /
+// Square Tubing / Beam / T-Bar / Channel / Angle / Flat Bar / Sheet). Several
+// keys share a group (e.g. pipe_circular + hss_circular both render as the
+// "Pipe" tile) — see FABRICATION_CATEGORY_GROUPS below. Existing saved items
+// keep using these same keys; `group` is purely a presentation grouping, so
+// adding it is backward compatible.
 
 export const FABRICATION_CATEGORIES = [
   {
     key: 'sheet_plate',
     label: 'Steel sheets and plates',
+    group: 'sheet',
     calcType: 'sheet',
     fields: [
       { key: 'thickness', label: 'Thickness (t)', unit: 'mm' },
@@ -30,6 +39,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'pipe_circular',
     label: 'Seamless steel pipes - circular',
+    group: 'pipe',
     calcType: 'perMeter',
     formula: 'pipeRing',
     fields: [
@@ -41,6 +51,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'hss_circular',
     label: 'Hollow structural sections - circular',
+    group: 'pipe',
     calcType: 'perMeter',
     formula: 'pipeRing',
     fields: [
@@ -52,6 +63,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'hss_square',
     label: 'Hollow structural sections - square',
+    group: 'square_tubing',
     calcType: 'perMeter',
     formula: 'hssSquare',
     fields: [
@@ -63,6 +75,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'hss_rectangular',
     label: 'Hollow structural sections - rectangular',
+    group: 'square_tubing',
     calcType: 'perMeter',
     formula: 'hssRect',
     fields: [
@@ -75,16 +88,18 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'round_bar',
     label: 'Round steel bars',
+    group: 'round_bar',
     calcType: 'perMeter',
     formula: 'roundBar',
     fields: [
-      { key: 'diameter', label: 'Diameter (d)', unit: 'mm' },
+      { key: 'diameter', label: 'Diameter (D)', unit: 'mm' },
       { key: 'length', label: 'Length (L)', unit: 'mm' },
     ],
   },
   {
     key: 'square_bar',
     label: 'Square steel bars',
+    group: 'square_bar',
     calcType: 'perMeter',
     formula: 'squareBar',
     fields: [
@@ -93,8 +108,33 @@ export const FABRICATION_CATEGORIES = [
     ],
   },
   {
+    key: 'hex_bar',
+    label: 'Hexagonal steel bars',
+    group: 'hex_bar',
+    calcType: 'perMeter',
+    formula: 'hexBar',
+    fields: [
+      { key: 'af', label: 'Across Flats (AF)', unit: 'mm' },
+      { key: 'length', label: 'Length (L)', unit: 'mm' },
+    ],
+  },
+  {
+    key: 't_bar',
+    label: 'T-bars',
+    group: 't_bar',
+    calcType: 'perMeter',
+    formula: 'tBar',
+    fields: [
+      { key: 'width', label: 'Flange Width (W)', unit: 'mm' },
+      { key: 'height', label: 'Height (H)', unit: 'mm' },
+      { key: 'thickness', label: 'Thickness (t)', unit: 'mm' },
+      { key: 'length', label: 'Length (L)', unit: 'mm' },
+    ],
+  },
+  {
     key: 'flat_bar',
     label: 'Flat bars',
+    group: 'flat_bar',
     calcType: 'perMeter',
     formula: 'flatBar',
     fields: [
@@ -106,6 +146,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'equal_angle',
     label: 'Equal angles',
+    group: 'angle',
     calcType: 'perMeter',
     formula: 'equalAngle',
     fields: [
@@ -117,6 +158,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'unequal_angle',
     label: 'Unequal angles',
+    group: 'angle',
     calcType: 'perMeter',
     formula: 'unequalAngle',
     fields: [
@@ -129,6 +171,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'channel_gost',
     label: 'Channels - GOST',
+    group: 'channel',
     calcType: 'lookup',
     lookupFamily: 'gost-channels',
     fields: [{ key: 'length', label: 'Length (L)', unit: 'mm' }],
@@ -136,6 +179,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'channel_upn',
     label: 'Channels - UPN',
+    group: 'channel',
     calcType: 'lookup',
     lookupFamily: 'upn-channels',
     fields: [{ key: 'length', label: 'Length (L)', unit: 'mm' }],
@@ -143,6 +187,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'beam_ipn',
     label: 'Beams - IPN',
+    group: 'beam',
     calcType: 'lookup',
     lookupFamily: 'ipn-beams',
     fields: [{ key: 'length', label: 'Length (L)', unit: 'mm' }],
@@ -150,6 +195,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'beam_ipe',
     label: 'Beams - IPE',
+    group: 'beam',
     calcType: 'lookup',
     lookupFamily: 'ipe-beams',
     fields: [{ key: 'length', label: 'Length (L)', unit: 'mm' }],
@@ -157,6 +203,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'beam_hea',
     label: 'Beams - HEA (IPBL)',
+    group: 'beam',
     calcType: 'lookup',
     lookupFamily: 'hea-beams',
     fields: [{ key: 'length', label: 'Length (L)', unit: 'mm' }],
@@ -164,6 +211,7 @@ export const FABRICATION_CATEGORIES = [
   {
     key: 'beam_heb',
     label: 'Beams - HEB (IPB)',
+    group: 'beam',
     calcType: 'lookup',
     lookupFamily: 'heb-beams',
     fields: [{ key: 'length', label: 'Length (L)', unit: 'mm' }],
@@ -172,4 +220,35 @@ export const FABRICATION_CATEGORIES = [
 
 export const getCategoryByKey = (key) => FABRICATION_CATEGORIES.find((c) => c.key === key) || null;
 
+// The 11 shape tiles the "Select Category" picker renders, in screenshot
+// order. `keys` lists every FABRICATION_CATEGORIES entry belonging to this
+// tile — length 1 means the tile goes straight to the dimension fields;
+// length > 1 means the Dimension Calculator shows a sub-type dropdown first
+// (e.g. Channel -> GOST/UPN) to resolve which exact key/formula to use.
+export const FABRICATION_CATEGORY_GROUPS = [
+  { key: 'round_bar', label: 'Round Bar', keys: ['round_bar'] },
+  { key: 'pipe', label: 'Pipe', keys: ['pipe_circular', 'hss_circular'] },
+  { key: 'square_bar', label: 'Square Bar', keys: ['square_bar'] },
+  { key: 'hex_bar', label: 'Hexagonal Bar', keys: ['hex_bar'] },
+  { key: 'square_tubing', label: 'Square Tubing', keys: ['hss_square', 'hss_rectangular'] },
+  { key: 'beam', label: 'Beam', keys: ['beam_ipn', 'beam_ipe', 'beam_hea', 'beam_heb'] },
+  { key: 't_bar', label: 'T-Bar', keys: ['t_bar'] },
+  { key: 'channel', label: 'Channel', keys: ['channel_gost', 'channel_upn'] },
+  { key: 'angle', label: 'Angle', keys: ['equal_angle', 'unequal_angle'] },
+  { key: 'flat_bar', label: 'Flat Bar', keys: ['flat_bar'] },
+  { key: 'sheet', label: 'Sheet', keys: ['sheet_plate'] },
+];
+
+export const getGroupByKey = (key) => FABRICATION_CATEGORY_GROUPS.find((g) => g.key === key) || null;
+
 export const DEFAULT_DENSITY_KG_M3 = 7850;
+
+// Metal Density Table (kg/m³) — drives the Material dropdown in the
+// Dimension Calculator. g/cm³ is just value/1000.
+export const MATERIAL_DENSITY_TABLE = [
+  { key: 'MS', label: 'MS (Mild Steel)', densityKgM3: 7850 },
+  { key: 'GI', label: 'GI (Galvanized Iron)', densityKgM3: 7850 },
+  { key: 'SS202', label: 'SS 202', densityKgM3: 7930 },
+  { key: 'SS304', label: 'SS 304', densityKgM3: 8000 },
+  { key: 'SS316', label: 'SS 316', densityKgM3: 8000 },
+];

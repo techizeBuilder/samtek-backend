@@ -252,6 +252,22 @@ const itemSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Receive Unit — the unit Store actually receives/counts stock in, which
+  // can differ from Purchase Unit (e.g. purchased by weight, received/counted
+  // by piece). Same Type+Unit pairing as Purchase/Used Unit above (UnitType
+  // collection). Auto-filled from FabricationMaster's own receiveUnitType/
+  // receiveUnit when picking a Fabrication Item (see SimpleInventoryForm's
+  // handleFabricationSelect), editable afterward like every other unit field.
+  receiveUnitType: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  receiveUnit: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   description: {
     type: String,
     trim: true

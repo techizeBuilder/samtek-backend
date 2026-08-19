@@ -25,8 +25,26 @@ const FabricationMasterSchema = new mongoose.Schema({
     designation: { type: String, default: '', trim: true }, // only for lookup categories, e.g. "IPE 200"
     weightPerMeterKg: { type: Number, default: null }, // null for the sheet/plate category
     weightPerPieceKg: { type: Number, required: true },
+    // Dimension Calculator convenience fields, entered alongside a dimension
+    // row purely for reference/preview (Total Weight = weightPerPieceKg x
+    // pieces, Total Price = Total Weight x pricePerKg). Never consulted by
+    // the weight formula itself and never fed into Item.weightUnitPrice —
+    // that stays Accounts' own manual/purchase-resolved flow.
+    pieces: { type: Number, default: 1 },
+    pricePerKg: { type: Number, default: null },
   }],
   isDiscontinued: { type: Boolean, default: false },
+  // Purchase/Used/Receive Unit — same Type+Unit pairing Inventory's Add Item
+  // form uses (UnitType collection, see Inventory.js's unitTypeSchema).
+  // Carried on the catalog entry so picking a Fabrication Item in Inventory's
+  // Add Item (see FabricationItemPicker.jsx) can auto-fill these onto the
+  // new Item, the same way dimensions already auto-fill.
+  purchaseUnitType: { type: String, default: '', trim: true },
+  purchaseUnit: { type: String, default: '', trim: true },
+  usedUnitType: { type: String, default: '', trim: true },
+  usedUnit: { type: String, default: '', trim: true },
+  receiveUnitType: { type: String, default: '', trim: true },
+  receiveUnit: { type: String, default: '', trim: true },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });

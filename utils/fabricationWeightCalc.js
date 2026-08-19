@@ -34,6 +34,13 @@ const calcWeightPerMeterKg = (formula, values, densityKgM3) => {
       return (2 * v('legLength') - v('thickness')) * v('thickness') * k;
     case 'unequalAngle':
       return (v('legA') + v('legB') - v('thickness')) * v('thickness') * k;
+    case 'hexBar':
+      // Regular hexagon, across-flats width `af`: area = (sqrt(3)/2) * af^2
+      return v('af') ** 2 * (Math.sqrt(3) / 2) * k;
+    case 'tBar':
+      // Flange (width x thickness) + web ((height - thickness) x thickness),
+      // same "two overlapping rectangles" shape as unequalAngle above.
+      return (v('width') + v('height') - v('thickness')) * v('thickness') * k;
     default:
       throw new Error(`Unknown formula: ${formula}`);
   }

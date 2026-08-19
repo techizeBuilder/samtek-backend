@@ -40,10 +40,12 @@ import {
   generateChildPartCode,
   createChildPart,
   updateChildPart,
+  deleteChildPart,
   uploadChildPartFile,
   generateSubChildPartCode,
   addSubChildPart,
   updateSubChildPart,
+  deleteSubChildPart,
 } from '../controllers/rdChildPartController.js';
 import {
   getBOMFieldConfig,
@@ -212,10 +214,12 @@ router.get('/child-parts', bomManagementView, getChildParts);
 router.get('/child-parts/generate-code', bomManagementView, generateChildPartCode);
 router.post('/child-parts', bomManagementAdd, createChildPart);
 router.put('/child-parts/:id', bomManagementEdit, updateChildPart);
+router.delete('/child-parts/:id', bomManagementDelete, deleteChildPart);
 router.post('/child-parts/upload-file', bomManagementAdd, rdDocumentUpload.single('file'), uploadChildPartFile);
 router.get('/child-parts/:id/sub-parts/generate-code', bomManagementView, generateSubChildPartCode);
 router.post('/child-parts/:id/sub-parts', bomManagementAdd, addSubChildPart);
 router.put('/child-parts/:id/sub-parts/:subId', bomManagementEdit, updateSubChildPart);
+router.delete('/child-parts/:id/sub-parts/:subId', bomManagementDelete, deleteSubChildPart);
 
 // ── BOM Format & Modification ────────────────────────────────────────────────
 router.get('/bom-field-config', bomManagementView, getBOMFieldConfig);
