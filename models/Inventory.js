@@ -56,12 +56,21 @@ const itemSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Denominated in Receive Unit (see receiveUnit/receiveUnitType below) — the
+  // unit Store actually counts physical stock in. For non-fabrication items
+  // Receive Unit is enforced equal to `unit` (sanitizeItemData in
+  // inventoryController.js — no general conversion exists between two
+  // arbitrary unit types), so this is numerically the same as `unit` for
+  // them. For fabrication items `qty` stays 0/unused — real stock lives in
+  // dimensionVariants[].subStock, itself Receive-Unit/Pieces-denominated.
   qty: {
     type: Number,
     required: true,
     min: 0,
     default: 0
   },
+  // "Used Unit" — despite the field name, this is the BOM/consumption unit,
+  // not necessarily what stock is counted in (see qty's comment above).
   unit: {
     type: String,
     required: true,

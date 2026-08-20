@@ -23,6 +23,7 @@ import { getSellableItems as fetchSellableItems } from '../services/sellableItem
 import { dimensionSignature, resolveFabricationWeight } from '../services/fabricationDemandService.js';
 import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
+import { toMm, toMm2 } from '../utils/unitConversion.js';
 
 // Delivery Challan Order for Unit Head Inventory
 const DELIVERY_CHALLAN_ORDER = [
@@ -1229,6 +1230,19 @@ const sanitizeItemData = (data) => {
     sanitized.unitWeightValue = Number(sanitized.unitWeightValue);
   }
 
+  // Receive Unit is only meaningfully independent of Used Unit for
+  // fabrication items (Pieces received vs. a Length/Area unit used, bridged
+  // by geometry × density). No such conversion exists between two arbitrary
+  // unit types, so for every other item Receive Unit must equal Used Unit —
+  // enforced here (not just on the form) so it holds regardless of caller.
+  // Guarded on unitType/unit actually being part of this payload so a
+  // partial update that doesn't touch them (e.g. the discontinue/reactivate
+  // toggle, which sends only { isDiscontinued }) leaves Receive Unit alone.
+  if ((sanitized.unitType !== undefined || sanitized.unit !== undefined) && !sanitized.fabricationRef) {
+    sanitized.receiveUnitType = sanitized.unitType;
+    sanitized.receiveUnit = sanitized.unit;
+  }
+
   // Convert numeric fields
   if (sanitized.qty !== undefined) sanitized.qty = Number(sanitized.qty);
   if (sanitized.stdCost !== undefined) sanitized.stdCost = Number(sanitized.stdCost);
@@ -1784,7 +1798,7 @@ export const getUnitTypes = async (req, res) => {
     if (unitTypes.length === 0) {
       console.log(`🌱 Seeding default unit types for company ${companyId}...`);
       const seedData = [
-        { name: 'Length Unit', units: ['Millimeter', 'Centimeter', 'Meter', 'Kilometer', 'Inch', 'Feet'], companyId },
+        { name: 'Length Unit', units: ['Millimeter', 'Centimeter', 'Meter', 'Kilometer', 'Inch', 'Foot'], companyId },
         { name: 'Area Unit', units: ['Millimeter Square', 'Centimeter Square', 'Meter Square', 'Inch Square', 'Foot Square'], companyId },
         { name: 'Volume Unit', units: ['Centimeter Cube', 'Meter Cube', 'Liter', 'Inch Cube', 'Foot Cube'], companyId },
         { name: 'Mass Unit', units: ['Gram', 'Kilogram', 'Tonne'], companyId },
@@ -3422,16 +3436,25 @@ export const transferMaterialToProduction = async (req, res) => {
 // a rectangle cut from a rectangle isn't generally another clean rectangle,
 // so only the person physically cutting it knows the remaining shape).
 // Leaving the leftover fields blank means the offcut is scrap.
+//
+// stockPiecesConsumed (how many physical stock pieces Store is cutting from)
+// is deliberately separate from quantityFulfilled (how many of the demand's
+// needed pieces this transfer covers) — the previous version of this
+// endpoint conflated the two (deducted/left-overed by the demand's own
+// quantity, as if 1 stock piece always == 1 demanded piece), so a single
+// long stock bar that actually covered 2 short demanded cuts still deducted
+// 2 whole stock pieces and recorded a leftover of quantity 2 instead of 1.
 // POST /api/inventory/transfer-fabrication-material/:id
 export const transferFabricationMaterialToProduction = async (req, res) => {
   try {
-    const { materialCode, sourceVariantId, quantity, leftoverDimensions } = req.body;
+    const { materialCode, sourceVariantId, stockPiecesConsumed, quantityFulfilled, leftover } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
-    const transferQty = Number(quantity);
+    const piecesConsumed = Number(stockPiecesConsumed);
+    const qtyFulfilled = Number(quantityFulfilled);
 
-    if (!materialCode || !sourceVariantId || !transferQty || transferQty <= 0) {
-      return res.status(400).json({ success: false, message: 'Material, source variant, and a valid quantity are required.' });
+    if (!materialCode || !sourceVariantId || !(piecesConsumed > 0) || !(qtyFulfilled > 0)) {
+      return res.status(400).json({ success: false, message: 'Material, source variant, stock pieces consumed, and quantity fulfilled are all required.' });
     }
 
     const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
@@ -3446,6 +3469,11 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This material is not a fabrication item — use the standard transfer instead.' });
     }
 
+    const remaining = (demand.quantity || 0) - (demand.transferredQuantity || 0);
+    if (qtyFulfilled > remaining) {
+      return res.status(400).json({ success: false, message: `Cannot fulfil ${qtyFulfilled} piece(s) — only ${remaining} still needed on this demand.` });
+    }
+
     const sourceItem = await Item.findOne({ code: demand.sourceItemCode, companyId });
     if (!sourceItem) {
       return res.status(400).json({ success: false, message: `Source item "${demand.sourceItemCode}" not found in Inventory.` });
@@ -3455,46 +3483,83 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
     if (!sourceVariant) {
       return res.status(404).json({ success: false, message: 'Chosen stock size not found on this item.' });
     }
-    if ((sourceVariant.subStock || 0) < transferQty) {
+    if ((sourceVariant.subStock || 0) < piecesConsumed) {
       return res.status(400).json({ success: false, message: `Insufficient stock in the chosen size — only ${sourceVariant.subStock || 0} available.` });
+    }
+
+    const category = getCategoryByKey(demand.fabricationCategory);
+    if (!category) {
+      return res.status(400).json({ success: false, message: 'Unknown fabrication category for this material.' });
+    }
+    const isSheet = category.calcType === 'sheet';
+
+    // Size-sufficiency check — the other real bug: today's system never
+    // confirmed the chosen stock piece(s) were even physically big enough
+    // for the cut. demand.amountValue/amountUnit is the per-piece amount
+    // needed (set by the BOM/demand amount+quantity model — see
+    // ProductionOrder.js's MaterialDemandSchema); missing on demands
+    // created before that redesign, in which case this falls back to no
+    // sufficiency check (matches the old behavior) so already-in-flight
+    // orders don't suddenly start rejecting valid transfers.
+    if (demand.amountValue != null && demand.amountUnit) {
+      const neededPerPiece = isSheet ? toMm2(demand.amountValue, demand.amountUnit) : toMm(demand.amountValue, demand.amountUnit);
+      const variantCapacity = isSheet
+        ? (Number(sourceVariant.values?.width) || 0) * (Number(sourceVariant.values?.length) || 0)
+        : (Number(sourceVariant.values?.length) || 0);
+      if (neededPerPiece != null && variantCapacity > 0) {
+        const totalNeeded = neededPerPiece * qtyFulfilled;
+        const totalCapacity = variantCapacity * piecesConsumed;
+        if (totalCapacity < totalNeeded) {
+          const unitLabel = isSheet ? 'mm²' : 'mm';
+          return res.status(400).json({
+            success: false,
+            message: `Not enough material — ${piecesConsumed} stock piece(s) of this size only cover ${Math.round(totalCapacity)}${unitLabel}, but ${qtyFulfilled} piece(s) at ${demand.amountValue} ${demand.amountUnit} each need ${Math.round(totalNeeded)}${unitLabel}.`
+          });
+        }
+      }
     }
 
     // Snapshot before mutating — used for the audit log and the leftover calc.
     const sourceValuesSnapshot = { ...(sourceVariant.values || {}) };
 
-    // Deduct the transferred quantity from the chosen stock size regardless
-    // of whether cutting is needed.
-    sourceVariant.subStock -= transferQty;
+    // Deduct the STOCK PIECES actually consumed — not the demand quantity
+    // fulfilled (the core bug fix: these are no longer assumed equal).
+    sourceVariant.subStock -= piecesConsumed;
 
-    const isExactMatch = dimensionSignature(sourceValuesSnapshot) === dimensionSignature(demand.bomDimensions);
+    // Leftover is now an explicit batch: pieceCount identical leftover
+    // pieces of amountValue+amountUnit size — Store's own count, not
+    // re-derived from piecesConsumed/qtyFulfilled (the bug's other half:
+    // consuming 1 stock piece could still leave more than 1 leftover piece,
+    // or none at all, depending on how it was actually cut).
     let leftoverValuesRecorded = null;
-
-    if (!isExactMatch && leftoverDimensions && Object.keys(leftoverDimensions).length > 0) {
-      const category = getCategoryByKey(demand.fabricationCategory);
-      if (!category) {
-        return res.status(400).json({ success: false, message: 'Unknown fabrication category for this material.' });
-      }
+    if (leftover && Number(leftover.pieceCount) > 0 && Number(leftover.amountValue) > 0 && leftover.amountUnit) {
       // Only the fields a straight cut can actually change (length, and
-      // width for flat sheets) come from the client — everything else
-      // (thickness, wall thickness, OD, leg length...) is taken straight
-      // from the source variant's own values, never trusted from the
-      // request, so a leftover can never end up with a different
+      // width for flat sheets) ever come from Store's entry — everything
+      // else (thickness, wall thickness, OD, leg length...) is taken
+      // straight from the source variant's own values, never trusted from
+      // the request, so a leftover can never end up with a different
       // cross-section than what it was actually cut from.
-      const editableKeys = category.fields
-        .filter(f => f.key === 'length' || (category.calcType === 'sheet' && f.key === 'width'))
-        .map(f => f.key);
       const leftoverValues = { ...sourceValuesSnapshot };
-      for (const key of editableKeys) {
-        if (leftoverDimensions[key] !== undefined && leftoverDimensions[key] !== '') {
-          leftoverValues[key] = leftoverDimensions[key];
-        }
+      if (isSheet) {
+        // Sheet leftovers: Store enters a single area, but the stored shape
+        // still needs width+length individually — width stays the source's
+        // own fixed width, length is derived so width*length reproduces the
+        // entered area exactly (calculateFabricationWeight's sheet formula
+        // is width*length either way, so this is a pure re-encoding, not a
+        // different number).
+        const areaMm2 = toMm2(leftover.amountValue, leftover.amountUnit);
+        const width = Number(sourceValuesSnapshot.width) || 0;
+        if (areaMm2 != null && width > 0) leftoverValues.length = Math.round((areaMm2 / width) * 1000) / 1000;
+      } else {
+        const lengthMm = toMm(leftover.amountValue, leftover.amountUnit);
+        if (lengthMm != null) leftoverValues.length = lengthMm;
       }
 
       const existingLeftover = sourceItem.dimensionVariants.find(
         dv => dv.isLeftover && dimensionSignature(dv.values) === dimensionSignature(leftoverValues)
       );
       if (existingLeftover) {
-        existingLeftover.subStock = (existingLeftover.subStock || 0) + transferQty;
+        existingLeftover.subStock = (existingLeftover.subStock || 0) + Number(leftover.pieceCount);
       } else {
         const { weightPerMeterKg, weightPerPieceKg } = calculateFabricationWeight(
           demand.fabricationCategory, leftoverValues, sourceVariant.densityValue, sourceVariant.densityUnit
@@ -3502,12 +3567,12 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
         sourceItem.dimensionVariants.push({
           category: demand.fabricationCategory,
           values: leftoverValues,
-          designation: '',
+          designation: sourceVariant.designation || '',
           densityValue: sourceVariant.densityValue,
           densityUnit: sourceVariant.densityUnit,
           weightPerMeterKg,
           weightPerPieceKg,
-          subStock: transferQty,
+          subStock: Number(leftover.pieceCount),
           isLeftover: true,
         });
       }
@@ -3516,8 +3581,10 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
 
     await sourceItem.save();
 
-    // Update the demand — identical to the standard transfer from here.
-    demand.transferredQuantity = (demand.transferredQuantity || 0) + transferQty;
+    // Update the demand — transferredQuantity tracks demanded PIECES
+    // (qtyFulfilled), the same unit as quantity/issuedQuantity everywhere
+    // else in this app; stockPiecesConsumed only ever affects Item stock.
+    demand.transferredQuantity = (demand.transferredQuantity || 0) + qtyFulfilled;
     demand.status = 'In Transit';
     await order.save();
 
@@ -3528,7 +3595,7 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
       materialCode: demand.materialCode,
       sourceItemCode: demand.sourceItemCode,
       materialName: demand.materialName,
-      quantityTransferred: transferQty,
+      quantityTransferred: qtyFulfilled,
       unit: demand.unit,
       fromDimensions: sourceValuesSnapshot,
       toDimensions: demand.bomDimensions,
@@ -3537,7 +3604,7 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
       company: companyId
     });
 
-    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.` });
+    res.json({ success: true, message: `Successfully transferred ${qtyFulfilled} piece(s) to Production (${piecesConsumed} stock piece(s) consumed).` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

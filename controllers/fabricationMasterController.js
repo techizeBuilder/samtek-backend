@@ -1,5 +1,6 @@
 import FabricationMaster from '../models/FabricationMaster.js';
 import FabricationMaterial from '../models/FabricationMaterial.js';
+import { Item } from '../models/Inventory.js';
 import {
   FABRICATION_CATEGORIES, FABRICATION_CATEGORY_GROUPS, MATERIAL_DENSITY_TABLE,
   getCategoryByKey, DEFAULT_DENSITY_KG_M3,
@@ -89,15 +90,25 @@ const derivePrefix = (name) => {
   return (letters.slice(0, 3).toUpperCase()) || 'ITM';
 };
 
-const getNextCodeForPrefix = async (companyId, prefix) => {
-  const docs = await FabricationMaster.find({
-    company: companyId,
-    itemCode: { $regex: `^${prefix}-\\d+$` },
-  }).select('itemCode').lean();
+// itemCode is globally unique (see FabricationMaster.js's index comment) and
+// becomes an Item.code verbatim the moment it's picked in Inventory — which
+// itself has a global unique constraint covering every item, fabrication-
+// derived or not. So the "next" number has to skip anything already taken
+// in EITHER collection, across every company — not just this one — or the
+// suggested code can still collide the moment it's turned into an Item.
+const getNextCodeForPrefix = async (prefix) => {
   const regex = new RegExp(`^${prefix}-(\\d+)$`);
+  const [fabDocs, itemDocs] = await Promise.all([
+    FabricationMaster.find({ itemCode: { $regex: `^${prefix}-\\d+$` } }).select('itemCode').lean(),
+    Item.find({ code: { $regex: `^${prefix}-\\d+$` } }).select('code').lean(),
+  ]);
   let max = 0;
-  for (const d of docs) {
+  for (const d of fabDocs) {
     const m = d.itemCode.match(regex);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  for (const d of itemDocs) {
+    const m = d.code.match(regex);
     if (m) max = Math.max(max, parseInt(m[1], 10));
   }
   return `${prefix}-${String(max + 1).padStart(3, '0')}`;
@@ -108,7 +119,7 @@ export const suggestNextCode = async (req, res) => {
     const { name } = req.query;
     if (!name || !name.trim()) return res.status(400).json({ success: false, message: 'name is required' });
     const prefix = derivePrefix(name);
-    const code = await getNextCodeForPrefix(req.user.companyId, prefix);
+    const code = await getNextCodeForPrefix(prefix);
     res.json({ success: true, data: { code } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -204,14 +215,29 @@ export const createFabricationItem = async (req, res) => {
 
     let code = itemCode && itemCode.trim();
     if (!code) {
-      code = await getNextCodeForPrefix(req.user.companyId, derivePrefix(itemName));
+      code = await getNextCodeForPrefix(derivePrefix(itemName));
     }
 
-    const existing = await FabricationMaster.findOne({ company: req.user.companyId, itemCode: code });
+    // Global checks, not company-scoped — itemCode has to be unique across
+    // every company (see FabricationMaster.js's index comment), and also
+    // can't already be taken as a plain Inventory Item.code (e.g. a manually
+    // created item, or another company's item that isn't Fabrication-linked
+    // at all) — either would otherwise only surface as a confusing
+    // duplicate-key error later, downstream in Inventory's Add Item form.
+    const [existing, existingItem] = await Promise.all([
+      FabricationMaster.findOne({ itemCode: code }),
+      Item.findOne({ code }).select('name company').lean(),
+    ]);
     if (existing) {
       return res.status(400).json({
         success: false,
         message: `Coding Conflict: The Item Code "${code}" is already assigned to "${existing.itemName}".`,
+      });
+    }
+    if (existingItem) {
+      return res.status(400).json({
+        success: false,
+        message: `Coding Conflict: The Item Code "${code}" is already used by an Inventory item ("${existingItem.name}").`,
       });
     }
 
@@ -253,11 +279,19 @@ export const updateFabricationItem = async (req, res) => {
       };
     }
     if (itemCode !== undefined && itemCode.trim() && itemCode.trim() !== existing.itemCode) {
-      const conflict = await FabricationMaster.findOne({ company: req.user.companyId, itemCode: itemCode.trim(), _id: { $ne: existing._id } });
+      const newCode = itemCode.trim();
+      // Global checks — see createFabricationItem's matching comment.
+      const [conflict, conflictItem] = await Promise.all([
+        FabricationMaster.findOne({ itemCode: newCode, _id: { $ne: existing._id } }),
+        Item.findOne({ code: newCode }).select('name').lean(),
+      ]);
       if (conflict) {
-        return res.status(400).json({ success: false, message: `Coding Conflict: The Item Code "${itemCode.trim()}" is already assigned to "${conflict.itemName}".` });
+        return res.status(400).json({ success: false, message: `Coding Conflict: The Item Code "${newCode}" is already assigned to "${conflict.itemName}".` });
       }
-      update.itemCode = itemCode.trim();
+      if (conflictItem) {
+        return res.status(400).json({ success: false, message: `Coding Conflict: The Item Code "${newCode}" is already used by an Inventory item ("${conflictItem.name}").` });
+      }
+      update.itemCode = newCode;
     }
     if (dimensions !== undefined) {
       const categoryForCalc = update.category || existing.category;

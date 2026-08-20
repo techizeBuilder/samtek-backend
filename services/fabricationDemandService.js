@@ -1,5 +1,7 @@
 import FabricationMaster from '../models/FabricationMaster.js';
 import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
+import { getCategoryByKey } from '../utils/fabricationCategories.js';
+import { toMm, toMm2 } from '../utils/unitConversion.js';
 
 // Resolves a consuming line's (a BOM material line, or a Production
 // out-of-BOM material demand) fabrication weight — null when the source
@@ -15,7 +17,13 @@ import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 // Shared between rdController.js (BOM materials) and
 // productionMfgController.js (out-of-BOM material demands) — same math,
 // same source-of-truth, so the two can never drift apart.
-export async function resolveFabricationWeight(sourceItem, bomDimensions) {
+// `designation` is optional — required only for calcType 'lookup' categories
+// (beam/channel, whose weight comes from a standardized section table, not a
+// formula over raw dimensions). Callers that resolve a specific
+// dimensionVariant (e.g. the BOM amount+quantity flow) should pass that
+// variant's own `.designation`; every other caller can omit it, matching the
+// pre-existing behavior (perMeter/sheet categories never used it).
+export async function resolveFabricationWeight(sourceItem, bomDimensions, designation) {
   if (!sourceItem.fabricationRef) return null;
 
   let category = sourceItem.dimensionVariants?.[0]?.category;
@@ -31,8 +39,45 @@ export async function resolveFabricationWeight(sourceItem, bomDimensions) {
   }
   if (!category || densityValue == null) return null;
 
-  const { weightPerPieceKg } = calculateFabricationWeight(category, bomDimensions, densityValue, densityUnit);
+  const { weightPerPieceKg } = calculateFabricationWeight(category, bomDimensions, densityValue, densityUnit, designation);
   return { fabricationCategory: category, weightPerPieceKg };
+}
+
+// Builds the full bomDimensions object a BOM material line stores, from the
+// user's actual input under the amount+quantity redesign: which catalog
+// Item.dimensionVariants[] entry this line draws from, plus a single
+// consumed amount (a length for every shape, an area for sheet_plate).
+// bomDimensions itself keeps the exact same shape resolveFabricationWeight
+// (above) already expects — { ...variant's own fixed values, length: mm }
+// for perMeter/lookup categories, { thickness, area: mm2 } for sheets, with
+// `designation` folded in for lookup categories (beam/channel) since that's
+// how their weight is actually resolved (a section table, not a formula) —
+// so every existing caller of resolveFabricationWeight(sourceItem,
+// mat.bomDimensions, mat.bomDimensions.designation) keeps working unchanged.
+// Returns null if the variant/category/amount can't be resolved (caller
+// should 400) rather than silently producing a zero-weight line.
+export function buildFabricationBomDimensions(sourceItem, dimensionVariantId, amountValue, amountUnit) {
+  const variant = sourceItem.dimensionVariants?.id
+    ? sourceItem.dimensionVariants.id(dimensionVariantId)
+    : (sourceItem.dimensionVariants || []).find(v => String(v._id) === String(dimensionVariantId));
+  if (!variant) return null;
+
+  const category = getCategoryByKey(variant.category);
+  if (!category) return null;
+
+  if (category.calcType === 'sheet') {
+    const areaMm2 = toMm2(amountValue, amountUnit);
+    if (areaMm2 == null) return null;
+    return { thickness: variant.values?.thickness, area: areaMm2 };
+  }
+
+  const lengthMm = toMm(amountValue, amountUnit);
+  if (lengthMm == null) return null;
+  const dims = { ...(variant.values || {}), length: lengthMm };
+  if (category.calcType === 'lookup' && variant.designation) {
+    dims.designation = variant.designation;
+  }
+  return dims;
 }
 
 // Deterministic "key:value,key:value" summary of a dimension set (sorted so

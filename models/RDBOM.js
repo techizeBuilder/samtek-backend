@@ -72,6 +72,20 @@ const MaterialSchema = new mongoose.Schema({
   fabricationCategory: { type: String, default: '' },
   bomDimensions: { type: mongoose.Schema.Types.Mixed, default: {} },
   computedWeightPerPieceKg: { type: Number, default: null },
+  // Fabrication Master materials only — which catalog Item.dimensionVariants[]
+  // entry this line draws from (its _id as a string), so downstream (Store
+  // transfer) knows exactly which stock size to cut from instead of
+  // re-deriving it by matching bomDimensions. amountValue/amountUnit are the
+  // raw entry the user actually typed (e.g. 2 + "Meter", or 2 + "Meter
+  // Square" for a sheet) — bomDimensions above is server-synthesized from
+  // the chosen variant's own fixed values plus this converted amount, so
+  // everything that already reads bomDimensions keeps working unchanged.
+  // null/'' for non-fabrication materials with a Pieces use-unit (see
+  // Part 8: assembly materials with a non-Pieces use-unit reuse
+  // amountValue/amountUnit too, just without a dimensionVariantId).
+  dimensionVariantId: { type: String, default: null },
+  amountValue: { type: Number, default: null },
+  amountUnit: { type: String, default: null },
   applications: [{ type: String }],
   specifications: [{ key: String, value: String }],
   // Legacy Product-Master-only fields — no longer populated (Inventory items

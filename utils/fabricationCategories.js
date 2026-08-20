@@ -168,6 +168,46 @@ export const FABRICATION_CATEGORIES = [
       { key: 'length', label: 'Length (L)', unit: 'mm' },
     ],
   },
+  // Beam and Channel: switched from a standardized-designation lookup to a
+  // computed cross-section, matching the reference calculator the client
+  // provided — Side (A)/Side (B)/Thickness (T)/Thickness (S)/Length, no
+  // designation picker. An I/H-beam and a C/U-channel have the identical
+  // "two flanges + a web" cross-section for area purposes (2 x B x S for the
+  // flanges, plus (A - 2S) x T for the web between them), so both share the
+  // 'iBeamChannel' formula — see fabricationWeightCalc.js.
+  {
+    key: 'beam',
+    label: 'Beams (I/H-Section)',
+    group: 'beam',
+    calcType: 'perMeter',
+    formula: 'iBeamChannel',
+    fields: [
+      { key: 'sideA', label: 'Side (A)', unit: 'mm' },
+      { key: 'sideB', label: 'Side (B)', unit: 'mm' },
+      { key: 'thicknessT', label: 'Thickness (T)', unit: 'mm' },
+      { key: 'thicknessS', label: 'Thickness (S)', unit: 'mm' },
+      { key: 'length', label: 'Length (L)', unit: 'mm' },
+    ],
+  },
+  {
+    key: 'channel',
+    label: 'Channels (C/U-Section)',
+    group: 'channel',
+    calcType: 'perMeter',
+    formula: 'iBeamChannel',
+    fields: [
+      { key: 'sideA', label: 'Side (A)', unit: 'mm' },
+      { key: 'sideB', label: 'Side (B)', unit: 'mm' },
+      { key: 'thicknessT', label: 'Thickness (T)', unit: 'mm' },
+      { key: 'thicknessS', label: 'Thickness (S)', unit: 'mm' },
+      { key: 'length', label: 'Length (L)', unit: 'mm' },
+    ],
+  },
+  // The 6 keys below are the old standardized-designation lookup categories
+  // Beam/Channel used before the change above — kept, unreachable from the
+  // picker (not listed in any FABRICATION_CATEGORY_GROUPS.keys below), purely
+  // so any pre-existing item saved under one of them keeps viewing/editing
+  // correctly. No live data used any of these as of this change (checked).
   {
     key: 'channel_gost',
     label: 'Channels - GOST',
@@ -235,21 +275,22 @@ export const getCategoryByKey = (key) => FABRICATION_CATEGORIES.find((c) => c.ke
 //     keys (hss_square, hss_rectangular's sibling hss_square, equal_angle,
 //     hss_circular) are still defined below and still fully work for
 //     editing/viewing pre-existing items saved under them.
-//   - Beam and Channel are lookup categories (designation -> standardized
-//     table weight, not computable from raw fields) so they can't be merged
-//     the same way — instead the Dimension Calculator merges all of a
-//     group's designation tables into ONE flat "Designation" dropdown
-//     (see DimensionCalculatorModal.jsx), so there's still no separate type
-//     picker even though `keys` here still lists all 4 (or 2) families.
+//   - Beam and Channel used to be lookup categories (designation ->
+//     standardized table weight) with the Dimension Calculator merging every
+//     family's designation table into one flat dropdown. Both are now single
+//     computed-formula keys (`beam`, `channel`) like every other shape here —
+//     the old `beam_ipn`/`beam_ipe`/`beam_hea`/`beam_heb`/`channel_gost`/
+//     `channel_upn` keys stay defined above (unreachable from `keys` below)
+//     purely so any item saved under one of them keeps working.
 export const FABRICATION_CATEGORY_GROUPS = [
   { key: 'round_bar', label: 'Round Bar', keys: ['round_bar'] },
   { key: 'pipe', label: 'Pipe', keys: ['pipe_circular'] },
   { key: 'square_bar', label: 'Square Bar', keys: ['square_bar'] },
   { key: 'hex_bar', label: 'Hexagonal Bar', keys: ['hex_bar'] },
   { key: 'square_tubing', label: 'Square Tubing', keys: ['hss_rectangular'] },
-  { key: 'beam', label: 'Beam', keys: ['beam_ipn', 'beam_ipe', 'beam_hea', 'beam_heb'] },
+  { key: 'beam', label: 'Beam', keys: ['beam'] },
   { key: 't_bar', label: 'T-Bar', keys: ['t_bar'] },
-  { key: 'channel', label: 'Channel', keys: ['channel_gost', 'channel_upn'] },
+  { key: 'channel', label: 'Channel', keys: ['channel'] },
   { key: 'angle', label: 'Angle', keys: ['unequal_angle'] },
   { key: 'flat_bar', label: 'Flat Bar', keys: ['flat_bar'] },
   { key: 'sheet', label: 'Sheet', keys: ['sheet_plate'] },

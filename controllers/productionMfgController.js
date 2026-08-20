@@ -9,7 +9,7 @@ import mongoose from 'mongoose';
 import { Item } from '../models/Inventory.js'; // Adjust path
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
 import { recalculateItemPricing } from '../services/itemPricingService.js';
-import { resolveFabricationWeight, dimensionSignature } from '../services/fabricationDemandService.js';
+import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimensions } from '../services/fabricationDemandService.js';
 
 import PDFDocument from 'pdfkit';
 
@@ -583,7 +583,7 @@ export const receiveMaterialInProduction = async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 export const addMaterialDemand = async (req, res) => {
   try {
-    const { materialCode, materialName, quantity, unit, bomDimensions, targetDemandCode } = req.body;
+    const { materialCode, materialName, quantity, unit, dimensionVariantId, amountValue, amountUnit, targetDemandCode } = req.body;
 
     if (!materialCode || !materialName || !quantity || !unit) {
       return res.status(400).json({ success: false, message: 'All material fields are required' });
@@ -612,17 +612,27 @@ export const addMaterialDemand = async (req, res) => {
     let fabricationFields = sourceItem ? { sourceItemCode: sourceItem.code } : {};
 
     if (!targetDemandCode && sourceItem?.fabricationRef) {
-      const fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions);
+      if (!dimensionVariantId || !(Number(amountValue) > 0) || !amountUnit) {
+        return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
+      }
+      const bomDimensions = buildFabricationBomDimensions(sourceItem, dimensionVariantId, amountValue, amountUnit);
+      if (!bomDimensions) {
+        return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
+      }
+      const fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions, bomDimensions.designation);
       if (!fabWeight || !(fabWeight.weightPerPieceKg > 0)) {
-        return res.status(400).json({ success: false, message: 'Could not resolve this fabrication item\'s dimensions — check all required dimension fields are filled in.' });
+        return res.status(400).json({ success: false, message: 'Could not resolve this fabrication item\'s weight from the chosen size and amount.' });
       }
       demandMaterialCode = `${sourceItem.code}#${dimensionSignature(bomDimensions)}`;
       fabricationFields = {
         sourceItemCode: sourceItem.code,
-        bomDimensions: bomDimensions || {},
+        bomDimensions,
         fabricationCategory: fabWeight.fabricationCategory,
         computedWeightPerPieceKg: fabWeight.weightPerPieceKg,
         unitPrice: Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100,
+        dimensionVariantId,
+        amountValue: Number(amountValue),
+        amountUnit,
       };
     }
 

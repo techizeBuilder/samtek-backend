@@ -100,8 +100,22 @@ async function createPurchaseQCJob(request, req, quantityOverride = null) {
       if (inventoryItem && inventoryItem.category) {
         qcCategory = inventoryItem.category;
       }
-      if (inventoryItem && inventoryItem.unit) {
-        qcBaseUnit = inventoryItem.unit;
+      if (inventoryItem?.fabricationRef) {
+        // Fabrication items: whatever ends up as this job's `quantity` (a
+        // fresh receive's totalPieces, or the fallback request.quantity) is
+        // always a PIECE count — dimensionVariants[].subStock is piece-based,
+        // same unit Store actually received/counted in (Receive Unit).
+        // inventoryItem.unit is the Used Unit (a Length/Area unit, for BOM
+        // consumption) — using it here would mislabel a piece count as e.g.
+        // "18 Centimeter" on the QC Job detail page.
+        qcBaseUnit = inventoryItem.receiveUnit || 'Pieces';
+      } else if (inventoryItem && (inventoryItem.receiveUnit || inventoryItem.unit)) {
+        // Non-fabrication items: Receive Unit is enforced equal to Used Unit
+        // (sanitizeItemData in inventoryController.js), so this is the same
+        // value either way — reading receiveUnit first is the architecturally
+        // correct source (it's the stock-counting unit), with unit as a
+        // fallback for any item saved before that enforcement existed.
+        qcBaseUnit = inventoryItem.receiveUnit || inventoryItem.unit;
       }
     } catch (invLookupErr) {
       console.error('Error looking up inventory item for QC job category:', invLookupErr);
@@ -934,7 +948,12 @@ export const updatePurchaseRequestStatus = async (req, res) => {
       }
 
       // ── Unit conversion: order was placed in a purchase unit, Store must
-      // convert the received qty back to the item's base (storage) unit ──────
+      // convert the received qty back to the item's Receive Unit — Item.qty's
+      // stock-counting unit. For non-fabrication items Receive Unit is
+      // enforced equal to Used Unit (sanitizeItemData), so this conversion
+      // target is the same value either way; it's only a distinct unit from
+      // Used Unit for fabrication items, which don't go through this generic
+      // path (see receiveFabricationPurchase instead). ─────────────────────
       if (request.purchaseUnit && request.purchaseQuantity) {
         const receivedQuantity = Number(req.body.receivedQuantity);
         const conversionFactor = Number(req.body.conversionFactor); // purchaseUnit per 1 base unit

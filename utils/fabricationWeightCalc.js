@@ -11,8 +11,18 @@ import { getSectionWeightPerMeter } from './steelSectionTables.js';
 
 export const densityToKgM3 = (value, unit) => (unit === 'g/cm3' ? Number(value) * 1000 : Number(value));
 
-const calcSheetWeightKg = ({ thickness, width, length }, densityKgM3) =>
-  ((Number(thickness) || 0) * (Number(width) || 0) * (Number(length) || 0)) / 1e9 * densityKgM3;
+// BOM material lines (post amount+quantity redesign) supply `area` (mm²)
+// directly instead of separate width/length — weight = thickness * area *
+// density is exactly the same product as thickness * width * length, so
+// this is a pure alternate input, not a different formula. Falls back to
+// width*length for Fabrication Master catalog rows and old BOM data that
+// still carry those keys instead.
+const calcSheetWeightKg = ({ thickness, width, length, area }, densityKgM3) => {
+  const areaMm2 = area !== undefined && area !== null && area !== ''
+    ? Number(area) || 0
+    : (Number(width) || 0) * (Number(length) || 0);
+  return ((Number(thickness) || 0) * areaMm2) / 1e9 * densityKgM3;
+};
 
 const calcWeightPerMeterKg = (formula, values, densityKgM3) => {
   const k = densityKgM3 / 1e6; // matches the user's given 0.00785-style constants
@@ -41,6 +51,11 @@ const calcWeightPerMeterKg = (formula, values, densityKgM3) => {
       // Flange (width x thickness) + web ((height - thickness) x thickness),
       // same "two overlapping rectangles" shape as unequalAngle above.
       return (v('width') + v('height') - v('thickness')) * v('thickness') * k;
+    case 'iBeamChannel':
+      // Two flanges (Side B x Thickness S each) + a web connecting them
+      // ((Side A - 2 x Thickness S) x Thickness T) — an I/H-beam and a
+      // C/U-channel share this exact cross-section shape for area purposes.
+      return (2 * v('sideB') * v('thicknessS') + (v('sideA') - 2 * v('thicknessS')) * v('thicknessT')) * k;
     default:
       throw new Error(`Unknown formula: ${formula}`);
   }

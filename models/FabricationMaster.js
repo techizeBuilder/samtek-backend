@@ -25,11 +25,12 @@ const FabricationMasterSchema = new mongoose.Schema({
     designation: { type: String, default: '', trim: true }, // only for lookup categories, e.g. "IPE 200"
     weightPerMeterKg: { type: Number, default: null }, // null for the sheet/plate category
     weightPerPieceKg: { type: Number, required: true },
-    // Dimension Calculator convenience fields, entered alongside a dimension
-    // row purely for reference/preview (Total Weight = weightPerPieceKg x
-    // pieces, Total Price = Total Weight x pricePerKg). Never consulted by
-    // the weight formula itself and never fed into Item.weightUnitPrice —
-    // that stays Accounts' own manual/purchase-resolved flow.
+    // pieces: Dimension Calculator convenience field (Total Weight =
+    // weightPerPieceKg x pieces). pricePerKg: no longer collected by the
+    // form (removed — a manual price here duplicated/conflicted with
+    // Accounts' own real pricing, Item.weightUnitPrice); field kept, always
+    // null on new rows, purely so a pre-existing row saved before removal
+    // keeps its old value instead of losing data on the next edit.
     pieces: { type: Number, default: 1 },
     pricePerKg: { type: Number, default: null },
   }],
@@ -49,7 +50,16 @@ const FabricationMasterSchema = new mongoose.Schema({
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 
-FabricationMasterSchema.index({ company: 1, itemCode: 1 }, { unique: true });
+// itemCode is globally unique, NOT company-scoped — deliberately matching
+// Item.code's own global `unique: true` (Inventory.js), since a Fabrication
+// Master code becomes an Inventory Item's code verbatim the moment it's
+// picked in Inventory's Add Item form (see FabricationItemPicker.jsx). A
+// compound {company, itemCode} index used to be here, which let two
+// different companies independently generate the identical code — harmless
+// within this collection, but the resulting Item.code duplicate-key error
+// only surfaced later, downstream, when either company actually tried to
+// create the Inventory Item.
+FabricationMasterSchema.index({ itemCode: 1 }, { unique: true });
 FabricationMasterSchema.index({ company: 1, category: 1 });
 
 export default mongoose.model('FabricationMaster', FabricationMasterSchema);

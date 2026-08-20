@@ -1,5 +1,5 @@
 import { Item } from '../models/Inventory.js';
-import { resolveFabricationWeight, dimensionSignature } from '../services/fabricationDemandService.js';
+import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimensions } from '../services/fabricationDemandService.js';
 import RDBOM from '../models/RDBOM.js';
 import RDPrototype from '../models/RDPrototype.js';
 import RDChangeRequest from '../models/RDChangeRequest.js';
@@ -54,7 +54,7 @@ async function refreshBOMMaterialPrices(bom, companyId) {
     let liveUnitPrice;
     let liveWeightPerPieceKg = mat.computedWeightPerPieceKg;
     if (mat.fabricationCategory) {
-      const fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions);
+      const fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions, mat.bomDimensions?.designation);
       liveUnitPrice = fabWeight ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100 : 0;
       liveWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
     } else {
@@ -192,6 +192,11 @@ const toMachineItemFields = (body) => {
   if (body.inputUnit !== undefined) out.purchaseUnit = body.inputUnit || '';
   if (body.outputUnitType !== undefined) out.unitType = body.outputUnitType || '';
   if (body.outputUnit !== undefined) out.unit = body.outputUnit || '';
+  // Receive Unit mirrors Used Unit for Product Master items too (see
+  // createMachine and inventoryController.js's sanitizeItemData, which this
+  // path bypasses) — no conversion exists between arbitrary unit types.
+  if (body.outputUnitType !== undefined) out.receiveUnitType = body.outputUnitType || 'Count Unit';
+  if (body.outputUnit !== undefined) out.receiveUnit = body.outputUnit || 'Pieces';
   if (body.specifications !== undefined) out.specifications = body.specifications || [];
   if (body.customFields !== undefined) out.customFields = body.customFields || [];
   if (body.isDiscontinued !== undefined) out.isDiscontinued = !!body.isDiscontinued;
@@ -390,6 +395,12 @@ export const createMachine = async (req, res) => {
       // in Pieces) rather than blocking machine creation on it.
       unitType: outputUnitType || 'Count Unit',
       unit: outputUnit || 'Pieces',
+      // Receive Unit mirrors Used Unit — this path bypasses
+      // inventoryController.js's sanitizeItemData (which enforces the same
+      // mirror for plain Inventory/Motor Master items), so it's done here
+      // explicitly. No conversion exists between arbitrary unit types.
+      receiveUnitType: outputUnitType || 'Count Unit',
+      receiveUnit: outputUnit || 'Pieces',
       specifications: specifications || [],
       customFields: customFields || [],
       applications: applications || [],
@@ -1058,7 +1069,7 @@ export const addMaterial = async (req, res) => {
       code, childPart, subChildPart, childPartCode, subChildPartCode, item, itemType, quantity, unit,
       pType, pSourceType, customFields,
       inputUnitType, inputUnit, outputUnitType, outputUnit,
-      bomDimensions
+      dimensionVariantId, amountValue, amountUnit
     } = req.body;
 
     // 2. Validate that 'code' is present
@@ -1089,11 +1100,26 @@ export const addMaterial = async (req, res) => {
     // always have real, authoritative data behind them.
     //
     // Fabrication Master materials (sourceItem.fabricationRef set) price by
-    // weight instead — this BOM line's own entered dimensions x the source
-    // item's density gives the weight, x its weightUnitPrice (₹/kg) gives
-    // the price. Every other material keeps the flat purchaseCost x qty
-    // pricing unchanged.
-    const fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions);
+    // weight instead — the user picks which catalog dimensionVariant this
+    // line draws from and enters a single consumed amount (length, or area
+    // for sheets); the server synthesizes the full bomDimensions from the
+    // variant's own fixed values + that amount (never trusting a client-sent
+    // bomDimensions — same "server is authoritative" principle
+    // computedWeightPerPieceKg already follows), x the source item's
+    // weightUnitPrice (₹/kg) gives the price. Every other material keeps the
+    // flat purchaseCost x qty pricing unchanged.
+    let bomDimensions = {};
+    let fabWeight = null;
+    if (sourceItem.fabricationRef) {
+      if (!dimensionVariantId || !(Number(amountValue) > 0) || !amountUnit) {
+        return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
+      }
+      bomDimensions = buildFabricationBomDimensions(sourceItem, dimensionVariantId, amountValue, amountUnit);
+      if (!bomDimensions) {
+        return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
+      }
+      fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions, bomDimensions.designation);
+    }
     const unitPrice = fabWeight
       ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
       : (sourceItem.purchaseCost || 0);
@@ -1117,8 +1143,11 @@ export const addMaterial = async (req, res) => {
             unitPrice,
             totalPrice,
             fabricationCategory: fabWeight?.fabricationCategory || '',
-            bomDimensions: fabWeight ? (bomDimensions || {}) : {},
+            bomDimensions,
             computedWeightPerPieceKg: fabWeight?.weightPerPieceKg ?? null,
+            dimensionVariantId: sourceItem.fabricationRef ? dimensionVariantId : null,
+            amountValue: sourceItem.fabricationRef ? Number(amountValue) : null,
+            amountUnit: sourceItem.fabricationRef ? amountUnit : null,
             // Inventory snapshot — authoritative, from sourceItem (see above),
             // field-for-field with BOM_FIELD_CATALOG / SimpleInventoryForm.jsx.
             category: sourceItem.category || '',
@@ -1197,13 +1226,28 @@ export const updateMaterial = async (req, res) => {
     // current data rather than whatever the client happened to send.
     //
     // Fabrication Master materials price by weight — see addMaterial's
-    // matching comment. mat.bomDimensions was just set from req.body above
-    // by Object.assign; fabricationCategory/computedWeightPerPieceKg/
-    // unitPrice/totalPrice are recomputed authoritatively here regardless of
-    // whatever the client sent for them.
-    const fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions);
+    // matching comment. Object.assign above already copied
+    // dimensionVariantId/amountValue/amountUnit if the client sent new ones
+    // (falls back to the material's existing values otherwise, so a plain
+    // quantity-only edit doesn't need to resend them); bomDimensions is
+    // always rebuilt from those here, never trusted from the client directly.
+    let fabWeight = null;
+    if (sourceItem.fabricationRef) {
+      if (!mat.dimensionVariantId || !(Number(mat.amountValue) > 0) || !mat.amountUnit) {
+        return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
+      }
+      mat.bomDimensions = buildFabricationBomDimensions(sourceItem, mat.dimensionVariantId, mat.amountValue, mat.amountUnit);
+      if (!mat.bomDimensions) {
+        return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
+      }
+      fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions, mat.bomDimensions.designation);
+    } else {
+      mat.bomDimensions = {};
+      mat.dimensionVariantId = null;
+      mat.amountValue = null;
+      mat.amountUnit = null;
+    }
     mat.fabricationCategory = fabWeight?.fabricationCategory || '';
-    mat.bomDimensions = fabWeight ? (mat.bomDimensions || {}) : {};
     mat.computedWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
     mat.unitPrice = fabWeight
       ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
@@ -2140,6 +2184,9 @@ export const processRDRequest = async (req, res) => {
               fabricationCategory: mat.fabricationCategory,
               computedWeightPerPieceKg: mat.computedWeightPerPieceKg ?? null,
               unitPrice: mat.unitPrice ?? null,
+              dimensionVariantId: mat.dimensionVariantId || null,
+              amountValue: mat.amountValue ?? null,
+              amountUnit: mat.amountUnit || null,
             } : {}),
           });
         }
