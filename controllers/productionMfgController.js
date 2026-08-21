@@ -16,6 +16,14 @@ import PDFDocument from 'pdfkit';
 
 import MaterialReturnLog from '../models/MaterialReturnLog.js';
 
+// A non-fabrication material whose Used Unit is Length/Area/Volume needs an
+// amountValue too (see addMaterialDemand below) — mirrors rdController.js's
+// identically-named helper for BOM materials. purchaseCost is ₹ per Used
+// Unit, and a flat quantity alone can't say "2 pieces of 1m length each" the
+// way it can say "5 kg" or "3 pieces" for Mass/Count materials.
+const AMOUNT_UNIT_TYPES = ['Length Unit', 'Area Unit', 'Volume Unit'];
+const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNIT_TYPES.includes(sourceItem.unitType);
+
 
 
 
@@ -633,6 +641,25 @@ export const addMaterialDemand = async (req, res) => {
         dimensionVariantId,
         amountValue: Number(amountValue),
         amountUnit,
+      };
+    } else if (!targetDemandCode && sourceItem && itemNeedsAmount(sourceItem)) {
+      // Non-fabrication Length/Area/Volume material — carries an amountValue
+      // (the per-piece size) purely as display metadata; `quantity` (below,
+      // shared with every other demand) is already the resolved TOTAL amount
+      // needed, computed client-side from Amount x Pieces before it ever
+      // reaches here (see UnitAmountField.jsx) — so pricing/stock deduction
+      // stay flat, unaffected by amountValue, same as every other material.
+      // amountUnit is never trusted from the client — always the item's own
+      // Used Unit (the form no longer offers a separate amount-unit picker).
+      if (!(Number(amountValue) > 0)) {
+        return res.status(400).json({ success: false, message: `An amount (in ${sourceItem.unit}) is required for this material.` });
+      }
+      demandMaterialCode = `${sourceItem.code}#${Number(amountValue)}${sourceItem.unit}`;
+      fabricationFields = {
+        sourceItemCode: sourceItem.code,
+        unitPrice: sourceItem.purchaseCost || 0,
+        amountValue: Number(amountValue),
+        amountUnit: sourceItem.unit,
       };
     }
 

@@ -111,13 +111,17 @@ const MaterialDemandSchema = new mongoose.Schema({
   bomDimensions: { type: mongoose.Schema.Types.Mixed, default: {} },
   fabricationCategory: { type: String, default: '' },
   computedWeightPerPieceKg: { type: Number, default: null },
-  // Fabrication Master materials only — mirrors RDBOM.MaterialSchema's
-  // matching fields: which catalog Item.dimensionVariants[] entry this
-  // demand line was cut from, and the single amount consumed (a length, or
-  // an area for sheets) that bomDimensions above was synthesized from. Lets
-  // Production/Store show "Amount × Quantity" directly instead of
-  // reverse-engineering it out of bomDimensions.
+  // Fabrication Master materials only — which catalog
+  // Item.dimensionVariants[] entry this demand line was cut from.
   dimensionVariantId: { type: String, default: null },
+  // amountValue/amountUnit: the single amount consumed per piece (a length,
+  // or an area for sheets) — for fabrication, what bomDimensions above was
+  // synthesized from; for a non-fabrication material whose Used Unit is
+  // Length/Area/Volume (mirrors RDBOM.MaterialSchema's matching fields —
+  // see UnitAmountField.jsx), the same concept without a dimensionVariant.
+  // Lets Production/Store show "Amount × Quantity" instead of a bare
+  // quantity that can't say "2 pieces of 1m length each". Null/'' for a
+  // Mass/Count-unit material, where quantity alone is already unambiguous.
   amountValue: { type: Number, default: null },
   amountUnit: { type: String, default: null },
   unitPrice: { type: Number, default: null },

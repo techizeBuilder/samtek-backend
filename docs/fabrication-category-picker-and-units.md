@@ -379,3 +379,172 @@ single dimension variant just above it), so the field the server/save logic read
 The label now shows the locked unit inline (e.g. "Length Used (Centimeter) *") instead of a second control.
 This is a shared component (`BOMCreationTab.jsx` and `OrderManagement.jsx`'s own "Add Material Demand" dialog
 both render it), so the fix applies in both places from one change.
+
+### Correction, same day: Qty column mislabeled with Used Unit instead of a piece count, across every BOM/material-demand display
+
+Client flagged R&D's `/r&d/approve-requests` Review Request Details modal: for a fabrication material, the
+Dimensions column correctly shows the per-piece amount (`"15 Centimeter · 0.06 kg/pc"`), but the Qty column
+showed `"2 Centimeter"` — reusing `mat.unit` (Used Unit) to label `mat.quantity`, which for a fabrication line
+is a piece count, not another length/area. Non-fabrication rows were already correct (`mat.unit` genuinely is
+their counting unit there, e.g. `"5 Pieces"`).
+
+Same root cause as the Receive Unit mislabeling fixed earlier — a piece count paired with the wrong unit
+field — but recurring across every screen that renders a `MaterialDemand`/BOM-material row's `quantity`+`unit`
+pair verbatim. Fixed everywhere the pattern was confirmed to touch fabrication-capable rows (`.fabricationCategory`
+present on the same object): `RDProductionQueue.jsx` (the reported screen), `OrderManagement.jsx` (Material
+Demand table, both BOM/Out-of-BOM branches, and the View BOM Entry modal), `RepairProduction.jsx` (same Material
+Demand table), `PendingRequestsTab.jsx` (Store's pending-transfer list), `JobCards.jsx` (printable Job Card),
+`BOMCreationTab.jsx` (View Material modal) — same one-line fix everywhere: `{m.quantity} {m.fabricationCategory
+? 'pcs' : m.unit}`. Checked and deliberately left alone: `PendingRequestsTab.jsx`'s "Consolidated Accounts
+Dispatch Summary" cart (fabrication materials are routed to their own dedicated purchase dialog,
+`handlePurchaseClick`, and never staged into this generic cart, so `combinedItem.unit` there is always a real
+non-fabrication Used Unit) and `DamageAndExpiry.jsx` (a different schema entirely — Damage/Expiry line items,
+no `fabricationCategory` field, unrelated to the BOM/material-demand data model).
+
+## Follow-on (2026-08-20): Amount + Quantity for non-fabrication materials — display-only, not a new stock unit
+
+The original amount+quantity BOM redesign (further up this doc) deliberately deferred one piece: a
+non-fabrication material whose Used Unit is Length/Area/Volume has the exact same *entry* problem fabrication
+did — a flat Quantity field can say "5 kg" or "3 pieces" (Mass/Count units) but can't say "2 pieces of 1m length
+each". `RDBOM.js`'s `dimensionVariantId`/`amountValue`/`amountUnit` fields even carried a comment anticipating
+this ("Part 8: assembly materials with a non-Pieces use-unit reuse amountValue/amountUnit too").
+
+**First pass got the semantics wrong — corrected same day.** The first implementation made `mat.quantity` mean
+"piece count" for these materials (mirroring fabrication exactly) and pushed an `amountValue × quantity`
+multiplication into `transferMaterialToProduction`'s stock deduction to compensate. Client caught it: a
+fabrication item's stock (`dimensionVariants[].subStock`) really is piece-based, so "quantity = pieces" is
+correct there — but a non-fabrication Length/Area/Volume item's stock (`Item.qty`) is a *continuous* amount
+(Receive Unit = Used Unit, established earlier this session), never piece-based. Store doesn't count "2 pieces
+of rod in stock," they have "12.5 meters." Making `quantity` mean pieces for these materials meant every
+downstream consumer — the Store transfer dialog's label and remaining-quantity check
+(`PendingRequestsTab.jsx:857`, never updated), any future availability check, Purchase Request auto-suggestions
+— would need to independently know to multiply by `amountValue`, and most of them didn't. The
+`transferMaterialToProduction` fix alone wasn't enough; the design needed the multiplication to happen once, at
+the source, not scattered across every consumer.
+
+**Corrected design**: `mat.quantity` (and everything it flows into — `MaterialDemand.quantity`, Store transfer,
+stock deduction) is *always* the total amount needed, in the item's real Used Unit — exactly what it has always
+meant for every material type, fabrication included in spirit (fabrication's piece count already matches its
+piece-based stock). "Amount × Pieces" is a data-entry convenience and a **display-only annotation** — R&D still
+types Amount (per piece) and Pieces separately, because that's the natural way to describe "2 separate 1m
+segments," but the form resolves this into one total (`pieces × amountValue`) before it ever reaches the API,
+and `amountValue` travels alongside purely so R&D/Store/Production can see the breakdown. Store and Production
+never transact in pieces for these materials — they request, transfer, and receive the total, unchanged from
+how every other material already worked.
+
+**`client/src/components/inventory/UnitAmountField.jsx`** — the Amount input itself is unchanged from the first
+pass (locked to the row's own Used Unit, auto-synced, no separate unit picker). What changed is what happens to
+its value at the boundary:
+- **Submit**: `resolveSubmitQuantity(row)` (`BOMCreationTab.jsx`, `OrderManagement.jsx`) — `rowNeedsAmount(row)
+  ? Number(row.quantity) * Number(row.amountValue) : Number(row.quantity)`. The "Quantity" input stays exactly
+  where it was, and the user still types pieces into it — this only changes what's sent to the API.
+- **Edit-load**: `openEdit` (`BOMCreationTab.jsx`) reverses it — `mat.amountValue != null && !mat.fabricationCategory
+  ? String(mat.quantity / mat.amountValue) : String(mat.quantity)` — so re-opening a saved material shows pieces
+  in the Quantity input again, not the total that only happens to look like a piece count when `amountValue`
+  is 1.
+- The "Price (auto)" preview needed no change — it already reads `row.quantity`(pieces) × `row.unitPrice`
+  (`purchaseCostPerUnit × amountValue`, still computed live by `UnitAmountField`'s effect), which equals the
+  same total the backend independently computes as `purchaseCost × totalQuantity`.
+
+**Backend, `server/controllers/rdController.js`** — `itemNeedsAmount(sourceItem)` still gates a server-side
+requirement that `amountValue > 0` was provided (never trusting the client's `amountValue` presence alone), and
+`amountUnit` is still always re-derived as `sourceItem.unit`, never trusted from the client. But pricing is back
+to the same flat formula every material already used: `unitPrice = sourceItem.purchaseCost || 0`,
+`totalPrice = unitPrice × quantity` — no `× amountValue` branch, because `quantity` sent by the client is
+already the total. Same reversion in `updateMaterial`, `refreshBOMMaterialPrices` (the live-resync job), and
+`server/controllers/productionMfgController.js`'s `addMaterialDemand` (Production's own ad-hoc demand endpoint).
+
+**Store transfer, `transferMaterialToProduction`** — back to the original, unconditional
+`Item.qty -= transferQty` — no `amountValue` multiplication. `demand.quantity` already *is* the physical amount
+to deduct, exactly like every other material.
+
+**Qty-column "pcs" display** — reverted to fabrication-only (`m.fabricationCategory ? 'pcs' : m.unit`,
+un-broadened) across all the files touched in the previous Follow-on section — a non-fabrication row's
+`quantity` is genuinely back to being denominated in `m.unit`, so that label is correct again, not "pcs".
+
+**Dimensions column now shows the piece breakdown for non-fabrication amount materials too** —
+`bomFieldFormat.js`'s `formatBomDimensions`/`formatCatalogFieldValue`, `RDProductionQueue.jsx`'s
+`summarizeBomDimensions` (now just a thin wrapper reusing the shared formatter instead of a parallel copy), and
+`OrderManagement.jsx`'s Material Demand subtitle and "Bill of Materials by Part" row all gained: for a
+non-fabrication material with `amountValue` set, show `${amountValue} ${amountUnit} × ${quantity / amountValue}
+pcs` — the piece count only exists as this *derived* display (`quantity ÷ amountValue`), since `quantity` itself
+carries the total, not a stored piece count. Fabrication rows are unaffected (their `quantity` already is the
+piece count, shown directly, no division needed). The "Bill of Materials by Part" row also picked up the same
+`fabricationCategory ? 'pcs' : mat.unit` Qty-label fix, since it reads straight from the RDBOM material and had
+never been touched by the original mislabeling fix.
+
+**Merge key** (`processRDRequest` WORKFLOW 2, `addMaterialDemand`'s existing-demand lookup) — kept the
+amount-aware branch (merge by `code#amountValue+amountUnit`, not just `code`) from the first pass. Purely
+additive now: since `quantity` is fully additive regardless of the per-piece breakdown, merging two "1m×2" and
+"2m×1" lines into one 4m demand would still be numerically correct — but keeping them separate preserves the
+distinct breakdowns as useful display information, so there was no reason to revert this part.
+
+**Backward compatible**: every field involved (`amountValue`/`amountUnit`/`purchaseCostPerUnit`) is additive/
+optional, same as the first pass. No live data existed under the brief incorrect design (caught and corrected
+same session, before any real use).
+
+## Follow-on (2026-08-20): BOM materials table restructured — Unit Weight is its own column, Hierarchy split, and the BOM PDF redesigned to match
+
+Client wanted two columns in `BOMCreationTab.jsx`'s materials table separated out rather than combined:
+**"Hierarchy (Child > Sub-Child)"** split into two real columns (Child Part, Sub Child Part), and **"Unit
+Weight"** pulled out of the "Dimensions" column (which used to show a fabrication material's amount *and* its
+computed weight combined into one string, e.g. `"15 Centimeter · 0.06 kg/pc"`) into its own dedicated column.
+
+**Unit Weight stopped being a "BOM Format & Modification" toggle.** It used to be one of the optional
+`BOM_FIELD_CATALOG` entries (`server/models/RDBOMFieldConfig.js`) a company could enable/disable per their
+preference, sourced only from the generic Inventory-snapshot `unitWeightValue`/`unitWeightUnit` — meaning a
+Fabrication Master material's *real* weight (`computedWeightPerPieceKg`) had nowhere proper to show except
+crammed into Dimensions. Removed `unitWeightValue` from `BOM_FIELD_CATALOG` entirely; it's now always shown as
+a native column, sourced via `bomFieldFormat.js`'s new `formatUnitWeight(mat)` — `computedWeightPerPieceKg` for
+a fabrication material, `unitWeightValue`/`unitWeightUnit` for everything else. `BOMFieldConfigModal.jsx`
+needed no change — it already self-heals a stale `enabledFields` entry that's since been dropped from the
+catalog (confirmed before removing anything).
+
+`bomFieldFormat.js`'s dimensions formatter split into two: `formatBomAmountOnly(mat)` (just the amount, no
+weight — used for the table's "Dimensions" BOM Format column and the Edit/Add forms) and the pre-existing
+`formatBomDimensions(mat)` (amount + weight combined, kept as-is for the compact one-line summaries elsewhere —
+`RDProductionQueue.jsx`'s approval review, `OrderManagement.jsx`'s Material Demand subtitle — where there's no
+separate Unit Weight column to defer to).
+
+**Qty column self-labels "pcs" for fabrication rows now too.** This exact table's Qty/Used Unit pair was the
+one spot left over from the earlier "pcs" mislabeling fix (see the Follow-on section above) — it used two
+*separate* table cells rather than one combined string, which seemed less misleading at the time, but in
+practice reading "2" next to "Centimeter" across two adjacent columns is just as easy to misread as "2
+Centimeter" as the combined-string cases were. Fixed to render `2 pcs` in the Qty cell itself for a fabrication
+row, so it's unambiguous regardless of what unit sits in the next column.
+
+### BOM PDF (`rdController.js`'s `writeBOMPdf`) — redesigned from 5 thin columns to match the table
+
+The PDF (shared by the on-demand `GET /boms/:id/download` and `lockBOM`'s auto-upload-to-Documentation flow —
+same function, so both always match) previously had only Code/Item/Child+Sub-Child(combined)/Qty/Unit — no
+Price, no weight, no amount breakdown, no Status. Redesigned to a "main row + muted detail sub-line" layout per
+material (same pattern `productionMfgController.js`'s Material Ledger PDF already established for its own
+"Cut: ..." line — packing everything into flat columns wouldn't fit a LETTER page legibly):
+
+- **Main row** (8 columns): Code, Item, Child Part, Sub Child Part, Qty (piece count, "pcs"-suffixed for
+  fabrication/amount-based materials), Used Unit, Price (total + unit price), Status (Active/Discontinued).
+- **Detail line** (smaller, grey, only rendered when non-empty): Amount + Total Amount (fabrication and
+  non-fabrication amount-based materials only), Unit Weight, Total Weight.
+
+New helpers in `rdController.js` (module-level, alongside `writeBOMPdf`): `bomMaterialPieceCount(mat)` — the
+same fabrication-direct-vs-non-fabrication-derived (`quantity ÷ amountValue`) split established for the
+amount+quantity redesign, kept server-side since PDF generation has no access to the client bundle;
+`bomMaterialTotalAmount(mat)`; `bomMaterialTotalWeight(mat)`; `bomMaterialDetailLine(mat)` (assembles the
+` · `-joined line, matching `formatBomDimensions`'s combining style).
+
+**Total Weight is deliberately left unresolved for a non-fabrication material whose Used Unit is
+Length/Area/Volume** (i.e. `mat.amountValue` set, `mat.fabricationCategory` not) — renders `"Total Weight: —
+(unit clarification pending)"` instead of a computed number. See
+`server/docs/non-fabrication-unit-weight-ambiguity.md` for the full reasoning: `unitWeightValue` has no enforced
+"per how much" convention, so multiplying it by quantity for these items specifically could silently be wrong by
+whatever reference scale the original entry actually meant. Total Weight *is* computed normally for fabrication
+materials (weight is server-computed from geometry × density, no ambiguity), non-fabrication Pieces materials
+(weight-per-piece is unambiguous), and non-fabrication Mass Unit materials (`unitWeightValue × quantity`,
+trusted per the client's own confirmation that Mass Unit is clear, unlike Length/Area/Volume).
+
+Currency renders as `Rs.` rather than `₹` — matches the established convention in `server/utils/invoicePdf.js`
+(pdfkit's standard Helvetica font has no ₹ glyph).
+
+Smoke-tested with synthetic materials covering all four cases (fabrication, non-fabrication amount-based,
+non-fabrication Pieces, non-fabrication Mass Unit) before shipping — confirmed the math and the "pending"
+placeholder both render correctly.

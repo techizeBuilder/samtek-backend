@@ -3388,6 +3388,12 @@ export const transferMaterialToProduction = async (req, res) => {
 
     // 1. ATOMIC DEDUCTION (The Store Gatekeeper)
     // Only deduct if we have enough stock. This prevents race conditions.
+    // demand.quantity is always already the total amount in the item's own
+    // stocking unit (even for a Length/Area/Volume material entered as
+    // "Amount x Pieces" in the BOM — see UnitAmountField.jsx — that split is
+    // resolved into one total quantity before it ever reaches here; the
+    // per-piece breakdown is display-only, R&D/Store/Production never
+    // transact in pieces for a non-fabrication material's continuous stock).
     const item = await Item.findOneAndUpdate(
       { code: sourceCode, companyId: companyId, qty: { $gte: transferQty } },
       { $inc: { qty: -transferQty } },

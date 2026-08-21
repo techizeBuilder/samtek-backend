@@ -75,15 +75,17 @@ const MaterialSchema = new mongoose.Schema({
   // Fabrication Master materials only — which catalog Item.dimensionVariants[]
   // entry this line draws from (its _id as a string), so downstream (Store
   // transfer) knows exactly which stock size to cut from instead of
-  // re-deriving it by matching bomDimensions. amountValue/amountUnit are the
-  // raw entry the user actually typed (e.g. 2 + "Meter", or 2 + "Meter
-  // Square" for a sheet) — bomDimensions above is server-synthesized from
-  // the chosen variant's own fixed values plus this converted amount, so
-  // everything that already reads bomDimensions keeps working unchanged.
-  // null/'' for non-fabrication materials with a Pieces use-unit (see
-  // Part 8: assembly materials with a non-Pieces use-unit reuse
-  // amountValue/amountUnit too, just without a dimensionVariantId).
+  // re-deriving it by matching bomDimensions.
   dimensionVariantId: { type: String, default: null },
+  // amountValue/amountUnit: the raw amount the user typed (e.g. 2 + "Meter").
+  // For fabrication, bomDimensions above is server-synthesized from the
+  // chosen variant's own fixed values plus this converted amount, so
+  // everything that already reads bomDimensions keeps working unchanged. For
+  // a non-fabrication material whose Used Unit is Length/Area/Volume, these
+  // are the whole story — no dimensionVariantId, priced as purchaseCost x
+  // amountValue instead of weight x weightUnitPrice (see rdController.js's
+  // itemNeedsAmount / UnitAmountField.jsx). null/'' for a Mass/Count-unit
+  // material, where a flat quantity is already unambiguous ("5 kg", "3 pcs").
   amountValue: { type: Number, default: null },
   amountUnit: { type: String, default: null },
   applications: [{ type: String }],
