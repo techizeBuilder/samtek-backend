@@ -91,9 +91,10 @@ export const updateChildPart = async (req, res) => {
   }
 };
 
-// Backs the Child Part Creation tab's Document field — accepts an image or a
-// PDF (via the shared rdDocumentUpload middleware) and just hands back the
-// stored URL; the child part itself is created/updated separately.
+// Backs the Child Part Creation tab's "Design File" field, for both Child
+// Parts and Sub Child Parts — accepts an image or a PDF (via the shared
+// rdDocumentUpload middleware) and just hands back the stored URL; the
+// child/sub child part itself is created/updated separately.
 export const uploadChildPartFile = async (req, res) => {
   if (!req.file) return res.status(400).json({ success: false, message: 'No file provided' });
   res.json({
@@ -129,7 +130,7 @@ export const generateSubChildPartCode = async (req, res) => {
 
 export const addSubChildPart = async (req, res) => {
   try {
-    const { name, code } = req.body;
+    const { name, code, image } = req.body;
     if (!name || !code) return res.status(400).json({ success: false, message: 'name and code are required' });
     const childPart = await RDChildPart.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!childPart) return res.status(404).json({ success: false, message: 'Child Part not found' });
@@ -138,7 +139,7 @@ export const addSubChildPart = async (req, res) => {
     if (childPart.subChildParts.some(s => s.code === codeTrim)) {
       return res.status(400).json({ success: false, message: `Sub Child Part code "${codeTrim}" already exists under this Child Part.` });
     }
-    childPart.subChildParts.push({ name: name.trim(), code: codeTrim });
+    childPart.subChildParts.push({ name: name.trim(), code: codeTrim, image: image || '' });
     await childPart.save();
     res.status(201).json({ success: true, data: childPart });
   } catch (err) {
@@ -148,12 +149,13 @@ export const addSubChildPart = async (req, res) => {
 
 export const updateSubChildPart = async (req, res) => {
   try {
-    const { name, isDiscontinued } = req.body;
+    const { name, image, isDiscontinued } = req.body;
     const childPart = await RDChildPart.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!childPart) return res.status(404).json({ success: false, message: 'Child Part not found' });
     const sub = childPart.subChildParts.id(req.params.subId);
     if (!sub) return res.status(404).json({ success: false, message: 'Sub Child Part not found' });
     if (name !== undefined) sub.name = name.trim();
+    if (image !== undefined) sub.image = image;
     if (isDiscontinued !== undefined) sub.isDiscontinued = !!isDiscontinued;
     await childPart.save();
     res.json({ success: true, data: childPart });

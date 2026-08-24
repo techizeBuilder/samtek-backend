@@ -548,3 +548,84 @@ Currency renders as `Rs.` rather than `₹` — matches the established conventi
 Smoke-tested with synthetic materials covering all four cases (fabrication, non-fabrication amount-based,
 non-fabrication Pieces, non-fabrication Mass Unit) before shipping — confirmed the math and the "pending"
 placeholder both render correctly.
+
+## Follow-on (2026-08-21): Inventory's 3 units locked for fabrication items; Material Grade auto-filled from Fabrication Master
+
+**Purchase Unit, Used Unit, and Receive Unit locked in `SimpleInventoryForm.jsx` when a Fabrication Master item
+is picked.** All three were already auto-filled from the catalog entry (`handleFabricationSelect`), but stayed
+freely editable afterward — meaning an Inventory item's units could silently drift from what its Fabrication
+Master catalog entry actually specifies. Now, whenever `formData.fabricationRef` is set, all three render as
+disabled `<Input>`s (same visual pattern already used for the non-fabrication Receive Unit lock) instead of
+editable `<Select>`s — locked only once a real catalog entry has actually been picked, so the transient state
+right after choosing "Fabrication Item" as the process type (before clicking "Select Fabrication Item") still
+shows normal editable fields with nothing to lock against yet.
+
+**Material Grade auto-filled from the Fabrication Master catalog entry's own Material.** Client wanted the
+Dimension Calculator's "Material" dropdown (MS/GI/SS 202/SS 304/SS 316 — the one that sets density) to flow
+into Inventory's Metrology/Material Grade fields. Investigation found a real blocker: **the Material dropdown's
+label was never persisted anywhere** — `FabricationMaster.density` only ever kept the resulting number
+(`{value, unit}`), so there was nothing to autofill in the first place.
+
+Also confirmed the label can't be reliably split into Metrology + Material Grade — the client's own rule
+("alphabet part is Metrology, number part is Grade") breaks for materials with no numeric part at all (e.g.
+"MS", "GI" — visible in the client's own reference screenshot). Resolved by keeping the whole label as one
+combined value in a single field, per direct client confirmation.
+
+- **`server/models/FabricationMaster.js`**: new top-level `material` field (`String`, e.g. `"SS 304"`) alongside
+  the existing `density` — the only place the actual material designation now survives.
+- **`client/src/components/fabrication/DimensionCalculatorModal.jsx`**: `handleSave`'s `onSave(...)` payload
+  gained `materialLabel` (looked up from the already-fetched `materials` list by the selected `material` key).
+- **`client/src/pages/ResearchDevelopment/FabricationMaster.jsx`**: `emptyForm`/`handleCalculatorSave`/`openEdit`
+  all thread `material` through, same as every other form-state field — `handleAdd`/`handleEditSave` already
+  submit the whole `form` object, so no separate wiring needed there.
+- **`server/controllers/fabricationMasterController.js`**: `createFabricationItem`/`updateFabricationItem`
+  persist `material` from the request body, same pattern as every other field.
+- **Inventory side**: `handleFabricationSelect` autofills `materialGrade` (not `metrology` — see the field-choice
+  reasoning below) from `fabItem.material`, and the Material Grade field locks (disabled `<Input>`) whenever
+  `formData.fabricationRef` is set, same treatment as the 3 units above. Metrology is untouched — stays
+  independently editable, unrelated to fabrication.
+
+**Why Material Grade, not Metrology**: a designation like "SS 304" reads naturally as a grade, not a metrology/
+measurement concept — confirmed with the client before implementing.
+
+**Why the BOM view needs no changes at all**: `bomFieldFormat.js`'s Metrology/Material Grade columns already
+handle sparse data gracefully (render "—" when a field is empty) — since only Material Grade gets populated for
+a fabrication material and Metrology is simply never touched for these items, the existing two-column table
+already shows the combined value in the right column and an honest blank in the other, with zero special-casing
+needed. This is the same reasoning that made the earlier Unit Weight/Dimensions split low-risk.
+
+**Backward compatible, with one real limitation**: existing Fabrication Master entries created before this
+change have no stored `material` (the field didn't exist yet) — Inventory items created from them won't
+backfill retroactively. Only Fabrication Master entries created or re-saved after this change populate it.
+
+## Follow-on (2026-08-22): Edit/Delete for company-added custom materials
+
+Client noticed the Dimension Calculator's Material dropdown lets a company add its own materials (beyond the
+5 built-ins MS/GI/SS 202/SS 304/SS 316) but never offers a way to fix a typo or remove one afterward.
+
+**Built-ins are still permanently fixed** — `MATERIAL_DENSITY_TABLE` stays a hardcoded constant, never a DB
+row, so it was never a candidate for Edit/Delete. Only `FabricationMaterial` documents (`custom: true` in
+`getMaterials`' merged response) are ever editable/deletable.
+
+- **`server/controllers/fabricationMasterController.js`**: new `updateMaterial`/`deleteMaterial`, sitting right
+  after `createMaterial` and reusing its same validation (name required, positive density, can't collide with a
+  built-in's label/key, can't collide with another custom material's name — case-insensitive, `$ne` self-excluded
+  on update). Both scope every query to `{ _id: req.params.id, company: req.user.companyId }`, so one company can
+  never edit or delete another's custom material even by guessing an id.
+- **`server/routes/fabricationMasterRoutes.js`**: `PUT /materials/:id` and `DELETE /materials/:id`, gated behind
+  the same `fabricationMasterEdit` (`checkPermission('rnd', 'inventory', 'edit')`) already used for every other
+  Fabrication Master write — there's no separate delete permission in this module, edit's is reused.
+- **Deleting is safe with no orphaned-reference risk**: nothing stores a `FabricationMaterial._id` anywhere.
+  `FabricationMaster.material` and `Item.materialGrade` (see the Material Grade follow-on above) only ever copy
+  the material's *name* as a plain string at save time — never the id — so a deleted custom material simply stops
+  being pickable going forward; anything that already used it keeps its already-saved label/density untouched.
+- **`client/src/components/fabrication/DimensionCalculatorModal.jsx`**: the native `<select>` used for Material
+  can't host a button inside an `<option>` (unlike the Radix `<Select>`/`SelectItem` pattern used elsewhere, e.g.
+  `SimpleInventoryForm.jsx`'s Receive Unit picker), so Edit (pencil) and Delete (trash) icon buttons sit in the
+  same row as the dropdown instead, next to the existing "+" Add button — shown only when
+  `materials.find(m => m.key === material)?.custom` is true, i.e. only when a company-added material is currently
+  selected. The existing inline Add-Material panel is reused for editing too: `openEditMaterial()` pre-fills
+  `newMatName`/`newMatDensity` from the selected material and sets `editingMaterialId`; `handleAddMaterial` then
+  branches `PUT /materials/:id` vs the original `POST /materials` on save depending on whether that id is set.
+  Delete goes through a `window.confirm` guard, then falls back to MS (or blank if MS is somehow unavailable)
+  if the just-deleted material was the one currently selected.

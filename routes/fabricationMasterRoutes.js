@@ -7,6 +7,8 @@ import {
   calculateWeight,
   getMaterials,
   createMaterial,
+  updateMaterial,
+  deleteMaterial,
   getFabricationItems,
   suggestNextCode,
   createFabricationItem,
@@ -38,6 +40,8 @@ router.get('/sections/:family', getSectionTableForFamily);
 router.post('/calculate-weight', calculateWeight);
 router.get('/materials', getMaterials);
 router.post('/materials', fabricationMasterAdd, createMaterial);
+router.put('/materials/:id', fabricationMasterEdit, updateMaterial);
+router.delete('/materials/:id', fabricationMasterEdit, deleteMaterial);
 router.get('/items', fabricationMasterView, getFabricationItems);
 router.get('/next-code', fabricationMasterView, suggestNextCode);
 router.post('/items', fabricationMasterAdd, createFabricationItem);

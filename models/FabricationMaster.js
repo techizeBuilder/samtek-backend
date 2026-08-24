@@ -16,6 +16,17 @@ const FabricationMasterSchema = new mongoose.Schema({
     value: { type: Number, required: true },
     unit: { type: String, enum: ['kg/m3', 'g/cm3'], default: 'kg/m3' },
   },
+  // Human-readable label of whichever Material the Dimension Calculator's
+  // dropdown picked (e.g. "SS 304", "MS (Mild Steel)") — density above only
+  // keeps the resulting number, this is the only place the actual material
+  // designation survives. Auto-filled (and locked) onto Material Grade when
+  // an Inventory item is created by picking this catalog entry (see
+  // SimpleInventoryForm.jsx's handleFabricationSelect) — Metrology and
+  // Material Grade are two separate Inventory fields, but a material label
+  // like "SS 304" isn't reliably splittable into the two (not every material
+  // has a numeric grade part, e.g. "MS"), so the client asked for it to land
+  // in one field (Material Grade) as one combined value instead.
+  material: { type: String, default: '', trim: true },
   dimensions: [{
     // Mixed, not Map — Map fields serialize to {} whenever a response path
     // goes through .toObject()/.lean() without flattenMaps (e.g. Inventory's

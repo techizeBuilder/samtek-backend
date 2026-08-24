@@ -64,6 +64,58 @@ export const createMaterial = async (req, res) => {
   }
 };
 
+// Built-in materials (MATERIAL_DENSITY_TABLE) are never editable/deletable —
+// only company-added ones (FabricationMaterial docs, custom: true in
+// getMaterials' response) reach these two. Safe to delete outright: nothing
+// stores a FabricationMaterial._id anywhere (FabricationMaster.material and
+// Item.materialGrade only ever copy the name as a plain string at save
+// time — see their own schema comments), so a deleted material's name just
+// stops being pickable going forward; items that already used it keep their
+// already-saved label/density untouched.
+export const updateMaterial = async (req, res) => {
+  try {
+    const name = (req.body.name || '').trim();
+    const densityKgM3 = Number(req.body.densityKgM3);
+    if (!name) return res.status(400).json({ success: false, message: 'Material name is required.' });
+    if (!densityKgM3 || densityKgM3 <= 0) return res.status(400).json({ success: false, message: 'A valid density is required.' });
+
+    const clashesBuiltIn = MATERIAL_DENSITY_TABLE.some(
+      (m) => m.label.toLowerCase() === name.toLowerCase() || m.key.toLowerCase() === name.toLowerCase()
+    );
+    if (clashesBuiltIn) {
+      return res.status(400).json({ success: false, message: `"${name}" already exists as a built-in material.` });
+    }
+    const existing = await FabricationMaterial.findOne({
+      company: req.user.companyId,
+      name: { $regex: `^${escapeRegExp(name)}$`, $options: 'i' },
+      _id: { $ne: req.params.id },
+    });
+    if (existing) {
+      return res.status(400).json({ success: false, message: `"${name}" has already been added.` });
+    }
+
+    const updated = await FabricationMaterial.findOneAndUpdate(
+      { _id: req.params.id, company: req.user.companyId },
+      { $set: { name, densityKgM3 } },
+      { new: true }
+    );
+    if (!updated) return res.status(404).json({ success: false, message: 'Material not found' });
+    res.json({ success: true, data: { key: String(updated._id), label: updated.name, densityKgM3: updated.densityKgM3, custom: true } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const deleteMaterial = async (req, res) => {
+  try {
+    const deleted = await FabricationMaterial.findOneAndDelete({ _id: req.params.id, company: req.user.companyId });
+    if (!deleted) return res.status(404).json({ success: false, message: 'Material not found' });
+    res.json({ success: true, data: deleted });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const getSectionTableForFamily = async (req, res) => {
   const { family } = req.params;
   res.json({ success: true, data: getSectionTable(family) });
@@ -194,7 +246,7 @@ const sanitizeUnitFields = (body) => ({
 
 export const createFabricationItem = async (req, res) => {
   try {
-    const { itemName, itemCode, category, density, dimensions } = req.body;
+    const { itemName, itemCode, category, density, dimensions, material } = req.body;
     if (!itemName || !itemName.trim()) {
       return res.status(400).json({ success: false, message: 'Item Name is required.' });
     }
@@ -246,6 +298,7 @@ export const createFabricationItem = async (req, res) => {
       itemCode: code,
       category,
       density: densityIn,
+      material: material ? String(material).trim() : '',
       dimensions: finalDimensions,
       ...sanitizeUnitFields(req.body),
       company: req.user.companyId,
@@ -259,7 +312,7 @@ export const createFabricationItem = async (req, res) => {
 
 export const updateFabricationItem = async (req, res) => {
   try {
-    const { itemName, itemCode, category, density, dimensions } = req.body;
+    const { itemName, itemCode, category, density, dimensions, material } = req.body;
     const existing = await FabricationMaster.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!existing) return res.status(404).json({ success: false, message: 'Fabrication item not found' });
 
@@ -278,6 +331,7 @@ export const updateFabricationItem = async (req, res) => {
         unit: density?.unit === 'g/cm3' ? 'g/cm3' : 'kg/m3',
       };
     }
+    if (material !== undefined) update.material = material ? String(material).trim() : '';
     if (itemCode !== undefined && itemCode.trim() && itemCode.trim() !== existing.itemCode) {
       const newCode = itemCode.trim();
       // Global checks — see createFabricationItem's matching comment.

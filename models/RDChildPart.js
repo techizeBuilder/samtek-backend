@@ -6,6 +6,11 @@ import mongoose from 'mongoose';
 const SubChildPartSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   code: { type: String, required: true, trim: true },
+  // Same "Design File" upload the parent Child Part has (image field
+  // below) — image or PDF, stored the identical way, so Sub Child Parts get
+  // the same Documentation-page visibility (see Documentation.jsx's
+  // childPartDocs merge).
+  image: { type: String, default: '' },
   isDiscontinued: { type: Boolean, default: false },
 }, { timestamps: true });
 
