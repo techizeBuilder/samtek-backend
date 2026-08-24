@@ -371,6 +371,37 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
   return { routed, invItem, splitSibling };
 }
 
+// ── Auto-check ALL items for an order (Order Form submission trigger) ───────
+//
+// Runs the exact same automation as Store's own "Check All Items" button
+// (see updateOrderStoreInfo's whole-order autoCheck branch) but is fired
+// automatically the moment the Order Form is submitted, so items land on the
+// Store page already checked/routed — Store's page/buttons stay unchanged,
+// the manual click just becomes unnecessary. Skips items already routed or
+// QC-approved, so it's safe to call again on Order Form resubmission.
+const LOCKED_STORE_STATUSES = ['Goes to QC', 'Approved from QC', 'Goes to Production', 'Production Completed', 'Goes to Purchase'];
+
+export async function autoCheckAllOrderItems(order, user) {
+  const { sale } = await ensureSaleForOrder(order, user);
+  const saleItems = (sale.items || []).filter(it =>
+    (it.quantity || 0) > 0 && !LOCKED_STORE_STATUSES.includes(it.storeQCStatus));
+  if (!saleItems.length) return { checked: false, itemCount: 0 };
+
+  let count = 0;
+  for (const saleItem of saleItems) {
+    try {
+      await applyStoreDecisionToItem({ sale, order, saleItem, decision: { autoCheck: true }, user });
+      count++;
+    } catch (err) {
+      console.error(`❌ [AutoCheck] Error routing item "${saleItem.productName}" for order ${order.orderCode}:`, err);
+    }
+  }
+
+  sale.recomputeAggregateStoreStatus();
+  await sale.save();
+  return { checked: true, itemCount: count, saleId: sale._id };
+}
+
 // Update ONE sale item's storeQCStatus by saleItemId and recompute the
 // aggregate. Falls back to sale-level update when saleItemId is missing or
 // doesn't match (legacy artifacts). Saves the sale.
