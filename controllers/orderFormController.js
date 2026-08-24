@@ -4,7 +4,7 @@ import Order from '../models/Order.js';
 import Lead from '../models/Lead.js';
 import Customer from '../models/Customer.js';
 import notificationService from '../services/notificationService.js';
-import { syncOrderItemsFromForm } from '../services/storeFlowService.js';
+import { syncOrderItemsFromForm, autoCheckAllOrderItems } from '../services/storeFlowService.js';
 import { computeBOMMaterialsMrpCost } from '../services/itemPricingService.js';
 
 const isSuperadmin = (role) => role === 'Superadmin' || role === 'Super Admin';
@@ -217,6 +217,18 @@ export const upsertOrderForm = async (req, res) => {
       console.log(`🔄 [OrderForm] Item sync for ${order.orderCode}:`, syncResult);
     } catch (syncErr) {
       console.error('❌ Error syncing Order Form items into Order/Sale:', syncErr);
+    }
+
+    // 🤖 New requirement: Store's per-item inventory check/routing (Available →
+    // QC, Not Available → Purchase/Production) now runs automatically the
+    // moment the Order Form is submitted — same logic as Store's "Check All
+    // Items" button, just no longer requiring that manual click. Store's page
+    // keeps showing the result exactly as it did before.
+    try {
+      const autoCheckResult = await autoCheckAllOrderItems(order, req.user);
+      console.log(`🤖 [OrderForm] Auto store-check for ${order.orderCode}:`, autoCheckResult);
+    } catch (autoCheckErr) {
+      console.error('❌ Error auto-checking inventory for Order Form items:', autoCheckErr);
     }
 
     if (newContribution !== previousContribution) {
