@@ -52,6 +52,7 @@ import {
   getMaterialIssueLogs,
   getPendingRequests,
   transferMaterialToProduction,
+  transferSheetMetalPlanToProduction,
   transferFabricationMaterialToProduction,
   getReturnedMaterials,
   getPendingReturns,
@@ -143,17 +144,16 @@ router.get('/inventory/low-stock', auth, getLowStockItems);
 router.get('/inventory/stats', auth, getInventoryStats);
 
 // Production - Store Material Transfer Handshake Routes
-const materialTransfersView = checkPermission('Store', 'materialTransfers', 'view');
-const materialTransfersEdit = checkPermission('Store', 'materialTransfers', 'edit');
-router.get('/inventory/material-issues', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersView, getMaterialIssueLogs);
-router.get('/inventory/pending-requests', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersView, getPendingRequests);
-router.post('/inventory/transfer-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersEdit, transferMaterialToProduction);
-router.post('/inventory/transfer-fabrication-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersEdit, transferFabricationMaterialToProduction);
-router.post('/inventory/bulk-transfer/:id', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersEdit, bulkTransferOrderMaterials);
-router.get('/inventory/returned-materials', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersView, getReturnedMaterials);
-router.get('/inventory/pending-returns', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersView, getPendingReturns);
-router.post('/inventory/confirm-return', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersEdit, confirmReturn);
-router.get('/inventory/store-transfer-logs', auth, authorizeRoles("Store Head", "Store Employee"), materialTransfersView, getStoreTransferLogs);
+router.get('/inventory/material-issues', auth, authorizeRoles("Store Head", "Store Employee"), getMaterialIssueLogs);
+router.get('/inventory/pending-requests', auth, authorizeRoles("Store Head", "Store Employee"), getPendingRequests);
+router.post('/inventory/transfer-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferMaterialToProduction);
+router.post('/inventory/transfer-sheet-metal/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferSheetMetalPlanToProduction);
+router.post('/inventory/transfer-fabrication-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferFabricationMaterialToProduction);
+router.post('/inventory/bulk-transfer/:id', auth, authorizeRoles("Store Head", "Store Employee"), bulkTransferOrderMaterials);
+router.get('/inventory/returned-materials', auth, authorizeRoles("Store Head", "Store Employee"), getReturnedMaterials);
+router.get('/inventory/pending-returns', auth, authorizeRoles("Store Head", "Store Employee"), getPendingReturns);
+router.post('/inventory/confirm-return', auth, authorizeRoles("Store Head", "Store Employee"), confirmReturn);
+router.get('/inventory/store-transfer-logs', auth, authorizeRoles("Store Head", "Store Employee"), getStoreTransferLogs);
 
 // Excel import/export routes
 router.get('/items/export', auth, exportItemsToExcel);

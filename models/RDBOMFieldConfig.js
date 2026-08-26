@@ -9,6 +9,12 @@ import mongoose from 'mongoose';
 // Cost/Purchase Cost/Sale Price/MRP/GST/HSN) were removed from here when they
 // were removed from that form — they still exist on RDBOM.MaterialSchema for
 // older BOMs' historical data, just not offered as a column choice anymore.
+// Unit Weight was removed from here too (2026-08-20) — it's now a BOM
+// material's own always-shown column (see BOMCreationTab.jsx and
+// bomFieldFormat.js's formatUnitWeight), not an optional BOM Format toggle:
+// it used to only ever show the generic Inventory-snapshot unitWeightValue,
+// leaving a Fabrication Master material's real weight (computedWeightPerPieceKg)
+// with nowhere proper to display except crammed into the Dimensions column.
 export const BOM_FIELD_CATALOG = [
   { key: 'itemType', label: 'Item Type' },
   { key: 'name', label: 'Item Name' },
@@ -20,7 +26,6 @@ export const BOM_FIELD_CATALOG = [
   { key: 'itemSourceType', label: 'Item Source Type' },
   { key: 'metrology', label: 'Metrology' },
   { key: 'materialGrade', label: 'Material Grade' },
-  { key: 'unitWeightValue', label: 'Unit Weight' },
   { key: 'unit', label: 'Used Unit' },
   { key: 'dimensions', label: 'Dimensions' },
   { key: 'description', label: 'Description' },

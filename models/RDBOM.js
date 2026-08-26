@@ -11,6 +11,19 @@ const MaterialSchema = new mongoose.Schema({
   childPartCode: { type: String, default: '' },
   subChildPartCode: { type: String, default: '' },
   item: { type: String, required: true, trim: true }, // Replaces 'name'
+  // Which Add button this row came from (Add Raw Material vs Add Tool) — set
+  // once from the source Item's own itemType at add-time and never re-derived
+  // live, same reasoning as every other snapshot field below: a later Item
+  // reclassification must not silently reshuffle an already-built BOM's
+  // table groupings. Sheet Metal is NOT a third materialKind — a sheet metal
+  // item is still added via Add Raw Material (materialKind stays 'raw'); see
+  // isSheetMetal below for how it's told apart.
+  materialKind: { type: String, enum: ['raw', 'tool'], default: 'raw' },
+  // Snapshot of Item.isSheetMetal at add-time — same snapshot-at-add-time
+  // reasoning as materialKind above. Drives the BOM's Sheet Metal tab/view
+  // and the sheet-metal planning flow (see SheetMetalPlan.js) instead of the
+  // old per-child-part fabrication cutting flow.
+  isSheetMetal: { type: Boolean, default: false },
   // Independent BOM-only classification (RDMasterOption field "MaterialType") —
   // not derived from Product Master's P-Type. Optional: no longer collected on the form.
   itemType: { type: String, default: '', trim: true },
@@ -75,15 +88,17 @@ const MaterialSchema = new mongoose.Schema({
   // Fabrication Master materials only — which catalog Item.dimensionVariants[]
   // entry this line draws from (its _id as a string), so downstream (Store
   // transfer) knows exactly which stock size to cut from instead of
-  // re-deriving it by matching bomDimensions. amountValue/amountUnit are the
-  // raw entry the user actually typed (e.g. 2 + "Meter", or 2 + "Meter
-  // Square" for a sheet) — bomDimensions above is server-synthesized from
-  // the chosen variant's own fixed values plus this converted amount, so
-  // everything that already reads bomDimensions keeps working unchanged.
-  // null/'' for non-fabrication materials with a Pieces use-unit (see
-  // Part 8: assembly materials with a non-Pieces use-unit reuse
-  // amountValue/amountUnit too, just without a dimensionVariantId).
+  // re-deriving it by matching bomDimensions.
   dimensionVariantId: { type: String, default: null },
+  // amountValue/amountUnit: the raw amount the user typed (e.g. 2 + "Meter").
+  // For fabrication, bomDimensions above is server-synthesized from the
+  // chosen variant's own fixed values plus this converted amount, so
+  // everything that already reads bomDimensions keeps working unchanged. For
+  // a non-fabrication material whose Used Unit is Length/Area/Volume, these
+  // are the whole story — no dimensionVariantId, priced as purchaseCost x
+  // amountValue instead of weight x weightUnitPrice (see rdController.js's
+  // itemNeedsAmount / UnitAmountField.jsx). null/'' for a Mass/Count-unit
+  // material, where a flat quantity is already unambiguous ("5 kg", "3 pcs").
   amountValue: { type: Number, default: null },
   amountUnit: { type: String, default: null },
   applications: [{ type: String }],

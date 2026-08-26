@@ -20,6 +20,8 @@ import {
   getTeams,
   createTeam,
   receiveMaterialInProduction,
+  getMaterialList,
+  issueMaterialToStore,
   returnMaterialToStore,
   downloadMaterialListPDF,
   addSubEntry,
@@ -75,6 +77,8 @@ router.put('/orders/:id/repair/start', repairEdit, startRepair);
 router.put('/orders/:id/repair/complete', repairEdit, completeRepair);
 
 // ── Material demands ────────────────────────────────────────────────────────
+router.get('/orders/:id/material-list', ordersView, getMaterialList);
+router.post('/orders/:id/materials/issue', ordersAdd, issueMaterialToStore);
 router.post('/orders/:id/materials', ordersAdd, addMaterialDemand);
 router.post('/orders/:id/materials/return', ordersAdd, returnMaterialToStore);
 router.put('/orders/:id/materials/:materialId/status', ordersEdit, updateMaterialStatus);

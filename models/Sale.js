@@ -89,7 +89,26 @@ const saleItemSchema = new mongoose.Schema({
     type: String,
     enum: [null, 'Store', 'Production', 'QC_Rejected'],
     default: null
-  }
+  },
+  // BOM raw-material availability for an In-house Manufactured item —
+  // separate from isAvailableInInventory above (which only checks the
+  // FINISHED product's own stock). Computed once at Order Form submission
+  // (see server/services/materialAvailabilityService.js) via a targeted
+  // Sale.updateOne on this one field — never written through a load-then-
+  // save of the whole Sale document, so it can't race with anything else
+  // concurrently touching this Sale. Absent/computedAt:null means not
+  // computed yet (computation errored, or this item predates the feature) —
+  // Store Orders' hover tooltips simply omit themselves in that case.
+  materialAvailability: {
+    computedAt: { type: Date, default: null },
+    available: [{
+      code: String, name: String, neededQty: Number, availableQty: Number, unit: String,
+    }],
+    needsPurchase: [{
+      code: String, name: String, neededQty: Number, availableQty: Number, shortfallQty: Number,
+      unit: String, purchaseRequestId: String,
+    }],
+  },
 });
 
 // Status that means "this item is ready for packing/dispatch".

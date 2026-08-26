@@ -11,6 +11,8 @@ import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
 import RDPlant from '../models/RDPlant.js';
+import SheetMetalPlan from '../models/SheetMetalPlan.js';
+import { sheetMetalGroupsFromBOM } from './sheetMetalPlanController.js';
 import { computeBOMMaterialsMrpCost, recalculateItemPricing } from '../services/itemPricingService.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
@@ -20,6 +22,13 @@ import path from 'path';
 
 
 const today = () => new Date().toISOString().split('T')[0];
+
+// A non-fabrication material whose Used Unit is Length/Area/Volume needs an
+// amountValue too (see addMaterial/updateMaterial) — purchaseCost is ₹ per
+// Used Unit, and a flat quantity alone can't say "2 pieces of 1m length
+// each" the way it can say "5 kg" or "3 pieces" for Mass/Count materials.
+const AMOUNT_UNIT_TYPES = ['Length Unit', 'Area Unit', 'Volume Unit'];
+const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNIT_TYPES.includes(sourceItem.unitType);
 
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -58,6 +67,12 @@ async function refreshBOMMaterialPrices(bom, companyId) {
       liveUnitPrice = fabWeight ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100 : 0;
       liveWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
     } else {
+      // purchaseCost is already ₹ per Used Unit — flat, unconditionally,
+      // even for a Length/Area/Volume material entered as "Amount x Pieces"
+      // (see UnitAmountField.jsx): mat.quantity there is already the
+      // resolved TOTAL amount, not a piece count, so no further
+      // amountValue multiplication belongs in pricing. amountValue is
+      // display-only for these materials (the per-piece breakdown).
       liveUnitPrice = sourceItem.purchaseCost || 0;
     }
 
@@ -1120,6 +1135,23 @@ export const addMaterial = async (req, res) => {
       }
       fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions, bomDimensions.designation);
     }
+    // Non-fabrication material with a Length/Area/Volume Used Unit — carries
+    // an amountValue too (the per-piece size, e.g. "1 Meter"), but purely as
+    // DISPLAY metadata for R&D/Store/Production (see UnitAmountField.jsx) —
+    // `quantity` here has already been resolved client-side into the TOTAL
+    // amount needed (pieces x amountValue), in the item's own Used Unit, so
+    // pricing stays the same flat purchaseCost-per-Used-Unit formula every
+    // material already uses; no further amountValue multiplication belongs
+    // here (unlike fabrication, whose quantity really is a piece count,
+    // because its stock — dimensionVariants[].subStock — really is
+    // piece-based; this item's stock, Item.qty, is a continuous amount).
+    // Never trust the client's amountValue presence alone — it's re-derived
+    // here from the item's own unitType, the same "server is authoritative"
+    // principle bomDimensions already follows above.
+    const needsAmount = itemNeedsAmount(sourceItem);
+    if (needsAmount && !(Number(amountValue) > 0)) {
+      return res.status(400).json({ success: false, message: `An amount (in ${sourceItem.unit}) is required for this material.` });
+    }
     const unitPrice = fabWeight
       ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
       : (sourceItem.purchaseCost || 0);
@@ -1138,6 +1170,15 @@ export const addMaterial = async (req, res) => {
             subChildPartCode: subChildPartCode || '',
             item,
             itemType: itemType || '',
+            // Which Add button this came from + the Sheet Metal flag — both
+            // re-derived here from sourceItem, never trusted from the client,
+            // same "server is authoritative" principle as inventoryItemType
+            // below. materialKind is 'tool' only when Item Type contains
+            // "tool" (case-insensitive) — matches Add Tool's own picker
+            // filter in BOMCreationTab.jsx, so a row always lands in the same
+            // table the picker it came from implies.
+            materialKind: /tool/i.test(sourceItem.itemType || '') ? 'tool' : 'raw',
+            isSheetMetal: !!sourceItem.isSheetMetal,
             quantity: Number(quantity),
             unit,
             unitPrice,
@@ -1146,8 +1187,8 @@ export const addMaterial = async (req, res) => {
             bomDimensions,
             computedWeightPerPieceKg: fabWeight?.weightPerPieceKg ?? null,
             dimensionVariantId: sourceItem.fabricationRef ? dimensionVariantId : null,
-            amountValue: sourceItem.fabricationRef ? Number(amountValue) : null,
-            amountUnit: sourceItem.fabricationRef ? amountUnit : null,
+            amountValue: (sourceItem.fabricationRef || needsAmount) ? Number(amountValue) : null,
+            amountUnit: (sourceItem.fabricationRef || needsAmount) ? (sourceItem.fabricationRef ? amountUnit : sourceItem.unit) : null,
             // Inventory snapshot — authoritative, from sourceItem (see above),
             // field-for-field with BOM_FIELD_CATALOG / SimpleInventoryForm.jsx.
             category: sourceItem.category || '',
@@ -1244,11 +1285,30 @@ export const updateMaterial = async (req, res) => {
     } else {
       mat.bomDimensions = {};
       mat.dimensionVariantId = null;
-      mat.amountValue = null;
-      mat.amountUnit = null;
+      // Non-fabrication Length/Area/Volume material — carries an amountValue
+      // (the per-piece size) purely as display metadata (Object.assign above
+      // already copied whatever the client sent); mat.quantity is already
+      // the resolved total, so pricing below stays flat purchaseCost, same
+      // as every other non-fabrication material. amountUnit is never
+      // trusted from the client — always re-derived from the item's own
+      // Used Unit, matching how the form no longer offers a separate
+      // amount-unit picker (see UnitAmountField.jsx).
+      if (itemNeedsAmount(sourceItem)) {
+        if (!(Number(mat.amountValue) > 0)) {
+          return res.status(400).json({ success: false, message: `An amount (in ${sourceItem.unit}) is required for this material.` });
+        }
+        mat.amountValue = Number(mat.amountValue);
+        mat.amountUnit = sourceItem.unit;
+      } else {
+        mat.amountValue = null;
+        mat.amountUnit = null;
+      }
     }
     mat.fabricationCategory = fabWeight?.fabricationCategory || '';
     mat.computedWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
+    // mat.quantity is already the resolved TOTAL amount for a non-fabrication
+    // Length/Area/Volume material (see addMaterial's matching comment) — flat
+    // purchaseCost pricing, same as every other non-fabrication material.
     mat.unitPrice = fabWeight
       ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
       : (sourceItem.purchaseCost || 0);
@@ -1256,6 +1316,8 @@ export const updateMaterial = async (req, res) => {
     mat.category = sourceItem.category || '';
     mat.subCategory = sourceItem.subCategory || '';
     mat.inventoryItemType = sourceItem.itemType || '';
+    mat.materialKind = /tool/i.test(sourceItem.itemType || '') ? 'tool' : 'raw';
+    mat.isSheetMetal = !!sourceItem.isSheetMetal;
     mat.sourceType = sourceItem.sourceType || '';
     mat.itemSourceType = sourceItem.itemSourceType || '';
     mat.itemCategories = sourceItem.itemCategories || [];
@@ -1309,12 +1371,85 @@ export const deleteMaterial = async (req, res) => {
 };
 
 
+// ── BOM PDF weight/amount math ──────────────────────────────────────────
+// A material's "how much" is either a flat quantity (Mass/Count Used Unit —
+// quantity already IS the total, e.g. "5 kg"/"3 pieces") or an Amount x
+// Pieces split (Fabrication Master materials, and non-fabrication materials
+// whose Used Unit is Length/Area/Volume — see UnitAmountField.jsx). For the
+// latter, mat.quantity is already the resolved TOTAL amount, not a piece
+// count — the piece count only exists as this derived division. Mirrors the
+// same math already established in bomFieldFormat.js's formatBomDimensions/
+// itemDisplayUnit-adjacent helpers, kept server-side here since PDF
+// generation has no access to the client bundle.
+const bomMaterialPieceCount = (mat) => {
+  if (mat.fabricationCategory) return mat.quantity ?? 0;
+  if (mat.amountValue != null && mat.amountValue > 0) return Math.round(((mat.quantity || 0) / mat.amountValue) * 1000) / 1000;
+  return mat.quantity ?? 0;
+};
+const bomMaterialTotalAmount = (mat) => {
+  if (mat.amountValue == null || !mat.amountUnit) return null;
+  const total = mat.fabricationCategory ? mat.amountValue * (mat.quantity || 0) : (mat.quantity || 0);
+  return { value: Math.round(total * 1000) / 1000, unit: mat.amountUnit };
+};
+// Total Weight is only computed where the underlying rate is actually
+// well-defined — see server/docs/non-fabrication-unit-weight-ambiguity.md.
+// Fabrication: weight is server-computed from geometry x density, no
+// ambiguity. Non-fabrication with no amountValue (Count/Mass Used Unit):
+// unitWeightValue's "per what" is unambiguous (per piece, or per 1 Used
+// Unit when that unit already is a mass unit). Non-fabrication WITH an
+// amountValue (Length/Area/Volume Used Unit): deliberately left null —
+// unitWeightValue has no enforced reference scale for these, multiplying it
+// by quantity could silently be wrong by whatever scale the original entry
+// actually meant.
+const bomMaterialTotalWeight = (mat) => {
+  if (mat.fabricationCategory) {
+    return mat.computedWeightPerPieceKg != null
+      ? { value: Math.round(mat.computedWeightPerPieceKg * (mat.quantity || 0) * 1000) / 1000, unit: 'kg' }
+      : null;
+  }
+  if (mat.amountValue != null) return null;
+  return mat.unitWeightValue != null && mat.unitWeightValue !== ''
+    ? { value: Math.round(mat.unitWeightValue * (mat.quantity || 0) * 1000) / 1000, unit: mat.unitWeightUnit || '' }
+    : null;
+};
+// Second, muted line under a material's main row — only the pieces that
+// actually apply to this material, ' · '-joined, same combining style
+// formatBomDimensions already uses. Empty string when none apply (a plain
+// flat Mass/Count material with no unitWeightValue set), in which case the
+// caller skips the line entirely.
+const bomMaterialDetailLine = (mat) => {
+  const parts = [];
+  if (mat.amountValue != null && mat.amountUnit) {
+    parts.push(`Amount: ${mat.amountValue} ${mat.amountUnit}/pc`);
+    const totalAmount = bomMaterialTotalAmount(mat);
+    if (totalAmount) parts.push(`Total Amount: ${totalAmount.value} ${totalAmount.unit}`);
+  }
+  if (mat.fabricationCategory) {
+    if (mat.computedWeightPerPieceKg != null) parts.push(`Unit Weight: ${mat.computedWeightPerPieceKg.toFixed(3)} kg/pc`);
+  } else if (mat.unitWeightValue != null && mat.unitWeightValue !== '') {
+    parts.push(`Unit Weight: ${mat.unitWeightValue} ${mat.unitWeightUnit || ''}`.trim());
+  }
+  const totalWeight = bomMaterialTotalWeight(mat);
+  if (totalWeight) {
+    parts.push(`Total Weight: ${totalWeight.value} ${totalWeight.unit}`.trim());
+  } else if (mat.amountValue != null && !mat.fabricationCategory) {
+    parts.push('Total Weight: — (unit clarification pending)');
+  }
+  return parts.join('   ·   ');
+};
+
 // Shared BOM PDF content writer — used both by lockBOM's auto-upload-to-
 // Documentation flow and the on-demand GET /boms/:id/download endpoint, so
 // both paths always produce the same, properly formatted document. Mirrors
 // productionMfgController.js's downloadMaterialListPDF layout/branding
 // (same header/metadata/table style already established for the Material
-// Ledger PDF) instead of inventing a new look.
+// Ledger PDF) instead of inventing a new look. Each material gets a main
+// row of core columns (mirrors BOMCreationTab.jsx's table, post the
+// 2026-08-20 Child Part/Sub Child Part split and native Unit Weight column)
+// plus an optional second, muted detail line for Amount/Total Amount/Total
+// Weight — packing all of that into flat columns wouldn't fit a LETTER page
+// legibly, so it follows the same "main row + detail sub-line" pattern the
+// Material Ledger PDF already established for its own "Cut: ..." line.
 const writeBOMPdf = (doc, bom) => {
   const machine = bom.machine || {};
 
@@ -1335,15 +1470,29 @@ const writeBOMPdf = (doc, bom) => {
   doc.fillColor('#1e3a8a').fontSize(11).font('Helvetica-Bold').text('Materials', 50, 215);
 
   const tableTop = 235;
-  doc.rect(50, tableTop, 512, 22).fill('#f8fafc');
-  doc.fillColor('#475569').fontSize(9).font('Helvetica-Bold');
-  doc.text('Code', 60, tableTop + 6, { width: 65 });
-  doc.text('Item', 130, tableTop + 6, { width: 150 });
-  doc.text('Child / Sub Child Part', 285, tableTop + 6, { width: 140 });
-  doc.text('Qty', 430, tableTop + 6, { width: 50, align: 'center' });
-  doc.text('Unit', 485, tableTop + 6, { width: 70, align: 'right' });
+  const cols = {
+    code: { x: 58, w: 44 },
+    item: { x: 106, w: 76 },
+    childPart: { x: 186, w: 55 },
+    subChildPart: { x: 245, w: 67 },
+    qty: { x: 316, w: 34 },
+    unit: { x: 354, w: 48 },
+    price: { x: 406, w: 98 },
+    status: { x: 508, w: 50 },
+  };
+  const headerH = 26;
+  doc.rect(50, tableTop, 512, headerH).fill('#f8fafc');
+  doc.fillColor('#475569').fontSize(8).font('Helvetica-Bold');
+  doc.text('Code', cols.code.x, tableTop + 9, { width: cols.code.w });
+  doc.text('Item', cols.item.x, tableTop + 9, { width: cols.item.w });
+  doc.text('Child Part', cols.childPart.x, tableTop + 9, { width: cols.childPart.w });
+  doc.text('Sub Child Part', cols.subChildPart.x, tableTop + 9, { width: cols.subChildPart.w });
+  doc.text('Qty', cols.qty.x, tableTop + 9, { width: cols.qty.w, align: 'center' });
+  doc.text('Unit', cols.unit.x, tableTop + 9, { width: cols.unit.w });
+  doc.text('Price', cols.price.x, tableTop + 9, { width: cols.price.w, align: 'right' });
+  doc.text('Status', cols.status.x, tableTop + 9, { width: cols.status.w, align: 'right' });
 
-  let currentY = tableTop + 22;
+  let currentY = tableTop + headerH;
   const materials = bom.materials || [];
 
   if (materials.length === 0) {
@@ -1351,22 +1500,35 @@ const writeBOMPdf = (doc, bom) => {
   }
 
   materials.forEach((mat) => {
-    if (currentY > 700) {
+    const detailLine = bomMaterialDetailLine(mat);
+    const rowHeight = detailLine ? 34 : 20;
+
+    if (currentY + rowHeight > 730) {
       doc.addPage();
       currentY = 50;
     }
-    doc.moveTo(50, currentY + 22).lineTo(562, currentY + 22).strokeColor('#f1f5f9').lineWidth(1).stroke();
+    doc.moveTo(50, currentY + rowHeight).lineTo(562, currentY + rowHeight).strokeColor('#f1f5f9').lineWidth(1).stroke();
 
-    const hierarchy = [mat.childPart, mat.subChildPart].filter(Boolean).join(' > ') || '—';
+    const pieceCount = bomMaterialPieceCount(mat);
+    const qtyLabel = mat.fabricationCategory || mat.amountValue != null ? `${pieceCount} pcs` : `${pieceCount}`;
 
-    doc.fillColor('#334155').fontSize(9).font('Helvetica');
-    doc.text(mat.code || '', 60, currentY + 7, { width: 65 });
-    doc.text(mat.item || '', 130, currentY + 7, { width: 150 });
-    doc.text(hierarchy, 285, currentY + 7, { width: 140 });
-    doc.text(`${mat.quantity ?? 0}`, 430, currentY + 7, { width: 50, align: 'center' });
-    doc.text(mat.unit || '', 485, currentY + 7, { width: 70, align: 'right' });
+    doc.fillColor('#334155').fontSize(8).font('Helvetica');
+    doc.text(mat.code || '', cols.code.x, currentY + 6, { width: cols.code.w, ellipsis: true });
+    doc.text(mat.item || '', cols.item.x, currentY + 6, { width: cols.item.w, ellipsis: true });
+    doc.text(mat.childPart || '—', cols.childPart.x, currentY + 6, { width: cols.childPart.w, ellipsis: true });
+    doc.text(mat.subChildPart || '—', cols.subChildPart.x, currentY + 6, { width: cols.subChildPart.w, ellipsis: true });
+    doc.text(qtyLabel, cols.qty.x, currentY + 6, { width: cols.qty.w, align: 'center' });
+    doc.text(mat.unit || '', cols.unit.x, currentY + 6, { width: cols.unit.w, ellipsis: true });
+    doc.text(`Rs. ${(mat.totalPrice || 0).toLocaleString()}`, cols.price.x, currentY + 6, { width: cols.price.w, align: 'right' });
+    doc.fontSize(7).fillColor('#94a3b8').text(`(Rs. ${mat.unitPrice || 0}/unit)`, cols.price.x, currentY + 15, { width: cols.price.w, align: 'right' });
+    doc.fontSize(8).fillColor(mat.isDiscontinued ? '#dc2626' : '#059669');
+    doc.text(mat.isDiscontinued ? 'Discontinued' : 'Active', cols.status.x, currentY + 6, { width: cols.status.w, align: 'right' });
 
-    currentY += 22;
+    if (detailLine) {
+      doc.fillColor('#94a3b8').fontSize(7).font('Helvetica').text(detailLine, 60, currentY + 24, { width: 490 });
+    }
+
+    currentY += rowHeight;
   });
 };
 
@@ -1395,6 +1557,25 @@ export const lockBOM = async (req, res) => {
     const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
     if (bom.isLocked) return res.status(400).json({ success: false, message: 'BOM is already locked' });
+
+    // A Sheet Metal plan is required, not optional, for every sheet-metal
+    // group on this BOM — no permanent fallback to the old per-child-part
+    // cutting behavior is kept around (see SheetMetalPlan.js/
+    // sheetMetalPlanController.js's own comments for the full reasoning).
+    // Blocks lock outright rather than silently letting the old behavior
+    // reappear for an unplanned group.
+    const sheetMetalGroups = sheetMetalGroupsFromBOM(bom);
+    if (sheetMetalGroups.length > 0) {
+      const plans = await SheetMetalPlan.find({ bom: bom._id, company: req.user.companyId }).lean();
+      const plannedKeys = new Set(plans.map(p => `${p.itemCode}#${p.dimensionVariantId}`));
+      const missing = sheetMetalGroups.filter(g => !plannedKeys.has(`${g.itemCode}#${g.dimensionVariantId}`));
+      if (missing.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `${missing.length} sheet metal group(s) still need a plan before this BOM can be locked: ${missing.map(g => `${g.itemName} (${g.itemCode})`).join(', ')}`,
+        });
+      }
+    }
 
     // 2. Setup PDF Generation
     const filename = `BOM_${bom.machine.code}_${Date.now()}.pdf`;
@@ -2164,10 +2345,62 @@ export const processRDRequest = async (req, res) => {
       // string equality). sourceItemCode carries the real Item code
       // wherever it's actually needed — not yet wired into Store's
       // transfer/return/purchase-request flows, that's the next phase.
+      // Sheet Metal lines (mat.isSheetMetal) don't merge/push the normal way
+      // at all — R&D's SheetMetalPlan already decided everything (how many
+      // whole sheets per unit) once per {code, dimensionVariantId} group
+      // across the whole BOM, replacing the old per-child-part cutting
+      // decision. One demand per group, not one per BOM line/cut.
+      const sheetMetalPlanKeys = new Set();
+      const sheetMetalDemands = [];
+      for (const mat of masterBOM.materials) {
+        if (mat.isDiscontinued || !mat.isSheetMetal || !mat.dimensionVariantId) continue;
+        const groupKey = `${mat.code}#${mat.dimensionVariantId}`;
+        if (sheetMetalPlanKeys.has(groupKey)) continue;
+        sheetMetalPlanKeys.add(groupKey);
+      }
+      if (sheetMetalPlanKeys.size > 0) {
+        const plans = await SheetMetalPlan.find({ bom: masterBOM._id, company: companyId });
+        const planByKey = new Map(plans.map(p => [`${p.itemCode}#${p.dimensionVariantId}`, p]));
+        for (const key of sheetMetalPlanKeys) {
+          const plan = planByKey.get(key);
+          const mat = masterBOM.materials.find(m => m.isSheetMetal && `${m.code}#${m.dimensionVariantId}` === key);
+          if (!plan) {
+            // Defensive only — lockBOM already blocks locking a BOM with an
+            // unplanned sheet-metal group, so this should be unreachable in
+            // normal use. Skip rather than crash the whole approval.
+            console.error(`[processRDRequest] Sheet Metal group ${key} has no SheetMetalPlan — skipping demand push.`);
+            continue;
+          }
+          sheetMetalDemands.push({
+            materialCode: key,
+            sourceItemCode: plan.itemCode,
+            materialName: plan.itemName || mat?.item || plan.itemCode,
+            bomQuantity: plan.sheetsNeededPerUnit,
+            quantity: plan.sheetsNeededPerUnit * buildQty,
+            unit: 'Pieces',
+            status: 'Requested',
+            fabricationCategory: mat?.fabricationCategory || 'sheet_plate',
+            dimensionVariantId: plan.dimensionVariantId,
+            sheetMetalPlanId: plan._id,
+            bomDimensions: {}, // no per-cut sizing left — Store ships whole sheets
+          });
+        }
+      }
+
       const mergedByCode = new Map();
       for (const mat of masterBOM.materials) {
+        if (mat.isSheetMetal) continue; // handled above via sheetMetalDemands instead
         const isFabrication = !!mat.fabricationCategory;
-        const mergeKey = isFabrication ? `${mat.code}#${dimensionSignature(mat.bomDimensions)}` : mat.code;
+        // Non-fabrication materials with an amountValue (Length/Area/Volume
+        // Used Unit) need the same treatment as fabrication's dimension
+        // signature above — two lines for the same material code but
+        // DIFFERENT amounts (e.g. "1m pieces" for one Child Part, "2m
+        // pieces" for another) must stay separate demand entries, since one
+        // amountValue field can't represent both.
+        const hasAmount = mat.amountValue != null && mat.amountUnit;
+        const mergeKey = isFabrication
+          ? `${mat.code}#${dimensionSignature(mat.bomDimensions)}`
+          : hasAmount ? `${mat.code}#${mat.amountValue}${mat.amountUnit}` : mat.code;
         const existing = mergedByCode.get(mergeKey);
         if (existing) {
           existing.bomQuantity += mat.quantity;
@@ -2185,8 +2418,10 @@ export const processRDRequest = async (req, res) => {
               computedWeightPerPieceKg: mat.computedWeightPerPieceKg ?? null,
               unitPrice: mat.unitPrice ?? null,
               dimensionVariantId: mat.dimensionVariantId || null,
-              amountValue: mat.amountValue ?? null,
-              amountUnit: mat.amountUnit || null,
+            } : {}),
+            ...(hasAmount ? {
+              amountValue: mat.amountValue,
+              amountUnit: mat.amountUnit,
             } : {}),
           });
         }
@@ -2194,7 +2429,7 @@ export const processRDRequest = async (req, res) => {
       const demandsToPush = Array.from(mergedByCode.values()).map(d => ({
         ...d,
         quantity: d.bomQuantity * buildQty
-      }));
+      })).concat(sheetMetalDemands);
 
       const docsToPush = designDocs.map(doc => ({ name: doc.name, fileUrl: doc.fileUrl, version: doc.version }));
 

@@ -28,7 +28,7 @@ import { MASS_UNIT_TO_KG_MULTIPLIER } from '../services/itemPricingService.js';
 // in the catalog at all — still weight-computable (only needs the item's
 // category+density, not catalog membership), the caller is responsible for
 // flagging it isLeftover when crediting stock (see qcController.js).
-async function resolveFabricationLines(masterItem, rawLines, { requireCatalogMatch = true } = {}) {
+export async function resolveFabricationLines(masterItem, rawLines, { requireCatalogMatch = true } = {}) {
   if (!Array.isArray(rawLines) || rawLines.length === 0) {
     throw new Error('At least one dimension line is required.');
   }

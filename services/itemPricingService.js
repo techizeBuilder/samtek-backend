@@ -2,6 +2,8 @@ import { Item } from '../models/Inventory.js';
 import RDBOM from '../models/RDBOM.js';
 import PurchaseInvoice from '../models/PurchaseInvoice.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
+import SheetMetalPlan from '../models/SheetMetalPlan.js';
+import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 
 // Defensive cap in addition to cycle detection, in case of a very deep
 // (but non-circular) BOM tree.
@@ -13,6 +15,48 @@ function round2(n) {
 
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// A Sheet Metal plan's REAL cost breakdown — every whole catalog sheet
+// actually bought (sheetsNeededPerUnit, rounded up) splits into 3 parts by
+// area: required (what the child parts actually need) + true scrap (waste
+// WITHIN the planned cutting layout — kerf/margins/nesting gaps around the
+// nested parts) + leftover (the CLEAN, UNCUT remainder from rounding up to
+// whole sheets, never touched by the laser at all — a genuinely reusable
+// piece Production returns to Store whole via the Return flow, NOT lost
+// material). These are two different things and must not be collapsed into
+// one "scrap" figure — a plan whose planned area is much smaller than one
+// catalog sheet (so 1 whole sheet still has to be bought) would otherwise
+// have almost the entire sheet wrongly counted as scrap, when in reality
+// only the untouched-by-laser remainder is recoverable leftover, not waste.
+// sheetCost is unaffected by this split — it's still the same total (every
+// whole sheet actually bought), which resolveManufacturingItemCost below
+// uses in place of the group's per-line theoretical sum (that IS the
+// scrap-costing feature); scrapCost/leftoverValue are broken out purely for
+// DISPLAY (BOM Management's Sheet Metal tab). matItem's own
+// dimensionVariants[] supplies thickness/density, since SheetMetalPlan
+// itself doesn't duplicate them.
+export function computeSheetMetalPlanCostBreakdown(plan, matItem) {
+  const variant = (matItem.dimensionVariants || []).find(v => String(v._id) === String(plan.dimensionVariantId));
+  const thickness = Number(variant?.values?.thickness) || 0;
+  const densityValue = variant?.densityValue ?? matItem.dimensionVariants?.[0]?.densityValue;
+  const densityUnit = variant?.densityUnit || matItem.dimensionVariants?.[0]?.densityUnit || 'kg/m3';
+  if (!thickness || densityValue == null || !(plan.sheetAreaMm2 > 0)) {
+    return { sheetCost: 0, scrapAreaMm2: 0, scrapCost: 0, leftoverAreaMm2: 0, leftoverValue: 0 };
+  }
+  const totalBoughtAreaMm2 = (plan.sheetsNeededPerUnit || 0) * plan.sheetAreaMm2;
+  const scrapAreaMm2 = Math.max(0, (plan.plannedAreaMm2 || 0) - (plan.requiredAreaMm2 || 0));
+  const leftoverAreaMm2 = Math.max(0, totalBoughtAreaMm2 - (plan.plannedAreaMm2 || 0));
+  const { weightPerPieceKg: sheetWeightKg } = calculateFabricationWeight('sheet_plate', { thickness, area: plan.sheetAreaMm2 }, densityValue, densityUnit);
+  const { weightPerPieceKg: scrapWeightKg } = calculateFabricationWeight('sheet_plate', { thickness, area: scrapAreaMm2 }, densityValue, densityUnit);
+  const { weightPerPieceKg: leftoverWeightKg } = calculateFabricationWeight('sheet_plate', { thickness, area: leftoverAreaMm2 }, densityValue, densityUnit);
+  const sheetCost = (sheetWeightKg || 0) * (plan.sheetsNeededPerUnit || 0) * (matItem.weightUnitPrice || 0);
+  const scrapCost = (scrapWeightKg || 0) * (matItem.weightUnitPrice || 0);
+  const leftoverValue = (leftoverWeightKg || 0) * (matItem.weightUnitPrice || 0);
+  return { sheetCost, scrapAreaMm2, scrapCost, leftoverAreaMm2, leftoverValue };
+}
+function computeSheetMetalPlanCost(plan, matItem) {
+  return computeSheetMetalPlanCostBreakdown(plan, matItem).sheetCost;
 }
 
 /**
@@ -47,8 +91,19 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
   visiting.add(item._id.toString());
   try {
     let materialsTotal = 0;
+    // Sheet Metal groups (mat.isSheetMetal) are priced once per {code,
+    // dimensionVariantId} group below (real, scrap-inclusive sheet cost),
+    // not per individual BOM line like every other material — the
+    // theoretical per-line area cost these lines would otherwise contribute
+    // is deliberately excluded from materialsTotal.
+    const sheetMetalGroupKeys = new Set();
     for (const mat of bom.materials) {
       if (mat.isDiscontinued) continue;
+
+      if (mat.isSheetMetal && mat.dimensionVariantId) {
+        sheetMetalGroupKeys.add(`${mat.code}#${mat.dimensionVariantId}`);
+        continue;
+      }
 
       const matItem = await Item.findOne({
         code: { $regex: new RegExp(`^${escapeRegex(mat.code)}$`, 'i') },
@@ -84,6 +139,24 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
       }
 
       materialsTotal += lineUnitCost * (mat.quantity || 0);
+    }
+
+    // Sheet Metal groups — real, scrap-inclusive cost per group (see
+    // computeSheetMetalPlanCost above), added once per {code,
+    // dimensionVariantId} regardless of how many BOM lines share it. A group
+    // with no saved plan yet contributes 0 (matches lockBOM's own gate —
+    // this situation can't reach a locked, production-costed BOM in normal
+    // use, but shouldn't throw here either).
+    for (const key of sheetMetalGroupKeys) {
+      const [code, dimensionVariantId] = key.split('#');
+      const plan = await SheetMetalPlan.findOne({ bom: bom._id, itemCode: code, dimensionVariantId, company: item.companyId }).lean();
+      if (!plan) continue;
+      const matItem = await Item.findOne({
+        code: { $regex: new RegExp(`^${escapeRegex(code)}$`, 'i') },
+        companyId: item.companyId
+      }).lean();
+      if (!matItem) continue;
+      materialsTotal += computeSheetMetalPlanCost(plan, matItem);
     }
 
     if (!(materialsTotal > 0)) {

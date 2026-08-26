@@ -6,6 +6,7 @@ import Customer from '../models/Customer.js';
 import notificationService from '../services/notificationService.js';
 import { syncOrderItemsFromForm, autoCheckAllOrderItems } from '../services/storeFlowService.js';
 import { computeBOMMaterialsMrpCost } from '../services/itemPricingService.js';
+import { computeMaterialAvailabilityForOrder } from '../services/materialAvailabilityService.js';
 
 const isSuperadmin = (role) => role === 'Superadmin' || role === 'Super Admin';
 const isAccountsRole = (role) => ['Accounts', 'Accounts Head', 'Account Employee'].includes(role) || isSuperadmin(role);
@@ -231,6 +232,19 @@ export const upsertOrderForm = async (req, res) => {
       console.log(`🤖 [OrderForm] Auto store-check for ${order.orderCode}:`, autoCheckResult);
     } catch (autoCheckErr) {
       console.error('❌ Error auto-checking inventory for Order Form items:', autoCheckErr);
+    }
+
+    // 📦 BOM raw-material availability for every In-house Manufactured item on
+    // this order — checks stock, auto-raises pre-approved Purchase Requests
+    // for any shortfall (see materialAvailabilityService.js). Shipped as an
+    // awaited step first, same as autoCheckAllOrderItems right above it, to
+    // measure real added latency before reaching for a fire-and-forget
+    // version — see server/docs/store-orders-material-availability.md.
+    try {
+      const materialAvailabilityResult = await computeMaterialAvailabilityForOrder(order);
+      console.log(`📦 [OrderForm] Material availability for ${order.orderCode}:`, materialAvailabilityResult);
+    } catch (materialAvailabilityErr) {
+      console.error('❌ Error computing material availability for Order Form items:', materialAvailabilityErr);
     }
 
     if (newContribution !== previousContribution) {

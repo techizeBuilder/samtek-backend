@@ -28,6 +28,12 @@ import {
   setPlantStatus,
 } from '../controllers/rdController.js';
 import {
+  getSheetMetalGroups,
+  getSheetMetalPlans,
+  saveSheetMetalPlan,
+  deleteSheetMetalPlan,
+} from '../controllers/sheetMetalPlanController.js';
+import {
   getRDExpenseCategories,
   createRDExpense,
   getRDExpenses,
@@ -141,6 +147,10 @@ router.get('/boms/:id/download', bomManagementView, downloadBOMPdf);
 router.put('/boms/:id/materials/:materialId/discontinue', bomManagementEdit, discontinueMaterial);
 router.put('/boms/:id/materials/:materialId/reactivate', bomManagementEdit, reactivateMaterial);
 router.put('/boms/:id/production-cost', bomManagementEdit, updateBOMProductionCost);
+router.get('/boms/:bomId/sheet-metal-groups', bomManagementView, getSheetMetalGroups);
+router.get('/boms/:bomId/sheet-metal-plans', bomManagementView, getSheetMetalPlans);
+router.post('/boms/:bomId/sheet-metal-plans', bomManagementAdd, saveSheetMetalPlan);
+router.delete('/boms/:bomId/sheet-metal-plans/:planId', bomManagementDelete, deleteSheetMetalPlan);
 
 // ── Prototypes ────────────────────────────────────────────────────────────────
 router.get('/prototypes', prototypeView, getPrototypes);
