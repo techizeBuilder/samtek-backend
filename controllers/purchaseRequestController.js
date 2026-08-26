@@ -337,7 +337,7 @@ export const getPurchaseRequests = async (req, res) => {
           { code: pr.itemId },
           { name: { $regex: new RegExp(`^${pr.productName}$`, 'i') } }
         ]
-      }).select('name code specifications warranty unit unitType purchaseUnit purchaseUnitType fabricationRef dimensionVariants');
+      }).select('name code specifications warranty unit unitType purchaseUnit purchaseUnitType receiveUnit fabricationRef dimensionVariants');
 
       if (masterItem) {
         pr.item = masterItem; // Attaches to PR so the frontend UI can read it

@@ -336,11 +336,19 @@ export const createRFQ = async (req, res) => {
       pr.purchaseUnitType = inventoryItem?.purchaseUnitType || pr.purchaseUnitType || null;
       await pr.save();
     }
-    // Vendor sees the Purchase Unit when defined; otherwise the item's Base Unit
+    // Vendor sees the Purchase Unit when defined; otherwise the item's Base Unit.
+    // pr.unit must win over inventoryItem?.unit in that fallback — pr.unit is
+    // this specific request's own already-resolved unit (for a fabrication
+    // item, raiseFabricationPurchaseRequest/resolveFabricationLines already
+    // set it to the item's Purchase Unit, e.g. "Kilogram" — never its Used
+    // Unit, e.g. "Centimeter Square"/"Inch", which is only meaningful for BOM
+    // consumption, not for what a vendor is quoted/quotes against).
+    // inventoryItem?.unit is only a last-resort fallback for the rare case
+    // pr.unit itself is missing.
     const rfqQuantity = (resolvedPurchaseQty && resolvedPurchaseUnit) ? resolvedPurchaseQty : pr.quantity;
     const rfqQuantityUnit = (resolvedPurchaseQty && resolvedPurchaseUnit)
       ? resolvedPurchaseUnit
-      : (inventoryItem?.unit || pr.unit || null);
+      : (pr.unit || inventoryItem?.unit || null);
 
     // 6. Create RFQ
     const rfqNo = await generateRFQNo();

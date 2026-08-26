@@ -705,3 +705,31 @@ came out of checking this:
    mirroring the existing minStock/reorderQty-relationship validation already there. Top-level `reorderQty`
    deliberately stays un-restricted to whole numbers — it's a direct purchaseUnit amount (e.g. "10.5 kg" is a
    perfectly valid mass), unlike the per-dimension piece counts.
+
+### Follow-on (2026-08-26): real persistence bug — per-dimension Material Flow was never actually being saved
+
+Client set Material Flow on several fabrication items' dimensions, ran production for a full day, and got a
+Purchase Request for a plain Tool item but **none** for any fabrication dimension — despite the low-stock
+condition clearly being met. Root cause: `inventoryController.js`'s `sanitizeItemData` rebuilds the whole
+`dimensionVariants[]` array from scratch on **every** item save (both create and update — see its own comment on
+why: `_id` must never survive the rebuild, since it isn't stable across edits). That rebuild's field list simply
+never included `materialFlow`/`minStock`/`reorderQty` — so every time R&D saved the Edit/Add form, those three
+fields were silently discarded and the schema defaults (`''`/`0`/`0`) took over. The form always showed a success
+response (the save itself succeeded, it just wrote empty values), and reopening the form correctly showed
+whatever was actually in the database — blank/zero, exactly as reported. The frontend (`SimpleInventoryForm.jsx`'s
+submit payload) was sending these three fields correctly the whole time; this was a pure backend rebuild bug.
+
+Fixed by adding `materialFlow`/`minStock`/`reorderQty` to the object `sanitizeItemData`'s `.map()` actually
+constructs. Confirmed the "one Purchase Request per flagged dimension" behavior itself (`checkFabricationVariants`
+in `lowStockReorderCron.js`) was always correct — it independently loops every flagged dimension variant and
+dedupes/creates per its own dimension signature; it simply never had real (non-zero, non-blank) data to act on
+because of this save bug.
+
+**Also found, deliberately not fixed this round (separate concern, flagged for the client to decide on)**: the
+exact same rebuild also drops `isLeftover` on every save — a `dimensionVariants[]` entry created by Store
+cutting a piece down (or Production returning unused cut material back) is flagged `isLeftover: true` so it's
+never offered as a pickable BOM dimension and never reorderable as if it were a real catalog size. Editing an
+Item that already has leftover stock via the normal Edit form would silently strip that flag on save, turning
+the leftover into an indistinguishable "real" catalog size going forward. **Fixed in the same pass, at the
+client's request** — added `isLeftover: !!dv.isLeftover` alongside the three Material Flow fields, same rebuild,
+same root cause.
