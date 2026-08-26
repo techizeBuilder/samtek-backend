@@ -673,6 +673,22 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             catch (cronError) {
                 console.warn('⚠️ SLA Monitor cron job setup warning:', cronError.message);
             }
+
+            // ─── Periodic Cron Job — Material Flow Low-Stock Auto-Purchase ───────────
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runLowStockReorderSweep } = await import('./jobs/lowStockReorderCron.js');
+                // Runs every 30 minutes — Purchase lead times are measured in days, so
+                // this cadence is more than sufficient.
+                cron.schedule('*/30 * * * *', async () => {
+                    console.log('⏰ [CRON] Starting Material Flow low-stock reorder sweep...');
+                    await runLowStockReorderSweep();
+                });
+                console.log('✅ Material Flow low-stock reorder cron job scheduled (every 30 minutes)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Low-stock reorder cron job setup warning:', cronError.message);
+            }
         }
         catch (error) {
             log(`Error importing routes: ${error.message}`);

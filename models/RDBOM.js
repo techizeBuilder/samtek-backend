@@ -11,6 +11,19 @@ const MaterialSchema = new mongoose.Schema({
   childPartCode: { type: String, default: '' },
   subChildPartCode: { type: String, default: '' },
   item: { type: String, required: true, trim: true }, // Replaces 'name'
+  // Which Add button this row came from (Add Raw Material vs Add Tool) — set
+  // once from the source Item's own itemType at add-time and never re-derived
+  // live, same reasoning as every other snapshot field below: a later Item
+  // reclassification must not silently reshuffle an already-built BOM's
+  // table groupings. Sheet Metal is NOT a third materialKind — a sheet metal
+  // item is still added via Add Raw Material (materialKind stays 'raw'); see
+  // isSheetMetal below for how it's told apart.
+  materialKind: { type: String, enum: ['raw', 'tool'], default: 'raw' },
+  // Snapshot of Item.isSheetMetal at add-time — same snapshot-at-add-time
+  // reasoning as materialKind above. Drives the BOM's Sheet Metal tab/view
+  // and the sheet-metal planning flow (see SheetMetalPlan.js) instead of the
+  // old per-child-part fabrication cutting flow.
+  isSheetMetal: { type: Boolean, default: false },
   // Independent BOM-only classification (RDMasterOption field "MaterialType") —
   // not derived from Product Master's P-Type. Optional: no longer collected on the form.
   itemType: { type: String, default: '', trim: true },

@@ -11,6 +11,8 @@ import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
 import RDPlant from '../models/RDPlant.js';
+import SheetMetalPlan from '../models/SheetMetalPlan.js';
+import { sheetMetalGroupsFromBOM } from './sheetMetalPlanController.js';
 import { computeBOMMaterialsMrpCost, recalculateItemPricing } from '../services/itemPricingService.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
@@ -1168,6 +1170,15 @@ export const addMaterial = async (req, res) => {
             subChildPartCode: subChildPartCode || '',
             item,
             itemType: itemType || '',
+            // Which Add button this came from + the Sheet Metal flag — both
+            // re-derived here from sourceItem, never trusted from the client,
+            // same "server is authoritative" principle as inventoryItemType
+            // below. materialKind is 'tool' only when Item Type contains
+            // "tool" (case-insensitive) — matches Add Tool's own picker
+            // filter in BOMCreationTab.jsx, so a row always lands in the same
+            // table the picker it came from implies.
+            materialKind: /tool/i.test(sourceItem.itemType || '') ? 'tool' : 'raw',
+            isSheetMetal: !!sourceItem.isSheetMetal,
             quantity: Number(quantity),
             unit,
             unitPrice,
@@ -1305,6 +1316,8 @@ export const updateMaterial = async (req, res) => {
     mat.category = sourceItem.category || '';
     mat.subCategory = sourceItem.subCategory || '';
     mat.inventoryItemType = sourceItem.itemType || '';
+    mat.materialKind = /tool/i.test(sourceItem.itemType || '') ? 'tool' : 'raw';
+    mat.isSheetMetal = !!sourceItem.isSheetMetal;
     mat.sourceType = sourceItem.sourceType || '';
     mat.itemSourceType = sourceItem.itemSourceType || '';
     mat.itemCategories = sourceItem.itemCategories || [];
@@ -1544,6 +1557,25 @@ export const lockBOM = async (req, res) => {
     const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
     if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
     if (bom.isLocked) return res.status(400).json({ success: false, message: 'BOM is already locked' });
+
+    // A Sheet Metal plan is required, not optional, for every sheet-metal
+    // group on this BOM — no permanent fallback to the old per-child-part
+    // cutting behavior is kept around (see SheetMetalPlan.js/
+    // sheetMetalPlanController.js's own comments for the full reasoning).
+    // Blocks lock outright rather than silently letting the old behavior
+    // reappear for an unplanned group.
+    const sheetMetalGroups = sheetMetalGroupsFromBOM(bom);
+    if (sheetMetalGroups.length > 0) {
+      const plans = await SheetMetalPlan.find({ bom: bom._id, company: req.user.companyId }).lean();
+      const plannedKeys = new Set(plans.map(p => `${p.itemCode}#${p.dimensionVariantId}`));
+      const missing = sheetMetalGroups.filter(g => !plannedKeys.has(`${g.itemCode}#${g.dimensionVariantId}`));
+      if (missing.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `${missing.length} sheet metal group(s) still need a plan before this BOM can be locked: ${missing.map(g => `${g.itemName} (${g.itemCode})`).join(', ')}`,
+        });
+      }
+    }
 
     // 2. Setup PDF Generation
     const filename = `BOM_${bom.machine.code}_${Date.now()}.pdf`;
@@ -2313,8 +2345,51 @@ export const processRDRequest = async (req, res) => {
       // string equality). sourceItemCode carries the real Item code
       // wherever it's actually needed — not yet wired into Store's
       // transfer/return/purchase-request flows, that's the next phase.
+      // Sheet Metal lines (mat.isSheetMetal) don't merge/push the normal way
+      // at all — R&D's SheetMetalPlan already decided everything (how many
+      // whole sheets per unit) once per {code, dimensionVariantId} group
+      // across the whole BOM, replacing the old per-child-part cutting
+      // decision. One demand per group, not one per BOM line/cut.
+      const sheetMetalPlanKeys = new Set();
+      const sheetMetalDemands = [];
+      for (const mat of masterBOM.materials) {
+        if (mat.isDiscontinued || !mat.isSheetMetal || !mat.dimensionVariantId) continue;
+        const groupKey = `${mat.code}#${mat.dimensionVariantId}`;
+        if (sheetMetalPlanKeys.has(groupKey)) continue;
+        sheetMetalPlanKeys.add(groupKey);
+      }
+      if (sheetMetalPlanKeys.size > 0) {
+        const plans = await SheetMetalPlan.find({ bom: masterBOM._id, company: companyId });
+        const planByKey = new Map(plans.map(p => [`${p.itemCode}#${p.dimensionVariantId}`, p]));
+        for (const key of sheetMetalPlanKeys) {
+          const plan = planByKey.get(key);
+          const mat = masterBOM.materials.find(m => m.isSheetMetal && `${m.code}#${m.dimensionVariantId}` === key);
+          if (!plan) {
+            // Defensive only — lockBOM already blocks locking a BOM with an
+            // unplanned sheet-metal group, so this should be unreachable in
+            // normal use. Skip rather than crash the whole approval.
+            console.error(`[processRDRequest] Sheet Metal group ${key} has no SheetMetalPlan — skipping demand push.`);
+            continue;
+          }
+          sheetMetalDemands.push({
+            materialCode: key,
+            sourceItemCode: plan.itemCode,
+            materialName: plan.itemName || mat?.item || plan.itemCode,
+            bomQuantity: plan.sheetsNeededPerUnit,
+            quantity: plan.sheetsNeededPerUnit * buildQty,
+            unit: 'Pieces',
+            status: 'Requested',
+            fabricationCategory: mat?.fabricationCategory || 'sheet_plate',
+            dimensionVariantId: plan.dimensionVariantId,
+            sheetMetalPlanId: plan._id,
+            bomDimensions: {}, // no per-cut sizing left — Store ships whole sheets
+          });
+        }
+      }
+
       const mergedByCode = new Map();
       for (const mat of masterBOM.materials) {
+        if (mat.isSheetMetal) continue; // handled above via sheetMetalDemands instead
         const isFabrication = !!mat.fabricationCategory;
         // Non-fabrication materials with an amountValue (Length/Area/Volume
         // Used Unit) need the same treatment as fabrication's dimension
@@ -2354,7 +2429,7 @@ export const processRDRequest = async (req, res) => {
       const demandsToPush = Array.from(mergedByCode.values()).map(d => ({
         ...d,
         quantity: d.bomQuantity * buildQty
-      }));
+      })).concat(sheetMetalDemands);
 
       const docsToPush = designDocs.map(doc => ({ name: doc.name, fileUrl: doc.fileUrl, version: doc.version }));
 

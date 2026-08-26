@@ -124,6 +124,13 @@ const MaterialDemandSchema = new mongoose.Schema({
   // Mass/Count-unit material, where quantity alone is already unambiguous.
   amountValue: { type: Number, default: null },
   amountUnit: { type: String, default: null },
+  // Set only for a Sheet Metal plan-driven demand (see SheetMetalPlan.js) —
+  // lets Store's transfer screen and Production's demand list tell a
+  // flat-N-sheets plan demand apart from a normal per-cut fabrication demand
+  // without re-deriving it. quantity/unit above are already "N Pieces" of
+  // the catalog sheet size for these; bomDimensions stays {} since there's
+  // no per-cut sizing left to track once a plan exists.
+  sheetMetalPlanId: { type: mongoose.Schema.Types.ObjectId, ref: 'SheetMetalPlan', default: null },
   unitPrice: { type: Number, default: null },
   bomQuantity: { type: Number, default: null },
   quantity: { type: Number, required: true, min: 0 },
@@ -132,6 +139,13 @@ const MaterialDemandSchema = new mongoose.Schema({
   returnPendingQuantity: { type: Number, default: 0, min: 0 },
   transferredQuantity: { type: Number, default: 0, min: 0 }, // Store sent it
   issuedQuantity: { type: Number, default: 0, min: 0 },      // Production received it
+  // Store's own free-text entry at transfer time — who they physically
+  // handed the material to (mirrors ProcessStepSchema.qcBy's pattern: plain
+  // typed text, not a User ref, since the recipient may be a floor worker
+  // with no login). Overwritten on each subsequent transfer of the same
+  // demand, so only the most recent issuer survives — acceptable since a
+  // demand is normally transferred in one shot.
+  issuedToName: { type: String, default: null, trim: true },
 
   unit: { type: String, required: true },
   status: {

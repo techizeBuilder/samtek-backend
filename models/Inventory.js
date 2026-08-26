@@ -303,6 +303,14 @@ const itemSchema = new mongoose.Schema({
     trim: true,
     default: ''
   },
+  // Sheet Metal / Non Sheet Metal classification — only ever meaningful for
+  // fabrication items. Auto-filled from FabricationMaster.isSheetMetal (its
+  // own comment has the full reasoning) and locked in the Inventory form,
+  // same pattern as materialGrade/the 3 Unit fields above. Consumed by BOM.
+  isSheetMetal: {
+    type: Boolean,
+    default: false
+  },
   modelNumber: {
     type: String,
     trim: true,
@@ -346,6 +354,26 @@ const itemSchema = new mongoose.Schema({
     // Production transfer but must never be offered as a choice when Store
     // raises a Purchase Request (Purchase only reorders catalog sizes).
     isLeftover: { type: Boolean, default: false },
+    // Material Flow — same High/Medium/Low reorder-point classification as
+    // the top-level fields below, but per dimension size: Store cuts and
+    // reorders each catalog size independently, so each one gets its own
+    // trigger point and order quantity rather than sharing the item's single
+    // top-level minStock/reorderQty (which stay unused for fabrication items
+    // — real stock lives here in subStock, not in top-level qty). Excluded
+    // from the low-stock sweep when isLeftover — same "Purchase only
+    // reorders catalog sizes" rule as above.
+    materialFlow: { type: String, enum: ['', 'High Flow', 'Medium Flow', 'Low Flow'], default: '' },
+    // Both denominated in PIECES of this exact size, NOT the item's
+    // purchaseUnit (unlike the top-level reorderQty above) — subStock itself
+    // is a piece count, and a vendor sells whole pieces regardless of the
+    // purchaseUnit being weight-based (e.g. kg). The cron job
+    // (lowStockReorderCron.js) converts reorderQty pieces -> the actual
+    // purchase-unit total (typically kg) via resolveFabricationLines, which
+    // is always an exact multiplication (pieces x weight/piece) — never a
+    // division back into pieces, so there's no fractional-piece risk. Both
+    // must be whole numbers (enforced in inventoryController.js).
+    minStock: { type: Number, min: 0, default: 0 },
+    reorderQty: { type: Number, min: 0, default: 0 },
   }],
   unitWeightValue: {
     type: Number,
@@ -365,11 +393,28 @@ const itemSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Reorder trigger point ("cap") for the low-stock auto-purchase sweep (see
+  // server/jobs/lowStockReorderCron.js) — a PR auto-raises once qty falls to
+  // this. Only meaningful for non-fabrication items (fabrication real stock
+  // lives per-dimension in dimensionVariants[].subStock/minStock instead,
+  // since qty stays 0/unused for them).
   minStock: {
     type: Number,
     min: 0,
     default: 0
   },
+  // Material Flow — High/Medium/Low preset that auto-fills (but doesn't
+  // lock) minStock above with a default of 20/10/5 respectively, resolving
+  // the client's own "fixed label value vs custom per item" ask: the label
+  // is a convenience default, minStock is what's actually compared. Only
+  // shown/used for Purchasable items (formData.purchase === true) — an
+  // Internal-Manufacturing item has no purchase-based reorder concept.
+  materialFlow: { type: String, enum: ['', 'High Flow', 'Medium Flow', 'Low Flow'], default: '' },
+  // How much to auto-order once minStock triggers, denominated in
+  // purchaseUnit (not the stock-counting unit) — must be >= minStock or
+  // receiving the order would immediately re-trigger the same request
+  // (enforced in inventoryController.js's validateItemData).
+  reorderQty: { type: Number, min: 0, default: 0 },
   leadTime: {
     type: Number,
     min: 0,

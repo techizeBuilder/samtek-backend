@@ -1133,6 +1133,32 @@ const validateItemData = (data, isUpdate = false) => {
   if (data.minStock !== undefined && (isNaN(data.minStock) || data.minStock < 0)) {
     errors.minStock = 'Minimum stock must be a non-negative number';
   }
+  if (data.reorderQty !== undefined && (isNaN(data.reorderQty) || data.reorderQty < 0)) {
+    errors.reorderQty = 'Order Quantity must be a non-negative number';
+  } else if (Number(data.reorderQty) > 0 && Number(data.reorderQty) < (Number(data.minStock) || 0)) {
+    // Ordering less than the trigger point means receiving it would still
+    // leave stock at/below minStock — the request would fire again right away.
+    errors.reorderQty = 'Order Quantity must be at least the Minimum Stock value, otherwise receiving it will immediately trigger another auto-purchase request.';
+  }
+  // Same reorderQty >= minStock guard, per fabrication dimension variant —
+  // each is its own independent flow (see Inventory.js's own comment). Both
+  // are piece counts here (not the item's purchaseUnit, unlike the top-level
+  // fields above), so must be whole numbers — a vendor sells whole pieces
+  // regardless of a weight-based purchaseUnit.
+  if (data.dimensionVariants && Array.isArray(data.dimensionVariants)) {
+    data.dimensionVariants.forEach((dv, index) => {
+      const dvMinStock = Number(dv.minStock) || 0;
+      const dvReorderQty = Number(dv.reorderQty) || 0;
+      if (!Number.isInteger(dvMinStock)) {
+        errors[`dimensionVariants[${index}].minStock`] = 'Minimum Stock must be a whole number of pieces for this dimension.';
+      }
+      if (!Number.isInteger(dvReorderQty)) {
+        errors[`dimensionVariants[${index}].reorderQty`] = 'Order Quantity must be a whole number of pieces for this dimension.';
+      } else if (dvReorderQty > 0 && dvReorderQty < dvMinStock) {
+        errors[`dimensionVariants[${index}].reorderQty`] = 'Order Quantity must be at least the Minimum Stock value for this dimension.';
+      }
+    });
+  }
   if (data.leadTime !== undefined && (isNaN(data.leadTime) || data.leadTime < 0)) {
     errors.leadTime = 'Lead time must be a non-negative number';
   }
@@ -3357,7 +3383,7 @@ export const getPendingRequests = async (req, res) => {
 // ── 2. TRANSFER MATERIAL TO PRODUCTION ───────────────────────────────
 export const transferMaterialToProduction = async (req, res) => {
   try {
-    const { materialCode, quantityToTransfer } = req.body;
+    const { materialCode, quantityToTransfer, issuedTo } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
     const transferQty = Number(quantityToTransfer);
@@ -3410,6 +3436,7 @@ export const transferMaterialToProduction = async (req, res) => {
     // Update quantities
     order.materialDemands[demandIndex].transferredQuantity = (order.materialDemands[demandIndex].transferredQuantity || 0) + transferQty;
     order.materialDemands[demandIndex].status = 'In Transit'; // Moves to Production's "Receive" list
+    if (issuedTo) order.materialDemands[demandIndex].issuedToName = issuedTo;
 
     await order.save();
 
@@ -3428,6 +3455,87 @@ export const transferMaterialToProduction = async (req, res) => {
     });
 
     res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── 2a. TRANSFER FLAT-PIECES FABRICATION DEMAND TO PRODUCTION ────────
+// Covers two demand shapes, both needing no per-cut cutting decision from
+// Store: (1) Sheet Metal plan-driven demands (demand.sheetMetalPlanId set —
+// R&D's SheetMetalPlan already decided how many whole catalog sheets are
+// needed), and (2) length-fabrication group demands (Production Order
+// Management's "Issue Material" — see bomMaterialGroupsService.js's
+// lengthFabricationGroupsFromBOM — already combined every Child Part's cut
+// length sharing one catalog dimension into a single whole-pieces count).
+// Both share the same tell: demand.fabricationCategory set, but
+// demand.bomDimensions is empty — there is no specific per-cut size left to
+// track, only "N whole pieces of this exact catalog dimensionVariantId".
+// This is a flat transfer of N whole pieces, same atomic-condition shape as
+// transferMaterialToProduction above, just targeting one dimensionVariants[]
+// subdocument's subStock instead of flat Item.qty (fabrication stock never
+// lives in Item.qty — see Inventory.js). What Production actually returns
+// after cutting is measured and reconciled separately (see
+// returnMaterialToStore/confirmReturn).
+// POST /api/inventory/transfer-sheet-metal/:id
+export const transferSheetMetalPlanToProduction = async (req, res) => {
+  try {
+    const { materialCode, quantityToTransfer } = req.body;
+    const orderId = req.params.id;
+    const companyId = req.user.companyId;
+    const transferQty = Number(quantityToTransfer);
+
+    if (!materialCode || !transferQty || transferQty <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid material code and quantity are required.' });
+    }
+
+    const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+    const demand = order.materialDemands.find(m => m.materialCode === materialCode);
+    if (!demand) return res.status(404).json({ success: false, message: 'Material not requested on this order.' });
+    const hasSpecificCut = demand.bomDimensions && Object.keys(demand.bomDimensions).length > 0;
+    if (!demand.fabricationCategory || !demand.dimensionVariantId || hasSpecificCut) {
+      return res.status(400).json({ success: false, message: 'This demand has a specific cut size — use the dimension-based transfer instead.' });
+    }
+    const sourceCode = demand.sourceItemCode || materialCode;
+    const { issuedTo } = req.body;
+
+    // Atomic deduction against the specific catalog dimensionVariant's own
+    // subStock — same "only deduct if enough stock" gatekeeper pattern as
+    // the flat transfer above, just scoped into the array subdocument.
+    const item = await Item.findOneAndUpdate(
+      {
+        code: sourceCode, companyId,
+        'dimensionVariants._id': demand.dimensionVariantId,
+        'dimensionVariants.subStock': { $gte: transferQty },
+      },
+      { $inc: { 'dimensionVariants.$.subStock': -transferQty } },
+      { new: true }
+    );
+    if (!item) {
+      return res.status(400).json({ success: false, message: 'Insufficient sheet stock in Store for this transfer.' });
+    }
+
+    const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
+    order.materialDemands[demandIndex].transferredQuantity = (order.materialDemands[demandIndex].transferredQuantity || 0) + transferQty;
+    order.materialDemands[demandIndex].status = 'In Transit';
+    if (issuedTo) order.materialDemands[demandIndex].issuedToName = issuedTo;
+    await order.save();
+
+    await StoreTransferLog.create({
+      productionOrderId: order._id,
+      orderId: order.orderId,
+      machineCode: order.machineCode,
+      materialCode,
+      sourceItemCode: sourceCode,
+      materialName: order.materialDemands[demandIndex].materialName,
+      quantityTransferred: transferQty,
+      unit: order.materialDemands[demandIndex].unit,
+      transferredBy: req.user._id,
+      company: companyId,
+    });
+
+    res.json({ success: true, message: `Successfully transferred ${transferQty} sheet(s) to Production.` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -3453,7 +3561,7 @@ export const transferMaterialToProduction = async (req, res) => {
 // POST /api/inventory/transfer-fabrication-material/:id
 export const transferFabricationMaterialToProduction = async (req, res) => {
   try {
-    const { materialCode, sourceVariantId, stockPiecesConsumed, quantityFulfilled, leftover } = req.body;
+    const { materialCode, sourceVariantId, stockPiecesConsumed, quantityFulfilled, leftover, issuedTo } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
     const piecesConsumed = Number(stockPiecesConsumed);
@@ -3592,6 +3700,7 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
     // else in this app; stockPiecesConsumed only ever affects Item stock.
     demand.transferredQuantity = (demand.transferredQuantity || 0) + qtyFulfilled;
     demand.status = 'In Transit';
+    if (issuedTo) demand.issuedToName = issuedTo;
     await order.save();
 
     await StoreTransferLog.create({
@@ -4090,18 +4199,26 @@ export const confirmReturn = async (req, res) => {
         // uncut-remainder piece — an ad-hoc BOM-driven size isn't a real
         // catalog SKU Purchase should be able to reorder, even though it's
         // perfectly good stock for a future Production transfer.
+        //
+        // Sheet Metal plan returns (log.leftoverValues set — see
+        // returnMaterialToStore) key/credit off THOSE actually-measured
+        // dimensions instead — a plan-driven demand has no bomDimensions of
+        // its own (Store shipped whole catalog sheets, not a specific cut),
+        // so demand.bomDimensions would be an empty, meaningless signature
+        // for this case.
+        const creditDimensions = log.leftoverValues || demand.bomDimensions;
         const sourceItem = await Item.findOne({ code: sourceCode, companyId });
         if (sourceItem) {
           const existingVariant = sourceItem.dimensionVariants.find(
-            dv => dimensionSignature(dv.values) === dimensionSignature(demand.bomDimensions)
+            dv => dimensionSignature(dv.values) === dimensionSignature(creditDimensions)
           );
           if (existingVariant) {
             existingVariant.subStock = (existingVariant.subStock || 0) + log.quantityReturned;
           } else {
-            const fabWeight = await resolveFabricationWeight(sourceItem, demand.bomDimensions);
+            const fabWeight = await resolveFabricationWeight(sourceItem, creditDimensions);
             sourceItem.dimensionVariants.push({
               category: demand.fabricationCategory,
-              values: demand.bomDimensions,
+              values: creditDimensions,
               designation: '',
               densityValue: sourceItem.dimensionVariants?.[0]?.densityValue ?? null,
               densityUnit: sourceItem.dimensionVariants?.[0]?.densityUnit || 'kg/m3',

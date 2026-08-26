@@ -27,6 +27,11 @@ const FabricationMasterSchema = new mongoose.Schema({
   // has a numeric grade part, e.g. "MS"), so the client asked for it to land
   // in one field (Material Grade) as one combined value instead.
   material: { type: String, default: '', trim: true },
+  // Client's own Sheet Metal / Non Sheet Metal classification for this
+  // catalog entry — a whole-item property (not per-dimension-row), set once
+  // here and then auto-filled + locked onto any Inventory item created from
+  // it (see Inventory.js's own isSheetMetal field). Feeds into BOM later.
+  isSheetMetal: { type: Boolean, default: false },
   dimensions: [{
     // Mixed, not Map — Map fields serialize to {} whenever a response path
     // goes through .toObject()/.lean() without flattenMaps (e.g. Inventory's

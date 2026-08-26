@@ -246,7 +246,7 @@ const sanitizeUnitFields = (body) => ({
 
 export const createFabricationItem = async (req, res) => {
   try {
-    const { itemName, itemCode, category, density, dimensions, material } = req.body;
+    const { itemName, itemCode, category, density, dimensions, material, isSheetMetal } = req.body;
     if (!itemName || !itemName.trim()) {
       return res.status(400).json({ success: false, message: 'Item Name is required.' });
     }
@@ -299,6 +299,7 @@ export const createFabricationItem = async (req, res) => {
       category,
       density: densityIn,
       material: material ? String(material).trim() : '',
+      isSheetMetal: !!isSheetMetal,
       dimensions: finalDimensions,
       ...sanitizeUnitFields(req.body),
       company: req.user.companyId,
@@ -312,7 +313,7 @@ export const createFabricationItem = async (req, res) => {
 
 export const updateFabricationItem = async (req, res) => {
   try {
-    const { itemName, itemCode, category, density, dimensions, material } = req.body;
+    const { itemName, itemCode, category, density, dimensions, material, isSheetMetal } = req.body;
     const existing = await FabricationMaster.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!existing) return res.status(404).json({ success: false, message: 'Fabrication item not found' });
 
@@ -332,6 +333,7 @@ export const updateFabricationItem = async (req, res) => {
       };
     }
     if (material !== undefined) update.material = material ? String(material).trim() : '';
+    if (isSheetMetal !== undefined) update.isSheetMetal = !!isSheetMetal;
     if (itemCode !== undefined && itemCode.trim() && itemCode.trim() !== existing.itemCode) {
       const newCode = itemCode.trim();
       // Global checks — see createFabricationItem's matching comment.

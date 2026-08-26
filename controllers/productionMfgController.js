@@ -10,11 +10,23 @@ import { Item } from '../models/Inventory.js'; // Adjust path
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
 import { recalculateItemPricing } from '../services/itemPricingService.js';
 import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimensions } from '../services/fabricationDemandService.js';
+import { toMm2 } from '../utils/unitConversion.js';
 
 import PDFDocument from 'pdfkit';
 
 
 import MaterialReturnLog from '../models/MaterialReturnLog.js';
+import SheetMetalPlan from '../models/SheetMetalPlan.js';
+import { sheetMetalGroupsFromBOM } from './sheetMetalPlanController.js';
+import { plainMaterialGroupsFromBOM, lengthFabricationGroupsFromBOM } from '../services/bomMaterialGroupsService.js';
+
+// Department-Head-only gate for Issue Material + Receive — mirrors
+// productionExpenseController.js's own HEAD_ROLES/canManage pattern exactly,
+// layered on top of the route-level checkPermission('production','orders',...)
+// gate (unchanged) rather than replacing it, since other actions on the same
+// page (Add Demand, Adjust Qty, Return, View) stay open to regular
+// Production Employees.
+const HEAD_ROLES = ['Production Head', 'Superadmin', 'Super Admin'];
 
 // A non-fabrication material whose Used Unit is Length/Area/Volume needs an
 // amountValue too (see addMaterialDemand below) — mirrors rdController.js's
@@ -387,6 +399,172 @@ export const raiseRDRequest = async (req, res) => {
   }
 };
 
+// ─── MATERIAL LIST — direct-from-BOM, no R&D request needed ────────────────────
+// Standard BOM materials no longer need a per-production R&D request/approval
+// cycle (that requirement is now reserved for a genuinely new/changed BOM,
+// per the client's own framing — deferred until those requirements arrive).
+// This computes the live list straight from the locked RDBOM, using the same
+// grouping math Store Orders' material-availability check already uses
+// (bomMaterialGroupsService.js), and cross-references each group against
+// order.materialDemands to show either the real demand (already issued) or a
+// "Not Issued" row with just an Issue Material button. Add Demand (out-of-BOM
+// extras) is untouched — still its own separate R&D "Material Change" path.
+function groupKeyFor(itemCode, dimensionVariantId) {
+  return dimensionVariantId ? `${itemCode}#${dimensionVariantId}` : itemCode;
+}
+
+async function buildMaterialListGroups(order, companyId) {
+  const machineItem = await Item.findOne({ code: order.machineCode, companyId, productKind: 'Machine' }).lean();
+  if (!machineItem) return { groups: [], bom: null };
+  const bom = await RDBOM.findOne({ machine: machineItem._id, company: companyId }).lean();
+  if (!bom || !bom.materials?.length) return { groups: [], bom };
+
+  const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
+  const groups = [];
+
+  for (const g of plainMaterialGroupsFromBOM(bom)) {
+    groups.push({
+      key: groupKeyFor(g.itemCode, null),
+      itemCode: g.itemCode,
+      name: g.itemName,
+      unit: g.unit,
+      neededQty: g.perUnitQty * buildQty,
+      childParts: g.childParts,
+      fabricationCategory: '',
+      dimensionVariantId: null,
+      sheetMetalPlanId: null,
+    });
+  }
+
+  const sheetGroups = sheetMetalGroupsFromBOM(bom);
+  if (sheetGroups.length) {
+    const plans = await SheetMetalPlan.find({ bom: bom._id, company: companyId }).lean();
+    const planByKey = new Map(plans.map(p => [groupKeyFor(p.itemCode, p.dimensionVariantId), p]));
+    for (const g of sheetGroups) {
+      const key = groupKeyFor(g.itemCode, g.dimensionVariantId);
+      const plan = planByKey.get(key);
+      if (!plan) continue; // unplanned group — lockBOM's gate should prevent this; skip defensively
+      groups.push({
+        key,
+        itemCode: g.itemCode,
+        name: g.itemName,
+        unit: 'Pieces',
+        neededQty: plan.sheetsNeededPerUnit * buildQty,
+        childParts: g.childParts,
+        fabricationCategory: 'sheet_plate',
+        dimensionVariantId: g.dimensionVariantId,
+        sheetMetalPlanId: plan._id,
+      });
+    }
+  }
+
+  for (const g of lengthFabricationGroupsFromBOM(bom)) {
+    const matItem = await Item.findOne({ code: g.itemCode, companyId });
+    const variant = (matItem?.dimensionVariants || []).find(v => String(v._id) === String(g.dimensionVariantId));
+    const catalogPieceLengthMm = Number(variant?.values?.length) || 0;
+    if (!variant || !catalogPieceLengthMm) continue;
+    const key = groupKeyFor(g.itemCode, g.dimensionVariantId);
+    groups.push({
+      key,
+      itemCode: g.itemCode,
+      name: g.itemName,
+      unit: 'Pieces',
+      neededQty: Math.ceil((g.totalLengthMmPerUnit * buildQty) / catalogPieceLengthMm),
+      childParts: g.childParts,
+      fabricationCategory: g.fabricationCategory,
+      dimensionVariantId: g.dimensionVariantId,
+      sheetMetalPlanId: null,
+    });
+  }
+
+  return { groups, bom };
+}
+
+// GET /orders/:id/material-list
+export const getMaterialList = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    const { groups } = await buildMaterialListGroups(order, req.user.companyId);
+    const demandByKey = new Map((order.materialDemands || []).map(d => [d.materialCode, d]));
+    const groupKeys = new Set(groups.map(g => g.key));
+
+    const materialList = groups.map(g => ({
+      key: g.key,
+      itemCode: g.itemCode,
+      name: g.name,
+      unit: g.unit,
+      neededQty: g.neededQty,
+      childParts: g.childParts,
+      demand: demandByKey.get(g.key) || null,
+    }));
+
+    // Out-of-BOM extras ("Add Demand") never match a live BOM group key
+    // (their key is a per-cut dimension signature or a plain typed code —
+    // see addMaterialDemand — not this file's {code}#{dimensionVariantId}
+    // scheme), so without this they'd silently disappear from the list
+    // entirely instead of showing as "Out of BOM" like they always have.
+    for (const d of order.materialDemands || []) {
+      if (!groupKeys.has(d.materialCode)) {
+        materialList.push({
+          key: d.materialCode, itemCode: d.sourceItemCode || d.materialCode,
+          name: d.materialName, unit: d.unit, neededQty: d.quantity, childParts: [], demand: d,
+        });
+      }
+    }
+
+    res.json({ success: true, data: materialList });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /orders/:id/materials/issue — body: { groupKey }
+export const issueMaterialToStore = async (req, res) => {
+  try {
+    if (!HEAD_ROLES.includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only a Production Head can issue material to Store.' });
+    }
+    const { groupKey } = req.body;
+    if (!groupKey) return res.status(400).json({ success: false, message: 'groupKey is required.' });
+
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    if (order.materialDemands.some(d => d.materialCode === groupKey)) {
+      return res.status(400).json({ success: false, message: 'This material has already been issued.' });
+    }
+
+    // Never trust a client-sent quantity — re-derive the group fresh from
+    // the BOM, same server-authoritative principle every other BOM
+    // calculation in this app already follows.
+    const { groups } = await buildMaterialListGroups(order, req.user.companyId);
+    const group = groups.find(g => g.key === groupKey);
+    if (!group) return res.status(404).json({ success: false, message: 'This material is not part of the current BOM.' });
+
+    const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
+    order.materialDemands.push({
+      materialCode: group.key,
+      sourceItemCode: group.itemCode,
+      materialName: group.name,
+      bomQuantity: group.neededQty / buildQty,
+      quantity: group.neededQty,
+      unit: group.unit,
+      status: 'Requested',
+      fabricationCategory: group.fabricationCategory || '',
+      dimensionVariantId: group.dimensionVariantId || null,
+      sheetMetalPlanId: group.sheetMetalPlanId || null,
+      bomDimensions: {},
+    });
+    await order.save();
+
+    res.json({ success: true, message: `${group.name} issued to Store.` });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ─── QC-REJECTED ORDER: REWORK / REPAIR DECISION ───────────────────────────────
 // A QC_Rejected order sits with reworkDecision='Pending' (BOM/R&D UI hidden)
 // until Production explicitly picks one of these two paths.
@@ -498,6 +676,9 @@ export const completeRepair = async (req, res) => {
 
 export const receiveMaterialInProduction = async (req, res) => {
   try {
+    if (!HEAD_ROLES.includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Only a Production Head can confirm material receipt.' });
+    }
     const { materialCode, receivedQuantity } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
@@ -737,7 +918,7 @@ export const addMaterialDemand = async (req, res) => {
 export const returnMaterialToStore = async (req, res) => {
   try {
     // 🚨 Added returnType ('Excess' or 'Defect') from the production client interface
-    const { materialCode, returnQuantity, reason, returnType } = req.body;
+    const { materialCode, returnQuantity, reason, returnType, leftoverAmountValue, leftoverAmountUnit } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
 
@@ -767,6 +948,39 @@ export const returnMaterialToStore = async (req, res) => {
       });
     }
 
+    // Sheet Metal plan-driven demands (demand.sheetMetalPlanId set) carry no
+    // per-cut bomDimensions of their own (Store shipped whole catalog
+    // sheets, not a specific cut — see rdController.js's WORKFLOW 2), so
+    // there's nothing meaningful to snapshot into bomDimensions below.
+    // Instead Production measures the REAL leftover after cutting and enters
+    // it here — an area (value + the demand's own locked unit), converted
+    // server-side into the same {thickness, width, length} shape a catalog
+    // dimensionVariant uses, exactly mirroring how Store's own outbound
+    // leftover entry already derives it (transferFabricationMaterialToProduction).
+    // Required for this demand type — without it there's no dimension key to
+    // credit stock against on Accept (see confirmReturn).
+    let leftoverValues = null;
+    if (demand.sheetMetalPlanId) {
+      const areaMm2 = toMm2(leftoverAmountValue, leftoverAmountUnit);
+      if (!areaMm2) {
+        return res.status(400).json({ success: false, message: 'A measured leftover area is required to return sheet metal material.' });
+      }
+      const sourceItem = await Item.findOne({ code: demand.sourceItemCode || materialCode, companyId }).lean();
+      const sourceVariant = (sourceItem?.dimensionVariants || []).find(v => String(v._id) === String(demand.dimensionVariantId));
+      if (!sourceVariant) {
+        return res.status(400).json({ success: false, message: 'Could not resolve the original catalog sheet size for this demand.' });
+      }
+      const width = Number(sourceVariant.values?.width) || 0;
+      if (!width) {
+        return res.status(400).json({ success: false, message: 'The original catalog sheet has no width recorded — cannot derive leftover dimensions.' });
+      }
+      leftoverValues = {
+        thickness: sourceVariant.values?.thickness,
+        width,
+        length: Math.round((areaMm2 / width) * 1000) / 1000,
+      };
+    }
+
     // ✅ Increment the specific quantitative lock field instead of altering demand.status
     demand.returnPendingQuantity = (demand.returnPendingQuantity || 0) + retQty;
     await order.save();
@@ -780,6 +994,8 @@ export const returnMaterialToStore = async (req, res) => {
       sourceItemCode: demand.sourceItemCode || demand.materialCode,
       fabricationCategory: demand.fabricationCategory || '',
       bomDimensions: demand.bomDimensions || null,
+      leftoverValues,
+      isSheetMetalPlanReturn: !!demand.sheetMetalPlanId,
       materialName: demand.materialName,
       quantityReturned: retQty,
       unit: demand.unit,
