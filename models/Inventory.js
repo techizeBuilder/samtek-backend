@@ -225,6 +225,17 @@ const itemSchema = new mongoose.Schema({
     max: 100,
     default: null
   },
+  // Also set from Company Admin > Pricing Value. The Sales Order Form's Bill
+  // Amt for this item (when it's a Machine billed against its BOM) must
+  // exceed the BOM's per-unit material cost by more than this percent —
+  // replaces what used to be a hardcoded 10% everywhere. null/unset is
+  // treated as 10 (the old hardcoded default) by itemPricingService.js.
+  billAmountPercent: {
+    type: Number,
+    min: 0,
+    max: 1000,
+    default: 10
+  },
   // Tracks whether stdCost/purchaseCost/salePrice/mrp are still R&D's manual
   // guess, or have been auto-computed from a real BOM roll-up / purchase
   // price. See server/services/itemPricingService.js.

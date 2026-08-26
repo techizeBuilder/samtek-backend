@@ -1,6 +1,7 @@
 import express from "express";
 import { taskUpload } from "../middleware/taskUpload.js";
 import { authenticateToken, authorizeRoles } from "../middleware/auth.js";
+import { checkPermission } from "../middleware/permissions.js";
 
 // Import standard task controllers
 import {
@@ -43,12 +44,26 @@ const DEPT_HEADS = [
 // Ensures EVERY route below requires a valid login token
 router.use(authenticateToken);
 
+// HR-Admin / Company Admin are the only roles with a "Task Management"
+// checkbox in roleModulesConfig.js (hrms.taskManagement) — every other Dept
+// Head / Top Admin role here has no catalog entry for it, so they keep the
+// existing role-based access below unchanged. For HR-Admin/Company Admin,
+// also enforce their saved add/delete checkbox on top of the role check.
+const taskManagementAdd = checkPermission("hrms", "taskManagement", "add");
+const taskManagementDelete = checkPermission("hrms", "taskManagement", "delete");
+const gateHrmsRoles = (permissionMiddleware) => (req, res, next) => {
+  if (req.user?.role === 'HR-Admin' || req.user?.role === 'Company Admin') {
+    return permissionMiddleware(req, res, next);
+  }
+  next();
+};
+
 // --- 3. STRICT ROUTES (Protected by authorizeRoles) ---
 // Both Top Admins and Dept Heads need to be able to create tasks
-router.post("/create", authorizeRoles(...TOP_ADMINS, ...DEPT_HEADS), taskUpload.single("file"), createTask);
+router.post("/create", authorizeRoles(...TOP_ADMINS, ...DEPT_HEADS), gateHrmsRoles(taskManagementAdd), taskUpload.single("file"), createTask);
 
 // Only Top Admins and Dept Heads should be allowed to delete a task
-router.delete("/delete/:taskId", authorizeRoles(...TOP_ADMINS, ...DEPT_HEADS), deleteTask);
+router.delete("/delete/:taskId", authorizeRoles(...TOP_ADMINS, ...DEPT_HEADS), gateHrmsRoles(taskManagementDelete), deleteTask);
 
 
 // --- 4. DYNAMIC ROUTES (Protected by the Controller) ---

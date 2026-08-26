@@ -3,7 +3,7 @@
 import { Item } from '../models/Inventory.js';
 import { reapplyItemPricingFormula } from '../services/itemPricingService.js';
 
-const PRICING_FIELDS = 'code name category subCategory unit costSource stdCost purchaseCost mrp salePrice profitPercent discountPercent';
+const PRICING_FIELDS = 'code name category subCategory unit costSource stdCost purchaseCost mrp salePrice profitPercent discountPercent billAmountPercent';
 
 // Same pool as the "Product / Service Required" dropdown in Add Lead (step 2)
 // — see salesController.js's getSalespersonItems, which forces type:'Product'
@@ -68,7 +68,7 @@ export const updatePricingItem = async (req, res) => {
     }
 
     const { id } = req.params;
-    const { profitPercent, discountPercent } = req.body;
+    const { profitPercent, discountPercent, billAmountPercent } = req.body;
 
     const item = await Item.findOne({ _id: id, store: req.user.companyId, ...sellableItemFilter() });
     if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
@@ -76,6 +76,10 @@ export const updatePricingItem = async (req, res) => {
     const toPercent = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
     if (profitPercent !== undefined) item.profitPercent = toPercent(profitPercent);
     if (discountPercent !== undefined) item.discountPercent = toPercent(discountPercent);
+    if (billAmountPercent !== undefined) {
+      const pct = toPercent(billAmountPercent);
+      item.billAmountPercent = pct === null ? 10 : pct;
+    }
     await item.save();
 
     await reapplyItemPricingFormula(item._id);

@@ -12,6 +12,7 @@ import {
   notesCrud,
   dispatchChecklistCrud,
   leadRejectReasonsCrud,
+  salesChecklistCrud,
   quotationNumberSettingsCrud,
   hrmsDocumentTypesCrud,
   rolesCrud,
@@ -59,6 +60,12 @@ router.get('/lead-reject-reasons', leadRejectReasonsCrud.list);
 router.post('/lead-reject-reasons', leadRejectReasonsCrud.add);
 router.put('/lead-reject-reasons/:id', leadRejectReasonsCrud.update);
 router.delete('/lead-reject-reasons/:id', leadRejectReasonsCrud.remove);
+
+// ─── Sales Checklist (Deal Won commitments, verified by Service team) ────────
+router.get('/sales-checklist', salesChecklistCrud.list);
+router.post('/sales-checklist', salesChecklistCrud.add);
+router.put('/sales-checklist/:id', salesChecklistCrud.update);
+router.delete('/sales-checklist/:id', salesChecklistCrud.remove);
 
 // ─── Terms & Conditions ───────────────────────────────────────────────────────
 router.get('/terms', termsCrud.list);

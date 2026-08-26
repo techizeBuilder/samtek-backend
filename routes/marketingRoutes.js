@@ -43,6 +43,23 @@ const marketingReportsView = checkPermission('marketing', 'reports', 'view');
 const marketingAuditLogsView = checkPermission('marketing', 'auditLogs', 'view');
 const marketingNotificationsView = checkPermission('marketing', 'notifications', 'view');
 
+const marketingExpensesView = checkPermission('marketing', 'expenses', 'view');
+const marketingExpensesAdd = checkPermission('marketing', 'expenses', 'add');
+const marketingExpensesEdit = checkPermission('marketing', 'expenses', 'edit');
+const marketingExpensesDelete = checkPermission('marketing', 'expenses', 'delete');
+
+const marketingEventFlyerView = checkPermission('marketing', 'eventFlyer', 'view');
+const marketingEventFlyerAdd = checkPermission('marketing', 'eventFlyer', 'add');
+const marketingEventFlyerEdit = checkPermission('marketing', 'eventFlyer', 'edit');
+const marketingEventFlyerDelete = checkPermission('marketing', 'eventFlyer', 'delete');
+
+// Marketing-side of the Sales<->Marketing content request workflow only —
+// createRequest/getMyRequests/getMatchingAssets below are called from the
+// Sales side (Sales roles have no 'marketing' permissions entry), so they
+// stay ungated to avoid 403'ing Sales users.
+const marketingSalesRequestsView = checkPermission('marketing', 'salesRequests', 'view');
+const marketingSalesRequestsEdit = checkPermission('marketing', 'salesRequests', 'edit');
+
 // Dashboard — no 'dashboard' key exists in the marketing module's features
 // array (roleModulesConfig.js), so no grantable feature to gate this on.
 // Left as authenticateToken-only.
@@ -75,16 +92,16 @@ router.post('/items/:id/media', marketingUploadAdd, marketingUpload.fields([
   { name: 'brochure', maxCount: 1 },
 ]), uploadItemMedia);
 
-// Content Requests (Sales ↔ Marketing) — no matching feature key in the
-// marketing module's features array (not "library"/"upload"/etc — this is a
-// distinct Sales<->Marketing request workflow). Left ungated pending a
-// product decision on whether/where this should get its own permission key.
+// Content Requests (Sales ↔ Marketing) — creating/viewing-own is the Sales
+// side (no matching feature key for them, left ungated so Sales users don't
+// 403); reviewing all requests and approving/rejecting is the Marketing side,
+// gated under the new 'salesRequests' feature.
 router.post('/requests', createRequest);
 router.get('/requests/my', getMyRequests);
-router.get('/requests', getAllRequests);
-router.get('/requests/:id/matching-assets', getMatchingAssets);
-router.post('/requests/:id/approve', approveRequest);
-router.post('/requests/:id/reject', rejectRequest);
+router.get('/requests', marketingSalesRequestsView, getAllRequests);
+router.get('/requests/:id/matching-assets', marketingSalesRequestsView, getMatchingAssets);
+router.post('/requests/:id/approve', marketingSalesRequestsEdit, approveRequest);
+router.post('/requests/:id/reject', marketingSalesRequestsEdit, rejectRequest);
 
 // Reports, Audit, Notifications
 router.get('/reports', marketingReportsView, getReports);

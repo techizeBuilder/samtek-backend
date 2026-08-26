@@ -1,6 +1,7 @@
 import express from 'express';
 import User from './models/User.js';
 import { generateToken, authenticateToken, authorizeRoles } from './middleware/auth.js';
+import { checkPermission } from './middleware/permissions.js';
 
 import {
   getUsers,
@@ -374,18 +375,33 @@ const verifyToken = authenticateToken;
 // role/permissions change from a non-admin caller, which is the actual
 // privilege-escalation vector this closes.
 const ADMIN_TIER_ROLES = ['Superadmin', 'Super Admin', 'HR-Admin', 'Company Admin'];
+// Superadmin/Super Admin bypass checkPermission automatically; this further
+// restricts HR-Admin/Company Admin to their saved hrms > Employee Management
+// add/delete checkbox instead of every admin-tier role always having both.
+const employeeManagementAdd = checkPermission('hrms', 'employeeManagement', 'add');
+const employeeManagementDelete = checkPermission('hrms', 'employeeManagement', 'delete');
+const employeeManagementEdit = checkPermission('hrms', 'employeeManagement', 'edit');
+// PUT/PATCH /users/:id is also used by Managers (and others) updating their
+// own team, who hold no 'hrms' module at all — only apply the checkbox to
+// HR-Admin/Company Admin, the two roles the catalog actually grants it to.
+const gateEmployeeEdit = (req, res, next) => {
+  if (req.user?.role === 'HR-Admin' || req.user?.role === 'Company Admin') {
+    return employeeManagementEdit(req, res, next);
+  }
+  next();
+};
 
 router.get('/users', verifyToken, getUsers);
 router.get('/users/generate-employee-id', verifyToken, getNextEmployeeId);
 router.get('/users/:id', verifyToken, getUserById);
 // profileUpload.single() parses multipart/form-data so req.body is populated
-router.post('/users', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), profileUpload.single('profilePicture'), createUser);
-router.put('/users/:id', verifyToken, profileUpload.single('profilePicture'), updateUser);
-router.patch('/users/:id', verifyToken, profileUpload.single('profilePicture'), updateUser);
+router.post('/users', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementAdd, profileUpload.single('profilePicture'), createUser);
+router.put('/users/:id', verifyToken, gateEmployeeEdit, profileUpload.single('profilePicture'), updateUser);
+router.patch('/users/:id', verifyToken, gateEmployeeEdit, profileUpload.single('profilePicture'), updateUser);
 router.patch('/users/:id/profile-picture', verifyToken, profileUpload.single('profilePicture'), updateUser);
-router.delete('/users/:id', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), deleteUser);
-router.post('/users/:id/reset-password', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), resetUserPassword);
-router.put('/users/:id/password', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), updateUserPassword);
+router.delete('/users/:id', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementDelete, deleteUser);
+router.post('/users/:id/reset-password', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementEdit, resetUserPassword);
+router.put('/users/:id/password', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementEdit, updateUserPassword);
 
 
 // Settings Routes (Super Admin Only)

@@ -141,6 +141,64 @@ export const checkAnyPermission = (moduleFeaturePairs, action) => {
   };
 };
 
+// Like checkPermission, but for a feature (e.g. 'lms') that's duplicated
+// across most — but not all — modules in roleModulesConfig.js rather than
+// owned by one module. Passes if ANY of the user's assigned modules that
+// actually define this feature key grants the action on it. If NONE of a
+// user's assigned modules even define the feature (e.g. HR-Admin/Company
+// Admin's only module is 'hrms', which has no 'lms' entry because they
+// oversee training company-wide rather than through one department's
+// checkbox), the catalog doesn't offer this checkbox to that role at all —
+// fall through to whatever role-based access the route already enforces.
+export const checkAnyModuleFeature = (featureKey, action) => {
+  return (req, res, next) => {
+    try {
+      const user = req.user;
+
+      if (!user) {
+        return res.status(401).json({
+          message: 'Authentication required',
+          success: false
+        });
+      }
+
+      if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') {
+        return next();
+      }
+
+      const modules = user.permissions?.modules;
+      if (!Array.isArray(modules)) {
+        return next();
+      }
+
+      const relevantFeatures = modules
+        .map((m) => m.features?.find((f) => f.key === featureKey))
+        .filter(Boolean);
+
+      if (relevantFeatures.length === 0) {
+        return next();
+      }
+
+      const hasAccess = relevantFeatures.some((f) => f[action]);
+
+      if (!hasAccess) {
+        return res.status(403).json({
+          message: `Access denied - No ${action} permission for ${featureKey}`,
+          success: false
+        });
+      }
+
+      next();
+    } catch (error) {
+      console.error('Permission check error:', error);
+      res.status(500).json({
+        message: 'Internal server error during permission check',
+        success: false
+      });
+    }
+  };
+};
+
 // Get user modules based on role
 export const getUserModules = (role) => {
   const moduleMap = {

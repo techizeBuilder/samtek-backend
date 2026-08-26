@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import AdminSettings from '../models/AdminSettings.js';
 import GlobalSmtpSettings from '../models/GlobalSmtpSettings.js';
 import { USER_ROLES } from '../shared/schema.js';
@@ -77,6 +78,17 @@ const DEFAULT_DISPATCH_CHECKLIST = [
   'All Parts Included', 'Accessories Included', 'Manual Included', 'Safety Packing Completed'
 ].map((label, i) => ({ label, order: i }));
 
+// Keys match the fields already used on existing Orders' salesChecklist —
+// changing labels/wording here later must never change these keys.
+const DEFAULT_SALES_CHECKLIST = [
+  { key: 'advancePayment', label: 'Advanced Payment Received/Discussed?', valueType: 'number', valueLabel: 'Advanced Amount (INR)', valuePlaceholder: 'Enter amount' },
+  { key: 'installationCharge', label: 'Installation Charges Discussed?', valueType: 'text', valueLabel: 'How much installation charge is agreed?', valuePlaceholder: 'e.g. ₹15,000 / Extra at actual / Included in Deal' },
+  { key: 'warranty', label: 'Warranty Committed?', valueType: 'text', valueLabel: 'Warranty duration & details', valuePlaceholder: 'e.g. 1 Year / 6 months / 2 Years on motor' },
+  { key: 'boardingLodging', label: 'Installation Crew Stay/Food Arranged?', valueType: 'text', valueLabel: 'Boarding & Lodging arrangement details', valuePlaceholder: 'e.g. Under Customer Scope / Hotel by customer' },
+  { key: 'backupGenerator', label: 'Backup Power Support / DG Discussed?', valueType: 'text', valueLabel: 'Generator / Power fluctuation arrangement details', valuePlaceholder: 'e.g. Customer will provide generator for backup' },
+  { key: 'operatorErrorClause', label: 'Customer agreed that damage due to operator mistake is NOT our fault?', valueType: 'none', valueLabel: '', valuePlaceholder: '' },
+].map((item, i) => ({ ...item, order: i }));
+
 // Seeded so quotation numbering keeps working (as "SM-0022") for companies that
 // never touch this new setting — matches the old hardcoded "SM-" prefix.
 const DEFAULT_QUOTATION_NUMBER_SETTINGS = [
@@ -114,6 +126,7 @@ async function getOrCreateSettings(companyId) {
       quotationNotes: DEFAULT_NOTES,
       dispatchChecklist: DEFAULT_DISPATCH_CHECKLIST,
       leadRejectReasons: DEFAULT_LEAD_REJECT_REASONS,
+      salesChecklist: DEFAULT_SALES_CHECKLIST,
       quotationNumberSettings: DEFAULT_QUOTATION_NUMBER_SETTINGS,
       hrmsDocumentTypes: DEFAULT_HRMS_DOCUMENT_TYPES,
       roles: DEFAULT_ROLES,
@@ -129,6 +142,10 @@ async function getOrCreateSettings(companyId) {
     }
     if (!settings.leadRejectReasons || settings.leadRejectReasons.length === 0) {
       settings.leadRejectReasons = DEFAULT_LEAD_REJECT_REASONS;
+      changed = true;
+    }
+    if (!settings.salesChecklist || settings.salesChecklist.length === 0) {
+      settings.salesChecklist = DEFAULT_SALES_CHECKLIST;
       changed = true;
     }
     if (!settings.quotationNumberSettings || settings.quotationNumberSettings.length === 0) {
@@ -282,6 +299,67 @@ function makeArrayCrud(field) {
     }
   };
 }
+
+// ─── Sales Checklist — bespoke (not the generic factory) because `key` must
+// be server-generated once at creation and is never editable afterwards,
+// so a later label rename can't ever disturb already-saved Orders' data.
+export const salesChecklistCrud = {
+  list: async (req, res) => {
+    try {
+      const settings = await getOrCreateSettings(req.user.companyId);
+      res.json({ success: true, data: settings.salesChecklist });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+  add: async (req, res) => {
+    try {
+      const { label, valueType, valueLabel, valuePlaceholder } = req.body;
+      if (!label || !label.trim()) {
+        return res.status(400).json({ success: false, message: 'Label is required' });
+      }
+      const settings = await getOrCreateSettings(req.user.companyId);
+      settings.salesChecklist.push({
+        key: new mongoose.Types.ObjectId().toString(),
+        label: label.trim(),
+        valueType: ['none', 'text', 'number'].includes(valueType) ? valueType : 'text',
+        valueLabel: valueLabel || '',
+        valuePlaceholder: valuePlaceholder || '',
+        order: settings.salesChecklist.length
+      });
+      await settings.save();
+      res.json({ success: true, data: settings.salesChecklist });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+  update: async (req, res) => {
+    try {
+      const settings = await getOrCreateSettings(req.user.companyId);
+      const item = settings.salesChecklist.id(req.params.id);
+      if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
+      const { label, valueType, valueLabel, valuePlaceholder } = req.body; // key intentionally excluded — immutable
+      if (label !== undefined) item.label = label;
+      if (valueType !== undefined && ['none', 'text', 'number'].includes(valueType)) item.valueType = valueType;
+      if (valueLabel !== undefined) item.valueLabel = valueLabel;
+      if (valuePlaceholder !== undefined) item.valuePlaceholder = valuePlaceholder;
+      await settings.save();
+      res.json({ success: true, data: settings.salesChecklist });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+  remove: async (req, res) => {
+    try {
+      const settings = await getOrCreateSettings(req.user.companyId);
+      settings.salesChecklist.pull({ _id: req.params.id });
+      await settings.save();
+      res.json({ success: true, data: settings.salesChecklist });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+};
 
 export const leadStagesCrud   = makeArrayCrud('leadStages');
 export const leadSourcesCrud  = makeArrayCrud('leadSources');

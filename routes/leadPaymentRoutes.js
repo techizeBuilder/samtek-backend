@@ -1,6 +1,6 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
-import { checkPermission } from '../middleware/permissions.js';
+import { checkPermission, checkAnyPermission } from '../middleware/permissions.js';
 import {
   getLeadsForPayment,
   addLeadPayment,
@@ -32,8 +32,10 @@ router.post('/', salesAdd, addLeadPayment);
 // Get all lead payments
 router.get('/', salesView, getLeadPayments);
 
-// Get payment summary for a specific lead
-router.get('/lead/:leadId', salesView, getLeadPaymentSummary);
+// Get payment summary for a specific lead — also readable by Sales (Accounts'
+// own accounts.sales.view stays valid too) since the Sales Order Form auto-
+// fills its Payment Details from here (see OrderFormModal.jsx prefillFromLead).
+router.get('/lead/:leadId', checkAnyPermission([['accounts', 'sales'], ['sales', 'leads']], 'view'), getLeadPaymentSummary);
 
 // Update payment status (verify/reject)
 router.put('/:id/status', salesEdit, updateLeadPaymentStatus);

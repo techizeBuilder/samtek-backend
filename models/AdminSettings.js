@@ -34,6 +34,20 @@ const adminSettingsSchema = new mongoose.Schema({
     order: { type: Number, default: 0 }
   }],
 
+  // Points Sales must declare when marking a lead "Deal Won" (Leads.jsx),
+  // later verified one-by-one by the Service team (DealVerifications.jsx).
+  // `key` is the stable identifier stored under Order.salesChecklist[key] —
+  // set once at creation and never changed by edits, so renaming/reordering
+  // a point here never disturbs already-saved Orders' checklist data.
+  salesChecklist: [{
+    key: { type: String, required: true },
+    label: { type: String, required: true },
+    valueType: { type: String, enum: ['none', 'text', 'number'], default: 'text' },
+    valueLabel: { type: String, default: '' },
+    valuePlaceholder: { type: String, default: '' },
+    order: { type: Number, default: 0 }
+  }],
+
   // ─── Quotation Settings ────────────────────────────────────────
   termsAndConditions: [{
     heading: { type: String, required: true },

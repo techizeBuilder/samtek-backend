@@ -115,9 +115,15 @@ export async function computeBOMMaterialsMrpCost(code, companyId) {
   const machine = await Item.findOne({ code, companyId, productKind: 'Machine' }).lean();
   if (!machine) return { found: false, totalCost: 0, materials: [] };
 
+  // Company Admin > Pricing Value's per-item "Bill Amount %" — the Sales
+  // Order Form's Bill Amt for this machine must exceed BOM cost by more
+  // than this percent. null/unset (item never touched in Pricing Value)
+  // falls back to the old hardcoded 10%.
+  const billAmountPercent = machine.billAmountPercent ?? 10;
+
   const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();
   const activeMaterials = (bom?.materials || []).filter(m => !m.isDiscontinued);
-  if (activeMaterials.length === 0) return { found: false, totalCost: 0, materials: [] };
+  if (activeMaterials.length === 0) return { found: false, totalCost: 0, materials: [], billAmountPercent };
 
   const items = await Item.find({
     companyId,
@@ -137,7 +143,7 @@ export async function computeBOMMaterialsMrpCost(code, companyId) {
   const productionExpense = bom.productionExpense || 0;
   const totalCost = round2(materialsCost + productionCost + productionExpense);
 
-  return { found: true, totalCost, materialsCost: round2(materialsCost), productionCost, productionExpense, materials };
+  return { found: true, totalCost, materialsCost: round2(materialsCost), productionCost, productionExpense, materials, billAmountPercent };
 }
 
 /**

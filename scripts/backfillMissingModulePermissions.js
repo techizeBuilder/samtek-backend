@@ -33,7 +33,7 @@ const ROLE_DEFAULT_MODULE = {
   },
   'QC Head': {
     name: 'quality-control',
-    features: ['dashboard', 'qcJobs', 'qcInspection', 'qcInward', 'qcReports', 'lms'],
+    features: ['dashboard', 'qcJobs', 'qcInspection', 'qcInward', 'lms'],
   },
   'Store Head': {
     name: 'Store',

@@ -1,6 +1,6 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
-import { checkPermission } from '../middleware/permissions.js';
+import { checkPermission, checkAnyPermission } from '../middleware/permissions.js';
 import { deliveryDocsMiddleware } from '../middleware/deliveryDocUpload.js';
 import {
   getDashboard,
@@ -80,15 +80,16 @@ router.put('/dispatch-orders/:id/deliver', activeDispatchesEdit, confirmDelivery
 router.put('/dispatch-orders/:id/close', dispatchHistoryEdit, closeDispatch);
 
 // ── Packing & Dispatch Expenses (shared by Packing + Dispatch roles) ────────
-// NOTE: no matching grantable feature key exists for "expenses" under either
-// the 'packing' or 'dispatches' module in roleModulesConfig.js — left
-// unguarded (authenticateToken only) pending a product decision on where
-// this feature should live in the permissions catalogue.
-router.get('/expenses/categories', getPackagingDispatchExpenseCategories);
-router.get('/expenses/summary', getPackagingDispatchExpenseSummary);
-router.get('/expenses', getPackagingDispatchExpenses);
-router.post('/expenses', createPackagingDispatchExpense);
-router.put('/expenses/:id', updatePackagingDispatchExpense);
-router.delete('/expenses/:id', deletePackagingDispatchExpense);
+const expensesPairs = [['dispatches', 'expenses'], ['packing', 'expenses']];
+const expensesView = checkAnyPermission(expensesPairs, 'view');
+const expensesAdd = checkAnyPermission(expensesPairs, 'add');
+const expensesEdit = checkAnyPermission(expensesPairs, 'edit');
+const expensesDelete = checkAnyPermission(expensesPairs, 'delete');
+router.get('/expenses/categories', expensesView, getPackagingDispatchExpenseCategories);
+router.get('/expenses/summary', expensesView, getPackagingDispatchExpenseSummary);
+router.get('/expenses', expensesView, getPackagingDispatchExpenses);
+router.post('/expenses', expensesAdd, createPackagingDispatchExpense);
+router.put('/expenses/:id', expensesEdit, updatePackagingDispatchExpense);
+router.delete('/expenses/:id', expensesDelete, deletePackagingDispatchExpense);
 
 export default router;

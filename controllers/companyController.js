@@ -15,12 +15,20 @@ const checkCompanyPermission = (user, action) => {
   console.log('Checking company permission for user:', user?.role, 'action:', action);
 
   // Super Admin has all permissions (support both 'Superadmin' and 'Super Admin' variants)
-  if (user?.role === 'Superadmin' || user?.role === 'Super Admin' || user?.role === 'HR-Admin') {
+  if (user?.role === 'Superadmin' || user?.role === 'Super Admin') {
     return true;
   }
-  // Unit Head / Company Admin has all company permissions
-  if (user?.role === 'Unit Head' || user?.role === 'Company Admin') {
+  // Unit Head has all company permissions (separate legacy role, not governed by roleModulesConfig)
+  if (user?.role === 'Unit Head') {
     return true;
+  }
+  // HR-Admin / Company Admin are governed by their saved hrms > My Company
+  // checkbox (roleModulesConfig.js), not an automatic role bypass.
+  if (user?.role === 'HR-Admin' || user?.role === 'Company Admin') {
+    const permAction = action === 'create' ? 'add' : action;
+    const hrmsModule = user?.permissions?.modules?.find(m => (m?.name || '').toLowerCase() === 'hrms');
+    const myCompanyFeature = hrmsModule?.features?.find(f => f.key === 'myCompany');
+    return myCompanyFeature?.[permAction] === true;
   }
   return user?.permissions?.Company?.[action] === true;
 };

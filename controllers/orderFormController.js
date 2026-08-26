@@ -121,7 +121,8 @@ export const upsertOrderForm = async (req, res) => {
     }
 
     // BOM-based minimum Billing Amount — an item's Bill Amount must clear its
-    // own BOM material cost (Σ material MRP × qty) by more than 10%, so a
+    // own BOM material cost (Σ material MRP × qty) by more than that item's
+    // own Bill Amount % (Company Admin > Pricing Value, default 10%), so a
     // sale is never billed at/below what it cost to build. Items with no
     // RDMachine/BOM for their code are skipped entirely — nothing to compare.
     const bomChecks = await Promise.all(
@@ -130,9 +131,10 @@ export const upsertOrderForm = async (req, res) => {
         .map(async (it) => {
           const bom = await computeBOMMaterialsMrpCost(it.mcCode, order.companyId);
           if (!bom.found) return null;
-          const minBillAmount = bom.totalCost * 1.1;
+          const pct = bom.billAmountPercent ?? 10;
+          const minBillAmount = bom.totalCost * (1 + pct / 100);
           if (it.billAmount <= minBillAmount) {
-            return { mcCode: it.mcCode, itemName: it.itemName, bomCost: bom.totalCost, minBillAmount, billAmount: it.billAmount };
+            return { mcCode: it.mcCode, itemName: it.itemName, bomCost: bom.totalCost, minBillAmount, billAmount: it.billAmount, pct };
           }
           return null;
         })
@@ -141,7 +143,7 @@ export const upsertOrderForm = async (req, res) => {
     if (bomFailures.length > 0) {
       return res.status(400).json({
         success: false,
-        message: `Billing Amount must be above 10% of BOM cost for: ${bomFailures.map(f => `${f.itemName || f.mcCode} (min ₹${Math.round(f.minBillAmount).toLocaleString('en-IN')}, BOM cost ₹${Math.round(f.bomCost).toLocaleString('en-IN')})`).join('; ')}`,
+        message: `Billing Amount must be above ${bomFailures.map(f => `${f.pct}%`).join('/')} of BOM cost for: ${bomFailures.map(f => `${f.itemName || f.mcCode} (min ₹${Math.round(f.minBillAmount).toLocaleString('en-IN')}, BOM cost ₹${Math.round(f.bomCost).toLocaleString('en-IN')})`).join('; ')}`,
         bomFailures
       });
     }

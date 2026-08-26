@@ -1,6 +1,6 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
-import { checkPermission } from '../middleware/permissions.js';
+import { checkPermission, checkAnyPermission } from '../middleware/permissions.js';
 import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
   getMachines, createMachine, updateMachine,
@@ -179,20 +179,22 @@ router.get('/production-rnd-requests', approveRequestsView, getRDRequests);
 // Body: { "action": "Approve" } OR { "action": "Reject", "rejectReason": "Incomplete requirements" }
 router.put('/:id/process', approveRequestsEdit, processRDRequest);
 router.get('/production-rnd-requests/:id/review', approveRequestsView, getRDRequestReviewData);
-// New Routes for Dynamic Dropdowns
-// NOTE: master-options (RDMasterOption CRUD) intentionally left WITHOUT
-// checkPermission. Confirmed via frontend (ProductMaster.jsx, MotorMaster.jsx
-// and PlantMaster.jsx all call GET/POST /api/rd/master-options for their own
-// dropdown catalogues) that this single endpoint is shared across three
-// different features (productMaster, motorMaster, plantMaster) with no
-// per-caller distinction available server-side. Gating it under any one of
-// those three would 403 the other two features' legitimately-permissioned
-// users. Needs a product decision (e.g. a shared/common feature key, or
-// splitting the endpoint per caller) rather than a guess.
+// Master-options (RDMasterOption CRUD) is shared across three different
+// features (productMaster, motorMaster, plantMaster — confirmed via frontend:
+// ProductMaster.jsx, MotorMaster.jsx and PlantMaster.jsx all call this same
+// endpoint for their own dropdown catalogues), with no per-caller distinction
+// available server-side. Gated against ANY of the three (same pattern used
+// for Store/R&D's shared inventory endpoints) so a legitimately-permissioned
+// user of any of the three isn't 403'd, while someone with none of them
+// still can't reach it.
+const masterOptionsPairs = [['rnd', 'productMaster'], ['rnd', 'motorMaster'], ['rnd', 'plantMaster']];
+const masterOptionsAdd = checkAnyPermission(masterOptionsPairs, 'add');
+const masterOptionsEdit = checkAnyPermission(masterOptionsPairs, 'edit');
+const masterOptionsDelete = checkAnyPermission(masterOptionsPairs, 'delete');
 router.get('/master-options', getDropdownOptions);
-router.post('/master-options', addDropdownOption);
-router.put('/master-options/:id', updateDropdownOption);
-router.delete('/master-options/:id', deleteDropdownOption);
+router.post('/master-options', masterOptionsAdd, addDropdownOption);
+router.put('/master-options/:id', masterOptionsEdit, updateDropdownOption);
+router.delete('/master-options/:id', masterOptionsDelete, deleteDropdownOption);
 
 // ── Custom Field Templates ───────────────────────────────────────────────────
 // Confirmed Product-Master-only (docs/inventory-product-motor-plant-master.md:
