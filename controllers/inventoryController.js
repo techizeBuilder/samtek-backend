@@ -1227,6 +1227,15 @@ const sanitizeItemData = (data) => {
   if (sanitized.itemProcessType) sanitized.itemProcessType = sanitized.itemProcessType.trim();
   if (sanitized.dimensionVariants && Array.isArray(sanitized.dimensionVariants)) {
     sanitized.dimensionVariants = sanitized.dimensionVariants.map((dv) => ({
+      // Preserve the existing variant's _id when the form round-tripped one
+      // (SimpleInventoryForm.jsx spreads the loaded item's dv, _id included).
+      // Without this, every save minted a brand-new _id for every variant —
+      // silently orphaning anything that had snapshotted the old one
+      // (SheetMetalPlan.dimensionVariantId, RDBOM material lines,
+      // ProductionOrder material demands). Freshly-added variants have no
+      // _id yet, so this key is omitted for them and Mongoose's schema
+      // default (a fresh ObjectId) applies exactly as before.
+      ...(dv._id && mongoose.Types.ObjectId.isValid(dv._id) ? { _id: dv._id } : {}),
       category: dv.category ? String(dv.category).trim() : '',
       values: dv.values && typeof dv.values === 'object' ? dv.values : {},
       designation: dv.designation ? String(dv.designation).trim() : '',
@@ -1235,6 +1244,21 @@ const sanitizeItemData = (data) => {
       weightPerMeterKg: dv.weightPerMeterKg !== undefined && dv.weightPerMeterKg !== null && dv.weightPerMeterKg !== '' ? Number(dv.weightPerMeterKg) : null,
       weightPerPieceKg: dv.weightPerPieceKg !== undefined && dv.weightPerPieceKg !== null && dv.weightPerPieceKg !== '' ? Number(dv.weightPerPieceKg) : null,
       subStock: Number(dv.subStock) || 0,
+      // Material Flow (High/Medium/Low Flow) per-dimension reorder preset —
+      // this map used to silently drop these on every single save (create
+      // AND update), which is why they always read back as blank/0 no
+      // matter what was entered: the object below never carried them
+      // through to what actually got persisted.
+      materialFlow: dv.materialFlow ? String(dv.materialFlow).trim() : '',
+      minStock: Number(dv.minStock) || 0,
+      reorderQty: Number(dv.reorderQty) || 0,
+      // Same drop-on-every-save bug as the 3 fields above, separate concern
+      // (marks a variant as Store-cut/Production-returned leftover stock,
+      // not a real Fabrication Master catalog size — see Inventory.js's
+      // own field comment) — without this, saving the Item via the normal
+      // Edit form silently strips the tag off any leftover variant it
+      // already has, making it indistinguishable from a real catalog size.
+      isLeftover: !!dv.isLeftover,
     }));
   }
   if (sanitized.itemCategories && Array.isArray(sanitized.itemCategories)) {

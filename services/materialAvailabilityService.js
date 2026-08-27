@@ -95,7 +95,7 @@ export async function computeMaterialAvailabilityForOrder(order) {
   const sale = await Sale.findOne({ order: order._id }).lean();
   if (!sale) return { processed: 0, skipped: 0 };
 
-  const stats = { processed: 0, skipped: 0 };
+  const stats = { processed: 0, skipped: 0, errored: 0 };
 
   for (const saleItem of sale.items || []) {
     if (!saleItem.itemRef) { stats.skipped++; continue; }
@@ -108,6 +108,13 @@ export async function computeMaterialAvailabilityForOrder(order) {
 
     const bom = await RDBOM.findOne({ machine: machineItem._id, company: order.companyId }).lean();
     if (!bom || !bom.materials?.length) { stats.skipped++; continue; }
+
+    // Isolated per sale item — one item's data problem (e.g. a stale
+    // dimensionVariantId reference) must never abort every other item's
+    // availability check on the same order. Logged and skipped, same
+    // "never let one bad row sink the whole request" principle
+    // orderFormController.js's own sibling try/catches already follow.
+    try {
 
     const buildQty = Math.max(1, Number(saleItem.quantity) || 1);
     const available = [];
@@ -143,14 +150,20 @@ export async function computeMaterialAvailabilityForOrder(order) {
       const matItem = await Item.findOne({ code: g.itemCode, companyId: order.companyId });
       if (!matItem) continue;
       const variant = (matItem.dimensionVariants || []).find(v => String(v._id) === String(g.dimensionVariantId));
+      // A saved dimensionVariantId can go stale if the Item was re-saved
+      // since (sanitizeItemData regenerates every variant's _id on every
+      // save — see the follow-on doc entry). Skip defensively rather than
+      // attempt a purchase request with no real dimension to resolve
+      // against — this must never abort the rest of the order's items.
+      if (!variant) continue;
       const neededQty = plan.sheetsNeededPerUnit * buildQty;
-      const availableQty = variant?.subStock || 0;
+      const availableQty = variant.subStock || 0;
       if (availableQty >= neededQty) {
         available.push({ code: key, name: g.itemName, neededQty, availableQty, unit: 'Pieces' });
       } else {
         const shortfallQty = neededQty - availableQty;
         const purchaseRequestId = await raiseFabricationPurchaseRequest({
-          matItem, dimensionValues: variant?.values || {}, piecesShort: Math.ceil(shortfallQty),
+          matItem, dimensionValues: variant.values, piecesShort: Math.ceil(shortfallQty),
           compositeMaterialCode: key, order,
         });
         needsPurchase.push({ code: key, name: g.itemName, neededQty, availableQty, shortfallQty, unit: 'Pieces', purchaseRequestId });
@@ -188,6 +201,11 @@ export async function computeMaterialAvailabilityForOrder(order) {
       { $set: { 'items.$.materialAvailability': { computedAt: new Date(), available, needsPurchase } } }
     );
     stats.processed++;
+
+    } catch (itemErr) {
+      console.error(`[MaterialAvailability] Error processing sale item ${saleItem._id}:`, itemErr.message);
+      stats.errored++;
+    }
   }
 
   return stats;

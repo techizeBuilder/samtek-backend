@@ -84,6 +84,15 @@ const productMasterDelete = checkPermission('rnd', 'productMaster', 'delete');
 const designApprovalEdit = checkPermission('rnd', 'designApproval', 'edit');
 
 const bomManagementView = checkPermission('rnd', 'bomManagement', 'view');
+// getBOMByMachineCode is a cross-department read-only lookup — Production's
+// Order Management ("Bill of Materials by Part", the View Material dialog)
+// calls it directly by machine code, with no R&D bomManagement grant of its
+// own. Gating it under bomManagementView alone silently 403'd every
+// Production-only user; the request never surfaced as an error because the
+// frontend's .catch() folds any failure into "No BOM found for this
+// machine" — indistinguishable from a genuinely missing BOM. Production
+// only ever needs read access, so production.orders.view is accepted too.
+const bomByCodeView = checkAnyPermission([['rnd', 'bomManagement'], ['production', 'orders']], 'view');
 const bomManagementAdd = checkPermission('rnd', 'bomManagement', 'add');
 const bomManagementEdit = checkPermission('rnd', 'bomManagement', 'edit');
 const bomManagementDelete = checkPermission('rnd', 'bomManagement', 'delete');
@@ -136,7 +145,7 @@ router.put('/machines/:id/reactivate', productMasterEdit, reactivateMachine);
 // ── BOMs ─────────────────────────────────────────────────────────────────────
 router.get('/boms', bomManagementView, getBOMs);
 router.get('/boms/machine/:machineId', bomManagementView, getBOMForMachine);
-router.get('/boms/by-code/:code', bomManagementView, getBOMByMachineCode);
+router.get('/boms/by-code/:code', bomByCodeView, getBOMByMachineCode);
 router.get('/boms/by-code/:code/cost', bomManagementView, getBOMCostByMachineCode);
 router.post('/boms', bomManagementAdd, createBOM);
 router.post('/boms/:id/materials', bomManagementAdd, addMaterial);
