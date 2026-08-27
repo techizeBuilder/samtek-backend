@@ -62,10 +62,12 @@ router.put('/lead-reject-reasons/:id', leadRejectReasonsCrud.update);
 router.delete('/lead-reject-reasons/:id', leadRejectReasonsCrud.remove);
 
 // ─── Sales Checklist (Deal Won commitments, verified by Service team) ────────
+// Platform-wide (Super Admin only edits it — shared by every company), so
+// only the writes are role-gated; every role may still read it (Sales/Service).
 router.get('/sales-checklist', salesChecklistCrud.list);
-router.post('/sales-checklist', salesChecklistCrud.add);
-router.put('/sales-checklist/:id', salesChecklistCrud.update);
-router.delete('/sales-checklist/:id', salesChecklistCrud.remove);
+router.post('/sales-checklist', authorizeRoles('Super Admin'), salesChecklistCrud.add);
+router.put('/sales-checklist/:id', authorizeRoles('Super Admin'), salesChecklistCrud.update);
+router.delete('/sales-checklist/:id', authorizeRoles('Super Admin'), salesChecklistCrud.remove);
 
 // ─── Terms & Conditions ───────────────────────────────────────────────────────
 router.get('/terms', termsCrud.list);

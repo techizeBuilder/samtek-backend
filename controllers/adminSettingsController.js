@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import AdminSettings from '../models/AdminSettings.js';
 import GlobalSmtpSettings from '../models/GlobalSmtpSettings.js';
+import GlobalSalesChecklist from '../models/GlobalSalesChecklist.js';
 import { USER_ROLES } from '../shared/schema.js';
 
 // ─── Default data used when creating new settings ─────────────────────────────
@@ -171,12 +172,26 @@ export const getAdminSettings = async (req, res) => {
     const companyId = req.user.companyId;
     if (!companyId) return res.status(400).json({ success: false, message: 'Company not assigned' });
     const settings = await getOrCreateSettings(companyId);
-    res.json({ success: true, settings });
+    const globalChecklist = await getOrCreateGlobalSalesChecklist();
+    res.json({
+      success: true,
+      settings: { ...settings.toObject(), salesChecklist: globalChecklist.salesChecklist }
+    });
   } catch (err) {
     console.error('getAdminSettings error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ─── Global Sales Checklist (Super Admin only — shared by every company) ──────
+async function getOrCreateGlobalSalesChecklist() {
+  let settings = await GlobalSalesChecklist.findOne();
+  if (!settings) {
+    settings = new GlobalSalesChecklist({ salesChecklist: DEFAULT_SALES_CHECKLIST });
+    await settings.save();
+  }
+  return settings;
+}
 
 // ─── Global SMTP (Super Admin only — shared by every company) ─────────────────
 async function getOrCreateGlobalSmtp() {
@@ -300,13 +315,14 @@ function makeArrayCrud(field) {
   };
 }
 
-// ─── Sales Checklist — bespoke (not the generic factory) because `key` must
-// be server-generated once at creation and is never editable afterwards,
-// so a later label rename can't ever disturb already-saved Orders' data.
+// ─── Sales Checklist — platform-wide (Super Admin manages one shared list;
+// bespoke, not the generic per-company factory, because `key` must be
+// server-generated once at creation and is never editable afterwards, so a
+// later label rename can't ever disturb already-saved Orders' data).
 export const salesChecklistCrud = {
   list: async (req, res) => {
     try {
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalSalesChecklist();
       res.json({ success: true, data: settings.salesChecklist });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
@@ -318,7 +334,7 @@ export const salesChecklistCrud = {
       if (!label || !label.trim()) {
         return res.status(400).json({ success: false, message: 'Label is required' });
       }
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalSalesChecklist();
       settings.salesChecklist.push({
         key: new mongoose.Types.ObjectId().toString(),
         label: label.trim(),
@@ -335,7 +351,7 @@ export const salesChecklistCrud = {
   },
   update: async (req, res) => {
     try {
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalSalesChecklist();
       const item = settings.salesChecklist.id(req.params.id);
       if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
       const { label, valueType, valueLabel, valuePlaceholder } = req.body; // key intentionally excluded — immutable
@@ -351,7 +367,7 @@ export const salesChecklistCrud = {
   },
   remove: async (req, res) => {
     try {
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalSalesChecklist();
       settings.salesChecklist.pull({ _id: req.params.id });
       await settings.save();
       res.json({ success: true, data: settings.salesChecklist });
