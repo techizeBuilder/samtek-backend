@@ -3415,6 +3415,9 @@ export const transferMaterialToProduction = async (req, res) => {
     if (!materialCode || !transferQty || transferQty <= 0) {
       return res.status(400).json({ success: false, message: 'Valid material code and quantity are required.' });
     }
+    if (!issuedTo || !String(issuedTo).trim()) {
+      return res.status(400).json({ success: false, message: 'Issued To (who this is being physically handed to) is required.' });
+    }
 
     // Resolve the demand FIRST — a fabrication demand's materialCode is a
     // synthetic per-cut tracking key (see MaterialDemandSchema's comment),
@@ -3523,6 +3526,9 @@ export const transferSheetMetalPlanToProduction = async (req, res) => {
     }
     const sourceCode = demand.sourceItemCode || materialCode;
     const { issuedTo } = req.body;
+    if (!issuedTo || !String(issuedTo).trim()) {
+      return res.status(400).json({ success: false, message: 'Issued To (who this is being physically handed to) is required.' });
+    }
 
     // Atomic deduction against the specific catalog dimensionVariant's own
     // subStock — same "only deduct if enough stock" gatekeeper pattern as
@@ -3593,6 +3599,9 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
 
     if (!materialCode || !sourceVariantId || !(piecesConsumed > 0) || !(qtyFulfilled > 0)) {
       return res.status(400).json({ success: false, message: 'Material, source variant, stock pieces consumed, and quantity fulfilled are all required.' });
+    }
+    if (!issuedTo || !String(issuedTo).trim()) {
+      return res.status(400).json({ success: false, message: 'Issued To (who this is being physically handed to) is required.' });
     }
 
     const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
@@ -3665,12 +3674,15 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
     sourceVariant.subStock -= piecesConsumed;
 
     // Leftover is now an explicit batch: pieceCount identical leftover
-    // pieces of amountValue+amountUnit size — Store's own count, not
-    // re-derived from piecesConsumed/qtyFulfilled (the bug's other half:
-    // consuming 1 stock piece could still leave more than 1 leftover piece,
-    // or none at all, depending on how it was actually cut).
+    // pieces of the measured length (+ width, for sheets) — Store's own
+    // count, not re-derived from piecesConsumed/qtyFulfilled (the bug's
+    // other half: consuming 1 stock piece could still leave more than 1
+    // leftover piece, or none at all, depending on how it was actually cut).
     let leftoverValuesRecorded = null;
-    if (leftover && Number(leftover.pieceCount) > 0 && Number(leftover.amountValue) > 0 && leftover.amountUnit) {
+    const hasLeftoverInput = leftover && Number(leftover.pieceCount) > 0
+      && Number(leftover.lengthValue) > 0 && leftover.lengthUnit
+      && (!isSheet || (Number(leftover.widthValue) > 0 && leftover.widthUnit));
+    if (hasLeftoverInput) {
       // Only the fields a straight cut can actually change (length, and
       // width for flat sheets) ever come from Store's entry — everything
       // else (thickness, wall thickness, OD, leg length...) is taken
@@ -3678,19 +3690,20 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
       // the request, so a leftover can never end up with a different
       // cross-section than what it was actually cut from.
       const leftoverValues = { ...sourceValuesSnapshot };
+      const lengthMm = toMm(leftover.lengthValue, leftover.lengthUnit);
       if (isSheet) {
-        // Sheet leftovers: Store enters a single area, but the stored shape
-        // still needs width+length individually — width stays the source's
-        // own fixed width, length is derived so width*length reproduces the
-        // entered area exactly (calculateFabricationWeight's sheet formula
-        // is width*length either way, so this is a pure re-encoding, not a
-        // different number).
-        const areaMm2 = toMm2(leftover.amountValue, leftover.amountUnit);
-        const width = Number(sourceValuesSnapshot.width) || 0;
-        if (areaMm2 != null && width > 0) leftoverValues.length = Math.round((areaMm2 / width) * 1000) / 1000;
-      } else {
-        const lengthMm = toMm(leftover.amountValue, leftover.amountUnit);
-        if (lengthMm != null) leftoverValues.length = lengthMm;
+        // Sheet leftovers: a real offcut is a genuine rectangle, so Store
+        // enters actual Length AND Width — never a single Area guessed back
+        // into a length by dividing by the source's own width (that forced
+        // every leftover to keep the original sheet's width, which isn't
+        // what a real irregular offcut looks like).
+        const widthMm = toMm(leftover.widthValue, leftover.widthUnit);
+        if (lengthMm != null && widthMm != null) {
+          leftoverValues.length = lengthMm;
+          leftoverValues.width = widthMm;
+        }
+      } else if (lengthMm != null) {
+        leftoverValues.length = lengthMm;
       }
 
       const existingLeftover = sourceItem.dimensionVariants.find(

@@ -615,17 +615,27 @@ export const createPurchaseRequest = async (req, res) => {
 // always show the exact weight/quantity total that will actually be saved.
 export const previewFabricationTotal = async (req, res) => {
   try {
-    const { itemId, materialCode, lines, allowNonCatalogDimensions } = req.body;
+    const { itemId, materialCode, productName, lines, allowNonCatalogDimensions } = req.body;
     const companyId = req.user.companyId;
 
+    // materialCode isn't always a real catalog code any more — an order-form-
+    // raised fabrication request stores a "{code}#{dimensionVariantId}"
+    // composite there instead (see materialAvailabilityService.js's
+    // raiseFabricationPurchaseRequest), needed so its partial unique index
+    // can dedupe per dimension rather than per item. itemId already carries
+    // the real code for those, but falling back to productName too (same
+    // fallback editFabricationLines/createPurchaseRequest already use) keeps
+    // this endpoint resolving correctly regardless of which id field a
+    // future caller happens to send.
     const searchCriteria = [];
     if (materialCode) searchCriteria.push({ code: materialCode });
     if (itemId) {
       searchCriteria.push({ code: itemId });
       if (/^[0-9a-fA-F]{24}$/.test(itemId)) searchCriteria.push({ _id: itemId });
     }
+    if (productName) searchCriteria.push({ name: { $regex: new RegExp(`^${productName.trim()}$`, 'i') } });
     if (searchCriteria.length === 0) {
-      return res.status(400).json({ success: false, message: 'itemId or materialCode is required' });
+      return res.status(400).json({ success: false, message: 'itemId, materialCode, or productName is required' });
     }
 
     const masterItem = await Item.findOne({ companyId, $or: searchCriteria });

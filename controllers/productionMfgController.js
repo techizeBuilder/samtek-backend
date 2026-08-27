@@ -10,7 +10,8 @@ import { Item } from '../models/Inventory.js'; // Adjust path
 import MaterialIssueLog from '../models/MaterialIssueLog.js';
 import { recalculateItemPricing } from '../services/itemPricingService.js';
 import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimensions } from '../services/fabricationDemandService.js';
-import { toMm2 } from '../utils/unitConversion.js';
+import { toMm } from '../utils/unitConversion.js';
+import { getCategoryByKey } from '../utils/fabricationCategories.js';
 
 import PDFDocument from 'pdfkit';
 
@@ -918,7 +919,10 @@ export const addMaterialDemand = async (req, res) => {
 export const returnMaterialToStore = async (req, res) => {
   try {
     // 🚨 Added returnType ('Excess' or 'Defect') from the production client interface
-    const { materialCode, returnQuantity, reason, returnType, leftoverAmountValue, leftoverAmountUnit } = req.body;
+    const {
+      materialCode, returnQuantity, reason, returnType,
+      leftoverLengthValue, leftoverLengthUnit, leftoverWidthValue, leftoverWidthUnit,
+    } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
 
@@ -948,37 +952,54 @@ export const returnMaterialToStore = async (req, res) => {
       });
     }
 
-    // Sheet Metal plan-driven demands (demand.sheetMetalPlanId set) carry no
-    // per-cut bomDimensions of their own (Store shipped whole catalog
-    // sheets, not a specific cut — see rdController.js's WORKFLOW 2), so
-    // there's nothing meaningful to snapshot into bomDimensions below.
-    // Instead Production measures the REAL leftover after cutting and enters
-    // it here — an area (value + the demand's own locked unit), converted
-    // server-side into the same {thickness, width, length} shape a catalog
-    // dimensionVariant uses, exactly mirroring how Store's own outbound
-    // leftover entry already derives it (transferFabricationMaterialToProduction).
-    // Required for this demand type — without it there's no dimension key to
-    // credit stock against on Accept (see confirmReturn).
+    // "Flat piece" demands (fabricationCategory set, empty bomDimensions) —
+    // both Sheet Metal Plan-driven demands AND the flat length-fabrication
+    // group demands (see bomMaterialGroupsService.js) — carry no per-cut
+    // bomDimensions of their own (Store shipped whole catalog pieces, not a
+    // specific cut). Production does the actual cutting on the floor, so
+    // whatever's genuinely left over has to be measured here, not assumed.
+    // A demand WITH a specific bomDimensions cut is different: Store already
+    // cut it to that exact size before issuing, so any unused whole pieces
+    // Production returns are already exactly that size — confirmReturn's
+    // existing bomDimensions fallback already credits those correctly, no
+    // measurement needed.
+    //
+    // Sheet metal needs a real Length AND Width (a laser-cut offcut is a
+    // genuine rectangle, not just a number) — thickness is inherited from
+    // the source catalog variant, never re-entered. Non-sheet fabrication
+    // (perMeter categories) needs only a Length; every other physical
+    // property (cross-section fields, etc.) is inherited from the source
+    // variant, same pattern Store's own outbound leftover entry already uses
+    // (transferFabricationMaterialToProduction). Required for this demand
+    // type — without it there's no dimension key to credit stock against on
+    // Accept (see confirmReturn).
     let leftoverValues = null;
-    if (demand.sheetMetalPlanId) {
-      const areaMm2 = toMm2(leftoverAmountValue, leftoverAmountUnit);
-      if (!areaMm2) {
-        return res.status(400).json({ success: false, message: 'A measured leftover area is required to return sheet metal material.' });
-      }
+    const isFlatPieceDemand = !!demand.fabricationCategory
+      && (!demand.bomDimensions || Object.keys(demand.bomDimensions).length === 0);
+    if (isFlatPieceDemand) {
+      const category = getCategoryByKey(demand.fabricationCategory);
+      const isSheet = category?.calcType === 'sheet';
+
       const sourceItem = await Item.findOne({ code: demand.sourceItemCode || materialCode, companyId }).lean();
       const sourceVariant = (sourceItem?.dimensionVariants || []).find(v => String(v._id) === String(demand.dimensionVariantId));
       if (!sourceVariant) {
-        return res.status(400).json({ success: false, message: 'Could not resolve the original catalog sheet size for this demand.' });
+        return res.status(400).json({ success: false, message: 'Could not resolve the original catalog size this demand was cut from.' });
       }
-      const width = Number(sourceVariant.values?.width) || 0;
-      if (!width) {
-        return res.status(400).json({ success: false, message: 'The original catalog sheet has no width recorded — cannot derive leftover dimensions.' });
+
+      const lengthMm = toMm(leftoverLengthValue, leftoverLengthUnit);
+      if (!lengthMm) {
+        return res.status(400).json({ success: false, message: 'A measured leftover length is required to return this fabrication material.' });
       }
-      leftoverValues = {
-        thickness: sourceVariant.values?.thickness,
-        width,
-        length: Math.round((areaMm2 / width) * 1000) / 1000,
-      };
+
+      if (isSheet) {
+        const widthMm = toMm(leftoverWidthValue, leftoverWidthUnit);
+        if (!widthMm) {
+          return res.status(400).json({ success: false, message: 'A measured leftover width is required to return sheet metal material.' });
+        }
+        leftoverValues = { thickness: sourceVariant.values?.thickness, width: widthMm, length: lengthMm };
+      } else {
+        leftoverValues = { ...(sourceVariant.values || {}), length: lengthMm };
+      }
     }
 
     // ✅ Increment the specific quantitative lock field instead of altering demand.status

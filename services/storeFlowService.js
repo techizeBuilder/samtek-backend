@@ -102,7 +102,20 @@ export function productTypeForItem(invItem) {
 // Ensure a Sale exists for the order (Store's internal placeholder if Accounts
 // hasn't invoiced yet), with sale.items built from Order.products and each
 // item's itemRef backfilled. Returns the (saved) Sale document.
+//
+// Populates products.product defensively rather than trusting the caller to
+// have done it — updateOrderStoreInfo's own `Order.findById(...).populate(
+// 'products.product')` always has, but upsertOrderForm's auto-check-on-submit
+// path (autoCheckAllOrderItems -> here) fetches `order` with a bare
+// `Order.findById`, so `p.product` was still a raw ObjectId here and every
+// item silently became "Unknown Product" the moment that path shipped.
+// document.populate() is a safe no-op on an already-populated path, so this
+// costs nothing on the already-correct caller.
 export async function ensureSaleForOrder(order, user) {
+  if (order.products?.length && !order.populated('products.product')) {
+    await order.populate('products.product');
+  }
+
   let sale = await Sale.findOne({ order: order._id });
   let isNewSale = false;
 
