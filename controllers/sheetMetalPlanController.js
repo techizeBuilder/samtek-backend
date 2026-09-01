@@ -38,13 +38,17 @@ function sheetMetalGroupsFromBOM(bom) {
   return Array.from(groups.values());
 }
 
+// Returns the catalog sheet's own real size, not just its area — needed by
+// saveSheetMetalPlan to check each entered sheet entry actually fits within
+// one physical catalog sheet (an area-only check can't catch a piece that's
+// too long in one dimension but narrow enough overall to pass on area alone).
 function sheetAreaFromItem(matItem, dimensionVariantId) {
   const variant = (matItem?.dimensionVariants || []).find(v => String(v._id) === String(dimensionVariantId));
   if (!variant) return null;
-  const width = Number(variant.values?.width) || 0;
-  const length = Number(variant.values?.length) || 0;
-  if (!width || !length) return null;
-  return width * length;
+  const widthMm = Number(variant.values?.width) || 0;
+  const lengthMm = Number(variant.values?.length) || 0;
+  if (!widthMm || !lengthMm) return null;
+  return { widthMm, lengthMm, areaMm2: widthMm * lengthMm };
 }
 
 async function sheetAreaForVariant(itemCode, dimensionVariantId, companyId) {
@@ -72,13 +76,25 @@ export const getSheetMetalGroups = async (req, res) => {
 
     const data = await Promise.all(groups.map(async (g) => {
       const matItem = await Item.findOne({ code: g.itemCode, companyId: req.user.companyId, productKind: null }).lean();
-      const sheetAreaMm2 = sheetAreaFromItem(matItem, g.dimensionVariantId);
+      const catalogSheet = sheetAreaFromItem(matItem, g.dimensionVariantId);
       const existingPlan = planByKey.get(`${g.itemCode}#${g.dimensionVariantId}`) || null;
       const breakdown = (existingPlan && matItem) ? computeSheetMetalPlanCostBreakdown(existingPlan, matItem) : null;
       return {
         ...g,
-        sheetAreaMm2,
+        sheetAreaMm2: catalogSheet?.areaMm2 ?? null,
+        // The catalog sheet's own real Length/Width — lets the modal check
+        // each entered sheet entry fits within one physical sheet before
+        // even hitting Save (server re-validates authoritatively regardless).
+        catalogLengthMm: catalogSheet?.lengthMm ?? null,
+        catalogWidthMm: catalogSheet?.widthMm ?? null,
         existingPlan,
+        // The material's own configured Used Unit — for a sheet_plate item
+        // this is itself an area unit (e.g. "Centimeter Square"), see
+        // Inventory.js's `unit` field. BOMCreationTab.jsx displays every
+        // area figure on this group's card in THIS unit consistently,
+        // instead of auto-picking mm²/m² per figure (which could show four
+        // different units on the same card).
+        unit: matItem?.unit || null,
         scrapAreaMm2: breakdown?.scrapAreaMm2 ?? null,
         scrapCost: breakdown?.scrapCost ?? null,
         sheetCost: breakdown?.sheetCost ?? null,
@@ -116,20 +132,15 @@ export const getSheetMetalPlans = async (req, res) => {
 // advisory only (per the client's explicit resolution) — never blocks save.
 export const saveSheetMetalPlan = async (req, res) => {
   try {
-    const { itemCode, dimensionVariantId, plannedLengthValue, plannedLengthUnit, plannedWidthValue, plannedWidthUnit, laserFileUrl, laserFileName } = req.body;
+    const { itemCode, dimensionVariantId, sheets, laserFileUrl, laserFileName } = req.body;
     if (!itemCode || !dimensionVariantId) {
       return res.status(400).json({ success: false, message: 'itemCode and dimensionVariantId are required' });
     }
-
-    // Length and Width are entered separately (each its own unit, e.g. cm/
-    // inch) — area is NEVER accepted directly from the client, only ever
-    // derived here from these two real dimensions, mm as the base unit, same
-    // convention as every other fabrication dimension in this codebase (see
-    // unitConversion.js / fabricationCategories.js's sheet_plate category).
-    const lengthMm = toMm(plannedLengthValue, plannedLengthUnit);
-    const widthMm = toMm(plannedWidthValue, plannedWidthUnit);
-    if (lengthMm == null || widthMm == null) {
-      return res.status(400).json({ success: false, message: 'A valid planned Length and Width (each with a unit) are required.' });
+    if (!Array.isArray(sheets) || sheets.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one sheet is required.' });
+    }
+    if (!laserFileUrl) {
+      return res.status(400).json({ success: false, message: 'A laser cutting file is required to save this plan.' });
     }
 
     const bom = await RDBOM.findOne({ _id: req.params.bomId, company: req.user.companyId });
@@ -141,16 +152,43 @@ export const saveSheetMetalPlan = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No sheet-metal raw material line on this BOM matches that item + dimension.' });
     }
 
-    const sheetAreaMm2 = await sheetAreaForVariant(itemCode, dimensionVariantId, req.user.companyId);
-    if (!sheetAreaMm2) {
+    const catalogSheet = await sheetAreaForVariant(itemCode, dimensionVariantId, req.user.companyId);
+    if (!catalogSheet) {
       return res.status(400).json({ success: false, message: 'Could not resolve this catalog sheet size (missing width/length).' });
     }
+    const { lengthMm: catalogLengthMm, widthMm: catalogWidthMm, areaMm2: sheetAreaMm2 } = catalogSheet;
 
-    // The laser-cutting area (this plan's own real layout) checked against
-    // ONE catalog sheet's own area — how many whole sheets Store needs to
-    // transfer per unit of the machine.
-    const plannedAreaMm2 = lengthMm * widthMm;
-    const sheetsNeededPerUnit = Math.ceil(plannedAreaMm2 / sheetAreaMm2);
+    // Each entry is one physical catalog sheet actually purchased — its own
+    // cutting layout can never be bigger than that one real sheet. Length
+    // and Width are entered separately (each its own unit, e.g. cm/inch) —
+    // area is NEVER accepted directly from the client, only ever derived
+    // here, mm as the base unit, same convention as every other fabrication
+    // dimension in this codebase (see unitConversion.js /
+    // fabricationCategories.js's sheet_plate category).
+    const resolvedSheets = [];
+    let plannedAreaMm2 = 0;
+    for (let i = 0; i < sheets.length; i++) {
+      const s = sheets[i] || {};
+      const lengthMm = toMm(s.lengthValue, s.lengthUnit);
+      const widthMm = toMm(s.widthValue, s.widthUnit);
+      if (lengthMm == null || widthMm == null) {
+        return res.status(400).json({ success: false, message: `Sheet ${i + 1}: a valid Length and Width (each with a unit) are required.` });
+      }
+      const fits = (lengthMm <= catalogLengthMm && widthMm <= catalogWidthMm)
+        || (lengthMm <= catalogWidthMm && widthMm <= catalogLengthMm);
+      if (!fits) {
+        return res.status(400).json({
+          success: false,
+          message: `Sheet ${i + 1}: ${Math.round(lengthMm)}mm × ${Math.round(widthMm)}mm doesn't fit within this item's catalog sheet size (${Math.round(catalogLengthMm)}mm × ${Math.round(catalogWidthMm)}mm).`,
+        });
+      }
+      resolvedSheets.push({
+        lengthValue: Number(s.lengthValue), lengthUnit: s.lengthUnit,
+        widthValue: Number(s.widthValue), widthUnit: s.widthUnit,
+      });
+      plannedAreaMm2 += lengthMm * widthMm;
+    }
+    const sheetsNeededPerUnit = resolvedSheets.length;
 
     const plan = await SheetMetalPlan.findOneAndUpdate(
       { bom: bom._id, itemCode, dimensionVariantId, company: req.user.companyId },
@@ -159,10 +197,7 @@ export const saveSheetMetalPlan = async (req, res) => {
           itemName: group.itemName,
           materialGrade: group.materialGrade,
           requiredAreaMm2: group.requiredAreaMm2,
-          plannedLengthValue: Number(plannedLengthValue),
-          plannedLengthUnit,
-          plannedWidthValue: Number(plannedWidthValue),
-          plannedWidthUnit,
+          sheets: resolvedSheets,
           plannedAreaMm2,
           sheetAreaMm2,
           sheetsNeededPerUnit,

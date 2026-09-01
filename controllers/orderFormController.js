@@ -5,7 +5,7 @@ import Lead from '../models/Lead.js';
 import Customer from '../models/Customer.js';
 import notificationService from '../services/notificationService.js';
 import { syncOrderItemsFromForm, autoCheckAllOrderItems } from '../services/storeFlowService.js';
-import { computeBOMMaterialsMrpCost } from '../services/itemPricingService.js';
+import { getMachineBillingBOMCost } from '../services/itemPricingService.js';
 import { computeMaterialAvailabilityForOrder } from '../services/materialAvailabilityService.js';
 
 const isSuperadmin = (role) => role === 'Superadmin' || role === 'Super Admin';
@@ -122,15 +122,17 @@ export const upsertOrderForm = async (req, res) => {
     }
 
     // BOM-based minimum Billing Amount — an item's Bill Amount must clear its
-    // own BOM material cost (Σ material MRP × qty) by more than that item's
-    // own Bill Amount % (Company Admin > Pricing Value, default 10%), so a
-    // sale is never billed at/below what it cost to build. Items with no
-    // RDMachine/BOM for their code are skipped entirely — nothing to compare.
+    // own real BOM cost (Item.stdCost — the same figure BOM Management's own
+    // card shows, fetched not recalculated, see getMachineBillingBOMCost) by
+    // more than that item's own Bill Amount % (Company Admin > Pricing
+    // Value, default 10%), so a sale is never billed at/below what it cost
+    // to build. Items with no BOM-derived cost yet for their code are
+    // skipped entirely — nothing to compare.
     const bomChecks = await Promise.all(
       cleanItems
         .filter(it => !it.hiddenCharge && it.mcCode)
         .map(async (it) => {
-          const bom = await computeBOMMaterialsMrpCost(it.mcCode, order.companyId);
+          const bom = await getMachineBillingBOMCost(it.mcCode, order.companyId);
           if (!bom.found) return null;
           const pct = bom.billAmountPercent ?? 10;
           const minBillAmount = bom.totalCost * (1 + pct / 100);

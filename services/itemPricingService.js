@@ -55,9 +55,6 @@ export function computeSheetMetalPlanCostBreakdown(plan, matItem) {
   const leftoverValue = (leftoverWeightKg || 0) * (matItem.weightUnitPrice || 0);
   return { sheetCost, scrapAreaMm2, scrapCost, leftoverAreaMm2, leftoverValue };
 }
-function computeSheetMetalPlanCost(plan, matItem) {
-  return computeSheetMetalPlanCostBreakdown(plan, matItem).sheetCost;
-}
 
 /**
  * Resolves a manufacturing Item's cost by recursively walking its RDBOM.
@@ -91,18 +88,24 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
   visiting.add(item._id.toString());
   try {
     let materialsTotal = 0;
-    // Sheet Metal groups (mat.isSheetMetal) are priced once per {code,
-    // dimensionVariantId} group below (real, scrap-inclusive sheet cost),
-    // not per individual BOM line like every other material — the
-    // theoretical per-line area cost these lines would otherwise contribute
-    // is deliberately excluded from materialsTotal.
+    // Sheet Metal lines are priced per-line exactly like any other
+    // fabrication material below (computedWeightPerPieceKg × weightUnitPrice
+    // — this child part's own committed cut, not the whole catalog sheet) —
+    // ONLY the true scrap on top of that (kerf/waste within the cutting
+    // layout, added once per {code, dimensionVariantId} group further down)
+    // gets added. The rest of the whole sheet actually bought — the clean,
+    // uncut leftover — is deliberately NEVER folded into this cost: it's
+    // returned to Store via the Return flow and reused on a future order, so
+    // it was never actually consumed by THIS unit. (Previously this fully
+    // skipped each sheet-metal line's own per-line cost here and substituted
+    // the entire whole-sheet cost per group instead — silently overcharging
+    // every unit for material that mostly ends up back in Store's stock.)
     const sheetMetalGroupKeys = new Set();
     for (const mat of bom.materials) {
       if (mat.isDiscontinued) continue;
 
       if (mat.isSheetMetal && mat.dimensionVariantId) {
         sheetMetalGroupKeys.add(`${mat.code}#${mat.dimensionVariantId}`);
-        continue;
       }
 
       const matItem = await Item.findOne({
@@ -141,12 +144,13 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
       materialsTotal += lineUnitCost * (mat.quantity || 0);
     }
 
-    // Sheet Metal groups — real, scrap-inclusive cost per group (see
-    // computeSheetMetalPlanCost above), added once per {code,
-    // dimensionVariantId} regardless of how many BOM lines share it. A group
-    // with no saved plan yet contributes 0 (matches lockBOM's own gate —
-    // this situation can't reach a locked, production-costed BOM in normal
-    // use, but shouldn't throw here either).
+    // Sheet Metal groups — the true scrap cost only (see
+    // computeSheetMetalPlanCostBreakdown above), added once per {code,
+    // dimensionVariantId} regardless of how many BOM lines share it, on top
+    // of each line's own per-line cost already summed above. A group with no
+    // saved plan yet contributes 0 (matches lockBOM's own gate — this
+    // situation can't reach a locked, production-costed BOM in normal use,
+    // but shouldn't throw here either).
     for (const key of sheetMetalGroupKeys) {
       const [code, dimensionVariantId] = key.split('#');
       const plan = await SheetMetalPlan.findOne({ bom: bom._id, itemCode: code, dimensionVariantId, company: item.companyId }).lean();
@@ -156,7 +160,7 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
         companyId: item.companyId
       }).lean();
       if (!matItem) continue;
-      materialsTotal += computeSheetMetalPlanCost(plan, matItem);
+      materialsTotal += computeSheetMetalPlanCostBreakdown(plan, matItem).scrapCost;
     }
 
     if (!(materialsTotal > 0)) {
@@ -174,49 +178,32 @@ export async function resolveManufacturingItemCost(item, visiting = new Set(), d
 }
 
 /**
- * Computes a finished item's PER-UNIT BOM cost using each material's MRP
- * (not purchaseCost/stdCost), plus the BOM's own productionCost/productionExpense
- * — used by the Sales Order Form to enforce a minimum Billing Amount. Flat
- * sum, no recursive sub-BOM walk: Σ(material.mrp × qty) + productionCost +
- * productionExpense. Returns { found: false } when there's no BOM for this
- * code at all — callers should skip validation entirely in that case (per
- * product requirement: no BOM = no check). This is a PER-UNIT figure — the
- * caller (Sales Order Form) is responsible for multiplying by however many
- * units of this machine are actually being ordered.
+ * The item's own already-computed per-unit BOM cost (Item.stdCost, kept in
+ * sync by recalculateItemPricing/resolveManufacturingItemCost — the exact
+ * same single source of truth BOM Management's card and everywhere else in
+ * the app already uses) plus its Bill Amount %, for the Sales Order Form's
+ * minimum-Billing-Amount check. Previously this re-derived its own separate
+ * "material MRP × qty" total here instead of just reading the real cost —
+ * MRP runs well above actual cost (it has the company's own markup baked
+ * in), so it could diverge sharply from the real BOM cost shown everywhere
+ * else, which is exactly what happened (client correction, 2026-09-02: "we
+ * already have our calculated price in bom [why] would we calculate those
+ * complex things here" — fetch it, don't recompute it). Returns
+ * { found: false } when this code isn't a manufactured item with a real
+ * BOM-derived cost yet (costSource !== 'BOM') — callers should skip
+ * validation entirely in that case, same "no BOM = no check" rule as before.
+ * This is a PER-UNIT figure — the caller (Sales Order Form) is responsible
+ * for multiplying by however many units of this machine are being ordered.
  */
-export async function computeBOMMaterialsMrpCost(code, companyId) {
-  const machine = await Item.findOne({ code, companyId, productKind: 'Machine' }).lean();
-  if (!machine) return { found: false, totalCost: 0, materials: [] };
-
-  // Company Admin > Pricing Value's per-item "Bill Amount %" — the Sales
-  // Order Form's Bill Amt for this machine must exceed BOM cost by more
-  // than this percent. null/unset (item never touched in Pricing Value)
-  // falls back to the old hardcoded 10%.
-  const billAmountPercent = machine.billAmountPercent ?? 10;
-
-  const bom = await RDBOM.findOne({ machine: machine._id, company: companyId }).lean();
-  const activeMaterials = (bom?.materials || []).filter(m => !m.isDiscontinued);
-  if (activeMaterials.length === 0) return { found: false, totalCost: 0, materials: [], billAmountPercent };
-
-  const items = await Item.find({
-    companyId,
-    code: { $in: activeMaterials.map(m => new RegExp(`^${escapeRegex(m.code)}$`, 'i')) }
-  }).select('code mrp').lean();
-  const mrpByCode = new Map(items.map(it => [it.code.toLowerCase(), it.mrp || 0]));
-
-  let materialsCost = 0;
-  const materials = activeMaterials.map(m => {
-    const mrp = mrpByCode.get((m.code || '').toLowerCase()) || 0;
-    const lineTotal = round2(mrp * (m.quantity || 0));
-    materialsCost += lineTotal;
-    return { code: m.code, item: m.item, quantity: m.quantity, unit: m.unit, mrp, lineTotal };
-  });
-
-  const productionCost = bom.productionCost || 0;
-  const productionExpense = bom.productionExpense || 0;
-  const totalCost = round2(materialsCost + productionCost + productionExpense);
-
-  return { found: true, totalCost, materialsCost: round2(materialsCost), productionCost, productionExpense, materials, billAmountPercent };
+export async function getMachineBillingBOMCost(code, companyId) {
+  const machine = await Item.findOne({ code, companyId, productKind: 'Machine' })
+    .select('costSource stdCost billAmountPercent').lean();
+  if (!machine || machine.costSource !== 'BOM' || !(machine.stdCost > 0)) {
+    return { found: false, totalCost: 0 };
+  }
+  // Company Admin > Pricing Value's per-item "Bill Amount %" — null/unset
+  // (item never touched in Pricing Value) falls back to the old hardcoded 10%.
+  return { found: true, totalCost: machine.stdCost, billAmountPercent: machine.billAmountPercent ?? 10 };
 }
 
 /**

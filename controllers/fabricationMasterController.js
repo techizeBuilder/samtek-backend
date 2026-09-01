@@ -181,7 +181,20 @@ export const suggestNextCode = async (req, res) => {
 export const getFabricationItems = async (req, res) => {
   try {
     const companyId = req.user.companyId;
-    const { search, discontinued, category, page, limit } = req.query;
+    const { search, discontinued, category, page, limit, onlyId, unusedOnly } = req.query;
+
+    // "Change" mode — SimpleInventoryForm re-syncing an Inventory Item's
+    // already-linked Fabrication Master entry (e.g. after R&D adds a new
+    // size to it) never offers a different entry to switch to, only the one
+    // it's already using — so this bypasses every other filter below
+    // (including unusedOnly, which would otherwise exclude it, and
+    // discontinued, so a re-sync stays possible even if it's since been
+    // discontinued) and returns exactly that one entry.
+    if (onlyId) {
+      const one = await FabricationMaster.findOne({ _id: onlyId, company: companyId }).lean();
+      return res.json({ success: true, data: one ? [one] : [] });
+    }
+
     const isPaginated = !!(page || limit);
     const query = { company: companyId };
     if (discontinued === 'true') query.isDiscontinued = true;
@@ -192,6 +205,14 @@ export const getFabricationItems = async (req, res) => {
         { itemName: { $regex: search, $options: 'i' } },
         { itemCode: { $regex: search, $options: 'i' } },
       ];
+    }
+    // "Add" mode — SimpleInventoryForm creating a brand-new Item — only
+    // offers entries no Item has already been created from, so R&D can
+    // never accidentally link two different Items to the same catalog
+    // entry (see FabricationItemPicker.jsx's own comment).
+    if (unusedOnly === 'true') {
+      const usedIds = await Item.distinct('fabricationRef', { companyId, fabricationRef: { $ne: null } });
+      if (usedIds.length) query._id = { $nin: usedIds };
     }
 
     if (isPaginated) {

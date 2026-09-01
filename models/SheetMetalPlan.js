@@ -1,5 +1,18 @@
 import mongoose from 'mongoose';
 
+// One entry per physical catalog sheet actually purchased for this plan —
+// e.g. sheet 1 uses the full catalog size, sheet 2 (added separately) is a
+// second whole sheet bought just to cut a much smaller remaining piece from.
+// sheetsNeededPerUnit is simply this array's length now — no longer a
+// division-derived guess assuming everything tiles evenly across identical
+// sheets (see the 2026-08-29 follow-on in sheet-metal-bom-planning.md).
+const SheetEntrySchema = new mongoose.Schema({
+  lengthValue: { type: Number, required: true, min: 0 },
+  lengthUnit: { type: String, required: true },
+  widthValue: { type: Number, required: true, min: 0 },
+  widthUnit: { type: String, required: true },
+});
+
 // One plan per distinct (BOM, sheet-metal Item, catalog dimensionVariant) —
 // R&D's real-world nesting/cutting decision for that sheet size across the
 // WHOLE BOM, replacing the old per-child-part cutting decision Store used to
@@ -25,22 +38,20 @@ const SheetMetalPlanSchema = new mongoose.Schema({
   // shown to R&D before they enter their own planned Length/Width (see the
   // planning screen's own comment) — only used afterward for the advisory warning.
   requiredAreaMm2: { type: Number, default: 0 },
-  // R&D's own real-world nesting/layout entry — the actual Length x Width of
-  // the laser-cutting layout for one unit (each independently unit-picked,
-  // e.g. cm/inch — mm is the base, same convention as Fabrication Master's
-  // own dimension fields, see fabricationCategories.js's sheet_plate
-  // category). This may legitimately exceed requiredAreaMm2 (kerf, margins,
-  // non-tiling part shapes are real) — area is never entered directly, only
-  // ever derived from these two dimensions, server-side.
-  plannedLengthValue: { type: Number, required: true, min: 0 },
-  plannedLengthUnit: { type: String, required: true },
-  plannedWidthValue: { type: Number, required: true, min: 0 },
-  plannedWidthUnit: { type: String, required: true },
-  plannedAreaMm2: { type: Number, required: true }, // = plannedLength(mm) x plannedWidth(mm), server-computed
+  // R&D's own real-world nesting/layout entry — one array entry per physical
+  // sheet actually purchased, each with its own Length x Width (how much of
+  // THAT sheet gets used — never entered as a raw area, always derived
+  // server-side same as before). A single entry's own dimensions can never
+  // exceed the catalog sheet's own size (checked server-side, either
+  // orientation) — it represents one real sheet, not a combined layout.
+  sheets: { type: [SheetEntrySchema], required: true },
+  // Sum of every entry's own length(mm) x width(mm), server-computed.
+  plannedAreaMm2: { type: Number, required: true },
   // Snapshot of the catalog variant's own one-sheet area (mm²) at plan-save
   // time — stays stable even if the Item's catalog dimensions are edited later.
   sheetAreaMm2: { type: Number, required: true },
-  // Math.ceil(plannedAreaMm2 / sheetAreaMm2) — whole sheets needed per ONE unit.
+  // sheets.length — a direct count of the physical sheets R&D actually
+  // added, not a division-derived ceiling.
   sheetsNeededPerUnit: { type: Number, required: true, min: 1 },
   // Advisory only (per the client's explicit resolution) — plannedAreaMm2 <
   // requiredAreaMm2 at last save. Never blocks save or BOM lock.
