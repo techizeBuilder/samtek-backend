@@ -333,27 +333,75 @@ export async function applyPricingToItem(item, cost, source, rawPurchaseUnitPric
  * Main entry point — call this whenever a real cost data point becomes
  * available for an Item (production completed, purchase invoice recorded).
  * internalManufacturing wins over purchase when both are set.
+ *
+ * `visiting`/`depth` are internal — always omit them when calling this from
+ * a controller. They exist so a successful update here can cascade "upward"
+ * (see cascadeRecalculateToConsumers below) without ever revisiting the same
+ * item twice or looping forever on a cyclical/very deep BOM graph.
  */
-export async function recalculateItemPricing(item) {
+export async function recalculateItemPricing(item, visiting = new Set(), depth = 0) {
   if (!item.internalManufacturing && !item.purchase) return { updated: false };
+  if (depth > MAX_BOM_DEPTH) return { updated: false };
+  const key = item._id.toString();
+  if (visiting.has(key)) return { updated: false };
+  visiting.add(key);
+
+  let updated = false;
+  let issue = null;
 
   if (item.internalManufacturing) {
-    const { cost, issue } = await resolveManufacturingItemCost(item);
-    if (cost == null) {
+    const resolved = await resolveManufacturingItemCost(item);
+    issue = resolved.issue;
+    if (resolved.cost == null) {
       if (issue && item.costResolutionIssue !== issue) {
         item.costResolutionIssue = issue;
         await item.save();
       }
       return { updated: false, issue };
     }
-    const updated = await applyPricingToItem(item, cost, 'BOM');
-    return { updated };
+    updated = await applyPricingToItem(item, resolved.cost, 'BOM');
+  } else {
+    const { cost, rawPurchaseUnitPrice } = await resolvePurchaseItemCost(item);
+    if (cost == null) return { updated: false };
+    updated = await applyPricingToItem(item, cost, 'Purchase', rawPurchaseUnitPrice);
   }
 
-  const { cost, rawPurchaseUnitPrice } = await resolvePurchaseItemCost(item);
-  if (cost == null) return { updated: false };
-  const updated = await applyPricingToItem(item, cost, 'Purchase', rawPurchaseUnitPrice);
-  return { updated };
+  if (updated) {
+    await cascadeRecalculateToConsumers(item, visiting, depth + 1);
+  }
+  return { updated, issue };
+}
+
+// When an Item's own cost just changed (BOM recompute above, or a fresh
+// purchase price), any OTHER Item that consumes it as a BOM material must
+// have ITS cost recomputed too — a raw material's price moving must ripple
+// up through every sub-assembly/machine that uses it, across every company,
+// not sit unnoticed until someone happens to reopen that specific BOM.
+// Mirrors resolveManufacturingItemCost's downward walk, just upward; shares
+// its caller's `visiting` set so a cycle can't loop forever and a
+// diamond-shaped BOM graph never recomputes the same item twice. Exported
+// separately (not just used internally by recalculateItemPricing above) for
+// the one write site that sets purchaseCost directly via applyPricingToItem
+// instead of going through recalculateItemPricing — see purchaseController.js's
+// updatePurchaseItemCost (Accounts' manual purchase-cost override).
+export async function cascadeRecalculateToConsumers(item, visiting = new Set(), depth = 0) {
+  if (depth > MAX_BOM_DEPTH) return;
+  const dependentBOMs = await RDBOM.find({
+    company: item.companyId,
+    materials: {
+      $elemMatch: {
+        code: { $regex: new RegExp(`^${escapeRegex(item.code)}$`, 'i') },
+        isDiscontinued: { $ne: true }
+      }
+    }
+  }).select('machine').lean();
+
+  for (const bomRef of dependentBOMs) {
+    if (!bomRef.machine) continue;
+    const consumer = await Item.findById(bomRef.machine);
+    if (!consumer || !consumer.internalManufacturing) continue;
+    await recalculateItemPricing(consumer, visiting, depth);
+  }
 }
 
 /**

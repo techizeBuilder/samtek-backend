@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import AdminSettings from '../models/AdminSettings.js';
 import GlobalSmtpSettings from '../models/GlobalSmtpSettings.js';
 import GlobalSalesChecklist from '../models/GlobalSalesChecklist.js';
+import GlobalAdminSettings from '../models/GlobalAdminSettings.js';
 import { USER_ROLES } from '../shared/schema.js';
 
 // ─── Default data used when creating new settings ─────────────────────────────
@@ -172,16 +173,58 @@ export const getAdminSettings = async (req, res) => {
     const companyId = req.user.companyId;
     if (!companyId) return res.status(400).json({ success: false, message: 'Company not assigned' });
     const settings = await getOrCreateSettings(companyId);
+    const globalSettings = await getOrCreateGlobalAdminSettings();
     const globalChecklist = await getOrCreateGlobalSalesChecklist();
     res.json({
       success: true,
-      settings: { ...settings.toObject(), salesChecklist: globalChecklist.salesChecklist }
+      settings: {
+        ...settings.toObject(),
+        leadStages: globalSettings.leadStages,
+        leadSources: globalSettings.leadSources,
+        businessTypes: globalSettings.businessTypes,
+        documentTypes: globalSettings.documentTypes,
+        leadRejectReasons: globalSettings.leadRejectReasons,
+        termsAndConditions: globalSettings.termsAndConditions,
+        additionalCharges: globalSettings.additionalCharges,
+        quotationNotes: globalSettings.quotationNotes,
+        quotationNumberSettings: globalSettings.quotationNumberSettings,
+        dispatchChecklist: globalSettings.dispatchChecklist,
+        hrmsDocumentTypes: globalSettings.hrmsDocumentTypes,
+        roles: globalSettings.roles,
+        salesChecklist: globalChecklist.salesChecklist,
+      }
     });
   } catch (err) {
     console.error('getAdminSettings error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ─── Global Admin Settings — "General" section (Super Admin only — shared
+// by every company: Lead Stages/Sources, Business/Document Types, Reject
+// Reasons, Terms, Charges, Notes, Dispatch Checklist, Quotation Number
+// Settings, HRMS Document Types, Roles) ─────────────────────────────────────
+async function getOrCreateGlobalAdminSettings() {
+  let settings = await GlobalAdminSettings.findOne();
+  if (!settings) {
+    settings = new GlobalAdminSettings({
+      leadStages: DEFAULT_LEAD_STAGES,
+      leadSources: DEFAULT_LEAD_SOURCES,
+      businessTypes: DEFAULT_BUSINESS_TYPES,
+      documentTypes: DEFAULT_DOCUMENT_TYPES,
+      leadRejectReasons: DEFAULT_LEAD_REJECT_REASONS,
+      termsAndConditions: DEFAULT_TERMS,
+      additionalCharges: DEFAULT_ADDITIONAL_CHARGES,
+      quotationNotes: DEFAULT_NOTES,
+      quotationNumberSettings: DEFAULT_QUOTATION_NUMBER_SETTINGS,
+      dispatchChecklist: DEFAULT_DISPATCH_CHECKLIST,
+      hrmsDocumentTypes: DEFAULT_HRMS_DOCUMENT_TYPES,
+      roles: DEFAULT_ROLES,
+    });
+    await settings.save();
+  }
+  return settings;
+}
 
 // ─── Global Sales Checklist (Super Admin only — shared by every company) ──────
 async function getOrCreateGlobalSalesChecklist() {
@@ -249,13 +292,13 @@ export const deleteGlobalSmtp = async (req, res) => {
   }
 };
 
-// ─── Generic CRUD factory for array fields ────────────────────────────────────
+// ─── Generic CRUD factory for array fields — platform-wide (Super Admin
+// manages one shared list per field, see getOrCreateGlobalAdminSettings) ──────
 function makeArrayCrud(field) {
   return {
     list: async (req, res) => {
       try {
-        const companyId = req.user.companyId;
-        const settings = await getOrCreateSettings(companyId);
+        const settings = await getOrCreateGlobalAdminSettings();
         res.json({ success: true, data: settings[field] });
       } catch (err) {
         res.status(500).json({ success: false, message: err.message });
@@ -263,8 +306,7 @@ function makeArrayCrud(field) {
     },
     add: async (req, res) => {
       try {
-        const companyId = req.user.companyId;
-        const settings = await getOrCreateSettings(companyId);
+        const settings = await getOrCreateGlobalAdminSettings();
         settings[field].push(req.body);
         await settings.save();
         res.json({ success: true, data: settings[field] });
@@ -274,9 +316,8 @@ function makeArrayCrud(field) {
     },
     update: async (req, res) => {
       try {
-        const companyId = req.user.companyId;
         const { id } = req.params;
-        const settings = await getOrCreateSettings(companyId);
+        const settings = await getOrCreateGlobalAdminSettings();
         const item = settings[field].id(id);
         if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
         Object.assign(item, req.body);
@@ -288,9 +329,8 @@ function makeArrayCrud(field) {
     },
     remove: async (req, res) => {
       try {
-        const companyId = req.user.companyId;
         const { id } = req.params;
-        const settings = await getOrCreateSettings(companyId);
+        const settings = await getOrCreateGlobalAdminSettings();
         settings[field].pull({ _id: id });
         await settings.save();
         res.json({ success: true, data: settings[field] });
@@ -300,9 +340,8 @@ function makeArrayCrud(field) {
     },
     reorder: async (req, res) => {
       try {
-        const companyId = req.user.companyId;
         const { orderedIds } = req.body; // array of ids in new order
-        const settings = await getOrCreateSettings(companyId);
+        const settings = await getOrCreateGlobalAdminSettings();
         if (orderedIds && Array.isArray(orderedIds)) {
           settings[field].sort((a, b) => orderedIds.indexOf(a._id.toString()) - orderedIds.indexOf(b._id.toString()));
         }
@@ -393,7 +432,7 @@ export const hrmsDocumentTypesCrud = makeArrayCrud('hrmsDocumentTypes');
 export const rolesCrud = {
   list: async (req, res) => {
     try {
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalAdminSettings();
       res.json({ success: true, data: settings.roles });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
@@ -401,7 +440,7 @@ export const rolesCrud = {
   },
   add: async (req, res) => {
     try {
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalAdminSettings();
       const name = (req.body.name || '').trim();
       if (!name) return res.status(400).json({ success: false, message: 'Role name is required' });
       if (settings.roles.some(r => r.name.toLowerCase() === name.toLowerCase())) {
@@ -416,7 +455,7 @@ export const rolesCrud = {
   },
   update: async (req, res) => {
     try {
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalAdminSettings();
       const role = settings.roles.id(req.params.id);
       if (!role) return res.status(404).json({ success: false, message: 'Role not found' });
       if (role.isBuiltIn) {
@@ -433,7 +472,7 @@ export const rolesCrud = {
   },
   remove: async (req, res) => {
     try {
-      const settings = await getOrCreateSettings(req.user.companyId);
+      const settings = await getOrCreateGlobalAdminSettings();
       const role = settings.roles.id(req.params.id);
       if (!role) return res.status(404).json({ success: false, message: 'Role not found' });
       if (role.isBuiltIn) {

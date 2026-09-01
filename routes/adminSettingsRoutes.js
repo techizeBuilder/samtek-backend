@@ -21,91 +21,98 @@ import {
 const router = express.Router();
 router.use(authenticateToken);
 
+// Every "General" settings section below is platform-wide — one shared list
+// configured by Super Admin, read by every company (see GlobalAdminSettings /
+// GlobalSalesChecklist / GlobalSmtpSettings). Reads stay open to any
+// authenticated role since Sales/Service/etc. all consume these lists; only
+// the writes are Super-Admin-gated.
+const superAdminOnly = authorizeRoles('Super Admin');
+
 // ─── Full settings (read all) ─────────────────────────────────────────────────
 router.get('/', getAdminSettings);
 
 // ─── SMTP (platform-wide, Super Admin only) ───────────────────────────────────
-router.get('/global-smtp', authorizeRoles('Super Admin'), getGlobalSmtp);
-router.post('/global-smtp', authorizeRoles('Super Admin'), addGlobalSmtp);
-router.put('/global-smtp/:id', authorizeRoles('Super Admin'), updateGlobalSmtp);
-router.delete('/global-smtp/:id', authorizeRoles('Super Admin'), deleteGlobalSmtp);
+router.get('/global-smtp', superAdminOnly, getGlobalSmtp);
+router.post('/global-smtp', superAdminOnly, addGlobalSmtp);
+router.put('/global-smtp/:id', superAdminOnly, updateGlobalSmtp);
+router.delete('/global-smtp/:id', superAdminOnly, deleteGlobalSmtp);
 
 // ─── Lead Stages ──────────────────────────────────────────────────────────────
 router.get('/lead-stages', leadStagesCrud.list);
-router.post('/lead-stages', leadStagesCrud.add);
-router.put('/lead-stages/:id', leadStagesCrud.update);
-router.delete('/lead-stages/:id', leadStagesCrud.remove);
-router.post('/lead-stages/reorder', leadStagesCrud.reorder);
+router.post('/lead-stages', superAdminOnly, leadStagesCrud.add);
+router.put('/lead-stages/:id', superAdminOnly, leadStagesCrud.update);
+router.delete('/lead-stages/:id', superAdminOnly, leadStagesCrud.remove);
+router.post('/lead-stages/reorder', superAdminOnly, leadStagesCrud.reorder);
 
 // ─── Lead Sources ─────────────────────────────────────────────────────────────
 router.get('/lead-sources', leadSourcesCrud.list);
-router.post('/lead-sources', leadSourcesCrud.add);
-router.put('/lead-sources/:id', leadSourcesCrud.update);
-router.delete('/lead-sources/:id', leadSourcesCrud.remove);
+router.post('/lead-sources', superAdminOnly, leadSourcesCrud.add);
+router.put('/lead-sources/:id', superAdminOnly, leadSourcesCrud.update);
+router.delete('/lead-sources/:id', superAdminOnly, leadSourcesCrud.remove);
 
 // ─── Business Types ───────────────────────────────────────────────────────────
 router.get('/business-types', businessTypesCrud.list);
-router.post('/business-types', businessTypesCrud.add);
-router.put('/business-types/:id', businessTypesCrud.update);
-router.delete('/business-types/:id', businessTypesCrud.remove);
+router.post('/business-types', superAdminOnly, businessTypesCrud.add);
+router.put('/business-types/:id', superAdminOnly, businessTypesCrud.update);
+router.delete('/business-types/:id', superAdminOnly, businessTypesCrud.remove);
 
 // ─── Document Types ───────────────────────────────────────────────────────────
 router.get('/document-types', documentTypesCrud.list);
-router.post('/document-types', documentTypesCrud.add);
-router.put('/document-types/:id', documentTypesCrud.update);
-router.delete('/document-types/:id', documentTypesCrud.remove);
+router.post('/document-types', superAdminOnly, documentTypesCrud.add);
+router.put('/document-types/:id', superAdminOnly, documentTypesCrud.update);
+router.delete('/document-types/:id', superAdminOnly, documentTypesCrud.remove);
 
 // ─── Lead Reject Reasons ──────────────────────────────────────────────────────
 router.get('/lead-reject-reasons', leadRejectReasonsCrud.list);
-router.post('/lead-reject-reasons', leadRejectReasonsCrud.add);
-router.put('/lead-reject-reasons/:id', leadRejectReasonsCrud.update);
-router.delete('/lead-reject-reasons/:id', leadRejectReasonsCrud.remove);
+router.post('/lead-reject-reasons', superAdminOnly, leadRejectReasonsCrud.add);
+router.put('/lead-reject-reasons/:id', superAdminOnly, leadRejectReasonsCrud.update);
+router.delete('/lead-reject-reasons/:id', superAdminOnly, leadRejectReasonsCrud.remove);
 
 // ─── Sales Checklist (Deal Won commitments, verified by Service team) ────────
-// Platform-wide (Super Admin only edits it — shared by every company), so
-// only the writes are role-gated; every role may still read it (Sales/Service).
 router.get('/sales-checklist', salesChecklistCrud.list);
-router.post('/sales-checklist', authorizeRoles('Super Admin'), salesChecklistCrud.add);
-router.put('/sales-checklist/:id', authorizeRoles('Super Admin'), salesChecklistCrud.update);
-router.delete('/sales-checklist/:id', authorizeRoles('Super Admin'), salesChecklistCrud.remove);
+router.post('/sales-checklist', superAdminOnly, salesChecklistCrud.add);
+router.put('/sales-checklist/:id', superAdminOnly, salesChecklistCrud.update);
+router.delete('/sales-checklist/:id', superAdminOnly, salesChecklistCrud.remove);
 
 // ─── Terms & Conditions ───────────────────────────────────────────────────────
 router.get('/terms', termsCrud.list);
-router.post('/terms', termsCrud.add);
-router.put('/terms/:id', termsCrud.update);
-router.delete('/terms/:id', termsCrud.remove);
+router.post('/terms', superAdminOnly, termsCrud.add);
+router.put('/terms/:id', superAdminOnly, termsCrud.update);
+router.delete('/terms/:id', superAdminOnly, termsCrud.remove);
 
 // ─── Additional Charges ───────────────────────────────────────────────────────
 router.get('/charges', chargesCrud.list);
-router.post('/charges', chargesCrud.add);
-router.put('/charges/:id', chargesCrud.update);
-router.delete('/charges/:id', chargesCrud.remove);
+router.post('/charges', superAdminOnly, chargesCrud.add);
+router.put('/charges/:id', superAdminOnly, chargesCrud.update);
+router.delete('/charges/:id', superAdminOnly, chargesCrud.remove);
 
 // ─── Quotation Notes ──────────────────────────────────────────────────────────
 router.get('/notes', notesCrud.list);
-router.post('/notes', notesCrud.add);
-router.put('/notes/:id', notesCrud.update);
-router.delete('/notes/:id', notesCrud.remove);
+router.post('/notes', superAdminOnly, notesCrud.add);
+router.put('/notes/:id', superAdminOnly, notesCrud.update);
+router.delete('/notes/:id', superAdminOnly, notesCrud.remove);
 
 // ─── Dispatch Checklist ───────────────────────────────────────────────────────
 router.get('/dispatch-checklist', dispatchChecklistCrud.list);
-router.post('/dispatch-checklist', dispatchChecklistCrud.add);
-router.put('/dispatch-checklist/:id', dispatchChecklistCrud.update);
-router.delete('/dispatch-checklist/:id', dispatchChecklistCrud.remove);
+router.post('/dispatch-checklist', superAdminOnly, dispatchChecklistCrud.add);
+router.put('/dispatch-checklist/:id', superAdminOnly, dispatchChecklistCrud.update);
+router.delete('/dispatch-checklist/:id', superAdminOnly, dispatchChecklistCrud.remove);
 
 // ─── Quotation Number Settings ────────────────────────────────────────────────
 router.get('/quotation-number-settings', quotationNumberSettingsCrud.list);
-router.post('/quotation-number-settings', quotationNumberSettingsCrud.add);
-router.put('/quotation-number-settings/:id', quotationNumberSettingsCrud.update);
-router.delete('/quotation-number-settings/:id', quotationNumberSettingsCrud.remove);
+router.post('/quotation-number-settings', superAdminOnly, quotationNumberSettingsCrud.add);
+router.put('/quotation-number-settings/:id', superAdminOnly, quotationNumberSettingsCrud.update);
+router.delete('/quotation-number-settings/:id', superAdminOnly, quotationNumberSettingsCrud.remove);
 
 // ─── HRMS: Upload Document Settings ───────────────────────────────────────────
 router.get('/hrms-document-types', hrmsDocumentTypesCrud.list);
-router.post('/hrms-document-types', hrmsDocumentTypesCrud.add);
-router.put('/hrms-document-types/:id', hrmsDocumentTypesCrud.update);
-router.delete('/hrms-document-types/:id', hrmsDocumentTypesCrud.remove);
+router.post('/hrms-document-types', superAdminOnly, hrmsDocumentTypesCrud.add);
+router.put('/hrms-document-types/:id', superAdminOnly, hrmsDocumentTypesCrud.update);
+router.delete('/hrms-document-types/:id', superAdminOnly, hrmsDocumentTypesCrud.remove);
 
 // ─── HRMS: Role Setting ────────────────────────────────────────────────────────
+// Left with its original broader write access (Super Admin / HR-Admin /
+// Company Admin) — unchanged from before this platform-wide migration.
 const canManageRoles = authorizeRoles('Super Admin', 'HR-Admin', 'Company Admin');
 router.get('/roles', rolesCrud.list);
 router.post('/roles', canManageRoles, rolesCrud.add);
