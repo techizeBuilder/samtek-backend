@@ -189,6 +189,86 @@ Metal tab shows both as separate stat tiles (5 area figures per group: catalog /
 leftover), and the Production Cost card shows both a Scrap Cost and a Leftover Value tile, both folded into
 Total BOM Cost.
 
+## Follow-on (2026-08-29): stdCost was charging the whole sheet, not just what's consumed — corrected
+
+**The bug**: despite the "Scrap costing" section above correctly splitting scrap (red zone, real waste) from
+leftover (green zone, returned to Store and reused on a future order), `resolveManufacturingItemCost` was still
+folding the ENTIRE `sheetCost` (every whole catalog sheet actually bought, leftover included) into `Item.stdCost`
+— not just the red zone. That silently overcharges every unit's Standard Cost/MRP for material that mostly ends
+up back in Store's stock, not actually consumed by that unit. Caught because BOM Management's own Total BOM Cost
+card (`BOMCreationTab.jsx`, unaffected by this bug — it was already right) disagreed sharply with the live
+`Item.stdCost` a production completion had just written (₹10,851.24 on the card vs. ₹16,222.22 on the item, for
+the exact same BOM).
+
+**The fix** — `resolveManufacturingItemCost` (`itemPricingService.js`) no longer skips each sheet-metal line's own
+per-line contribution to `materialsTotal` (removed the `continue` that excluded it); it's priced exactly like any
+other fabrication material (`computedWeightPerPieceKg × weightUnitPrice`, i.e. this child part's own committed
+cut). The per-`{code, dimensionVariantId}` group step afterward now adds only `computeSheetMetalPlanCostBreakdown(...).scrapCost`
+(the red zone) on top — not `sheetCost` (the whole sheet). The now-unused `computeSheetMetalPlanCost` wrapper
+(which just returned `.sheetCost`) was removed. This makes `resolveManufacturingItemCost`'s formula match
+`BOMCreationTab.jsx`'s card exactly: `Σ(every material's own per-line cost, incl. sheet metal) + Σ(scrap cost per
+group) + productionCost + productionExpense` — verified by running the corrected function directly against a real
+BOM and confirming it now returns the same figure the card shows.
+
+`computeSheetMetalPlanCostBreakdown` itself is untouched — `sheetCost`/`scrapAreaMm2`/`scrapCost`/
+`leftoverAreaMm2`/`leftoverValue` are all still computed and returned exactly as before (still used for
+`getSheetMetalGroups`' display figures on the Sheet Metal tab); only which of those fields
+`resolveManufacturingItemCost` actually folds into `Item.stdCost` changed.
+
+## Follow-on (2026-08-31): multiple discrete sheets instead of one combined dimension
+
+**The change**: R&D used to enter ONE combined Length × Width per group, deliberately allowed to exceed one
+catalog sheet's own size — the system then *derived* `sheetsNeededPerUnit = ceil(combinedArea /
+oneCatalogSheetArea)`, assuming the layout tiles evenly across N identical whole sheets. The client wants this
+explicit instead: R&D adds one entry per **physical sheet actually purchased**, each with its own Length ×
+Width (how much of *that specific sheet* gets used) via a "+ Add Sheet" button. Example: sheet 1 = the full
+catalog size (the whole sheet gets used), sheet 2 = a much smaller 200×500 — a second whole sheet is bought,
+but only a small piece is cut from it; the rest is leftover, not scrap. `sheetsNeededPerUnit` is now simply the
+number of entries, not a division-derived guess. **A single entry's own dimensions are blocked (server- and
+client-side) from exceeding the catalog sheet's own size, in either orientation** — it represents one real
+sheet, and can never be bigger than it.
+
+**Why the blast radius stayed small**: an exhaustive search before implementing found that nearly every
+downstream consumer — `rdController.js`'s `lockBOM`/WORKFLOW 2, `productionMfgController.js`'s
+`buildMaterialListGroups`, `materialAvailabilityService.js`'s Tier 2 material-availability check (not
+previously documented here — a real, live consumer, found only via grep), `itemPricingService.js`'s
+`computeSheetMetalPlanCostBreakdown`/`resolveManufacturingItemCost` — only ever reads the **aggregate** fields
+(`sheetsNeededPerUnit`, `plannedAreaMm2`, `sheetAreaMm2`, `requiredAreaMm2`, `dimensionVariantId`, `itemCode`,
+`_id`), never the raw per-dimension inputs directly. `inventoryController.js`'s transfer/return flows don't
+query `SheetMetalPlan` at all (only `demand.sheetMetalPlanId` as a boolean ref). As long as those aggregates
+keep being computed and stored, none of those files needed to change.
+
+**`server/models/SheetMetalPlan.js`** — `plannedLengthValue`/`plannedLengthUnit`/`plannedWidthValue`/
+`plannedWidthUnit` replaced with `sheets: [SheetEntrySchema]` (`{lengthValue, lengthUnit, widthValue,
+widthUnit}` per entry). `plannedAreaMm2`/`sheetAreaMm2`/`sheetsNeededPerUnit` stay as server-computed
+aggregates — same fields, same meaning, just derived from `sheets[]` now (`plannedAreaMm2` = sum of every
+entry's own area, `sheetsNeededPerUnit` = `sheets.length`) instead of one division.
+
+**`sheetMetalPlanController.js`** — `sheetAreaFromItem` now returns `{widthMm, lengthMm, areaMm2}` instead of a
+bare number (both its existing caller and the new per-entry fit-check need the catalog's real length/width, not
+just its area). `saveSheetMetalPlan` validates every entry (`toMm` each value, reject if either fails to parse,
+reject if the entry doesn't fit the catalog sheet in either orientation, naming which sheet number and both
+sizes in the error) before summing into the aggregates and upserting. `getSheetMetalGroups` additionally
+returns `catalogLengthMm`/`catalogWidthMm` per group so the modal can validate live client-side without a
+second round-trip — server stays authoritative regardless.
+
+**`SheetMetalPlanModal.jsx`** — the single Length/Width input pair became a repeatable list (`sheets` array
+state, starts with one blank row), each row showing its own inline fit-check error, with "+ Add Sheet" and a
+per-row remove (✕, hidden when only one row remains — at least one sheet is always required). Everything else
+(laser file upload/requirement, the post-save banner, `formatAreaInUnit` display) is unchanged — those all
+already only depended on the aggregate response fields.
+
+**Migration**: existing `SheetMetalPlan` documents (4 in the real DB at the time — SSS-001 ×2, SHE-001,
+MSS-002) were converted via a one-off script (connect with the real Mongo URI, `$set: {sheets: [{...old
+fields}]}`, `$unset` the 4 old fields, script deleted after running) rather than building permanent dual-shape
+fallback logic into the read path — the new code assumes `sheets[]` is always present, no legacy-shape branches
+anywhere.
+
+**Doc correction while in here**: this doc previously claimed `BOMCreationTab.jsx`'s Sheet Metal tab and the
+Production Cost card show separate Leftover Value tiles — they don't; only a Scrap Cost tile exists today.
+`leftoverAreaMm2`/`leftoverValue` are still returned by `getSheetMetalGroups` but aren't currently rendered
+anywhere in the frontend.
+
 ## Known gap / not built this round
 
 - `computeBOMMaterialsMrpCost` (Sales Order Form BOM floor check) doesn't account for sheet-metal scrap cost —

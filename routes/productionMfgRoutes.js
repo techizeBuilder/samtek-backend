@@ -31,7 +31,14 @@ import {
   decideRepair,
   getRepairJobs,
   startRepair,
-  completeRepair
+  completeRepair,
+  getPartsQC,
+  getPartChecklistRows,
+  savePartChecklist,
+  assignPartTeam,
+  startPart,
+  getFinalChecklist,
+  saveFinalChecklist,
 } from '../controllers/productionMfgController.js';
 
 const router = express.Router();
@@ -96,6 +103,19 @@ router.put('/orders/:id/processes/:stepIndex/notes', ordersEdit, updateProcessNo
 router.post('/orders/:id/processes/:stepIndex/sub-entries', ordersAdd, addSubEntry);
 router.put('/orders/:id/processes/:stepIndex/sub-entries/:subEntryId/complete', ordersEdit, completeSubEntry);
 router.put('/orders/:id/processes/:stepIndex/sub-entries/:subEntryId/qc', ordersEdit, qcSubEntry);
+
+// ── Sub Child Part QC (in-house/outsource manufactured products) ──────────
+// Same ONE shared QCJob as the order's eventual Final Check — see
+// productionMfgController.js's ensureQCJobForOrder.
+router.get('/orders/:id/parts-qc', ordersView, getPartsQC);
+router.put('/orders/:id/parts-qc/:partCheckId/assign-team', ordersEdit, assignPartTeam);
+router.put('/orders/:id/parts-qc/:partCheckId/start', ordersEdit, startPart);
+router.get('/orders/:id/parts-qc/:partCheckId/:stage', ordersView, getPartChecklistRows);
+router.put('/orders/:id/parts-qc/:partCheckId/:stage', ordersEdit, savePartChecklist);
+
+// ── Final Testing checklist (every order — R&D's Final stage) ─────────────
+router.get('/orders/:id/final-checklist', ordersView, getFinalChecklist);
+router.put('/orders/:id/final-checklist', ordersEdit, saveFinalChecklist);
 
 // ── Teams ───────────────────────────────────────────────────────────────────
 router.get('/teams', manpowerView, getTeams);

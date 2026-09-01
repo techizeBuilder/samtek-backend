@@ -57,6 +57,16 @@ import {
   getBOMFieldConfig,
   saveBOMFieldConfig,
 } from '../controllers/rdBOMFieldConfigController.js';
+import {
+  getMasterChecklist,
+  addMasterChecklistItem,
+  updateMasterChecklistItem,
+  deleteMasterChecklistItem,
+  reorderMasterChecklist,
+  getItemChecklist,
+  saveItemChecklist,
+  getProductQCParts,
+} from '../controllers/qcChecklistController.js';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -65,8 +75,17 @@ router.use(authenticateToken);
 // Feature keys verified against MODULES['rnd'].features in
 // Samtek-Frontend/client/src/lib/roleModulesConfig.js: dashboard, inventory,
 // approveRequests, productMaster, motorMaster, plantMaster, designApproval,
-// bomManagement, toolProcess, prototype, changeManagement, qualityParameters,
-// documentation, expenses, lms.
+// bomManagement, toolProcess, prototype, changeManagement, qcInventory,
+// qcProductMaster, qcMotorMaster, documentation, expenses, lms.
+//
+// 'qualityParameters' (below) was the old single Quality Parameters page's
+// feature key — removed from MODULES/the sidebar (2026-08-31, see
+// server/docs/qc-module-restructure-client-request.md: replaced with
+// InventoryQC / ProductMasterQC / MotorMasterQC placeholder pages, built out
+// one at a time). Left wired up here deliberately: the /quality-params
+// routes/data are untouched and still live, just unreached by any current
+// UI page — no new role gets this key granted by default anymore, but any
+// existing permission doc that already has it keeps working.
 const expensesView = checkPermission('rnd', 'expenses', 'view');
 const expensesAdd = checkPermission('rnd', 'expenses', 'add');
 const expensesEdit = checkPermission('rnd', 'expenses', 'edit');
@@ -186,6 +205,45 @@ router.post('/quality-params/parameters', qualityParametersAdd, addQualityParam)
 router.delete('/quality-params/:machineId/parameters/:paramId', qualityParametersDelete, deleteQualityParam);
 router.post('/quality-params/qc-items', qualityParametersAdd, addQCItem);
 router.delete('/quality-params/:machineId/qc-items/:itemId', qualityParametersDelete, deleteQCItem);
+
+// ── QC Checklist (Inventory QC / Product Master QC / Motor Master QC) ───────
+// Replaces the old Quality Params page for these three sidebar entries (see
+// server/docs/qc-module-restructure-client-request.md's 2026-08-31 follow-on).
+// One controller/route set shared by all three modules — the URL's :module
+// segment picks both which QCMasterChecklist document is read/written and,
+// via this map, which feature key gates it. Inventory QC is the only one
+// with a real UI today; Product Master QC / Motor Master QC need no backend
+// changes at all when their turn comes, just a frontend page passing
+// module='productMaster' / 'motorMaster'.
+const QC_MODULE_FEATURE = { inventory: 'qcInventory', productMaster: 'qcProductMaster', motorMaster: 'qcMotorMaster' };
+const checkQCModulePermission = (action) => (req, res, next) => {
+  const feature = QC_MODULE_FEATURE[req.params.module];
+  if (!feature) return res.status(400).json({ success: false, message: 'Invalid QC module' });
+  return checkPermission('rnd', feature, action)(req, res, next);
+};
+// :stage is 'default' for the flat modules (Inventory QC / Motor Master QC)
+// and 'initial'|'process'|'final' for Product Master QC (see
+// QCMasterChecklist.js's QC_MODULE_STAGES — the controller itself validates
+// the module+stage pair, this layer only resolves which feature key gates it).
+router.get('/qc-checklist/:module/:stage/master', checkQCModulePermission('view'), getMasterChecklist);
+router.post('/qc-checklist/:module/:stage/master', checkQCModulePermission('add'), addMasterChecklistItem);
+router.put('/qc-checklist/:module/:stage/master/reorder', checkQCModulePermission('edit'), reorderMasterChecklist);
+router.put('/qc-checklist/:module/:stage/master/:rowId', checkQCModulePermission('edit'), updateMasterChecklistItem);
+router.delete('/qc-checklist/:module/:stage/master/:rowId', checkQCModulePermission('delete'), deleteMasterChecklistItem);
+// Part-scoped route MUST be registered before the plain :itemId route so
+// Express doesn't need any special ordering trick — both are distinct full
+// paths (Express matches the longer, more specific one only when the URL
+// actually has the extra /part/:childPartId/:subChildPartId segments).
+router.get('/qc-checklist/:module/:stage/item/:itemId/part/:childPartId/:subChildPartId', checkQCModulePermission('view'), getItemChecklist);
+router.post('/qc-checklist/:module/:stage/item/:itemId/part/:childPartId/:subChildPartId', checkQCModulePermission('edit'), saveItemChecklist);
+router.get('/qc-checklist/:module/:stage/item/:itemId', checkQCModulePermission('view'), getItemChecklist);
+router.post('/qc-checklist/:module/:stage/item/:itemId', checkQCModulePermission('edit'), saveItemChecklist);
+// Product Master QC only — read-only Child Part/Sub Child Part + BOM tree
+// (material/grade/brand/qty), always a live read off BOM Management's own
+// data, never stored by this feature. Gated the same as every other
+// Product Master QC route (qcProductMaster), not bomManagement, since this
+// IS the QC page reading it, not BOM Management itself.
+router.get('/qc-checklist/productMaster/parts/:productId', checkPermission('rnd', 'qcProductMaster', 'view'), getProductQCParts);
 
 // ── Documents ─────────────────────────────────────────────────────────────────
 router.get('/documents', documentationView, getDocuments);

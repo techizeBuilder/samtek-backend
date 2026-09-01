@@ -13,7 +13,7 @@ import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
 import RDPlant from '../models/RDPlant.js';
 import SheetMetalPlan from '../models/SheetMetalPlan.js';
 import { sheetMetalGroupsFromBOM } from './sheetMetalPlanController.js';
-import { computeBOMMaterialsMrpCost, recalculateItemPricing } from '../services/itemPricingService.js';
+import { getMachineBillingBOMCost, recalculateItemPricing } from '../services/itemPricingService.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
@@ -973,16 +973,18 @@ export const getBOMByMachineCode = async (req, res) => {
   }
 };
 
-// ─── Cross-department lookup: a machine's BOM material cost by MRP ────────────
+// ─── Cross-department lookup: a machine's real BOM cost, for billing ──────────
 // Used by the Sales Order Form to show/enforce a minimum Billing Amount per
-// item (material MRP × qty, summed across the BOM). `data: null` means no
-// RDMachine/BOM exists for this code — callers should skip validation entirely.
+// item — the item's own Item.stdCost (same figure BOM Management's card
+// shows), not a separately recalculated one (see getMachineBillingBOMCost).
+// `data: null` means this code has no BOM-derived cost yet — callers should
+// skip validation entirely.
 export const getBOMCostByMachineCode = async (req, res) => {
   try {
     const { code } = req.params;
     const companyId = req.user.companyId;
 
-    const result = await computeBOMMaterialsMrpCost(code, companyId);
+    const result = await getMachineBillingBOMCost(code, companyId);
     res.json({ success: true, data: result.found ? result : null });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

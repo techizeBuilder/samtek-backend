@@ -1135,16 +1135,13 @@ const validateItemData = (data, isUpdate = false) => {
   }
   if (data.reorderQty !== undefined && (isNaN(data.reorderQty) || data.reorderQty < 0)) {
     errors.reorderQty = 'Order Quantity must be a non-negative number';
-  } else if (Number(data.reorderQty) > 0 && Number(data.reorderQty) < (Number(data.minStock) || 0)) {
-    // Ordering less than the trigger point means receiving it would still
-    // leave stock at/below minStock — the request would fire again right away.
-    errors.reorderQty = 'Order Quantity must be at least the Minimum Stock value, otherwise receiving it will immediately trigger another auto-purchase request.';
   }
-  // Same reorderQty >= minStock guard, per fabrication dimension variant —
-  // each is its own independent flow (see Inventory.js's own comment). Both
-  // are piece counts here (not the item's purchaseUnit, unlike the top-level
-  // fields above), so must be whole numbers — a vendor sells whole pieces
-  // regardless of a weight-based purchaseUnit.
+  // Order Qty is deliberately allowed to be lower than Min Stock — the
+  // client explicitly asked for free input here (was previously blocked:
+  // "Order Quantity must be at least the Minimum Stock value", on the
+  // reasoning that ordering less than the trigger point would immediately
+  // re-trigger another auto-purchase request on receipt — the client heard
+  // that and still wants it removed).
   if (data.dimensionVariants && Array.isArray(data.dimensionVariants)) {
     data.dimensionVariants.forEach((dv, index) => {
       const dvMinStock = Number(dv.minStock) || 0;
@@ -1154,8 +1151,6 @@ const validateItemData = (data, isUpdate = false) => {
       }
       if (!Number.isInteger(dvReorderQty)) {
         errors[`dimensionVariants[${index}].reorderQty`] = 'Order Quantity must be a whole number of pieces for this dimension.';
-      } else if (dvReorderQty > 0 && dvReorderQty < dvMinStock) {
-        errors[`dimensionVariants[${index}].reorderQty`] = 'Order Quantity must be at least the Minimum Stock value for this dimension.';
       }
     });
   }

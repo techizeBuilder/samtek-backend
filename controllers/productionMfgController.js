@@ -20,6 +20,11 @@ import MaterialReturnLog from '../models/MaterialReturnLog.js';
 import SheetMetalPlan from '../models/SheetMetalPlan.js';
 import { sheetMetalGroupsFromBOM } from './sheetMetalPlanController.js';
 import { plainMaterialGroupsFromBOM, lengthFabricationGroupsFromBOM } from '../services/bomMaterialGroupsService.js';
+import PurchaseRequest from '../models/PurchaseRequest.js';
+import RFQ from '../models/RFQ.js';
+import Purchase from '../models/Purchase.js';
+import RDChildPart from '../models/RDChildPart.js';
+import { ensurePartChecksStructure, resolvePartChecklistRows, ensureFlatChecklist, attachPartReference, MANUFACTURING_SOURCE_TYPES } from '../services/qcChecklistPullService.js';
 
 // Department-Head-only gate for Issue Material + Receive — mirrors
 // productionExpenseController.js's own HEAD_ROLES/canManage pattern exactly,
@@ -49,16 +54,34 @@ async function generateOrderId(companyId) {
   return `ORD-${year}-${String(count + 1).padStart(3, '0')}`;
 }
 
-// Auto-creates (or reuses) the central QC intake job for a Production Order's
-// output — used once the last process step is QC-approved (approveQC below)
-// and, identically, once a Repair job is marked complete.
-async function createQCJobForCompletedOrder(order, sentBy, userId) {
+// Auto-creates (or reuses) the ONE central QC job for a Production Order's
+// output — same dedup rule regardless of who calls it or when, so there is
+// only ever one job per order no matter which caller reaches it first:
+// approveQC (once the last process step is self-approved — unchanged for a
+// non-manufactured product) and, identically, once a Repair job is marked
+// complete, OR (new, 2026-09-01) Production opening its Parts QC panel for
+// an in-house/outsource-manufactured order — which now creates this SAME
+// job much earlier and starts seeding partChecks[] into it, instead of it
+// only ever coming into existence at the very end. Client's own reasoning:
+// one record per machine, so its full QC history is in one place, not
+// scattered across several jobs (see QCJob.js's own comment).
+function qcJobSourceForOrder(order) {
+  return order.source === 'QC_Rejected' ? 'QC_Rejected' : (order.source === 'Stock' ? 'Stock' : 'Production');
+}
+
+export async function ensureQCJobForOrder(order, sentBy, userId) {
   const existingQC = await QCJob.findOne({
-    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : (order.source === 'Stock' ? 'Stock' : 'Production'),
+    source: qcJobSourceForOrder(order),
     sourceRefId: order.orderId,
     company: order.company
   });
-  if (existingQC) return existingQC;
+  if (existingQC) {
+    // No-op for a non-manufactured product (ensurePartChecksStructure itself
+    // returns false — wrong productKind/productSourceType) — cheap enough
+    // to just always try rather than duplicate that gate here.
+    if (await ensurePartChecksStructure(existingQC, order.company)) await existingQC.save();
+    return existingQC;
+  }
 
   const year = new Date().getFullYear();
   const lastJob = await QCJob.findOne({
@@ -88,7 +111,7 @@ async function createQCJobForCompletedOrder(order, sentBy, userId) {
 
   const qcJob = await QCJob.create({
     qcJobId,
-    source: order.source === 'QC_Rejected' ? 'QC_Rejected' : (order.source === 'Stock' ? 'Stock' : 'Production'),
+    source: qcJobSourceForOrder(order),
     sourceRefId: order.orderId,
     sourceDepartment: 'Production',
     sentBy: sentBy || 'Production Dept',
@@ -120,8 +143,287 @@ async function createQCJobForCompletedOrder(order, sentBy, userId) {
     });
   } catch (e) { console.error('QC job notification error:', e); }
 
+  if (await ensurePartChecksStructure(qcJob, order.company)) await qcJob.save();
+
   return qcJob;
 }
+
+// ─── Sub Child Part QC (in-house/outsource manufactured products only) ─────
+// Production self-performs Initial then Process on each Sub Child Part —
+// only once Process is saved (with Initial already done) does the part
+// automatically arrive in QC's queue, no separate "send to QC" action (see
+// QCJob.js's PartQCEntrySchema comment, confirmed 2026-09-01). Everything
+// here operates on the ONE QCJob this order shares with its Final Check —
+// created here, early, the first time Production opens this panel, instead
+// of only once every stage self-approves.
+
+// GET /orders/:id/parts-qc — ensures the shared QCJob exists (+ its
+// partChecks structurally seeded from the real BOM) and returns just that
+// list, for Production's own panel. Empty array for a Purchase/Job-Work
+// product — nothing to show there, Fabrication stays a whole-order stage.
+export const getPartsQC = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+    await qcJob.populate('partChecks.assignedTeam', 'name supervisor members');
+    // designFile/materials per part — the real BOM spec Production is being
+    // asked to verify "Design"/"Material"/"Size (Amount)/Qty" against
+    // (confirmed 2026-09-02, was missing entirely before).
+    const machineItem = await Item.findOne({ code: order.machineCode, companyId: req.user.companyId }).select('_id').lean();
+    const partChecks = machineItem ? await attachPartReference(qcJob.partChecks, machineItem._id, req.user.companyId) : qcJob.partChecks;
+    res.json({ success: true, data: { qcJobId: qcJob.qcJobId, partChecks } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/parts-qc/:partCheckId/assign-team — "allot work" on this
+// one Sub Child Part. Blocked until every BOM material line THIS part
+// itself needs has actually been received in Production (confirmed
+// 2026-09-01) — narrower than Job Work's whole-order version of the same
+// gate (assignTeam above), since a part only ever needs its own lines, not
+// everything the rest of the BOM happens to need too. Clearing the team
+// (teamId falsy) is always allowed.
+export const assignPartTeam = async (req, res) => {
+  try {
+    const { teamId } = req.body;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId });
+    const part = qcJob?.partChecks?.id(req.params.partCheckId);
+    if (!part) return res.status(404).json({ success: false, message: 'Part not found — open the Parts QC panel first.' });
+
+    if (teamId) {
+      const unissued = await getPartUnissuedMaterials(order, req.user.companyId, part.childPartName, part.subChildPartName);
+      if (unissued.length > 0) {
+        return res.status(400).json({ success: false, message: `Material not yet received in Production, can't allot work on this part: ${unissued.join(', ')}.` });
+      }
+    }
+
+    part.assignedTeam = teamId || null;
+    await qcJob.save();
+    await qcJob.populate('partChecks.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: qcJob.partChecks.id(part._id) });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/parts-qc/:partCheckId/start — can't start without a team
+// allotted first (confirmed 2026-09-01); the Initial/Process checklists
+// themselves also refuse to save until this is set — see savePartChecklist.
+export const startPart = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId });
+    const part = qcJob?.partChecks?.id(req.params.partCheckId);
+    if (!part) return res.status(404).json({ success: false, message: 'Part not found — open the Parts QC panel first.' });
+    if (!part.assignedTeam) {
+      return res.status(400).json({ success: false, message: 'Assign a team to this part before starting it.' });
+    }
+    if (!['Awaiting Production', 'Rejected'].includes(part.status)) {
+      return res.status(400).json({ success: false, message: `This part is currently ${part.status} — it can't be (re)started right now.` });
+    }
+
+    part.startedAt = new Date();
+    await qcJob.save();
+    res.json({ success: true, data: part });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /orders/:id/parts-qc/:partCheckId/:stage(initial|process) — the row
+// definitions for this part+stage (always freshly resolved from R&D's
+// current selection, never cached — a master-checklist edit mid-build
+// should show up immediately) merged with whatever Production already saved
+// here, if this is a reopen rather than a first visit.
+export const getPartChecklistRows = async (req, res) => {
+  try {
+    const { stage } = req.params;
+    if (!['initial', 'process'].includes(stage)) return res.status(400).json({ success: false, message: 'stage must be initial or process' });
+
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const machineItem = await Item.findOne({ code: order.machineCode, companyId: req.user.companyId }).lean();
+    if (!machineItem) return res.status(404).json({ success: false, message: 'Machine item not found' });
+
+    const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId }).lean();
+    const part = qcJob?.partChecks?.find(p => String(p._id) === req.params.partCheckId);
+    if (!part) return res.status(404).json({ success: false, message: 'Part not found — open the Parts QC panel first.' });
+
+    // Sequential within one part (confirmed 2026-09-01): Process can't even
+    // be opened for entry until Initial has been saved at least once.
+    if (stage === 'process' && part.initial.length === 0) {
+      return res.status(400).json({ success: false, message: 'Complete the Initial checklist for this part before Process.' });
+    }
+
+    const rows = await resolvePartChecklistRows(machineItem._id, part.childPartId, part.subChildPartId, stage, req.user.companyId);
+    const saved = part[stage] || [];
+    const savedByParam = new Map(saved.map(r => [r.parameter, r]));
+    // .lean() above means a saved row created before qcStatus/qcRemarks/type
+    // existed on the schema comes back with those keys genuinely missing (no
+    // Mongoose defaults applied) — normalize here so an old, never-reviewed
+    // row reads as 'Pending', not `undefined` (which the frontend would
+    // otherwise mistake for a real QC verdict).
+    const merged = rows.map(r => {
+      const found = savedByParam.get(r.parameter);
+      return found ? { type: 'checkbox', qcStatus: 'Pending', qcRemarks: '', ...found } : r;
+    });
+
+    res.json({ success: true, data: { rows: merged, partStatus: part.status } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/parts-qc/:partCheckId/:stage(initial|process) — Production
+// saves its own tick/value results. Saving 'process' is the automatic
+// hand-off to QC — see this function's own gate below.
+export const savePartChecklist = async (req, res) => {
+  try {
+    const { stage } = req.params;
+    if (!['initial', 'process'].includes(stage)) return res.status(400).json({ success: false, message: 'stage must be initial or process' });
+    const { results } = req.body;
+    if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
+    if (results.some(r => r.status === 'Pending')) {
+      return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before saving.' });
+    }
+
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId });
+    const part = qcJob?.partChecks?.id(req.params.partCheckId);
+    if (!part) return res.status(404).json({ success: false, message: 'Part not found — open the Parts QC panel first.' });
+
+    if (!part.startedAt) {
+      return res.status(400).json({ success: false, message: 'Assign a team and start this part before filling its checklist.' });
+    }
+    if (stage === 'process' && part.initial.length === 0) {
+      return res.status(400).json({ success: false, message: 'Complete the Initial checklist for this part before Process.' });
+    }
+    // A part mid-QC-review or already approved can't be silently overwritten
+    // from underneath QC — Production can still fix a Rejected part (that's
+    // the whole point of a reject) or resave before it's been picked up yet.
+    if (!['Awaiting Production', 'Rejected'].includes(part.status)) {
+      return res.status(400).json({ success: false, message: `This part is currently ${part.status} — it can't be edited right now.` });
+    }
+
+    // Fresh row objects each save — qcStatus/qcRemarks aren't included, so
+    // they fall back to schema defaults (Pending/''), correctly clearing out
+    // any stale QC verdict from a prior round when Production resubmits
+    // after a reject (confirmed 2026-09-02).
+    part[stage] = results.map(r => ({ parameter: r.parameter, standardValue: r.standardValue || '', type: r.type === 'value' ? 'value' : 'checkbox', actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' }));
+
+    if (stage === 'process') {
+      part.status = 'QC Pending';
+      part.producedBy = req.user.fullName || req.user.username || 'Production';
+      part.producedAt = new Date();
+      part.rejectReason = ''; // clears a previous rejection note now that it's been resubmitted
+    }
+
+    await qcJob.save();
+    if (stage === 'process') {
+      try {
+        await notificationService.triggerQCNotification({
+          action: 'qc_job_created',
+          data: { qcJobId: qcJob.qcJobId, itemName: `${part.subChildPartName} (${qcJob.itemName})`, jobId: qcJob._id },
+          targetCompanyId: req.user.companyId,
+        });
+      } catch (e) { /* non-fatal */ }
+    }
+
+    res.json({ success: true, data: part });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── Final Testing checklist (every Production Order, not just manufactured
+// ones — Final applies uniformly regardless of purchase vs in-house, see
+// qcChecklistPullService.js's flatModuleStageForItem) ───────────────────────
+// Production fills THE SAME job.checklist[] QC will review — no separate
+// "Production's copy" — mirroring the Sub Child Part pattern one level up:
+// Production records it first, QC can still edit before deciding (confirmed
+// 2026-09-02: wire R&D's Final checklist into Production first, then QC).
+
+// GET /orders/:id/final-checklist — ensures the shared QCJob exists this
+// early (same one Sub Child Part QC already created, for a manufactured
+// product) and its checklist is pulled, then returns it.
+export const getFinalChecklist = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+    if (!qcJob.checklist?.length && await ensureFlatChecklist(qcJob, req.user.companyId)) await qcJob.save();
+    res.json({ success: true, data: { rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/final-checklist — Production's own fill-in, matched back
+// onto job.checklist by parameter. Locked once QC has actually started
+// reviewing THIS checklist (any row's own qcStatus no longer Pending) so
+// Production can't silently rewrite it out from under an in-progress QC
+// review. Deliberately NOT gated on the job's overall status past 'Pending'
+// — for a manufactured job that overall status legitimately goes 'In
+// Progress' the moment QC starts reviewing the first Sub Child Part
+// (SubChildPartQCReview), which happens well before Production even reaches
+// Final Testing; treating that as "QC already reviewing the Final Check"
+// wrongly locked Production out of ever submitting it (real stuck job,
+// caught 2026-09-02 — traces back to the earlier premature-checklist-pull
+// bug's fallout, but is a distinct gap in its own right).
+export const saveFinalChecklist = async (req, res) => {
+  try {
+    const { results } = req.body;
+    if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
+    if (results.some(r => r.status === 'Pending')) {
+      return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before saving.' });
+    }
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId });
+    if (!qcJob) return res.status(404).json({ success: false, message: 'Open the Final Testing checklist first.' });
+    if (!qcJob.checklist?.length) return res.status(400).json({ success: false, message: 'No Final checklist configured for this product yet.' });
+    // 'Rejected' is the resubmit case — QC rejected the whole Final Check
+    // (see qcController.js's reopenFinalTestingForRejection), Production
+    // fixes whatever failed and saves again here, same as a Sub Child
+    // Part's own Rejected -> resave -> back-to-QC cycle.
+    const qcStartedReviewingFinalCheck = qcJob.checklist.some(c => c.qcStatus !== 'Pending');
+    const lockedFromProduction = qcJob.status === 'Approved'
+      || (qcJob.status === 'In Progress' && qcStartedReviewingFinalCheck);
+    if (lockedFromProduction) {
+      return res.status(400).json({ success: false, message: `QC has already reviewed this Final Check (status: ${qcJob.status}) — it can't be changed from Production anymore.` });
+    }
+    const wasRejected = qcJob.status === 'Rejected';
+
+    const byParam = new Map(results.map(r => [r.parameter, r]));
+    qcJob.checklist = qcJob.checklist.map(row => {
+      const r = byParam.get(row.parameter);
+      // Same reset-on-resubmit as savePartChecklist above: omitting
+      // qcStatus/qcRemarks here lets them fall back to schema defaults,
+      // clearing out QC's prior verdict now that Production has changed the
+      // underlying row.
+      return r ? { parameter: row.parameter, standardValue: row.standardValue, type: row.type, actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' } : row.toObject();
+    });
+    qcJob.finalCheckFilledBy = req.user.fullName || req.user.username || 'Production';
+    qcJob.finalCheckFilledAt = new Date();
+    // Automatic re-send to QC once fixed — no manual "resubmit" action,
+    // same principle as everything else in this flow (confirmed 2026-09-01/02).
+    if (wasRejected) {
+      qcJob.status = 'Pending';
+      qcJob.decision = '';
+      qcJob.failReason = '';
+    }
+    await qcJob.save();
+    res.json({ success: true, data: { rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
 
@@ -481,6 +783,115 @@ async function buildMaterialListGroups(order, companyId) {
   return { groups, bom };
 }
 
+// Names of every Material List row not yet fully received in Production —
+// "received" means status 'Issued' specifically (confirmed 2026-09-01:
+// "material needs to be present in production means we have received it"),
+// not merely requested/in transit. `filterGroups`, when given, narrows this
+// to only the groups relevant to one Sub Child Part (see
+// getPartMaterialGate below) — omitted, it's the whole order's Material
+// List, which is what Job Work's own gate uses for now (kept as one
+// whole-order stage rather than broken into parts, per the same
+// confirmation — easy to narrow later once it needs to be).
+async function getUnissuedMaterials(order, companyId, filterGroups = null) {
+  const { groups } = await buildMaterialListGroups(order, companyId);
+  const relevant = filterGroups ? groups.filter(filterGroups) : groups;
+  const demandByKey = new Map((order.materialDemands || []).map(d => [d.materialCode, d]));
+  return relevant.filter(g => demandByKey.get(g.key)?.status !== 'Issued').map(g => g.name);
+}
+
+// Same check, narrowed to one Sub Child Part's own BOM material lines —
+// matched by name (RDBOM.MaterialSchema's childPart/subChildPart snapshot
+// fields, the same ones the Material List's own "(N parts)" hover already
+// reads off each group's g.childParts) since a group can be shared by
+// several parts and doesn't carry their ids, only their name snapshots.
+async function getPartUnissuedMaterials(order, companyId, childPartName, subChildPartName) {
+  return getUnissuedMaterials(order, companyId, g =>
+    g.childParts.some(cp => cp.childPart === childPartName && cp.subChildPart === subChildPartName)
+  );
+}
+
+// Live "can Production actually request this right now" info — computed
+// fresh on every load, never trusted from the frozen order-submission-time
+// snapshot (Sale.items[].materialAvailability — stock can move in either
+// direction since then: consumed by another order, or topped up by an
+// unrelated purchase). That snapshot is only ever used below as the LINK to
+// the auto-raised Purchase Request/RFQ/PO chain when live stock is still
+// short, never as the availability verdict itself.
+//
+// Only computed for rows currently sitting on an outstanding (unfulfilled)
+// quantity — a never-issued row (no demand yet) or one whose demand is back
+// at status 'Requested' (the state an R&D-approved Adjust Qty resets it to
+// when Production needs MORE than what's already been transferred — see
+// rdController.js's Material Change approval). Every other status (In
+// Transit/Issued/Pending R&D/R&D Rejected/Pending Return) isn't "about to
+// request issue", so those rows get no entry at all (confirmed 2026-08-31).
+async function computeLiveMaterialAvailability(materialList, order, companyId) {
+  const candidates = materialList.filter(row => !row.demand || row.demand.status === 'Requested');
+  if (!candidates.length) return new Map();
+
+  // Only order-triggered runs (order.saleId set) ever had this snapshot
+  // computed at all — a Stock/manual run's shortfalls always resolve to
+  // 'short_no_pr' below, same as an out-of-BOM "Add Demand" extra that
+  // postdates the order form and was never part of that check either.
+  const needsPurchaseByCode = new Map();
+  if (order.saleId && order.saleItemId) {
+    const sale = await Sale.findById(order.saleId).lean();
+    const saleItem = sale?.items?.find(i => String(i._id) === String(order.saleItemId));
+    for (const np of saleItem?.materialAvailability?.needsPurchase || []) {
+      needsPurchaseByCode.set(np.code, np);
+    }
+  }
+
+  const result = new Map();
+  for (const row of candidates) {
+    const matItem = await Item.findOne({ code: row.itemCode, companyId }).lean();
+    if (!matItem) { result.set(row.key, { state: 'unknown' }); continue; }
+
+    // A demand's own dimensionVariantId (fabrication only) always wins over
+    // the BOM group's, since an out-of-BOM "Add Demand" fabrication line's
+    // key isn't the {code}#{dimensionVariantId} scheme buildMaterialListGroups
+    // uses (it's a dimension-signature key — see addMaterialDemand) and would
+    // resolve to the wrong variant if parsed back out of row.key instead.
+    const dimensionVariantId = row.demand?.dimensionVariantId ?? row.dimensionVariantId ?? null;
+    const outstandingQty = row.demand
+      ? Math.max(0, row.demand.quantity - (row.demand.transferredQuantity || 0))
+      : row.neededQty;
+
+    let availableQty;
+    if (dimensionVariantId) {
+      const variant = (matItem.dimensionVariants || []).find(v => String(v._id) === String(dimensionVariantId));
+      availableQty = variant?.subStock || 0;
+    } else {
+      availableQty = matItem.qty || 0;
+    }
+
+    if (availableQty >= outstandingQty) {
+      result.set(row.key, { state: 'available', availableQty });
+      continue;
+    }
+
+    const np = needsPurchaseByCode.get(row.key);
+    if (!np?.purchaseRequestId) {
+      result.set(row.key, { state: 'short_no_pr', availableQty });
+      continue;
+    }
+
+    const pr = await PurchaseRequest.findOne({ requestId: np.purchaseRequestId, companyId }).select('_id').lean();
+    const rfq = pr ? await RFQ.findOne({ purchaseRequest: pr._id, companyId }).select('status purchaseOrder').lean() : null;
+    if (!rfq || rfq.status !== 'Awarded' || !rfq.purchaseOrder) {
+      result.set(row.key, { state: 'short_pr_pending', availableQty, purchaseRequestId: np.purchaseRequestId });
+      continue;
+    }
+
+    const po = await Purchase.findById(rfq.purchaseOrder).select('expectedDeliveryDate').lean();
+    result.set(row.key, {
+      state: 'short_eta', availableQty,
+      purchaseRequestId: np.purchaseRequestId, expectedDeliveryDate: po?.expectedDeliveryDate || null,
+    });
+  }
+  return result;
+}
+
 // GET /orders/:id/material-list
 export const getMaterialList = async (req, res) => {
   try {
@@ -498,6 +909,7 @@ export const getMaterialList = async (req, res) => {
       unit: g.unit,
       neededQty: g.neededQty,
       childParts: g.childParts,
+      dimensionVariantId: g.dimensionVariantId,
       demand: demandByKey.get(g.key) || null,
     }));
 
@@ -510,9 +922,15 @@ export const getMaterialList = async (req, res) => {
       if (!groupKeys.has(d.materialCode)) {
         materialList.push({
           key: d.materialCode, itemCode: d.sourceItemCode || d.materialCode,
-          name: d.materialName, unit: d.unit, neededQty: d.quantity, childParts: [], demand: d,
+          name: d.materialName, unit: d.unit, neededQty: d.quantity, childParts: [],
+          dimensionVariantId: null, demand: d,
         });
       }
+    }
+
+    const availabilityByKey = await computeLiveMaterialAvailability(materialList, order, req.user.companyId);
+    for (const row of materialList) {
+      row.availability = availabilityByKey.get(row.key) || null;
     }
 
     res.json({ success: true, data: materialList });
@@ -658,7 +1076,7 @@ export const completeRepair = async (req, res) => {
     // normal QC_Rejected Pass (routes straight to dispatch for the original
     // order); Fail re-runs this same Rework/Repair choice again.
     try {
-      await createQCJobForCompletedOrder(order, 'Repair Dept', req.user._id);
+      await ensureQCJobForOrder(order, 'Repair Dept', req.user._id);
     } catch (qcErr) {
       console.error('❌ Error creating QC Job for completed repair:', qcErr);
     }
@@ -1223,6 +1641,18 @@ export const assignTeam = async (req, res) => {
     const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    // Job Work only, for now (kept as one whole-order stage — confirmed
+    // 2026-09-01; the Sub Child Part version of this same rule lives in
+    // assignPartTeam below). Only gates actually ASSIGNING a team — clearing
+    // one (teamId falsy) is always allowed.
+    if (idx === 0 && teamId) {
+      const unissued = await getUnissuedMaterials(order, req.user.companyId);
+      if (unissued.length > 0) {
+        return res.status(400).json({ success: false, message: `Material not yet received in Production, can't allot work: ${unissued.join(', ')}.` });
+      }
+    }
+
     const procs = getUnitProcesses(order, unitNumber);
     if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
     procs[idx].assignedTeam = teamId || null;
@@ -1265,6 +1695,29 @@ export const startProcess = async (req, res) => {
     const procs = getUnitProcesses(order, unitNumber);
     if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
 
+    // Job Work — can't start without a team allotted first, and (belt-and-
+    // suspenders alongside the existing order.materialIssued check above,
+    // which is whole-order and can go stale) a fresh check that nothing Job
+    // Work itself needs is still unreceived (confirmed 2026-09-01).
+    if (idx === 0) {
+      if (!procs[idx].assignedTeam) {
+        return res.status(400).json({ success: false, message: 'Assign a team to Job Work before starting it.' });
+      }
+      const unissued = await getUnissuedMaterials(order, req.user.companyId);
+      if (unissued.length > 0) {
+        return res.status(400).json({ success: false, message: `Material not yet received in Production: ${unissued.join(', ')}.` });
+      }
+    }
+    // Every step after Fabrication (Assembly/Painting/Re-Assembly/Final
+    // Testing) — same "can't start without a team" rule as Job Work,
+    // extended here on request (confirmed 2026-09-02, Final Testing
+    // included for now too). Fabrication itself (idx === 1) is deliberately
+    // excluded — it has no manual Start anymore, work begins per Sub Child
+    // Part instead, each gated on its own team there already.
+    if (idx > 1 && !procs[idx].assignedTeam) {
+      return res.status(400).json({ success: false, message: `Assign a team to ${PROCESS_STEPS[idx]} before starting it.` });
+    }
+
     // Gate: previous step (of this same unit) must be completed
     if (idx > 0 && procs[idx - 1].status !== 'Completed') {
       return res.status(400).json({
@@ -1301,12 +1754,53 @@ export const markProcessComplete = async (req, res) => {
 
     const proc = procs[idx];
     if (proc.step === 'Fabrication') {
-      if (!proc.subEntries || proc.subEntries.length === 0) {
-        return res.status(400).json({ success: false, message: 'At least one sub-entry must be added to Fabrication before marking it as complete.' });
+      // Real gate now — every Sub Child Part on the shared QCJob must be QC-
+      // Approved (see SubChildPartQCPanel/decidePartCheck), replacing the
+      // old subEntries-based check (2026-09-02) which nothing populates
+      // anymore now that Fabrication's own Assign Team/Start are gone.
+      // ensureQCJobForOrder (not a bare findOne) so a manufactured product
+      // whose Parts QC panel nobody's opened yet still gets its partChecks
+      // seeded and correctly gated here, rather than reading an empty array
+      // and wrongly treating "never touched" the same as "nothing to check".
+      const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+      const partChecks = qcJob.partChecks || [];
+      if (partChecks.length > 0 && partChecks.some(p => p.status !== 'Approved')) {
+        return res.status(400).json({ success: false, message: 'All Sub Child Parts must be QC-approved before marking Fabrication as complete.' });
       }
-      const allDone = proc.subEntries.every(se => se.status === 'Completed' && se.qcStatus === 'Approved');
-      if (!allDone) {
-        return res.status(400).json({ success: false, message: 'All Fabrication sub-entries must be completed and QC approved before marking this process as complete.' });
+      // Every Sub Child Part already went through its own individual QC
+      // decision (decidePartCheck) — a further whole-stage Approve/Reject QC
+      // click here would just be redundant, and worse, would let someone
+      // reject a stage whose every part already individually passed. So
+      // unlike every other step, Fabrication skips 'QC Pending' and the
+      // separate approveQC/rejectQC step entirely, completing immediately
+      // once the gate above passes — the parent-level QC flow was meant to
+      // be fully retired here, not just Assign Team/Start (corrected
+      // 2026-09-02, this half was missed the first time).
+      proc.status = 'Completed';
+      proc.qcStatus = 'Approved';
+      proc.qcBy = 'Sub Child Part QC';
+      proc.qcDate = today();
+      proc.endDate = today();
+      proc.completedAt = new Date();
+      if (allUnitsCompleted(order)) {
+        order.status = 'Completed';
+      }
+      await order.save();
+      await order.populate('processes.assignedTeam', 'name supervisor members');
+      await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+      return res.json({ success: true, data: order });
+    }
+    // Final Testing can't be marked done until Production has actually
+    // filled the real, R&D-configured Final checklist (saveFinalChecklist)
+    // — the same rows QC will then review — instead of the old bare
+    // self-approve with no checklist behind it at all (confirmed
+    // 2026-09-02). QC's own decision (submitDecision) is still the real
+    // gate on the order actually completing; this only gates the work
+    // being logged in the first place.
+    if (proc.step === 'Final Testing') {
+      const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId }).lean();
+      if (!qcJob?.checklist?.length || qcJob.checklist.some(c => c.status === 'Pending')) {
+        return res.status(400).json({ success: false, message: 'Fill the Final Testing checklist before marking this step complete.' });
       }
     }
 
@@ -1357,6 +1851,17 @@ export const approveQC = async (req, res) => {
     procs[idx].qcStatus = 'Approved';
     procs[idx].qcBy = qcBy;
     procs[idx].qcDate = today();
+    // Fabrication no longer has its own manual Start (2026-09-02) — work now
+    // begins per Sub Child Part (SubChildPartQCPanel), independent of the
+    // stage itself needing an explicit start click. The moment the step
+    // immediately before it (always Job Work today) completes, Fabrication
+    // auto-advances to In Progress so that panel — gated on status !==
+    // 'Pending' — actually renders.
+    if (procs[idx + 1]?.step === 'Fabrication' && procs[idx + 1].status === 'Pending') {
+      procs[idx + 1].status = 'In Progress';
+      procs[idx + 1].startDate = today();
+      procs[idx + 1].startedAt = new Date();
+    }
     // Order is only fully Completed once every step of every unit (main +
     // extraUnits) is done — for single-quantity orders this is identical to
     // the original "all processes complete" check.
@@ -1484,7 +1989,7 @@ export const approveQC = async (req, res) => {
 
       // 🏭 Auto-create QC Job for completed production order
       try {
-        await createQCJobForCompletedOrder(order, qcBy, req.user._id);
+        await ensureQCJobForOrder(order, qcBy, req.user._id);
       } catch (qcCreateErr) {
         console.error('❌ Error creating QC Job for completed production order:', qcCreateErr);
       }

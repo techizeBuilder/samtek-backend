@@ -49,6 +49,9 @@ export const createChildPart = async (req, res) => {
     if (!productId || !name || !code) {
       return res.status(400).json({ success: false, message: 'productId, name and code are required' });
     }
+    if (!image) {
+      return res.status(400).json({ success: false, message: 'A Design File (image or PDF) is required.' });
+    }
     const product = await findManufacturingProduct(productId, req.user.companyId);
     if (!product) {
       return res.status(400).json({ success: false, message: 'Child Parts can only be created for manufacturing products (In House / Out Source Manufactured).' });
@@ -132,6 +135,7 @@ export const addSubChildPart = async (req, res) => {
   try {
     const { name, code, image } = req.body;
     if (!name || !code) return res.status(400).json({ success: false, message: 'name and code are required' });
+    if (!image) return res.status(400).json({ success: false, message: 'A Design File (image or PDF) is required.' });
     const childPart = await RDChildPart.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!childPart) return res.status(404).json({ success: false, message: 'Child Part not found' });
 
