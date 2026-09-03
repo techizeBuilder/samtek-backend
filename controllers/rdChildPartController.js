@@ -1,5 +1,26 @@
 import RDChildPart from '../models/RDChildPart.js';
 import { Item } from '../models/Inventory.js';
+import fs from 'fs';
+import path from 'path';
+
+// Deletes a Design File upload (Child Part / Sub Child Part's own `image`)
+// from disk once its DB reference is gone — deleting a (sub) child part
+// previously only removed the database record, leaving the real file
+// orphaned in uploads/rd-docs/ forever, and (since Documentation.jsx and
+// Design Approval both pull these files in live off the (sub) child part
+// record rather than a stored copy) it also silently disappears from both
+// of those pages the moment the record is gone — no separate cleanup
+// needed there (confirmed 2026-09-03). Fire-and-forget and non-fatal: a
+// missing/already-gone file never blocks the actual delete.
+function deleteUploadedFile(url) {
+  if (!url || typeof url !== 'string' || !url.startsWith('/uploads/')) return;
+  const filePath = path.join(process.cwd(), url.replace(/^\/+/, ''));
+  fs.unlink(filePath, (err) => {
+    if (err && err.code !== 'ENOENT') {
+      console.error('Failed to delete uploaded design file:', filePath, err.message);
+    }
+  });
+}
 
 const MANUFACTURING_SOURCE_TYPES = ['In House Manufacturing', 'Out Source Manufactured'];
 
@@ -111,9 +132,12 @@ export const uploadChildPartFile = async (req, res) => {
 export const deleteChildPart = async (req, res) => {
   try {
     // subChildParts live as subdocuments on the Child Part itself, so
-    // deleting the parent document cascades them automatically.
+    // deleting the parent document cascades them automatically — their own
+    // design files need cleaning up right here too, same as the parent's.
     const childPart = await RDChildPart.findOneAndDelete({ _id: req.params.id, company: req.user.companyId });
     if (!childPart) return res.status(404).json({ success: false, message: 'Child Part not found' });
+    deleteUploadedFile(childPart.image);
+    (childPart.subChildParts || []).forEach(sub => deleteUploadedFile(sub.image));
     res.json({ success: true, data: childPart });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -174,8 +198,10 @@ export const deleteSubChildPart = async (req, res) => {
     if (!childPart) return res.status(404).json({ success: false, message: 'Child Part not found' });
     const sub = childPart.subChildParts.id(req.params.subId);
     if (!sub) return res.status(404).json({ success: false, message: 'Sub Child Part not found' });
+    const subImage = sub.image;
     childPart.subChildParts.pull({ _id: req.params.subId });
     await childPart.save();
+    deleteUploadedFile(subImage);
     res.json({ success: true, data: childPart });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

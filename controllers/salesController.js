@@ -12,6 +12,7 @@ import PriorityProduct from '../models/PriorityProduct.js';
 import CutoffTime from '../models/CutoffTime.js';
 import { sendPaymentReminderEmail, sendQuotationEmail } from '../services/emailService.js';
 import { getSellableItems } from '../services/sellableItemsService.js';
+import RDPlant from '../models/RDPlant.js';
 
 export const getSales = async (req, res) => {
   try {
@@ -1216,6 +1217,54 @@ export const getSalespersonItems = async (req, res) => {
       success: false,
       message: 'Internal server error'
     });
+  }
+};
+
+// Sales-scoped read of Plant Master's own plants (RDPlant) — same reasoning
+// as getSalespersonItems above: Leads/Quotation pickers need to read this
+// R&D-owned catalog, but Sales roles were never granted rnd.plantMaster.view
+// (that's an R&D-only feature grant), so hitting /api/rd/plants directly
+// 403'd for every real Sales user (confirmed 2026-09-03 — Leads' new Plant
+// filter surfaced a latent bug Quotation.jsx's own direct /rd/plants call
+// already had too, just not yet noticed since it degrades silently to an
+// empty list rather than an error). Machines + Motors populated for the
+// combined-MRP display both pickers already compute client-side.
+export const getSalesPlants = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    const userCompanyId = req.user.companyId;
+    const { discontinued, category, subCategory, search } = req.query;
+
+    const scopedRoles = ['Sales', 'Sales Employee', 'Sales Head', 'Unit Manager', 'Unit Head'];
+    if (!scopedRoles.includes(userRole) || !userCompanyId) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const query = { company: userCompanyId };
+    if (discontinued === 'true') query.isDiscontinued = true;
+    else if (discontinued === 'false') query.isDiscontinued = false;
+    if (category) query.category = category;
+    if (subCategory) query.subCategory = subCategory;
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { category: { $regex: search, $options: 'i' } },
+        { subCategory: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const plants = await RDPlant.find(query)
+      .populate([
+        { path: 'machines.item', select: 'code name category subCategory isDiscontinued mrp' },
+        { path: 'motors.item', select: 'code name category subCategory isDiscontinued mrp' },
+      ])
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({ success: true, data: plants });
+  } catch (error) {
+    console.error('Get sales plants error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 

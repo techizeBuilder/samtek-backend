@@ -16,6 +16,7 @@ import {
   updateSalespersonDamage,
   deleteSalespersonDamage,
   getSalespersonItems,
+  getSalesPlants,
   createSalespersonItem,
   getSalesSummary,
   getSalesRecentOrders,
@@ -224,6 +225,7 @@ salesRouter.post('/create-damage', salesDamagesAdd, createSalespersonDamage);
 salesRouter.put('/update-damage/:id', salesDamagesEdit, updateSalespersonDamage);
 salesRouter.delete('/delete-damage/:id', salesDamagesDelete, deleteSalespersonDamage);
 salesRouter.get('/items', salesOrdersView, getSalespersonItems);
+salesRouter.get('/plants', salesOrdersView, getSalesPlants);
 salesRouter.post('/create-item', salesOrdersAdd, itemUpload.fields([{ name: 'image', maxCount: 1 }, { name: 'brochure', maxCount: 1 }]), createSalespersonItem);
 salesRouter.get('/invoice/:id/pdf', salesOrdersView, downloadInvoicePDF);
 salesRouter.post('/send-quotation-email', salesOrdersEdit, sendQuotationEmailHandler);
