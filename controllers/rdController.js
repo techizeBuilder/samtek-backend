@@ -6,6 +6,7 @@ import RDChangeRequest from '../models/RDChangeRequest.js';
 import RDToolProcess from '../models/RDToolProcess.js';
 import RDQualityParam from '../models/RDQualityParam.js';
 import RDDocument from '../models/RDDocument.js';
+import RDChildPart from '../models/RDChildPart.js';
 import RDRequest from '../models/RDRequest.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
@@ -319,14 +320,40 @@ export const getMachines = async (req, res) => {
       type: 'Design Files' // Only pulling design files for the approval workflow
     }).lean();
 
-    // 3. Group the design files by machine ID
+    // 3. Group the design files by machine ID — tagged 'General' so the
+    // frontend can tell a manually-uploaded design doc apart from a BOM
+    // part's own design file below (confirmed 2026-09-02: Design Approval
+    // never showed Child Part/Sub Child Part design files at all before
+    // this, even though Documentation already surfaces them live).
     const docsByMachine = {};
     designDocuments.forEach(doc => {
       const mId = doc.machine.toString();
-      if (!docsByMachine[mId]) {
-        docsByMachine[mId] = [];
+      if (!docsByMachine[mId]) docsByMachine[mId] = [];
+      docsByMachine[mId].push({ ...doc, source: 'General' });
+    });
+
+    // 2b. Same Child Part / Sub Child Part design files Documentation.jsx
+    // already pulls in live (RDChildPart.image / subChildParts[].image) —
+    // never stored as RDDocument, so this endpoint never saw them until now.
+    // Tagged 'BOM Part' with the part name, per the "unrelated to BOM parts
+    // gets a different tag" requirement.
+    const childParts = await RDChildPart.find({ company: companyId, product: { $in: machineIds } }).lean();
+    childParts.forEach(cp => {
+      const mId = cp.product.toString();
+      if (!docsByMachine[mId]) docsByMachine[mId] = [];
+      if (cp.image) {
+        docsByMachine[mId].push({
+          _id: `child-part-${cp._id}`, name: `${cp.name} (${cp.code})`, version: '',
+          fileUrl: cp.image, source: 'BOM Part',
+        });
       }
-      docsByMachine[mId].push(doc);
+      (cp.subChildParts || []).forEach(sub => {
+        if (!sub.image) return;
+        docsByMachine[mId].push({
+          _id: `sub-child-part-${sub._id}`, name: `${cp.name} > ${sub.name} (${sub.code})`, version: '',
+          fileUrl: sub.image, source: 'BOM Part',
+        });
+      });
     });
 
     // 4. Attach the grouped documents to their respective machines, then translate to the response shape
@@ -498,6 +525,10 @@ export const getDropdownOptions = async (req, res) => {
       PowerSource: options.filter(o => o.field === 'PowerSource').map(toOption),
       PlantCategory: options.filter(o => o.field === 'PlantCategory').map(toOption),
       PlantSubCategory: options.filter(o => o.field === 'PlantSubCategory').map(toOption),
+      ProductName: options.filter(o => o.field === 'ProductName').map(toOption),
+      ProductVariant: options.filter(o => o.field === 'ProductVariant').map(toOption),
+      PlantName: options.filter(o => o.field === 'PlantName').map(toOption),
+      PlantProduction: options.filter(o => o.field === 'PlantProduction').map(toOption),
     };
 
     res.json({ success: true, data: groupedOptions });
@@ -512,7 +543,7 @@ export const addDropdownOption = async (req, res) => {
   try {
     const { field, value, parentValue } = req.body;
 
-    if (!['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType', 'MotorCategory', 'MotorSubCategory', 'MotorType', 'MaterialGrade', 'PowerSource', 'PlantCategory', 'PlantSubCategory'].includes(field)) {
+    if (!['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType', 'MotorCategory', 'MotorSubCategory', 'MotorType', 'MaterialGrade', 'PowerSource', 'PlantCategory', 'PlantSubCategory', 'ProductName', 'ProductVariant', 'PlantName', 'PlantProduction'].includes(field)) {
       return res.status(400).json({ success: false, message: 'Invalid field type.' });
     }
     if (!value || value.trim() === '') {
@@ -526,6 +557,26 @@ export const addDropdownOption = async (req, res) => {
     }
     if (field === 'PlantSubCategory' && (!parentValue || !parentValue.trim())) {
       return res.status(400).json({ success: false, message: 'Select the parent Plant Category before adding this option.' });
+    }
+    // Full linear chain: Category -> Sub Category -> Product Name -> Variant
+    // -> Product Source Type. Product Name is scoped to a Sub Category (which
+    // is itself already scoped to a Category, so Name is transitively linked
+    // to both); Variant is scoped to a Product Name; Product Source Type
+    // keeps its existing Sub Category scope unchanged — only its position in
+    // the sequence moved (confirmed 2026-09-02).
+    if (field === 'ProductName' && (!parentValue || !parentValue.trim())) {
+      return res.status(400).json({ success: false, message: 'Select the parent Sub Category before adding this Product Name.' });
+    }
+    if (field === 'ProductVariant' && (!parentValue || !parentValue.trim())) {
+      return res.status(400).json({ success: false, message: 'Select the parent Product Name before adding this Variant.' });
+    }
+    // Plant's own chain: PlantCategory -> PlantSubCategory -> PlantName ->
+    // PlantProduction (confirmed 2026-09-02).
+    if (field === 'PlantName' && (!parentValue || !parentValue.trim())) {
+      return res.status(400).json({ success: false, message: 'Select the parent Sub Category before adding this Plant Name.' });
+    }
+    if (field === 'PlantProduction' && (!parentValue || !parentValue.trim())) {
+      return res.status(400).json({ success: false, message: 'Select the parent Plant Name before adding this Production value.' });
     }
 
     const newOption = await RDMasterOption.create({
@@ -568,12 +619,33 @@ const ITEM_FIELD_MAP = {
   // shared with Inventory's own Material Grade dropdown, not Machine-specific.
   MaterialGrade: { field: 'materialGrade', productKind: null },
   PowerSource: { field: 'machineDetails.powerSource', productKind: 'Machine' },
+  ProductName: { field: 'name', productKind: 'Machine' },
+  ProductVariant: { field: 'variant', productKind: 'Machine' },
 };
-// Field -> the child dropdown field whose parentValue chains off it
-const CHILD_FIELD_MAP = { 'P-Type': 'Category', 'Category': 'P-SourceType', MotorCategory: 'MotorSubCategory', PlantCategory: 'PlantSubCategory' };
+// Field -> the child dropdown field(s) whose parentValue chains off it. Values
+// are arrays since Category (Sub Category) now has two independent children —
+// P-SourceType (unchanged) and ProductName — making the full chain P-Type ->
+// Category -> ProductName -> ProductVariant, with P-SourceType a second child
+// of Category alongside ProductName (confirmed 2026-09-02: Source Type keeps
+// its existing Sub Category scope, only its position in the UI moved).
+const CHILD_FIELD_MAP = {
+  'P-Type': ['Category'],
+  'Category': ['P-SourceType', 'ProductName'],
+  MotorCategory: ['MotorSubCategory'],
+  // Plant's own chain: PlantCategory -> PlantSubCategory -> PlantName ->
+  // PlantProduction (confirmed 2026-09-02 — same pre-enter-ahead-of-time
+  // pattern as Product Master's Name/Variant, no custom-fields feature).
+  PlantCategory: ['PlantSubCategory'],
+  PlantSubCategory: ['PlantName'],
+  PlantName: ['PlantProduction'],
+  ProductName: ['ProductVariant'],
+};
 // Field -> the RDPlant column it's the live source of truth for (Plant Master
 // is its own collection, not an Item, so it needs its own rename/delete target).
-const PLANT_FIELD_MAP = { PlantCategory: 'category', PlantSubCategory: 'subCategory' };
+const PLANT_FIELD_MAP = {
+  PlantCategory: 'category', PlantSubCategory: 'subCategory',
+  PlantName: 'name', PlantProduction: 'productionRate',
+};
 
 // ─── 3b. UPDATE DROPDOWN OPTION (rename a value, cascading everywhere it's used) ─
 export const updateDropdownOption = async (req, res) => {
@@ -627,8 +699,8 @@ export const updateDropdownOption = async (req, res) => {
       );
     }
 
-    const childField = CHILD_FIELD_MAP[option.field];
-    if (childField) {
+    const childFields = CHILD_FIELD_MAP[option.field] || [];
+    for (const childField of childFields) {
       await RDMasterOption.updateMany(
         { company: req.user.companyId, field: childField, parentValue: oldValue },
         { $set: { parentValue: newValue } }
@@ -668,16 +740,19 @@ export const deleteDropdownOption = async (req, res) => {
       ? await RDPlant.countDocuments({ company: req.user.companyId, [plantField]: option.value })
       : 0;
 
-    const childField = CHILD_FIELD_MAP[option.field];
-    const childCount = childField
-      ? await RDMasterOption.countDocuments({ company: req.user.companyId, field: childField, parentValue: option.value })
-      : 0;
+    const childFields = CHILD_FIELD_MAP[option.field] || [];
+    const childCounts = await Promise.all(
+      childFields.map(cf => RDMasterOption.countDocuments({ company: req.user.companyId, field: cf, parentValue: option.value }))
+    );
+    const childCount = childCounts.reduce((a, b) => a + b, 0);
 
     if (productCount > 0 || plantCount > 0 || childCount > 0) {
       const parts = [];
       if (productCount > 0) parts.push(`${productCount} product${productCount > 1 ? 's' : ''}`);
       if (plantCount > 0) parts.push(`${plantCount} plant${plantCount > 1 ? 's' : ''}`);
-      if (childCount > 0) parts.push(`${childCount} linked ${childField.replace('P-', 'P-')} value${childCount > 1 ? 's' : ''}`);
+      childFields.forEach((cf, i) => {
+        if (childCounts[i] > 0) parts.push(`${childCounts[i]} linked ${cf} value${childCounts[i] > 1 ? 's' : ''}`);
+      });
       return res.status(400).json({
         success: false,
         message: `Cannot delete "${option.value}" — still used by ${parts.join(' and ')}. Reassign or remove those first.`,
