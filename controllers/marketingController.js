@@ -5,7 +5,7 @@ import MarketingShareLog from '../models/MarketingShareLog.js';
 import { getFileType } from '../middleware/marketingUpload.js';
 import { Item, Group, Category } from '../models/Inventory.js';
 import Lead from '../models/Lead.js';
-import GlobalAdminSettings from '../models/GlobalAdminSettings.js';
+import AdminSettings from '../models/AdminSettings.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -272,10 +272,11 @@ export const getReports = async (req, res) => {
 // Stage-wise lead counts, Won/Late totals, and a Source-wise performance
 // breakdown — scoped to the logged-in Marketing Head's own company (never
 // cross-company), matching the same cid(req) convention as the rest of this
-// controller. Stage order follows the platform-wide configured pipeline
-// (GlobalAdminSettings.leadStages, shared by every company) since stages are
-// admin-editable, not a fixed enum — see leadStagesCrud in
-// adminSettingsController.js.
+// controller. Stage order follows this company's own configured pipeline
+// (AdminSettings.leadStages, per-company) since stages are admin-editable,
+// not a fixed enum — see getOrCreateSettings in adminSettingsController.js
+// and leadSettingRequestController.js (Sales Head request -> Company Admin
+// approval flow that now manages this list).
 export const getLeadReports = async (req, res) => {
   try {
     const companyId = cid(req);
@@ -330,7 +331,7 @@ export const getLeadReports = async (req, res) => {
           },
         },
       ]),
-      GlobalAdminSettings.findOne().select('leadStages').lean(),
+      AdminSettings.findOne({ companyId: companyObjectId }).select('leadStages').lean(),
     ]);
 
     // Order stage rows by the company's configured pipeline order. Any stage

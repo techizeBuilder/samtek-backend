@@ -4,8 +4,39 @@ import Customer from '../models/Customer.js';
 import mongoose from 'mongoose';
 import ApiSettings from '../models/ApiSettings.js';
 import CallLog from '../models/CallLog.js';
+import GlobalAdminSettings from '../models/GlobalAdminSettings.js';
 import notificationService from '../services/notificationService.js';
 // Using global fetch (Node 18+)
+
+// Kept in sync with adminSettingsController.js's DEFAULT_LEAD_REJECT_REASONS —
+// used only until GlobalAdminSettings has a saved leadRejectReasons list.
+const DEFAULT_LEAD_REJECT_REASONS = [
+  "Payment Term Is Out Of Scope",
+  "Freight Charged Are High",
+  "Client Is Not Responding",
+  "Client Dropped His Purchase Requirement",
+  "Quoted Price Is High",
+  "Purchased From Local Vendor",
+  "Irrelevant Product Enquiry",
+  "Low/ Retail Quantity",
+  "Delivery Location Is Out Of Scope",
+  "Legal Issue",
+  "Junk Enquiry",
+  "Payment Not Received",
+  "Duplicate Leads",
+  "Quoted But Delaying Decision",
+  "Invalid Contact Number",
+  "Not Potential",
+];
+
+// Same source Leads.jsx reads via GET /api/admin-settings (settings.leadRejectReasons),
+// so a lead counted/filtered here as "Disqualified" always matches what the Leads page
+// shows as disqualified (a lead whose status is one of these reject-reason labels).
+async function getDisqualifyReasons() {
+  const globalSettings = await GlobalAdminSettings.findOne().select('leadRejectReasons').lean();
+  const reasons = globalSettings?.leadRejectReasons?.map(r => r.label);
+  return (reasons && reasons.length) ? reasons : DEFAULT_LEAD_REJECT_REASONS;
+}
 
 // Create new lead
 export const createLead = async (req, res) => {
@@ -82,6 +113,10 @@ export const createLead = async (req, res) => {
       leadCode,
       companyId: req.user.companyId,
       assignedTo: leadData.assignedTo || req.user._id,
+      // Frontend's "Enquiry Received Date" field (enquiryDate) maps onto the
+      // schema's leadDate — that field doesn't exist on Lead, so without this
+      // it would be silently dropped and leadDate would default to "now".
+      leadDate: leadData.enquiryDate ? new Date(leadData.enquiryDate) : undefined,
       history: [{
         action: 'Lead Created',
         notes: 'Initial lead entry',
@@ -127,6 +162,7 @@ export const getLeads = async (req, res) => {
       enquiryDateTo,
       nextFollowUpDateFrom,
       nextFollowUpDateTo,
+      leadStatus,
       paymentCheckRequested,
       paymentCheckStatusFilter
     } = req.query;
@@ -226,6 +262,8 @@ export const getLeads = async (req, res) => {
         query.customerType = 'Dealer';
       } else if (status === "New Leads") {
         query.status = 'New';
+      } else if (status === "Disqualified") {
+        query.status = { $in: await getDisqualifyReasons() };
       } else {
         query.status = status;
       }
@@ -245,12 +283,17 @@ export const getLeads = async (req, res) => {
     if (city) query.city = { $regex: city, $options: 'i' };
     if (source) query.source = source;
     if (customerType) query.customerType = customerType;
+    // Advanced Filters' Lead Status (Hot/Warm/Cold/Pending/Star Lead/Followup)
+    // — independent of the tab bar's status special-cases above, and takes
+    // precedence over whatever tab set query.status if both are active.
+    if (leadStatus) query.status = leadStatus;
 
-    // Date range filters
+    // Date range filters — "Enquiry Date" in the UI maps to the Lead
+    // schema's leadDate field (there is no separate enquiryDate field).
     if (enquiryDateFrom || enquiryDateTo) {
-      query.enquiryDate = {};
-      if (enquiryDateFrom) query.enquiryDate.$gte = new Date(enquiryDateFrom);
-      if (enquiryDateTo) query.enquiryDate.$lte = new Date(enquiryDateTo);
+      query.leadDate = {};
+      if (enquiryDateFrom) query.leadDate.$gte = new Date(enquiryDateFrom);
+      if (enquiryDateTo) query.leadDate.$lte = new Date(enquiryDateTo);
     }
 
     if (nextFollowUpDateFrom || nextFollowUpDateTo) {
@@ -314,10 +357,26 @@ export const getLeads = async (req, res) => {
     const forms = await OrderForm.find({ leadId: { $in: leadIds } }).select('leadId status');
     const formStatusMap = new Map(forms.map(f => [f.leadId.toString(), f.status]));
 
+    // How many times a quotation has been sent per lead — powers the count
+    // badge next to "View" on the Leads page. Computed from the separate
+    // LeadQuotationHistory log (see sendQuotationEmailHandler in
+    // salesController.js), not stored on Lead itself.
+    const LeadQuotationHistory = (await import('../models/LeadQuotationHistory.js')).default;
+    const quotationCountsAgg = await LeadQuotationHistory.aggregate([
+      { $match: { leadId: { $in: leadIds } } },
+      { $group: { _id: '$leadId', count: { $sum: 1 } } },
+    ]);
+    const quotationCountMap = new Map(quotationCountsAgg.map(q => [q._id.toString(), q.count]));
+
     const leads = leadsDocs.map(l => {
       const doc = l.toObject();
-      doc.hasQuotation = quoteSet.has(doc._id.toString());
-      doc.orderFormStatus = formStatusMap.get(doc._id.toString()) || null;
+      const idStr = doc._id.toString();
+      doc.hasQuotation = quoteSet.has(idStr);
+      doc.orderFormStatus = formStatusMap.get(idStr) || null;
+      // Fallback to 1 for leads that already had a quotation sent before this
+      // history log existed — so the count never reads as 0 when a quotation
+      // is clearly present.
+      doc.quotationCount = quotationCountMap.get(idStr) || (doc.hasQuotation ? 1 : 0);
       return doc;
     });
 
@@ -354,6 +413,51 @@ export const getLeads = async (req, res) => {
   }
 };
 
+// Lead counts for the Sales Dashboard's "Leads Overview" cards — reuses the exact
+// same role-based visibility rules as getLeads (Sales Employee sees only their
+// assigned/observed leads; Cruncher/Sales Head see the whole company) and the same
+// status/date semantics as the Leads page tabs (Won, Disqualified, Today's Follow-up),
+// so each card's count matches what the user lands on after clicking through.
+export const getLeadDashboardStats = async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user._id).populate('designationId');
+    const isCruncher = currentUser?.designationId?.name === 'Cruncher' ||
+                      currentUser?.designation?.name === 'Cruncher' ||
+                      (currentUser?.role === 'Sales Employee' && currentUser?.designation === 'Cruncher');
+    const isSalesEmployee = ['Sales', 'Sales Employee'].includes(req.user.role) && !isCruncher;
+
+    const query = { companyId: req.user.companyId };
+    if (isSalesEmployee) {
+      query.$or = [{ assignedTo: req.user._id }, { observer: req.user._id }];
+    }
+    // Cruncher / Sales Head / other roles: full company visibility (same as getLeads)
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const disqualifyReasons = await getDisqualifyReasons();
+
+    const [total, won, disqualified, todayFollowUp, pendingFollowUp, upcomingFollowUp] = await Promise.all([
+      Lead.countDocuments(query),
+      Lead.countDocuments({ ...query, status: 'Won' }),
+      Lead.countDocuments({ ...query, status: { $in: disqualifyReasons } }),
+      Lead.countDocuments({ ...query, nextFollowUpDate: { $gte: today, $lt: tomorrow } }),
+      Lead.countDocuments({ ...query, nextFollowUpDate: { $lt: today } }),
+      Lead.countDocuments({ ...query, nextFollowUpDate: { $gte: tomorrow } }),
+    ]);
+
+    res.json({
+      success: true,
+      stats: { total, won, disqualified, todayFollowUp, pendingFollowUp, upcomingFollowUp },
+    });
+  } catch (error) {
+    console.error('Error fetching lead dashboard stats:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
 // Get single lead by ID
 export const getLeadById = async (req, res) => {
   try {
@@ -370,7 +474,8 @@ export const getLeadById = async (req, res) => {
   }
 };
 
-// Get only the quotation PDF for a lead (lightweight endpoint)
+// Get only the quotation PDF for a lead (lightweight endpoint) — always the
+// latest one, same as before this feature; unaffected by quotation history.
 export const getLeadQuotation = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id).select('quotation leadCode');
@@ -379,6 +484,37 @@ export const getLeadQuotation = async (req, res) => {
     res.json({ success: true, quotation: lead.quotation, leadCode: lead.leadCode });
   } catch (error) {
     console.error('Error fetching lead quotation:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// List every quotation ever sent for a lead (metadata only, no PDF content —
+// keeps this list call light even with many sends). Powers the "View All
+// Quotations" history modal on both Leads.jsx and Quotation.jsx.
+export const getLeadQuotationHistory = async (req, res) => {
+  try {
+    const LeadQuotationHistory = (await import('../models/LeadQuotationHistory.js')).default;
+    const history = await LeadQuotationHistory.find({ leadId: req.params.id })
+      .select('-quotation')
+      .populate('sentBy', 'fullName username')
+      .sort({ sentAt: -1 });
+    res.json({ success: true, history });
+  } catch (error) {
+    console.error('Error fetching lead quotation history:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// Fetch one specific past quotation's full PDF content, on demand — only
+// called when the user actually opens that entry from the history list.
+export const getLeadQuotationHistoryItem = async (req, res) => {
+  try {
+    const LeadQuotationHistory = (await import('../models/LeadQuotationHistory.js')).default;
+    const entry = await LeadQuotationHistory.findOne({ _id: req.params.historyId, leadId: req.params.id }).select('quotation leadCode sentAt');
+    if (!entry) return res.status(404).json({ success: false, message: 'Quotation history entry not found' });
+    res.json({ success: true, quotation: entry.quotation, leadCode: entry.leadCode, sentAt: entry.sentAt });
+  } catch (error) {
+    console.error('Error fetching lead quotation history item:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 };

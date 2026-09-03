@@ -114,7 +114,10 @@ const DEFAULT_ROLES = Object.values(USER_ROLES)
   .map((name, i) => ({ name, isBuiltIn: true, order: i }));
 
 // ─── Helper: get or create settings for a company ─────────────────────────────
-async function getOrCreateSettings(companyId) {
+// Exported for leadSettingRequestController.js — Lead Settings (the 6 fields
+// below) are now per-company live data, applied only on Company Admin approval
+// of a Sales Head's request, rather than a direct Super Admin edit.
+export async function getOrCreateSettings(companyId) {
   let settings = await AdminSettings.findOne({ companyId });
   if (!settings) {
     settings = new AdminSettings({
@@ -174,16 +177,15 @@ export const getAdminSettings = async (req, res) => {
     if (!companyId) return res.status(400).json({ success: false, message: 'Company not assigned' });
     const settings = await getOrCreateSettings(companyId);
     const globalSettings = await getOrCreateGlobalAdminSettings();
-    const globalChecklist = await getOrCreateGlobalSalesChecklist();
     res.json({
       success: true,
       settings: {
         ...settings.toObject(),
-        leadStages: globalSettings.leadStages,
-        leadSources: globalSettings.leadSources,
-        businessTypes: globalSettings.businessTypes,
-        documentTypes: globalSettings.documentTypes,
-        leadRejectReasons: globalSettings.leadRejectReasons,
+        // Lead Settings (leadStages/leadSources/businessTypes/documentTypes/
+        // leadRejectReasons/salesChecklist) intentionally NOT overridden here
+        // anymore — they're per-company live data now, editable only via a
+        // Sales Head request + Company Admin approval (leadSettingRequestController.js).
+        // Everything below this line stays platform-wide/Super-Admin-managed.
         termsAndConditions: globalSettings.termsAndConditions,
         additionalCharges: globalSettings.additionalCharges,
         quotationNotes: globalSettings.quotationNotes,
@@ -191,7 +193,6 @@ export const getAdminSettings = async (req, res) => {
         dispatchChecklist: globalSettings.dispatchChecklist,
         hrmsDocumentTypes: globalSettings.hrmsDocumentTypes,
         roles: globalSettings.roles,
-        salesChecklist: globalChecklist.salesChecklist,
       }
     });
   } catch (err) {
