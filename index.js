@@ -351,6 +351,14 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const adminSettingsRoutes = (await import('./routes/adminSettingsRoutes.js')).default;
             app.use('/api/admin-settings', adminSettingsRoutes);
             console.log('Admin Settings routes registered at /api/admin-settings');
+            // Lead Setting change requests (Sales Head propose -> Company Admin approve)
+            const leadSettingRequestRoutes = (await import('./routes/leadSettingRequestRoutes.js')).default;
+            app.use('/api/lead-setting-requests', leadSettingRequestRoutes);
+            console.log('Lead Setting Request routes registered at /api/lead-setting-requests');
+            // Sales -> R&D new-product requests (raised from a lead's Quotation page)
+            const salesItemRequestRoutes = (await import('./routes/salesItemRequestRoutes.js')).default;
+            app.use('/api/sales-item-requests', salesItemRequestRoutes);
+            console.log('Sales Item Request routes registered at /api/sales-item-requests');
             // Pricing Value routes (per-item Profit%/Discount% for sellable items)
             const pricingValueRoutes = (await import('./routes/pricingValueRoutes.js')).default;
             app.use('/api/pricing-value', pricingValueRoutes);

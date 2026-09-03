@@ -3,8 +3,11 @@ import { authenticateToken } from '../middleware/auth.js';
 import {
   createLead,
   getLeads,
+  getLeadDashboardStats,
   getLeadById,
   getLeadQuotation,
+  getLeadQuotationHistory,
+  getLeadQuotationHistoryItem,
   updateLead,
   deleteLead,
   checkExistingLead,
@@ -64,6 +67,7 @@ const paymentCheckEdit = checkAnyPermission(leadOrAccountsSales, 'edit');
 
 router.post('/',                          leadsAdd, createLead);
 router.get('/',                           leadsViewOrAccountsSales, getLeads);
+router.get('/dashboard-stats',            leadsView, getLeadDashboardStats);
 router.get('/check',                      leadsView, checkExistingLead);
 router.get('/users',                      leadsView, getAssignableUsers);
 
@@ -78,6 +82,8 @@ router.post('/click-to-call',            leadsEdit, clickToCall);
 
 // Lead-specific routes
 router.get('/:id/quotation',              leadsView, getLeadQuotation);
+router.get('/:id/quotation-history',      leadsView, getLeadQuotationHistory);
+router.get('/:id/quotation-history/:historyId', leadsView, getLeadQuotationHistoryItem);
 router.get('/:id',                        leadsView, getLeadById);
 router.put('/:id',                        leadsEdit, updateLead);
 router.put('/:id/payment-check',          paymentCheckEdit, updatePaymentCheckStatus);

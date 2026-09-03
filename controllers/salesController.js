@@ -2286,7 +2286,7 @@ export const sendQuotationEmailHandler = async (req, res) => {
             updateFields.quotationFinalAmount = Number(quotationFinalAmount);
             console.log(`💰 Saving quotationFinalAmount: ₹${quotationFinalAmount} for lead ${leadCode}`);
           }
-          await Lead.findOneAndUpdate(
+          const updatedLead = await Lead.findOneAndUpdate(
             { leadCode, companyId: userCompanyId },
             {
               ...updateFields,
@@ -2301,6 +2301,27 @@ export const sendQuotationEmailHandler = async (req, res) => {
             }
           );
           console.log(`💾 Saved quotation for lead ${leadCode}`);
+
+          // Additive send-history log — every send (first-time or "Update
+          // Quotation" resend) gets its own retrievable row here, separate
+          // from Lead so past PDFs aren't lost even though the field above
+          // keeps overwriting to just the latest. Never blocks the response.
+          if (updatedLead) {
+            try {
+              const LeadQuotationHistory = (await import('../models/LeadQuotationHistory.js')).default;
+              await LeadQuotationHistory.create({
+                leadId: updatedLead._id,
+                companyId: userCompanyId,
+                leadCode,
+                quotation: attachmentBase64,
+                quotationFinalAmount: updateFields.quotationFinalAmount || 0,
+                sentTo: to,
+                sentBy: req.user._id,
+              });
+            } catch (historyError) {
+              console.error('❌ Error saving quotation history:', historyError);
+            }
+          }
         } catch (saveError) {
           console.error('❌ Error saving quotation to lead:', saveError);
           // Don't fail the whole request if only saving to DB fails

@@ -272,10 +272,11 @@ export const getReports = async (req, res) => {
 // Stage-wise lead counts, Won/Late totals, and a Source-wise performance
 // breakdown — scoped to the logged-in Marketing Head's own company (never
 // cross-company), matching the same cid(req) convention as the rest of this
-// controller. Stage order follows the company's own configured pipeline
-// (AdminSettings.leadStages) since stages/sources are per-company and
-// user-editable, not a fixed enum — see leadStagesCrud/leadSourcesCrud in
-// adminSettingsController.js.
+// controller. Stage order follows this company's own configured pipeline
+// (AdminSettings.leadStages, per-company) since stages are admin-editable,
+// not a fixed enum — see getOrCreateSettings in adminSettingsController.js
+// and leadSettingRequestController.js (Sales Head request -> Company Admin
+// approval flow that now manages this list).
 export const getLeadReports = async (req, res) => {
   try {
     const companyId = cid(req);
@@ -330,7 +331,7 @@ export const getLeadReports = async (req, res) => {
           },
         },
       ]),
-      AdminSettings.findOne({ companyId }).select('leadStages').lean(),
+      AdminSettings.findOne({ companyId: companyObjectId }).select('leadStages').lean(),
     ]);
 
     // Order stage rows by the company's configured pipeline order. Any stage

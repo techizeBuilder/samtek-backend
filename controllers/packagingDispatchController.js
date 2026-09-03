@@ -3,7 +3,7 @@ import PackagingJob from '../models/PackagingJob.js';
 import DispatchOrder from '../models/DispatchOrder.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import QCJob from '../models/QCJob.js';
-import AdminSettings from '../models/AdminSettings.js';
+import GlobalAdminSettings from '../models/GlobalAdminSettings.js';
 import notificationService from '../services/notificationService.js';
 import Sale from '../models/Sale.js';
 import Order from '../models/Order.js';
@@ -696,7 +696,7 @@ export const completePacking = async (req, res) => {
     const job = await PackagingJob.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
-    const settings = await AdminSettings.findOne({ companyId: req.user.companyId });
+    const settings = await GlobalAdminSettings.findOne();
     const checklistItems = settings?.dispatchChecklist || [];
     const cl = job.checklist || {};
     const allDone = checklistItems.every(item => cl[item._id.toString()]);

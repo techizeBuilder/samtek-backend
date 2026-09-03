@@ -5,7 +5,7 @@ import PurchaseRequest from '../models/PurchaseRequest.js';
 import { Company } from '../models/Company.js';
 import { sendPurchaseOrderEmail } from '../services/emailService.js';
 import { USER_ROLES } from '../shared/schema.js';
-import { applyPricingToItem } from '../services/itemPricingService.js';
+import { applyPricingToItem, cascadeRecalculateToConsumers } from '../services/itemPricingService.js';
 
 export const getPurchases = async (req, res) => {
   try {
@@ -721,7 +721,12 @@ export const updatePurchaseItemCost = async (req, res) => {
     // profitPercent/discountPercent (Company Admin > Pricing Value) in one
     // step — same formula every other purchase-cost-driven recalculation
     // uses (see itemPricingService.js).
-    await applyPricingToItem(item, Number(purchaseCost), 'Purchase');
+    const updated = await applyPricingToItem(item, Number(purchaseCost), 'Purchase');
+    // This bypasses recalculateItemPricing (which would re-derive cost from
+    // the latest invoice, overriding Accounts' manually-typed value), so the
+    // upward cascade to every machine/sub-assembly that uses this item as a
+    // BOM material has to be triggered explicitly here too.
+    if (updated) await cascadeRecalculateToConsumers(item);
 
     res.json({
       success: true,
