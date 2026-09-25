@@ -1,6 +1,104 @@
+import mongoose from 'mongoose';
 import Supplier from '../models/Supplier.js';
+import { Item } from '../models/Inventory.js';
+import ProcessCategoryOption from '../models/ProcessCategoryOption.js';
+import ChildPartBOM from '../models/ChildPartBOM.js';
+import MachineBOM from '../models/MachineBOM.js';
 import * as XLSX from 'xlsx';
 import multer from 'multer';
+
+// suppliedItems/services arrive straight from the Vendor Master form — keep
+// only valid Item ids and trimmed, non-empty, de-duplicated (case-
+// insensitive) step names. Absent/non-array means "not being edited" and is
+// left out, so other callers saving a vendor never wipe them.
+function cleanVendorCoverage(body) {
+  if (Array.isArray(body.suppliedItems)) {
+    body.suppliedItems = [...new Set(body.suppliedItems.map(String).filter(id => mongoose.Types.ObjectId.isValid(id)))];
+  } else {
+    delete body.suppliedItems;
+  }
+  if (Array.isArray(body.services)) {
+    const seen = new Set();
+    body.services = body.services.map(s => String(s).trim()).filter(s => {
+      const key = s.toLowerCase();
+      if (!s || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  } else {
+    delete body.services;
+  }
+}
+
+// GET /api/suppliers/catalog — what the Vendor Master's Product / Services
+// tabs pick from (2026-09-25).
+//  - items: every Purchasable Item of the company (Inventory, Product
+//    Master, Motor Master). Child Parts / Sub Child Parts are excluded by
+//    kind, not just by flag: the BOM creates them in-house, and their vendor
+//    need is outsourced job work — the Services tab.
+//  - services: Process Template step names (every BOM level, de-duplicated
+//    by name, since matching is by name across levels), each with where it
+//    sits in the templates and which parts' BOMs actually use it as an Out
+//    Source step. Templates don't record In-House/Out Source — each BOM step
+//    does — so usedBy is what tells Purchase a step is really outsourced.
+//    Out Source step names found in a BOM but no longer in the templates
+//    (e.g. renamed since) are listed too, so they can still be covered.
+export const getSupplierCatalog = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const notDiscontinued = { isDiscontinued: { $ne: true } };
+
+    const items = await Item.find({
+      companyId, purchase: true, ...notDiscontinued,
+      productKind: { $nin: ['SubChildPart', 'ChildPart'] },
+    }).select('code name productKind category subCategory unit').sort({ name: 1 }).lean();
+    const sourceOf = (it) => it.productKind === 'Machine' ? 'Product Master' : it.productKind === 'Motor' ? 'Motor Master' : 'Inventory';
+
+    const byName = new Map();
+    const entryFor = (name) => {
+      const key = name.trim().toLowerCase();
+      if (!byName.has(key)) byName.set(key, { name: name.trim(), templates: [], usedBy: [] });
+      return byName.get(key);
+    };
+
+    const templates = await ProcessCategoryOption.find({ companyId }).lean();
+    for (const t of templates) {
+      for (const step of t.internalProcesses || []) {
+        if (step?.trim()) entryFor(step).templates.push({ bomLevel: t.bomLevel, category: t.label });
+      }
+    }
+
+    const addUsage = (bomLevel, part, processDefinition) => {
+      if (!part) return;
+      for (const cat of processDefinition || []) {
+        for (const step of cat.internalProcesses || []) {
+          if (step.type !== 'OutSource' || !step.name?.trim()) continue;
+          const entry = entryFor(step.name);
+          if (!entry.usedBy.some(u => String(u._id) === String(part._id))) {
+            entry.usedBy.push({ _id: part._id, code: part.code, name: part.name, bomLevel });
+          }
+        }
+      }
+    };
+    const [subChildParts, childPartBoms, machineBoms] = await Promise.all([
+      Item.find({ companyId, productKind: 'SubChildPart', ...notDiscontinued }).select('code name subChildPartDetails.processDefinition').lean(),
+      ChildPartBOM.find({ company: companyId }).select('childPart processDefinition').populate('childPart', 'code name isDiscontinued').lean(),
+      MachineBOM.find({ company: companyId }).select('machine processDefinition').populate('machine', 'code name isDiscontinued').lean(),
+    ]);
+    subChildParts.forEach(p => addUsage('SubChildPart', p, p.subChildPartDetails?.processDefinition));
+    childPartBoms.forEach(b => { if (!b.childPart?.isDiscontinued) addUsage('ChildPart', b.childPart, b.processDefinition); });
+    machineBoms.forEach(b => { if (!b.machine?.isDiscontinued) addUsage('Machine', b.machine, b.processDefinition); });
+
+    res.json({
+      success: true,
+      items: items.map(it => ({ ...it, source: sourceOf(it) })),
+      services: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    });
+  } catch (error) {
+    console.error('Error building supplier catalog:', error);
+    res.status(500).json({ message: 'Error loading vendor catalog' });
+  }
+};
 
 // Configure multer for file upload
 const upload = multer({
@@ -75,6 +173,7 @@ export const getSupplierById = async (req, res) => {
 export const createSupplier = async (req, res) => {
   try {
     const supplierData = { ...req.body, unit: req.user.unit };
+    cleanVendorCoverage(supplierData);
     const supplier = new Supplier(supplierData);
     await supplier.save();
     res.status(201).json({ message: 'Supplier created successfully', supplier });
@@ -89,6 +188,7 @@ export const createSupplier = async (req, res) => {
 
 export const updateSupplier = async (req, res) => {
   try {
+    cleanVendorCoverage(req.body);
     const supplier = await Supplier.findByIdAndUpdate(
       req.params.id,
       req.body,

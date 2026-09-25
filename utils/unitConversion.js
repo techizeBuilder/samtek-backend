@@ -22,6 +22,16 @@ export const AREA_UNIT_TO_MM2 = {
   'Foot Square': 92903.04,
 };
 
+// Volume — same precedent, canonical base is milliliters (= cm³). Unit name
+// strings match the "Volume Unit" UnitType seed data exactly.
+export const VOLUME_UNIT_TO_ML = {
+  'Centimeter Cube': 1,
+  'Meter Cube': 1e6,
+  'Liter': 1000,
+  'Inch Cube': 16.387064,
+  'Foot Cube': 28316.846592,
+};
+
 export function toMm(value, unit) {
   const multiplier = LENGTH_UNIT_TO_MM[unit];
   if (!multiplier || !(Number(value) > 0)) return null;
@@ -32,4 +42,28 @@ export function toMm2(value, unit) {
   const multiplier = AREA_UNIT_TO_MM2[unit];
   if (!multiplier || !(Number(value) > 0)) return null;
   return Number(value) * multiplier;
+}
+
+export function toMl(value, unit) {
+  const multiplier = VOLUME_UNIT_TO_ML[unit];
+  if (!multiplier || !(Number(value) > 0)) return null;
+  return Number(value) * multiplier;
+}
+
+// Converts `value` from `fromUnit` to `toUnit` when both belong to the same
+// Length/Area/Volume category (found by checking which of the three tables
+// above contains both unit names) — e.g. a BOM line's amount in Millimeter
+// against an Inventory item's weight rate defined per Meter. Returns null
+// (never a guessed number) when either unit is unknown or they're not in the
+// same category — callers must treat that as "can't convert."
+const UNIT_CATEGORY_TABLES = [LENGTH_UNIT_TO_MM, AREA_UNIT_TO_MM2, VOLUME_UNIT_TO_ML];
+export function convertBetweenUnits(value, fromUnit, toUnit) {
+  if (!(Number(value) >= 0) || !fromUnit || !toUnit) return null;
+  if (fromUnit === toUnit) return Number(value);
+  for (const table of UNIT_CATEGORY_TABLES) {
+    if (table[fromUnit] && table[toUnit]) {
+      return (Number(value) * table[fromUnit]) / table[toUnit];
+    }
+  }
+  return null;
 }

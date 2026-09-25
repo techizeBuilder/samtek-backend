@@ -153,6 +153,21 @@ export async function getOrCreateSettings(companyId) {
       settings.salesChecklist = DEFAULT_SALES_CHECKLIST;
       changed = true;
     }
+    // Quotation Settings are per-company now (Sales Head request + Company
+    // Admin approval, same as Lead Settings) — seed the old hardcoded lists
+    // once for any company that never had them.
+    if (!settings.termsAndConditions || settings.termsAndConditions.length === 0) {
+      settings.termsAndConditions = DEFAULT_TERMS;
+      changed = true;
+    }
+    if (!settings.additionalCharges || settings.additionalCharges.length === 0) {
+      settings.additionalCharges = DEFAULT_ADDITIONAL_CHARGES;
+      changed = true;
+    }
+    if (!settings.quotationNotes || settings.quotationNotes.length === 0) {
+      settings.quotationNotes = DEFAULT_NOTES;
+      changed = true;
+    }
     if (!settings.quotationNumberSettings || settings.quotationNumberSettings.length === 0) {
       settings.quotationNumberSettings = DEFAULT_QUOTATION_NUMBER_SETTINGS;
       changed = true;
@@ -182,14 +197,12 @@ export const getAdminSettings = async (req, res) => {
       settings: {
         ...settings.toObject(),
         // Lead Settings (leadStages/leadSources/businessTypes/documentTypes/
-        // leadRejectReasons/salesChecklist) intentionally NOT overridden here
-        // anymore — they're per-company live data now, editable only via a
-        // Sales Head request + Company Admin approval (leadSettingRequestController.js).
+        // leadRejectReasons/salesChecklist) AND Quotation Settings
+        // (termsAndConditions/additionalCharges/quotationNotes/
+        // quotationNumberSettings) are per-company live data now, editable only
+        // via a Sales Head request + Company Admin approval
+        // (leadSettingRequestController.js) — NOT overridden here.
         // Everything below this line stays platform-wide/Super-Admin-managed.
-        termsAndConditions: globalSettings.termsAndConditions,
-        additionalCharges: globalSettings.additionalCharges,
-        quotationNotes: globalSettings.quotationNotes,
-        quotationNumberSettings: globalSettings.quotationNumberSettings,
         dispatchChecklist: globalSettings.dispatchChecklist,
         hrmsDocumentTypes: globalSettings.hrmsDocumentTypes,
         roles: globalSettings.roles,
@@ -421,13 +434,13 @@ export const leadStagesCrud   = makeArrayCrud('leadStages');
 export const leadSourcesCrud  = makeArrayCrud('leadSources');
 export const businessTypesCrud = makeArrayCrud('businessTypes');
 export const documentTypesCrud = makeArrayCrud('documentTypes');
-export const termsCrud        = makeArrayCrud('termsAndConditions');
-export const chargesCrud      = makeArrayCrud('additionalCharges');
-export const notesCrud        = makeArrayCrud('quotationNotes');
 export const dispatchChecklistCrud = makeArrayCrud('dispatchChecklist');
 export const leadRejectReasonsCrud = makeArrayCrud('leadRejectReasons');
-export const quotationNumberSettingsCrud = makeArrayCrud('quotationNumberSettings');
 export const hrmsDocumentTypesCrud = makeArrayCrud('hrmsDocumentTypes');
+// termsAndConditions / additionalCharges / quotationNotes /
+// quotationNumberSettings are per-company now (Sales Head request + Company
+// Admin approval — see leadSettingRequestController.js), no longer a global
+// Super-Admin-managed list.
 
 // ─── HRMS: Role Setting (built-in roles are protected from rename/delete) ─────
 export const rolesCrud = {

@@ -1,6 +1,37 @@
-# Open question: `unitWeightValue` is ambiguous for non-fabrication Length/Area/Volume Unit items
+# Resolved: `unitWeightValue` reference unit for non-fabrication Length/Area/Volume Unit items
 
-**Status: unresolved, pending client clarification.** Not yet acted on beyond the BOM PDF redesign (2026-08-20) deliberately declining to compute a "Total Weight" for the affected item category rather than risk showing a wrong number.
+**Status: resolved 2026-09-07.** Client confirmed non-fabrication items in these 3 Used Unit categories are
+never purchased in Length/Area/Volume units in practice, and asked to build explicit per-unit weight support
+rather than leave the display gap below. Existing dev-only records were NOT migrated (not production data) —
+they simply keep showing "—" for Total Weight until re-saved through the new form, same as any other legacy
+record with a blank field.
+
+## The fix
+
+`Item.unitWeightUnit` (and `unitWeightUnitType`) now mean something different for a Length/Area/Volume Used
+Unit item than for a Mass/Count one:
+
+- **Mass/Count Used Unit (unchanged)** — `unitWeightUnit` is still the WEIGHT's own unit, hardcoded
+  `'Kilogram'` (`SimpleInventoryForm.jsx`) — no ambiguity, as established below.
+- **Length/Area/Volume Used Unit (new)** — `unitWeightUnit` is now the REFERENCE unit `unitWeightValue` (kg) is
+  defined per, chosen independently of the item's own Used Unit via a new "per [unit]" dropdown next to Unit
+  Weight, scoped to the same UnitType (so a thin wire can be "1 kg per Meter" instead of an awkward "0.0002 kg
+  per Millimeter" if Used Unit happens to be Millimeter).
+
+BOM Total Weight (`rdController.js`'s `bomMaterialTotalWeight`, used by the BOM PDF's `writeBOMPdf`) now
+converts the BOM line's own resolved amount (`mat.quantity`, already in `mat.amountUnit` = the item's Used
+Unit) into `mat.unitWeightUnit`'s scale via the new `convertBetweenUnits` helper
+(`server/utils/unitConversion.js`, backed by `LENGTH_UNIT_TO_MM`/`AREA_UNIT_TO_MM2`/new `VOLUME_UNIT_TO_ML`)
+before multiplying — e.g. Item's Used Unit Millimeter with a BOM line of 100mm, weight rate "1 kg per Meter" →
+100mm converts to 0.1m → 0.1 kg, not the wrong 100 kg a naive same-unit multiplication would give. Returns null
+(still renders "—", never a guessed number) when the material has no recorded reference unit (legacy dev data)
+or the two units aren't in the same category.
+
+`formatUnitWeight` (`client/src/utils/bomFieldFormat.js`, BOM Management's Unit Weight column) and
+`ViewItemModal.jsx`'s own Unit Weight row both display the new "X kg / Y" phrasing for this category instead of
+the old bare "X Y".
+
+## Original problem (superseded, kept for context)
 
 ## The problem
 
@@ -25,4 +56,4 @@ This is fine for two of the four Used Unit categories, genuinely ambiguous for a
 
 ## Resolution tracking
 
-Not yet resolved. Update this doc (or delete it, if superseded by a real fix) once the client clarifies and any resulting change ships — this file exists purely so the reasoning above doesn't need to be rediscovered from scratch in a future session.
+Resolved 2026-09-07 — see "The fix" at the top of this doc.

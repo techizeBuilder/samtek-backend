@@ -1,23 +1,19 @@
 import { Item } from '../models/Inventory.js';
-import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimensions } from '../services/fabricationDemandService.js';
-import RDBOM from '../models/RDBOM.js';
 import RDPrototype from '../models/RDPrototype.js';
 import RDChangeRequest from '../models/RDChangeRequest.js';
 import RDToolProcess from '../models/RDToolProcess.js';
 import RDQualityParam from '../models/RDQualityParam.js';
 import RDDocument from '../models/RDDocument.js';
-import RDChildPart from '../models/RDChildPart.js';
 import RDRequest from '../models/RDRequest.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import RDMasterOption from '../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
 import RDPlant from '../models/RDPlant.js';
-import SheetMetalPlan from '../models/SheetMetalPlan.js';
-import { sheetMetalGroupsFromBOM } from './sheetMetalPlanController.js';
-import { getMachineBillingBOMCost, recalculateItemPricing } from '../services/itemPricingService.js';
-import PDFDocument from 'pdfkit';
+import { getMachineBillingBOMCost } from '../services/itemPricingService.js';
+import MachineBOM from '../models/MachineBOM.js';
+import ChildPartBOM from '../models/ChildPartBOM.js';
+import { findMachineMaterialLines } from '../services/machineReorderService.js';
 import fs from 'fs';
-import path from 'path';
 
 
 
@@ -28,66 +24,6 @@ const today = () => new Date().toISOString().split('T')[0];
 // amountValue too (see addMaterial/updateMaterial) — purchaseCost is ₹ per
 // Used Unit, and a flat quantity alone can't say "2 pieces of 1m length
 // each" the way it can say "5 kg" or "3 pieces" for Mass/Count materials.
-const AMOUNT_UNIT_TYPES = ['Length Unit', 'Area Unit', 'Volume Unit'];
-const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNIT_TYPES.includes(sourceItem.unitType);
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Keeps a BOM's material unitPrice/totalPrice snapshots in sync with each
-// material Item's LIVE price — addMaterial/updateMaterial already pull the
-// price fresh at write time, but a material's Item can have its price
-// changed later (e.g. Purchase > Inventory) without anyone touching the BOM
-// again, which used to leave the BOM's displayed Price column stale. Called
-// on every BOM read; only writes back if something actually changed. Takes
-// a real (non-lean) Mongoose document so it can save.
-//
-// Fabrication Master materials (mat.fabricationCategory set) price by
-// weight, not purchaseCost — see addMaterial's matching comment. Recomputes
-// from the material line's own committed bomDimensions x the Item's
-// current weightUnitPrice, mirroring addMaterial/updateMaterial exactly, so
-// this "keep it live" refresh can't silently undo the fabrication pricing
-// those two already compute at add/edit time.
-async function refreshBOMMaterialPrices(bom, companyId) {
-  if (!bom || !bom.materials || bom.materials.length === 0) return bom;
-  let changed = false;
-  for (const mat of bom.materials) {
-    if (mat.isDiscontinued) continue;
-    const sourceItem = await Item.findOne({
-      companyId,
-      productKind: null,
-      code: { $regex: new RegExp(`^${escapeRegex(mat.code)}$`, 'i') }
-    }).select('purchaseCost fabricationRef weightUnitPrice dimensionVariants').lean();
-    if (!sourceItem) continue;
-
-    let liveUnitPrice;
-    let liveWeightPerPieceKg = mat.computedWeightPerPieceKg;
-    if (mat.fabricationCategory) {
-      const fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions, mat.bomDimensions?.designation);
-      liveUnitPrice = fabWeight ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100 : 0;
-      liveWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
-    } else {
-      // purchaseCost is already ₹ per Used Unit — flat, unconditionally,
-      // even for a Length/Area/Volume material entered as "Amount x Pieces"
-      // (see UnitAmountField.jsx): mat.quantity there is already the
-      // resolved TOTAL amount, not a piece count, so no further
-      // amountValue multiplication belongs in pricing. amountValue is
-      // display-only for these materials (the per-piece breakdown).
-      liveUnitPrice = sourceItem.purchaseCost || 0;
-    }
-
-    if (mat.unitPrice !== liveUnitPrice || mat.computedWeightPerPieceKg !== liveWeightPerPieceKg) {
-      mat.unitPrice = liveUnitPrice;
-      mat.totalPrice = Math.round(liveUnitPrice * (mat.quantity || 0) * 100) / 100;
-      mat.computedWeightPerPieceKg = liveWeightPerPieceKg;
-      changed = true;
-    }
-  }
-  if (changed) await bom.save();
-  return bom;
-}
-
 async function generateChangeId(companyId) {
   const year = new Date().getFullYear();
 
@@ -154,6 +90,12 @@ const toMachineResponse = (item) => ({
   variant: item.machineDetails?.variant || '',
   productionRate: item.machineDetails?.productionRate || '',
   materialGrade: item.materialGrade || '',
+  // A machine can run on several motors (e.g. one 5 HP + one 10 HP) — see
+  // powerRequirements[] on machineDetails. The 4 legacy scalar fields below
+  // are kept alongside it purely so a machine saved before this existed
+  // still has something to show (PlantMaster.jsx's powerLine() falls back to
+  // them when powerRequirements is empty); no longer written by new saves.
+  powerRequirements: item.machineDetails?.powerRequirements || [],
   powerSource: item.machineDetails?.powerSource || '',
   powerRequiredHP: item.machineDetails?.powerRequiredHP ?? null,
   powerRequiredKWH: item.machineDetails?.powerRequiredKWH ?? null,
@@ -174,6 +116,7 @@ const toMachineResponse = (item) => ({
   salePrice: item.salePrice ?? 0,
   mrp: item.mrp ?? 0,
   gst: item.gst ?? 0,
+  hsn: item.hsn || '',
   qty: item.qty ?? 0,
   minStock: item.minStock ?? 0,
   costSource: item.costSource || 'Manual',
@@ -224,6 +167,7 @@ const toMachineItemFields = (body) => {
   if (body.salePrice !== undefined) out.salePrice = Number(body.salePrice) || 0;
   if (body.mrp !== undefined) out.mrp = Number(body.mrp) || 0;
   if (body.gst !== undefined) out.gst = Number(body.gst) || 0;
+  if (body.hsn !== undefined) out.hsn = body.hsn || '';
   if (body.qty !== undefined) out.qty = Number(body.qty) || 0;
   if (body.minStock !== undefined) out.minStock = Number(body.minStock) || 0;
 
@@ -236,16 +180,80 @@ const toMachineItemFields = (body) => {
   if (body.firstBuiltAt !== undefined) md.firstBuiltAt = body.firstBuiltAt;
   if (body.variant !== undefined) md.variant = body.variant || '';
   if (body.productionRate !== undefined) md.productionRate = body.productionRate || '';
-  if (body.powerSource !== undefined) md.powerSource = body.powerSource || '';
-  if (body.powerRequiredHP !== undefined) md.powerRequiredHP = body.powerRequiredHP !== '' ? Number(body.powerRequiredHP) : null;
-  if (body.powerRequiredKWH !== undefined) md.powerRequiredKWH = body.powerRequiredKWH !== '' ? Number(body.powerRequiredKWH) : null;
-  if (body.powerRequiredRPM !== undefined) md.powerRequiredRPM = body.powerRequiredRPM !== '' ? Number(body.powerRequiredRPM) : null;
+  if (body.powerRequirements !== undefined) {
+    md.powerRequirements = Array.isArray(body.powerRequirements)
+      ? body.powerRequirements.map(pr => ({
+          powerSource: pr.powerSource || '',
+          hp: pr.hp !== undefined && pr.hp !== '' ? Number(pr.hp) : null,
+          kwh: pr.kwh !== undefined && pr.kwh !== '' ? Number(pr.kwh) : null,
+          rpm: pr.rpm !== undefined && pr.rpm !== '' ? Number(pr.rpm) : null,
+        }))
+      : [];
+    // Once a machine is edited through the new multi-power form, clear the
+    // old single-power fields so there's only one source of truth for it
+    // going forward (PlantMaster.jsx's fallback only kicks in when
+    // powerRequirements is empty, so stale scalars here would otherwise just
+    // sit unused, but clearing avoids confusion for anyone reading the DB directly).
+    md.powerSource = '';
+    md.powerRequiredHP = null;
+    md.powerRequiredKWH = null;
+    md.powerRequiredRPM = null;
+  }
   if (body.accessories !== undefined) md.accessories = body.accessories || [];
   if (body.modelNumber !== undefined) md.modelNumber = body.modelNumber || '';
   Object.keys(md).forEach(k => { out[`machineDetails.${k}`] = md[k]; });
 
   return out;
 };
+
+// Single-machine version of getMachines' own design-file merge below (General
+// RDDocument uploads + BOM Part Child/Sub Child Part images) — exported so
+// other departments needing "the same categorized list Design Approval
+// shows" for ONE machine don't re-derive a slightly different subset of it.
+// See productionMfgController.js's getBomDesignStatus (Production's new
+// BOM/Design check) for the first other caller.
+// Full cutover (2026-09-14, confirmed with the user — no additive merge):
+// Child Part/Sub Child Part design files are now resolved by walking the
+// NEW Machine BOM -> Child Part -> Sub Child Part reference chain
+// (MachineBOM.childParts[] -> ChildPartBOM.subChildParts[]), not the OLD
+// RDChildPart structure. A machine with no MachineBOM yet (still on the
+// legacy per-machine flow) simply shows no Child Part/Sub Child Part
+// images here anymore — only its real uploaded ("General") RDDocument rows.
+export async function buildMachineDesignFiles(machineId, companyId) {
+  const files = [];
+  const designDocuments = await RDDocument.find({
+    company: companyId, machine: machineId, type: 'Design Files'
+  }).lean();
+  designDocuments.forEach(doc => files.push({ ...doc, source: 'General' }));
+
+  const machineBom = await MachineBOM.findOne({ company: companyId, machine: machineId }).lean();
+  const childPartIds = (machineBom?.childParts || []).filter(l => !l.isDiscontinued).map(l => l.childPart);
+  if (childPartIds.length === 0) return files;
+
+  const childPartItems = await Item.find({ _id: { $in: childPartIds }, companyId }).select('name code image').lean();
+  const childPartItemById = new Map(childPartItems.map(i => [i._id.toString(), i]));
+  childPartItems.forEach(cp => {
+    if (cp.image) files.push({ _id: `child-part-${cp._id}`, name: `${cp.name} (${cp.code})`, version: '', fileUrl: cp.image, source: 'BOM Part' });
+  });
+
+  const childPartBoms = await ChildPartBOM.find({ company: companyId, childPart: { $in: childPartIds } }).lean();
+  const subChildPartIds = [];
+  childPartBoms.forEach(cpb => (cpb.subChildParts || []).filter(l => !l.isDiscontinued).forEach(l => subChildPartIds.push(l.subChildPart)));
+  if (subChildPartIds.length === 0) return files;
+
+  const subChildPartItems = await Item.find({ _id: { $in: subChildPartIds }, companyId }).select('name code image').lean();
+  const subChildPartItemById = new Map(subChildPartItems.map(i => [i._id.toString(), i]));
+  childPartBoms.forEach(cpb => {
+    const cpItem = childPartItemById.get(cpb.childPart.toString());
+    if (!cpItem) return;
+    (cpb.subChildParts || []).filter(l => !l.isDiscontinued).forEach(l => {
+      const scpItem = subChildPartItemById.get(String(l.subChildPart));
+      if (!scpItem?.image) return;
+      files.push({ _id: `sub-child-part-${scpItem._id}`, name: `${cpItem.name} (${cpItem.code}) > ${scpItem.name} (${scpItem.code})`, version: '', fileUrl: scpItem.image, source: 'BOM Part' });
+    });
+  });
+  return files;
+}
 
 export const getMachines = async (req, res) => {
   try {
@@ -332,29 +340,49 @@ export const getMachines = async (req, res) => {
       docsByMachine[mId].push({ ...doc, source: 'General' });
     });
 
-    // 2b. Same Child Part / Sub Child Part design files Documentation.jsx
-    // already pulls in live (RDChildPart.image / subChildParts[].image) —
-    // never stored as RDDocument, so this endpoint never saw them until now.
-    // Tagged 'BOM Part' with the part name, per the "unrelated to BOM parts
-    // gets a different tag" requirement.
-    const childParts = await RDChildPart.find({ company: companyId, product: { $in: machineIds } }).lean();
-    childParts.forEach(cp => {
-      const mId = cp.product.toString();
-      if (!docsByMachine[mId]) docsByMachine[mId] = [];
-      if (cp.image) {
-        docsByMachine[mId].push({
-          _id: `child-part-${cp._id}`, name: `${cp.name} (${cp.code})`, version: '',
-          fileUrl: cp.image, source: 'BOM Part',
-        });
-      }
-      (cp.subChildParts || []).forEach(sub => {
-        if (!sub.image) return;
-        docsByMachine[mId].push({
-          _id: `sub-child-part-${sub._id}`, name: `${cp.name} > ${sub.name} (${sub.code})`, version: '',
-          fileUrl: sub.image, source: 'BOM Part',
+    // 2b. Child Part / Sub Child Part design files — full cutover (2026-09-14,
+    // confirmed with the user): resolved through the NEW Machine BOM ->
+    // Child Part -> Sub Child Part reference chain (mirrors
+    // buildMachineDesignFiles's own single-machine version), not the OLD
+    // RDChildPart structure. Batched ($in) the same way the "General"
+    // RDDocument fetch above already is, not a per-machine loop, to avoid
+    // regressing this into an N+1 query across a potentially large machine
+    // list. A machine with no MachineBOM yet (still on the legacy flow)
+    // simply contributes no 'BOM Part' rows here anymore.
+    const machineBoms = await MachineBOM.find({ company: companyId, machine: { $in: machineIds } }).lean();
+    const childPartIdsAll = [];
+    machineBoms.forEach(mb => (mb.childParts || []).filter(l => !l.isDiscontinued).forEach(l => childPartIdsAll.push(l.childPart)));
+    if (childPartIdsAll.length > 0) {
+      const childPartItems = await Item.find({ _id: { $in: childPartIdsAll }, companyId }).select('name code image').lean();
+      const childPartItemById = new Map(childPartItems.map(i => [i._id.toString(), i]));
+
+      const childPartBoms = await ChildPartBOM.find({ company: companyId, childPart: { $in: childPartIdsAll } }).lean();
+      const childPartBomByChildPartId = new Map(childPartBoms.map(cpb => [cpb.childPart.toString(), cpb]));
+      const subChildPartIdsAll = [];
+      childPartBoms.forEach(cpb => (cpb.subChildParts || []).filter(l => !l.isDiscontinued).forEach(l => subChildPartIdsAll.push(l.subChildPart)));
+      const subChildPartItems = subChildPartIdsAll.length
+        ? await Item.find({ _id: { $in: subChildPartIdsAll }, companyId }).select('name code image').lean()
+        : [];
+      const subChildPartItemById = new Map(subChildPartItems.map(i => [i._id.toString(), i]));
+
+      machineBoms.forEach(mb => {
+        const mId = mb.machine.toString();
+        if (!docsByMachine[mId]) docsByMachine[mId] = [];
+        (mb.childParts || []).filter(l => !l.isDiscontinued).forEach(l => {
+          const cpItem = childPartItemById.get(String(l.childPart));
+          if (!cpItem) return;
+          if (cpItem.image) {
+            docsByMachine[mId].push({ _id: `child-part-${cpItem._id}`, name: `${cpItem.name} (${cpItem.code})`, version: '', fileUrl: cpItem.image, source: 'BOM Part' });
+          }
+          const cpb = childPartBomByChildPartId.get(String(l.childPart));
+          (cpb?.subChildParts || []).filter(sl => !sl.isDiscontinued).forEach(sl => {
+            const scpItem = subChildPartItemById.get(String(sl.subChildPart));
+            if (!scpItem?.image) return;
+            docsByMachine[mId].push({ _id: `sub-child-part-${scpItem._id}`, name: `${cpItem.name} (${cpItem.code}) > ${scpItem.name} (${scpItem.code})`, version: '', fileUrl: scpItem.image, source: 'BOM Part' });
+          });
         });
       });
-    });
+    }
 
     // 4. Attach the grouped documents to their respective machines, then translate to the response shape
     const enrichedMachines = machines.map(machine => toMachineResponse({
@@ -386,11 +414,11 @@ export const createMachine = async (req, res) => {
       unitWeightValue, unitWeightUnitType, unitWeightUnit,
       inputUnitType, inputUnit, outputUnitType, outputUnit,
       specifications, customFields, forwardToNextPhase,
-      variant, productionRate, materialGrade, powerSource,
-      powerRequiredHP, powerRequiredKWH, powerRequiredRPM,
+      variant, productionRate, materialGrade,
+      powerRequirements,
       accessories, modelNumber, applications,
       purchase, internalManufacturing, isDiscontinued,
-      stdCost, purchaseCost, salePrice, mrp, gst, qty, minStock,
+      stdCost, purchaseCost, salePrice, mrp, gst, hsn, qty, minStock,
     } = req.body;
 
     // Strict validation for required fields
@@ -399,6 +427,15 @@ export const createMachine = async (req, res) => {
         success: false,
         message: 'Product Code, Name, Category, P-Type, and P-Source Type are required.'
       });
+    }
+    // Exactly one of Purchasable (Vendor) / Internal Manufacturing — an
+    // explicit user choice, never a default (2026-09-24, found live: the form
+    // used to pre-select Purchasable, so IP612 was created "In House
+    // Manufacturing" by Source Type but purchase:true by this flag — its BOM
+    // cost never reached its price, and a Sale line for it would have routed
+    // to Purchase instead of Production, since both read this flag).
+    if (!!purchase === !!internalManufacturing) {
+      return res.status(400).json({ success: false, message: 'Choose either Purchasable (Vendor) or Internal Manufacturing.' });
     }
 
     // No DB-level unique index on code (some pre-existing data already violates
@@ -454,6 +491,7 @@ export const createMachine = async (req, res) => {
       salePrice: Number(salePrice) || 0,
       mrp: Number(mrp) || 0,
       gst: Number(gst) || 0,
+      hsn: hsn || '',
       qty: Number(qty) || 0,
       minStock: Number(minStock) || 0,
       materialGrade: materialGrade || '',
@@ -461,10 +499,14 @@ export const createMachine = async (req, res) => {
         forwardToNextPhase: !!forwardToNextPhase,
         variant: variant || '',
         productionRate: productionRate || '',
-        powerSource: powerSource || '',
-        powerRequiredHP: powerRequiredHP !== undefined && powerRequiredHP !== '' ? Number(powerRequiredHP) : null,
-        powerRequiredKWH: powerRequiredKWH !== undefined && powerRequiredKWH !== '' ? Number(powerRequiredKWH) : null,
-        powerRequiredRPM: powerRequiredRPM !== undefined && powerRequiredRPM !== '' ? Number(powerRequiredRPM) : null,
+        powerRequirements: Array.isArray(powerRequirements)
+          ? powerRequirements.map(pr => ({
+              powerSource: pr.powerSource || '',
+              hp: pr.hp !== undefined && pr.hp !== '' ? Number(pr.hp) : null,
+              kwh: pr.kwh !== undefined && pr.kwh !== '' ? Number(pr.kwh) : null,
+              rpm: pr.rpm !== undefined && pr.rpm !== '' ? Number(pr.rpm) : null,
+            }))
+          : [],
         accessories: accessories || [],
         modelNumber: modelNumber || '',
       },
@@ -489,6 +531,12 @@ export const createMachine = async (req, res) => {
 
 export const updateMachine = async (req, res) => {
   try {
+    // Same exactly-one rule as createMachine — only checked when the edit
+    // actually carries the sourcing choice (other partial updates don't).
+    const { purchase, internalManufacturing } = req.body;
+    if (purchase !== undefined && internalManufacturing !== undefined && !!purchase === !!internalManufacturing) {
+      return res.status(400).json({ success: false, message: 'Choose either Purchasable (Vendor) or Internal Manufacturing.' });
+    }
     // Backfills `store` on save if it was missing (see createMachine) — lets
     // editing an older machine self-heal without needing a separate migration.
     const machine = await Item.findOneAndUpdate(
@@ -595,11 +643,6 @@ export const addDropdownOption = async (req, res) => {
   }
 };
 
-// Field -> the RDBOM material snapshot column it renders into. These snapshot
-// field names are independent legacy names (a point-in-time copy captured when
-// a BOM material's code matched a Product Master item) — they don't need to
-// match Item's own field names below.
-const BOM_SNAPSHOT_FIELD_MAP = { 'P-Type': 'pType', 'Category': 'category', 'P-SourceType': 'pSourceType', 'Metrology': 'metrology' };
 // Field -> the Item column (+ optional productKind scope) it's the live source
 // of truth for. P-Type/Category/P-SourceType are Product Master's own cascade
 // (now living on Item as category/subCategory/productSourceType, scoped to
@@ -618,7 +661,12 @@ const ITEM_FIELD_MAP = {
   // Unscoped like Metrology — Material Grade (e.g. SS304) is a universal spec
   // shared with Inventory's own Material Grade dropdown, not Machine-specific.
   MaterialGrade: { field: 'materialGrade', productKind: null },
-  PowerSource: { field: 'machineDetails.powerSource', productKind: 'Machine' },
+  // Lives inside the powerRequirements[] array now (a machine can have
+  // several) — this path still works unchanged for the *count/match* queries
+  // below (Mongo matches an array-of-subdocuments dot-path natively), but the
+  // rename handler's $set needs arrayFilters instead of a plain $set — see
+  // its `itemMap.field === 'machineDetails.powerRequirements.powerSource'` branch.
+  PowerSource: { field: 'machineDetails.powerRequirements.powerSource', productKind: 'Machine' },
   ProductName: { field: 'name', productKind: 'Machine' },
   ProductVariant: { field: 'variant', productKind: 'Machine' },
 };
@@ -675,20 +723,22 @@ export const updateDropdownOption = async (req, res) => {
     option.value = newValue;
     await option.save();
 
-    const bomField = BOM_SNAPSHOT_FIELD_MAP[option.field];
-    if (bomField) {
-      await RDBOM.updateMany(
-        { company: req.user.companyId, [`materials.${bomField}`]: oldValue },
-        { $set: { [`materials.$[elem].${bomField}`]: newValue } },
-        { arrayFilters: [{ [`elem.${bomField}`]: oldValue }] }
-      );
-    }
-
     const itemMap = ITEM_FIELD_MAP[option.field];
     if (itemMap) {
       const itemQuery = { companyId: req.user.companyId, [itemMap.field]: oldValue };
       if (itemMap.productKind) itemQuery.productKind = itemMap.productKind; // unscoped (e.g. Metrology) applies to any kind
-      await Item.updateMany(itemQuery, { $set: { [itemMap.field]: newValue } });
+      if (itemMap.field === 'machineDetails.powerRequirements.powerSource') {
+        // Array of subdocuments — a plain $set on the dot-path would overwrite
+        // the whole array with a string; needs arrayFilters to rename just the
+        // matching element(s).
+        await Item.updateMany(
+          itemQuery,
+          { $set: { 'machineDetails.powerRequirements.$[elem].powerSource': newValue } },
+          { arrayFilters: [{ 'elem.powerSource': oldValue }] }
+        );
+      } else {
+        await Item.updateMany(itemQuery, { $set: { [itemMap.field]: newValue } });
+      }
     }
 
     const plantField = PLANT_FIELD_MAP[option.field];
@@ -1000,54 +1050,6 @@ export const reactivateMachine = async (req, res) => {
 
 // ─── BOMs ─────────────────────────────────────────────────────────────────────
 
-export const getBOMs = async (req, res) => {
-  try {
-    const boms = await RDBOM.find({ company: req.user.companyId }).populate('machine', 'code name');
-    // BOM Management (the frontend page) reads BOMs from this list endpoint,
-    // not getBOMForMachine/getBOMByMachineCode — the material price refresh
-    // has to happen here too, or its "Price" column stays stale.
-    for (const bom of boms) {
-      await refreshBOMMaterialPrices(bom, req.user.companyId);
-    }
-    res.json({ success: true, data: boms });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const getBOMForMachine = async (req, res) => {
-  try {
-    const bom = await RDBOM.findOne({ machine: req.params.machineId, company: req.user.companyId });
-    await refreshBOMMaterialPrices(bom, req.user.companyId);
-    res.json({ success: true, data: bom || null });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// ─── Cross-department lookup: get a machine's BOM by its Product Code ─────────
-// Used by Production (Order Management) to show the full R&D BOM entry — including
-// hierarchy, material type, and the Product Master snapshot — for a material demand,
-// without needing the internal RDMachine ObjectId.
-export const getBOMByMachineCode = async (req, res) => {
-  try {
-    const { code } = req.params;
-    const companyId = req.user.companyId;
-
-    const machine = await Item.findOne({ code, companyId, productKind: { $in: ['Machine', 'Motor'] } }).lean();
-    if (!machine) {
-      return res.json({ success: true, data: { machine: null, bom: null } });
-    }
-
-    const bomDoc = await RDBOM.findOne({ machine: machine._id, company: companyId });
-    await refreshBOMMaterialPrices(bomDoc, companyId);
-    const bom = bomDoc ? bomDoc.toObject() : null;
-    res.json({ success: true, data: { machine: toMachineResponse(machine), bom } });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
 // ─── Cross-department lookup: a machine's real BOM cost, for billing ──────────
 // Used by the Sales Order Form to show/enforce a minimum Billing Amount per
 // item — the item's own Item.stdCost (same figure BOM Management's card
@@ -1066,687 +1068,6 @@ export const getBOMCostByMachineCode = async (req, res) => {
   }
 };
 
-
-// ─── CREATE BOM (WITH SOURCE TYPE VALIDATION) ─────────────────────────────────
-export const createBOM = async (req, res) => {
-  try {
-    const { machineId, variant } = req.body;
-    if (!machineId) return res.status(400).json({ success: false, message: 'machineId is required' });
-
-    // 1. Fetch the manufacturing product (Product Master machine or Motor
-    // Master motor) and validate it's actually flagged as manufactured.
-    const machine = await Item.findOne({ _id: machineId, companyId: req.user.companyId, productKind: { $in: ['Machine', 'Motor'] } });
-    if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
-
-    if (machine.productKind === 'Machine') {
-      const validSources = ['In House Manufacturing', 'Out Source Manufactured'];
-      if (!validSources.includes(machine.productSourceType)) {
-        return res.status(400).json({
-          success: false,
-          message: `BOM creation blocked. P-Source Type must be In House or Out Source. Current: ${machine.productSourceType}`
-        });
-      }
-    } else if (!machine.internalManufacturing) {
-      // Motor Master doesn't have a P-Source Type field — it uses the same
-      // internalManufacturing flag Inventory items do (see MotorMaster.jsx's
-      // Purchasable/In House toggle).
-      return res.status(400).json({
-        success: false,
-        message: 'BOM creation blocked. This motor is marked Purchasable, not In House manufactured.'
-      });
-    }
-
-    const existing = await RDBOM.findOne({ machine: machineId, company: req.user.companyId });
-    if (existing) return res.status(400).json({ success: false, message: 'BOM already exists for this machine' });
-
-    const bom = await RDBOM.create({
-      machine: machineId,
-      variant: variant || 'Standard',
-      company: req.user.companyId,
-      createdBy: req.user._id,
-    });
-
-    res.status(201).json({ success: true, data: bom });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// R&D's pre-build cost estimate — set/update the BOM's productionCost
-// (labor/job-work to build one unit) and productionExpense (other one-off
-// costs). Always tagged 'Manual' here since this is a person typing an
-// estimate; once Production actually completes a build, Process Execution's
-// approveQC overwrites these same fields with the real figures and tags
-// 'Actual' instead (see productionMfgController.js). Feeds directly into
-// resolveManufacturingItemCost's BOM total once the item has been built.
-export const updateBOMProductionCost = async (req, res) => {
-  try {
-    const { productionCost, productionExpense } = req.body;
-    const toNonNegNumber = (v) => {
-      if (v === '' || v === null || v === undefined) return null;
-      const n = Number(v);
-      return Number.isFinite(n) && n >= 0 ? n : undefined; // undefined = invalid
-    };
-    const cost = toNonNegNumber(productionCost);
-    const expense = toNonNegNumber(productionExpense);
-    if (cost === undefined || expense === undefined) {
-      return res.status(400).json({ success: false, message: 'productionCost and productionExpense must be non-negative numbers' });
-    }
-
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-
-    bom.productionCost = cost;
-    bom.productionExpense = expense;
-    bom.productionCostSource = 'Manual';
-    bom.productionCostUpdatedAt = new Date();
-    await bom.save();
-
-    // Harmless no-op if the item hasn't been built yet (resolveManufacturingItemCost
-    // returns cost:null pre-build) — keeps mrp/salePrice fresh once it has.
-    if (bom.machine?.internalManufacturing) {
-      await recalculateItemPricing(bom.machine);
-    }
-
-    res.json({ success: true, data: bom });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const addMaterial = async (req, res) => {
-  try {
-    // 1. Extract 'code' alongside the new fields
-    const {
-      code, childPart, subChildPart, childPartCode, subChildPartCode, item, itemType, quantity, unit,
-      pType, pSourceType, customFields,
-      inputUnitType, inputUnit, outputUnitType, outputUnit,
-      dimensionVariantId, amountValue, amountUnit
-    } = req.body;
-
-    // 2. Validate that 'code' is present
-    if (!code || !item || !quantity || !unit) {
-      return res.status(400).json({
-        success: false,
-        message: 'code, item, quantity, and unit are required'
-      });
-    }
-
-    // BOM materials must reference an existing Inventory item (raw material) —
-    // no free-typed codes, even via direct API calls that bypass the frontend's
-    // MaterialCodePicker. Product Master now holds finished-goods machines
-    // only, not raw materials, so materials come from plain Inventory
-    // (productKind: null) instead.
-    const sourceItem = await Item.findOne({ companyId: req.user.companyId, productKind: null, code: code.trim() });
-    if (!sourceItem) {
-      return res.status(400).json({
-        success: false,
-        message: `"${code}" does not match any Inventory item. BOM materials must be selected from Inventory.`
-      });
-    }
-
-    // Price and every other BOM_FIELD_CATALOG field are pulled straight from
-    // the validated Inventory item server-side, never trusted from the
-    // client — "Price fetch by Purchase item wise and auto calculate", and
-    // whatever fields BOM Format & Modification later enables as columns
-    // always have real, authoritative data behind them.
-    //
-    // Fabrication Master materials (sourceItem.fabricationRef set) price by
-    // weight instead — the user picks which catalog dimensionVariant this
-    // line draws from and enters a single consumed amount (length, or area
-    // for sheets); the server synthesizes the full bomDimensions from the
-    // variant's own fixed values + that amount (never trusting a client-sent
-    // bomDimensions — same "server is authoritative" principle
-    // computedWeightPerPieceKg already follows), x the source item's
-    // weightUnitPrice (₹/kg) gives the price. Every other material keeps the
-    // flat purchaseCost x qty pricing unchanged.
-    let bomDimensions = {};
-    let fabWeight = null;
-    if (sourceItem.fabricationRef) {
-      if (!dimensionVariantId || !(Number(amountValue) > 0) || !amountUnit) {
-        return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
-      }
-      bomDimensions = buildFabricationBomDimensions(sourceItem, dimensionVariantId, amountValue, amountUnit);
-      if (!bomDimensions) {
-        return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
-      }
-      fabWeight = await resolveFabricationWeight(sourceItem, bomDimensions, bomDimensions.designation);
-    }
-    // Non-fabrication material with a Length/Area/Volume Used Unit — carries
-    // an amountValue too (the per-piece size, e.g. "1 Meter"), but purely as
-    // DISPLAY metadata for R&D/Store/Production (see UnitAmountField.jsx) —
-    // `quantity` here has already been resolved client-side into the TOTAL
-    // amount needed (pieces x amountValue), in the item's own Used Unit, so
-    // pricing stays the same flat purchaseCost-per-Used-Unit formula every
-    // material already uses; no further amountValue multiplication belongs
-    // here (unlike fabrication, whose quantity really is a piece count,
-    // because its stock — dimensionVariants[].subStock — really is
-    // piece-based; this item's stock, Item.qty, is a continuous amount).
-    // Never trust the client's amountValue presence alone — it's re-derived
-    // here from the item's own unitType, the same "server is authoritative"
-    // principle bomDimensions already follows above.
-    const needsAmount = itemNeedsAmount(sourceItem);
-    if (needsAmount && !(Number(amountValue) > 0)) {
-      return res.status(400).json({ success: false, message: `An amount (in ${sourceItem.unit}) is required for this material.` });
-    }
-    const unitPrice = fabWeight
-      ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
-      : (sourceItem.purchaseCost || 0);
-    const totalPrice = Math.round(unitPrice * Number(quantity) * 100) / 100;
-
-    // 3. Push all fields to the materials array
-    const bom = await RDBOM.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId, isLocked: false },
-      {
-        $push: {
-          materials: {
-            code, // Injecting explicit material code
-            childPart,
-            subChildPart,
-            childPartCode: childPartCode || '',
-            subChildPartCode: subChildPartCode || '',
-            item,
-            itemType: itemType || '',
-            // Which Add button this came from + the Sheet Metal flag — both
-            // re-derived here from sourceItem, never trusted from the client,
-            // same "server is authoritative" principle as inventoryItemType
-            // below. materialKind is 'tool' only when Item Type contains
-            // "tool" (case-insensitive) — matches Add Tool's own picker
-            // filter in BOMCreationTab.jsx, so a row always lands in the same
-            // table the picker it came from implies.
-            materialKind: /tool/i.test(sourceItem.itemType || '') ? 'tool' : 'raw',
-            isSheetMetal: !!sourceItem.isSheetMetal,
-            quantity: Number(quantity),
-            unit,
-            unitPrice,
-            totalPrice,
-            fabricationCategory: fabWeight?.fabricationCategory || '',
-            bomDimensions,
-            computedWeightPerPieceKg: fabWeight?.weightPerPieceKg ?? null,
-            dimensionVariantId: sourceItem.fabricationRef ? dimensionVariantId : null,
-            amountValue: (sourceItem.fabricationRef || needsAmount) ? Number(amountValue) : null,
-            amountUnit: (sourceItem.fabricationRef || needsAmount) ? (sourceItem.fabricationRef ? amountUnit : sourceItem.unit) : null,
-            // Inventory snapshot — authoritative, from sourceItem (see above),
-            // field-for-field with BOM_FIELD_CATALOG / SimpleInventoryForm.jsx.
-            category: sourceItem.category || '',
-            subCategory: sourceItem.subCategory || '',
-            inventoryItemType: sourceItem.itemType || '',
-            sourceType: sourceItem.sourceType || '',
-            itemSourceType: sourceItem.itemSourceType || '',
-            itemCategories: sourceItem.itemCategories || [],
-            stdCost: sourceItem.stdCost ?? null,
-            salePrice: sourceItem.salePrice ?? null,
-            mrp: sourceItem.mrp ?? null,
-            hsn: sourceItem.hsn || '',
-            gst: sourceItem.gst ?? null,
-            brand: sourceItem.brand || '',
-            description: sourceItem.description || '',
-            modelNumber: sourceItem.modelNumber || '',
-            metrology: sourceItem.metrology || '',
-            materialGrade: sourceItem.materialGrade || '',
-            size: sourceItem.size || '',
-            unitWeightValue: sourceItem.unitWeightValue ?? null,
-            unitWeightUnitType: sourceItem.unitWeightUnitType || '',
-            unitWeightUnit: sourceItem.unitWeightUnit || '',
-            dimensions: sourceItem.dimensions || {},
-            applications: sourceItem.applications || [],
-            specifications: sourceItem.specifications || [],
-            // Legacy Product-Master-only fields — kept for older BOMs that
-            // still reference them; never populated from Inventory items.
-            pType: pType || '',
-            pSourceType: pSourceType || '',
-            inputUnitType: inputUnitType || '',
-            inputUnit: inputUnit || '',
-            outputUnitType: outputUnitType || '',
-            outputUnit: outputUnit || '',
-            customFields: customFields || [],
-          }
-        }
-      },
-      { new: true }
-    ).populate('machine');
-
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found or is locked' });
-
-    // Keeps stdCost/mrp/salePrice in sync the moment the BOM's materials
-    // total changes — mirrors updateBOMProductionCost's matching call.
-    if (bom.machine?.internalManufacturing) {
-      await recalculateItemPricing(bom.machine);
-    }
-
-    res.json({ success: true, data: bom });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const updateMaterial = async (req, res) => {
-  try {
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-    const mat = bom.materials.id(req.params.materialId);
-    if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
-
-    const newCode = req.body.code ? req.body.code.trim() : mat.code;
-    const sourceItem = await Item.findOne({ companyId: req.user.companyId, productKind: null, code: newCode });
-    if (!sourceItem) {
-      return res.status(400).json({
-        success: false,
-        message: `"${req.body.code || newCode}" does not match any Inventory item. BOM materials must be selected from Inventory.`
-      });
-    }
-
-    Object.assign(mat, req.body);
-
-    // Price and every other BOM_FIELD_CATALOG field are re-pulled from the
-    // validated Inventory item server-side, never trusted from the client —
-    // same as addMaterial, so editing a material always reflects Inventory's
-    // current data rather than whatever the client happened to send.
-    //
-    // Fabrication Master materials price by weight — see addMaterial's
-    // matching comment. Object.assign above already copied
-    // dimensionVariantId/amountValue/amountUnit if the client sent new ones
-    // (falls back to the material's existing values otherwise, so a plain
-    // quantity-only edit doesn't need to resend them); bomDimensions is
-    // always rebuilt from those here, never trusted from the client directly.
-    let fabWeight = null;
-    if (sourceItem.fabricationRef) {
-      if (!mat.dimensionVariantId || !(Number(mat.amountValue) > 0) || !mat.amountUnit) {
-        return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
-      }
-      mat.bomDimensions = buildFabricationBomDimensions(sourceItem, mat.dimensionVariantId, mat.amountValue, mat.amountUnit);
-      if (!mat.bomDimensions) {
-        return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
-      }
-      fabWeight = await resolveFabricationWeight(sourceItem, mat.bomDimensions, mat.bomDimensions.designation);
-    } else {
-      mat.bomDimensions = {};
-      mat.dimensionVariantId = null;
-      // Non-fabrication Length/Area/Volume material — carries an amountValue
-      // (the per-piece size) purely as display metadata (Object.assign above
-      // already copied whatever the client sent); mat.quantity is already
-      // the resolved total, so pricing below stays flat purchaseCost, same
-      // as every other non-fabrication material. amountUnit is never
-      // trusted from the client — always re-derived from the item's own
-      // Used Unit, matching how the form no longer offers a separate
-      // amount-unit picker (see UnitAmountField.jsx).
-      if (itemNeedsAmount(sourceItem)) {
-        if (!(Number(mat.amountValue) > 0)) {
-          return res.status(400).json({ success: false, message: `An amount (in ${sourceItem.unit}) is required for this material.` });
-        }
-        mat.amountValue = Number(mat.amountValue);
-        mat.amountUnit = sourceItem.unit;
-      } else {
-        mat.amountValue = null;
-        mat.amountUnit = null;
-      }
-    }
-    mat.fabricationCategory = fabWeight?.fabricationCategory || '';
-    mat.computedWeightPerPieceKg = fabWeight?.weightPerPieceKg ?? null;
-    // mat.quantity is already the resolved TOTAL amount for a non-fabrication
-    // Length/Area/Volume material (see addMaterial's matching comment) — flat
-    // purchaseCost pricing, same as every other non-fabrication material.
-    mat.unitPrice = fabWeight
-      ? Math.round(fabWeight.weightPerPieceKg * (sourceItem.weightUnitPrice || 0) * 100) / 100
-      : (sourceItem.purchaseCost || 0);
-    mat.totalPrice = Math.round(mat.unitPrice * (mat.quantity || 0) * 100) / 100;
-    mat.category = sourceItem.category || '';
-    mat.subCategory = sourceItem.subCategory || '';
-    mat.inventoryItemType = sourceItem.itemType || '';
-    mat.materialKind = /tool/i.test(sourceItem.itemType || '') ? 'tool' : 'raw';
-    mat.isSheetMetal = !!sourceItem.isSheetMetal;
-    mat.sourceType = sourceItem.sourceType || '';
-    mat.itemSourceType = sourceItem.itemSourceType || '';
-    mat.itemCategories = sourceItem.itemCategories || [];
-    mat.stdCost = sourceItem.stdCost ?? null;
-    mat.salePrice = sourceItem.salePrice ?? null;
-    mat.mrp = sourceItem.mrp ?? null;
-    mat.hsn = sourceItem.hsn || '';
-    mat.gst = sourceItem.gst ?? null;
-    mat.brand = sourceItem.brand || '';
-    mat.description = sourceItem.description || '';
-    mat.modelNumber = sourceItem.modelNumber || '';
-    mat.metrology = sourceItem.metrology || '';
-    mat.materialGrade = sourceItem.materialGrade || '';
-    mat.size = sourceItem.size || '';
-    mat.unitWeightValue = sourceItem.unitWeightValue ?? null;
-    mat.unitWeightUnitType = sourceItem.unitWeightUnitType || '';
-    mat.unitWeightUnit = sourceItem.unitWeightUnit || '';
-    mat.dimensions = sourceItem.dimensions || {};
-    mat.applications = sourceItem.applications || [];
-    mat.specifications = sourceItem.specifications || [];
-
-    await bom.save();
-
-    if (bom.machine?.internalManufacturing) {
-      await recalculateItemPricing(bom.machine);
-    }
-
-    res.json({ success: true, data: bom });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const deleteMaterial = async (req, res) => {
-  try {
-    const bom = await RDBOM.findOneAndUpdate(
-      { _id: req.params.id, company: req.user.companyId, isLocked: false },
-      { $pull: { materials: { _id: req.params.materialId } } },
-      { new: true }
-    ).populate('machine');
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found or is locked' });
-
-    if (bom.machine?.internalManufacturing) {
-      await recalculateItemPricing(bom.machine);
-    }
-
-    res.json({ success: true, data: bom });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-
-// ── BOM PDF weight/amount math ──────────────────────────────────────────
-// A material's "how much" is either a flat quantity (Mass/Count Used Unit —
-// quantity already IS the total, e.g. "5 kg"/"3 pieces") or an Amount x
-// Pieces split (Fabrication Master materials, and non-fabrication materials
-// whose Used Unit is Length/Area/Volume — see UnitAmountField.jsx). For the
-// latter, mat.quantity is already the resolved TOTAL amount, not a piece
-// count — the piece count only exists as this derived division. Mirrors the
-// same math already established in bomFieldFormat.js's formatBomDimensions/
-// itemDisplayUnit-adjacent helpers, kept server-side here since PDF
-// generation has no access to the client bundle.
-const bomMaterialPieceCount = (mat) => {
-  if (mat.fabricationCategory) return mat.quantity ?? 0;
-  if (mat.amountValue != null && mat.amountValue > 0) return Math.round(((mat.quantity || 0) / mat.amountValue) * 1000) / 1000;
-  return mat.quantity ?? 0;
-};
-const bomMaterialTotalAmount = (mat) => {
-  if (mat.amountValue == null || !mat.amountUnit) return null;
-  const total = mat.fabricationCategory ? mat.amountValue * (mat.quantity || 0) : (mat.quantity || 0);
-  return { value: Math.round(total * 1000) / 1000, unit: mat.amountUnit };
-};
-// Total Weight is only computed where the underlying rate is actually
-// well-defined — see server/docs/non-fabrication-unit-weight-ambiguity.md.
-// Fabrication: weight is server-computed from geometry x density, no
-// ambiguity. Non-fabrication with no amountValue (Count/Mass Used Unit):
-// unitWeightValue's "per what" is unambiguous (per piece, or per 1 Used
-// Unit when that unit already is a mass unit). Non-fabrication WITH an
-// amountValue (Length/Area/Volume Used Unit): deliberately left null —
-// unitWeightValue has no enforced reference scale for these, multiplying it
-// by quantity could silently be wrong by whatever scale the original entry
-// actually meant.
-const bomMaterialTotalWeight = (mat) => {
-  if (mat.fabricationCategory) {
-    return mat.computedWeightPerPieceKg != null
-      ? { value: Math.round(mat.computedWeightPerPieceKg * (mat.quantity || 0) * 1000) / 1000, unit: 'kg' }
-      : null;
-  }
-  if (mat.amountValue != null) return null;
-  return mat.unitWeightValue != null && mat.unitWeightValue !== ''
-    ? { value: Math.round(mat.unitWeightValue * (mat.quantity || 0) * 1000) / 1000, unit: mat.unitWeightUnit || '' }
-    : null;
-};
-// Second, muted line under a material's main row — only the pieces that
-// actually apply to this material, ' · '-joined, same combining style
-// formatBomDimensions already uses. Empty string when none apply (a plain
-// flat Mass/Count material with no unitWeightValue set), in which case the
-// caller skips the line entirely.
-const bomMaterialDetailLine = (mat) => {
-  const parts = [];
-  if (mat.amountValue != null && mat.amountUnit) {
-    parts.push(`Amount: ${mat.amountValue} ${mat.amountUnit}/pc`);
-    const totalAmount = bomMaterialTotalAmount(mat);
-    if (totalAmount) parts.push(`Total Amount: ${totalAmount.value} ${totalAmount.unit}`);
-  }
-  if (mat.fabricationCategory) {
-    if (mat.computedWeightPerPieceKg != null) parts.push(`Unit Weight: ${mat.computedWeightPerPieceKg.toFixed(3)} kg/pc`);
-  } else if (mat.unitWeightValue != null && mat.unitWeightValue !== '') {
-    parts.push(`Unit Weight: ${mat.unitWeightValue} ${mat.unitWeightUnit || ''}`.trim());
-  }
-  const totalWeight = bomMaterialTotalWeight(mat);
-  if (totalWeight) {
-    parts.push(`Total Weight: ${totalWeight.value} ${totalWeight.unit}`.trim());
-  } else if (mat.amountValue != null && !mat.fabricationCategory) {
-    parts.push('Total Weight: — (unit clarification pending)');
-  }
-  return parts.join('   ·   ');
-};
-
-// Shared BOM PDF content writer — used both by lockBOM's auto-upload-to-
-// Documentation flow and the on-demand GET /boms/:id/download endpoint, so
-// both paths always produce the same, properly formatted document. Mirrors
-// productionMfgController.js's downloadMaterialListPDF layout/branding
-// (same header/metadata/table style already established for the Material
-// Ledger PDF) instead of inventing a new look. Each material gets a main
-// row of core columns (mirrors BOMCreationTab.jsx's table, post the
-// 2026-08-20 Child Part/Sub Child Part split and native Unit Weight column)
-// plus an optional second, muted detail line for Amount/Total Amount/Total
-// Weight — packing all of that into flat columns wouldn't fit a LETTER page
-// legibly, so it follows the same "main row + detail sub-line" pattern the
-// Material Ledger PDF already established for its own "Cut: ..." line.
-const writeBOMPdf = (doc, bom) => {
-  const machine = bom.machine || {};
-
-  // ── BRAND IDENTITY HEADER ──
-  doc.fillColor('#1e293b').fontSize(22).font('Helvetica-Bold').text('SAMTEK MACHINERY', 50, 50);
-  doc.fillColor('#64748b').fontSize(9).font('Helvetica').text('Master Bill of Materials', 50, 75);
-  doc.moveTo(50, 92).lineTo(562, 92).strokeColor('#e2e8f0').lineWidth(1).stroke();
-
-  // ── METADATA PROFILE BLOCK ──
-  doc.fillColor('#0f172a').fontSize(12).font('Helvetica-Bold').text(`Machine: ${machine.code || ''} — ${machine.name || ''}`, 50, 115);
-  doc.fillColor('#334155').fontSize(9).font('Helvetica');
-  doc.text(`Variant: ${bom.variant || 'Standard'}`, 50, 135);
-  doc.text(`Version: ${bom.version || 'v1.0'}`, 50, 150);
-  doc.text(`Status: ${bom.isLocked ? `Locked on ${bom.lockedAt || today()}` : 'Draft (not yet locked)'}`, 50, 165);
-  doc.text(`Generated Date: ${new Date().toLocaleDateString()}`, 50, 180);
-
-  // ── MATERIALS TABLE ──
-  doc.fillColor('#1e3a8a').fontSize(11).font('Helvetica-Bold').text('Materials', 50, 215);
-
-  const tableTop = 235;
-  const cols = {
-    code: { x: 58, w: 44 },
-    item: { x: 106, w: 76 },
-    childPart: { x: 186, w: 55 },
-    subChildPart: { x: 245, w: 67 },
-    qty: { x: 316, w: 34 },
-    unit: { x: 354, w: 48 },
-    price: { x: 406, w: 98 },
-    status: { x: 508, w: 50 },
-  };
-  const headerH = 26;
-  doc.rect(50, tableTop, 512, headerH).fill('#f8fafc');
-  doc.fillColor('#475569').fontSize(8).font('Helvetica-Bold');
-  doc.text('Code', cols.code.x, tableTop + 9, { width: cols.code.w });
-  doc.text('Item', cols.item.x, tableTop + 9, { width: cols.item.w });
-  doc.text('Child Part', cols.childPart.x, tableTop + 9, { width: cols.childPart.w });
-  doc.text('Sub Child Part', cols.subChildPart.x, tableTop + 9, { width: cols.subChildPart.w });
-  doc.text('Qty', cols.qty.x, tableTop + 9, { width: cols.qty.w, align: 'center' });
-  doc.text('Unit', cols.unit.x, tableTop + 9, { width: cols.unit.w });
-  doc.text('Price', cols.price.x, tableTop + 9, { width: cols.price.w, align: 'right' });
-  doc.text('Status', cols.status.x, tableTop + 9, { width: cols.status.w, align: 'right' });
-
-  let currentY = tableTop + headerH;
-  const materials = bom.materials || [];
-
-  if (materials.length === 0) {
-    doc.fillColor('#94a3b8').fontSize(9).font('Helvetica').text('No materials added yet.', 60, currentY + 7);
-  }
-
-  materials.forEach((mat) => {
-    const detailLine = bomMaterialDetailLine(mat);
-    const rowHeight = detailLine ? 34 : 20;
-
-    if (currentY + rowHeight > 730) {
-      doc.addPage();
-      currentY = 50;
-    }
-    doc.moveTo(50, currentY + rowHeight).lineTo(562, currentY + rowHeight).strokeColor('#f1f5f9').lineWidth(1).stroke();
-
-    const pieceCount = bomMaterialPieceCount(mat);
-    const qtyLabel = mat.fabricationCategory || mat.amountValue != null ? `${pieceCount} pcs` : `${pieceCount}`;
-
-    doc.fillColor('#334155').fontSize(8).font('Helvetica');
-    doc.text(mat.code || '', cols.code.x, currentY + 6, { width: cols.code.w, ellipsis: true });
-    doc.text(mat.item || '', cols.item.x, currentY + 6, { width: cols.item.w, ellipsis: true });
-    doc.text(mat.childPart || '—', cols.childPart.x, currentY + 6, { width: cols.childPart.w, ellipsis: true });
-    doc.text(mat.subChildPart || '—', cols.subChildPart.x, currentY + 6, { width: cols.subChildPart.w, ellipsis: true });
-    doc.text(qtyLabel, cols.qty.x, currentY + 6, { width: cols.qty.w, align: 'center' });
-    doc.text(mat.unit || '', cols.unit.x, currentY + 6, { width: cols.unit.w, ellipsis: true });
-    doc.text(`Rs. ${(mat.totalPrice || 0).toLocaleString()}`, cols.price.x, currentY + 6, { width: cols.price.w, align: 'right' });
-    doc.fontSize(7).fillColor('#94a3b8').text(`(Rs. ${mat.unitPrice || 0}/unit)`, cols.price.x, currentY + 15, { width: cols.price.w, align: 'right' });
-    doc.fontSize(8).fillColor(mat.isDiscontinued ? '#dc2626' : '#059669');
-    doc.text(mat.isDiscontinued ? 'Discontinued' : 'Active', cols.status.x, currentY + 6, { width: cols.status.w, align: 'right' });
-
-    if (detailLine) {
-      doc.fillColor('#94a3b8').fontSize(7).font('Helvetica').text(detailLine, 60, currentY + 24, { width: 490 });
-    }
-
-    currentY += rowHeight;
-  });
-};
-
-// GET /api/rd/boms/:id/download — on-demand PDF, no disk save, no
-// RDDocument created (distinct from lockBOM's auto-upload-to-Documentation
-// flow below). Works whether the BOM is locked or still being edited.
-export const downloadBOMPdf = async (req, res) => {
-  try {
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine').lean();
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-
-    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=BOM_${bom.machine?.code || 'machine'}_${bom.version || 'v1.0'}.pdf`);
-    doc.pipe(res);
-    writeBOMPdf(doc, bom);
-    doc.end();
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const lockBOM = async (req, res) => {
-  try {
-    // 1. Fetch BOM with Machine Details
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-    if (bom.isLocked) return res.status(400).json({ success: false, message: 'BOM is already locked' });
-
-    // A Sheet Metal plan is required, not optional, for every sheet-metal
-    // group on this BOM — no permanent fallback to the old per-child-part
-    // cutting behavior is kept around (see SheetMetalPlan.js/
-    // sheetMetalPlanController.js's own comments for the full reasoning).
-    // Blocks lock outright rather than silently letting the old behavior
-    // reappear for an unplanned group.
-    const sheetMetalGroups = sheetMetalGroupsFromBOM(bom);
-    if (sheetMetalGroups.length > 0) {
-      const plans = await SheetMetalPlan.find({ bom: bom._id, company: req.user.companyId }).lean();
-      const plannedKeys = new Set(plans.map(p => `${p.itemCode}#${p.dimensionVariantId}`));
-      const missing = sheetMetalGroups.filter(g => !plannedKeys.has(`${g.itemCode}#${g.dimensionVariantId}`));
-      if (missing.length > 0) {
-        return res.status(400).json({
-          success: false,
-          message: `${missing.length} sheet metal group(s) still need a plan before this BOM can be locked: ${missing.map(g => `${g.itemName} (${g.itemCode})`).join(', ')}`,
-        });
-      }
-    }
-
-    // 2. Setup PDF Generation
-    const filename = `BOM_${bom.machine.code}_${Date.now()}.pdf`;
-    const filepath = path.join(process.cwd(), 'uploads', 'rd-docs', filename);
-
-    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
-    const stream = fs.createWriteStream(filepath);
-    doc.pipe(stream);
-
-    // 3. Write the same shared content used by the on-demand download endpoint
-    writeBOMPdf(doc, bom);
-
-    doc.end();
-
-    // 5. Wait for PDF to finish writing to disk
-    await new Promise((resolve, reject) => {
-      stream.on('finish', resolve);
-      stream.on('error', reject);
-    });
-
-    // 6. Create the Document Record Automatically
-    await RDDocument.create({
-      machine: bom.machine._id,
-      machineCode: bom.machine.code,
-      machineName: bom.machine.name,
-      name: `Auto-Generated BOM (${bom.version})`,
-      type: 'BOM',
-      version: bom.version,
-      size: '0.1 MB', // Standard placeholder size for basic text PDFs
-      fileUrl: `/uploads/rd-docs/${filename}`,
-      originalName: filename,
-      notes: 'Automatically generated and uploaded by system upon BOM Lock.',
-      uploadedBy: 'System Automation',
-      uploadedAt: today(),
-      company: req.user.companyId,
-      createdBy: req.user._id,
-    });
-
-    // 7. Lock the BOM
-    bom.isLocked = true;
-    bom.lockedAt = today();
-    await bom.save();
-
-    // Final true-up in case earlier material edits happened without a
-    // completed production run in between to trigger a recalc.
-    if (bom.machine?.internalManufacturing) {
-      await recalculateItemPricing(bom.machine);
-    }
-
-    res.json({ success: true, data: bom, message: 'BOM locked and PDF generated successfully.' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const discontinueMaterial = async (req, res) => {
-  try {
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-    const mat = bom.materials.id(req.params.materialId);
-    if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
-    mat.isDiscontinued = true;
-    await bom.save();
-
-    // Discontinued materials drop out of resolveManufacturingItemCost's total
-    // — recalculate so stdCost/mrp/salePrice reflect the remaining materials.
-    if (bom.machine?.internalManufacturing) {
-      await recalculateItemPricing(bom.machine);
-    }
-
-    res.json({ success: true, data: bom });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const reactivateMaterial = async (req, res) => {
-  try {
-    const bom = await RDBOM.findOne({ _id: req.params.id, company: req.user.companyId }).populate('machine');
-    if (!bom) return res.status(404).json({ success: false, message: 'BOM not found' });
-    const mat = bom.materials.id(req.params.materialId);
-    if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
-    mat.isDiscontinued = false;
-    await bom.save();
-
-    if (bom.machine?.internalManufacturing) {
-      await recalculateItemPricing(bom.machine);
-    }
-
-    res.json({ success: true, data: bom });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
 
 // ─── PROTOTYPES ───────────────────────────────────────────────────────────────
 
@@ -1931,19 +1252,12 @@ export const resolveChangeRequest = async (req, res) => {
     );
     if (!cr) return res.status(404).json({ success: false, message: 'Change request not found' });
 
-    // Approving a change request is the ONLY way to edit a locked BOM — so
-    // approval must unlock the machine's BOM here. Nothing else in the
-    // codebase ever flips isLocked back to false (lockBOM only ever sets it
-    // true), so without this the BOM stayed locked forever after approval.
-    // The CR only references `machine`, not a specific BOM id, but
-    // RDBOM enforces a unique {company, machine} pair, so this lookup is
-    // unambiguous.
-    if (approved) {
-      await RDBOM.findOneAndUpdate(
-        { machine: cr.machine, company: req.user.companyId },
-        { isLocked: false, lockedAt: null }
-      );
-    }
+    // Approving a change request used to also unlock the old RDBOM (the
+    // ONLY way to edit a locked one) — that model is gone along with the
+    // Legacy BOM Management tab, so there's nothing left to unlock here.
+    // MachineBOM has its own `isLocked`/`lockMachineBOM`, with no
+    // unlock-via-Change-Request path of its own yet (pre-existing gap,
+    // not introduced by this removal).
 
     res.json({ success: true, data: cr });
   } catch (err) {
@@ -2376,7 +1690,6 @@ export const processRDRequest = async (req, res) => {
       }
 
       // ── WORKFLOW 2: INITIAL BOM APPROVAL ──
-      // (Your original logic remains untouched here)
       // isDiscontinued: false — code isn't guaranteed unique (see createMachine's
       // duplicate-code guard), so an old discontinued duplicate must never shadow
       // the live machine this BOM/prototype actually belongs to.
@@ -2385,133 +1698,43 @@ export const processRDRequest = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Machine profile missing or not released.' });
       }
 
-      const masterBOM = await RDBOM.findOne({ machine: machineProfile._id, company: companyId });
-      if (!masterBOM || masterBOM.materials.length === 0) {
-        return res.status(400).json({ success: false, message: 'No materials found in Master BOM.' });
+      // MachineBOM only — no RDBOM fallback (full cutover, 2026-09-17;
+      // RDBOM itself stays exactly where it already is, BOM Management's
+      // own "Legacy" tab, untouched). Existence only, NOT `isLocked`
+      // (corrected 2026-09-19 — the earlier version of this check mirrored
+      // getBomDesignStatus's own auto-verify gate, but that's the wrong
+      // model for what this action actually is). Auto-verify
+      // (`applyAutoVerify`, productionMfgController.js) is the NORMAL path —
+      // it fires on its own, with no R&D click needed, the moment a locked
+      // BOM + approved design both exist. THIS manual queue only exists for
+      // when that hasn't happened yet: Production raises a request asking
+      // permission to proceed anyway, and R&D can grant it as a judgment
+      // call — deliberately NOT gated on the BOM being finished/locked,
+      // since requiring that would make this action redundant with
+      // auto-verify instead of being its actual fallback. Still requires a
+      // real MachineBOM document to exist (so there's something concrete to
+      // reference/review — getRDRequestReviewData already pulls its
+      // materials from this same BOM), just not a LOCKED one.
+      const machineBom = await MachineBOM.findOne({ machine: machineProfile._id, company: companyId });
+      if (!machineBom) {
+        return res.status(400).json({ success: false, message: 'No Master BOM found for this machine yet — create one in BOM Management before this request can be approved.' });
       }
 
       const designDocs = await RDDocument.find({ machine: machineProfile._id, company: companyId, type: 'Design Files' });
 
-      // Multi-item/qty: the Master BOM is per-unit; a Production Order that
-      // builds N units (orderQuantity) demands N × the BOM quantity of every
-      // material. bomQuantity stays per-unit for reference.
-      const prodOrderForQty = await ProductionOrder.findById(rdRequest.productionOrderId)
-        .select('orderQuantity').lean();
-      const buildQty = Math.max(1, Number(prodOrderForQty?.orderQuantity) || 1);
-
-      // The same Inventory item is often used across multiple Child Part /
-      // Sub Child Part BOM lines (e.g. the same bolt in several
-      // sub-assemblies). Store's transfer/receive/return and Production's
-      // Add Demand all locate a demand by materialCode alone — one
-      // materialDemands entry per code, not per BOM line — so duplicate-code
-      // lines are merged here, summing their per-unit quantities, before
-      // being pushed. The per-part breakdown isn't lost: it still lives in
-      // RDBOM.materials (source for Production's "Bill of Materials by
-      // Part"); only this transaction-tracking list is deduplicated.
-      //
-      // Fabrication materials (mat.fabricationCategory set) are the one
-      // exception: the same raw-material Item code can legitimately appear
-      // in several BOM lines with DIFFERENT bomDimensions (a 500x300mm cut
-      // for one Child Part, 200x150mm for another, off the same sheet) —
-      // merging those by code alone would silently collapse two different
-      // cuts into one flat quantity, losing which sizes are actually
-      // needed. So fabrication lines merge by code + dimension signature
-      // instead — every distinct cut gets its own demand entry, with a
-      // synthetic per-cut materialCode (see MaterialDemandSchema's comment)
-      // so all the code/lookup places above still work unchanged (pure
-      // string equality). sourceItemCode carries the real Item code
-      // wherever it's actually needed — not yet wired into Store's
-      // transfer/return/purchase-request flows, that's the next phase.
-      // Sheet Metal lines (mat.isSheetMetal) don't merge/push the normal way
-      // at all — R&D's SheetMetalPlan already decided everything (how many
-      // whole sheets per unit) once per {code, dimensionVariantId} group
-      // across the whole BOM, replacing the old per-child-part cutting
-      // decision. One demand per group, not one per BOM line/cut.
-      const sheetMetalPlanKeys = new Set();
-      const sheetMetalDemands = [];
-      for (const mat of masterBOM.materials) {
-        if (mat.isDiscontinued || !mat.isSheetMetal || !mat.dimensionVariantId) continue;
-        const groupKey = `${mat.code}#${mat.dimensionVariantId}`;
-        if (sheetMetalPlanKeys.has(groupKey)) continue;
-        sheetMetalPlanKeys.add(groupKey);
-      }
-      if (sheetMetalPlanKeys.size > 0) {
-        const plans = await SheetMetalPlan.find({ bom: masterBOM._id, company: companyId });
-        const planByKey = new Map(plans.map(p => [`${p.itemCode}#${p.dimensionVariantId}`, p]));
-        for (const key of sheetMetalPlanKeys) {
-          const plan = planByKey.get(key);
-          const mat = masterBOM.materials.find(m => m.isSheetMetal && `${m.code}#${m.dimensionVariantId}` === key);
-          if (!plan) {
-            // Defensive only — lockBOM already blocks locking a BOM with an
-            // unplanned sheet-metal group, so this should be unreachable in
-            // normal use. Skip rather than crash the whole approval.
-            console.error(`[processRDRequest] Sheet Metal group ${key} has no SheetMetalPlan — skipping demand push.`);
-            continue;
-          }
-          sheetMetalDemands.push({
-            materialCode: key,
-            sourceItemCode: plan.itemCode,
-            materialName: plan.itemName || mat?.item || plan.itemCode,
-            bomQuantity: plan.sheetsNeededPerUnit,
-            quantity: plan.sheetsNeededPerUnit * buildQty,
-            unit: 'Pieces',
-            status: 'Requested',
-            fabricationCategory: mat?.fabricationCategory || 'sheet_plate',
-            dimensionVariantId: plan.dimensionVariantId,
-            sheetMetalPlanId: plan._id,
-            bomDimensions: {}, // no per-cut sizing left — Store ships whole sheets
-          });
-        }
-      }
-
-      const mergedByCode = new Map();
-      for (const mat of masterBOM.materials) {
-        if (mat.isSheetMetal) continue; // handled above via sheetMetalDemands instead
-        const isFabrication = !!mat.fabricationCategory;
-        // Non-fabrication materials with an amountValue (Length/Area/Volume
-        // Used Unit) need the same treatment as fabrication's dimension
-        // signature above — two lines for the same material code but
-        // DIFFERENT amounts (e.g. "1m pieces" for one Child Part, "2m
-        // pieces" for another) must stay separate demand entries, since one
-        // amountValue field can't represent both.
-        const hasAmount = mat.amountValue != null && mat.amountUnit;
-        const mergeKey = isFabrication
-          ? `${mat.code}#${dimensionSignature(mat.bomDimensions)}`
-          : hasAmount ? `${mat.code}#${mat.amountValue}${mat.amountUnit}` : mat.code;
-        const existing = mergedByCode.get(mergeKey);
-        if (existing) {
-          existing.bomQuantity += mat.quantity;
-        } else {
-          mergedByCode.set(mergeKey, {
-            materialCode: mergeKey,
-            sourceItemCode: mat.code,
-            materialName: mat.item,
-            bomQuantity: mat.quantity,
-            unit: mat.unit,
-            status: 'Requested',
-            ...(isFabrication ? {
-              bomDimensions: mat.bomDimensions || {},
-              fabricationCategory: mat.fabricationCategory,
-              computedWeightPerPieceKg: mat.computedWeightPerPieceKg ?? null,
-              unitPrice: mat.unitPrice ?? null,
-              dimensionVariantId: mat.dimensionVariantId || null,
-            } : {}),
-            ...(hasAmount ? {
-              amountValue: mat.amountValue,
-              amountUnit: mat.amountUnit,
-            } : {}),
-          });
-        }
-      }
-      const demandsToPush = Array.from(mergedByCode.values()).map(d => ({
-        ...d,
-        quantity: d.bomQuantity * buildQty
-      })).concat(sheetMetalDemands);
-
+      // Material demands are no longer pushed here — that's the "material
+      // transfer request to Store" the client asked to stop (this approval
+      // used to seed order.materialDemands with every BOM line, which fed
+      // Store's own separate pending-requests queue). Materials are already
+      // read live, direct from the locked BOM, wherever Production actually
+      // needs them (see "MATERIAL LIST — direct-from-BOM" in
+      // productionMfgController.js) — this push was a second, now-redundant
+      // path to the same data. Design docs still snapshot onto the order as
+      // before; only the material push is gone.
       const docsToPush = designDocs.map(doc => ({ name: doc.name, fileUrl: doc.fileUrl, version: doc.version }));
 
       await ProductionOrder.findByIdAndUpdate(rdRequest.productionOrderId, {
-        $push: { materialDemands: { $each: demandsToPush }, designDocuments: { $each: docsToPush } },
+        $push: { designDocuments: { $each: docsToPush } },
         bomVerified: true, designVerified: true, rdRequestRaised: false, status: 'Pending',
         notes: `BOM & Design approved by R&D on ${new Date().toLocaleDateString()}`
       });
@@ -2551,12 +1774,15 @@ export const getRDRequestReviewData = async (req, res) => {
     if (!machineProfile) {
       return res.json({
         success: true,
-        data: { machine: null, bom: null, documents: [] }
+        data: { machine: null, materials: [], documents: [] }
       });
     }
 
-    // 3. Fetch Master BOM
-    const masterBOM = await RDBOM.findOne({ machine: machineProfile._id, company: companyId }).lean();
+    // 3. Fetch Master BOM — MachineBOM only, no RDBOM fallback (full
+    // cutover, 2026-09-17, same reasoning as processRDRequest's own Initial
+    // BOM workflow above). `materials` is the same lineKind-tagged shape
+    // getBomDesignStatus/the Machine Material List already use.
+    const found = await findMachineMaterialLines(machineProfile._id, companyId);
 
     // 4. Fetch ONLY Design Documents
     const designDocs = await RDDocument.find({
@@ -2569,7 +1795,7 @@ export const getRDRequestReviewData = async (req, res) => {
       success: true,
       data: {
         machine: toMachineResponse(machineProfile),
-        bom: masterBOM,
+        materials: found?.materials || [],
         documents: designDocs
       }
     });

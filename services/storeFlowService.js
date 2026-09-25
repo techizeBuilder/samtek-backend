@@ -5,6 +5,8 @@ import QCJob from '../models/QCJob.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import { Item } from '../models/Inventory.js';
+import { checkMachineAssemblyMaterialAvailability, resolveMachineOrderProcesses } from './machineReorderService.js';
+import { releaseReservationsForOrder } from './materialReservationService.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Multi-item Store flow service
@@ -171,6 +173,21 @@ export async function ensureSaleForOrder(order, user) {
   return { sale, isNewSale };
 }
 
+// A Pending Machine ProductionOrder created by an earlier routing decision
+// (CASE 2) can get deleted here if Store re-routes the same item to
+// Available/Purchase instead — since it was created via
+// checkMachineAssemblyMaterialAvailability, it may hold MaterialReservations
+// against Child Part/raw material stock that must be released too, or that
+// stock stays permanently (and wrongly) claimed. A plain Mongoose
+// `deleteMany` doesn't hand back the deleted docs to a post-hook, so this
+// releases each match explicitly, right before the delete.
+async function releasePendingProductionOrderReservations(itemScope, companyId) {
+  const stray = await ProductionOrder.find({ company: companyId, ...itemScope, status: 'Pending' }).select('_id').lean();
+  for (const doc of stray) {
+    await releaseReservationsForOrder(doc._id);
+  }
+}
+
 // ── Per-item automation (the old whole-order 3-case block, scoped to one item) ──
 //
 // decision: { productType?, isAvailableInInventory?, autoCheck? }
@@ -263,6 +280,7 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
   // CASE 1: Available → deduct this item's qty, send this item to QC
   if (saleItem.isAvailableInInventory === 'Available') {
     // Cleanup this item's pending artifacts from a previous (changed) decision
+    await releasePendingProductionOrderReservations(itemScope, companyId);
     await ProductionOrder.deleteMany({ company: companyId, ...itemScope, status: 'Pending' });
     await PurchaseRequest.deleteMany({ companyId, saleItemId: saleItem._id, status: 'Pending' });
 
@@ -326,7 +344,11 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
 
     if (!existingProduction) {
       const prodOrderId = `PROD-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}`;
-      await ProductionOrder.create({
+      // Explicit, never the schema's own bare default — invItem is already
+      // resolved here, so pass its real _id straight through rather than
+      // re-resolving by code (see resolveMachineOrderProcesses's own comment).
+      const processes = await resolveMachineOrderProcesses(invItem?._id?.toString(), companyId);
+      const machineOrder = await ProductionOrder.create({
         orderId: prodOrderId,
         orderCode,
         machineCode: invItem?.code || orderCode,
@@ -340,9 +362,23 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
         orderQuantity: saleItem.quantity || 1,
         company: companyId,
         createdBy: user._id,
-        notes: `Automatically triggered from Store - Product Not Available in Inventory. Item: ${saleItem.productName} × ${saleItem.quantity || 1}. Ref: ${sourceRefId}`
+        notes: `Automatically triggered from Store - Product Not Available in Inventory. Item: ${saleItem.productName} × ${saleItem.quantity || 1}. Ref: ${sourceRefId}`,
+        processes,
       });
       console.log(`✅ [Store/${orderCode}] Production Order ${prodOrderId} created for item "${saleItem.productName}" × ${saleItem.quantity || 1}`);
+
+      // Real BOM-aware material check for this Machine build — cascades into
+      // real Child Part orders (and, transitively, Sub Child Part orders +
+      // raw-material Purchase Requests) for any shortfall, or raises flat
+      // Purchase Requests directly for the Machine's own extra materials.
+      // No-ops cleanly (returns {checked:false}) when this machine has no
+      // MachineBOM yet — see machineReorderService.js's own header comment
+      // on why that's the full-cutover, not-a-regression, intended behavior.
+      try {
+        await checkMachineAssemblyMaterialAvailability(machineOrder, companyId);
+      } catch (e) {
+        console.error(`❌ [Store/${orderCode}] Machine assembly material check error for "${saleItem.productName}":`, e);
+      }
     }
 
     saleItem.storeQCStatus = 'Goes to Production';
@@ -352,6 +388,7 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
   // CASE 3: Not Available + Purchased → Purchase Request for this item
   if (saleItem.isAvailableInInventory === 'Not Available' && saleItem.productType === 'Purchased (Trading Product)') {
     await QCJob.deleteMany({ company: companyId, ...itemScope, status: 'Pending' });
+    await releasePendingProductionOrderReservations(itemScope, companyId);
     await ProductionOrder.deleteMany({ company: companyId, ...itemScope, status: 'Pending' });
 
     const existingPR = await PurchaseRequest.findOne({

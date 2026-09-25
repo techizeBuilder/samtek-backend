@@ -368,6 +368,22 @@ export const getLeads = async (req, res) => {
     ]);
     const quotationCountMap = new Map(quotationCountsAgg.map(q => [q._id.toString(), q.count]));
 
+    // R&D product requests raised from a lead card — drives the colour of the
+    // "Add Request" pill on the Leads page. leadIds is already company-scoped
+    // upstream, and SalesItemRequest is indexed on leadId.
+    const SalesItemRequest = (await import('../models/SalesItemRequest.js')).default;
+    const itemReqAgg = await SalesItemRequest.aggregate([
+      { $match: { leadId: { $in: leadIds } } },
+      { $group: { _id: { leadId: '$leadId', status: '$status' }, count: { $sum: 1 } } },
+    ]);
+    const itemReqMap = new Map();
+    itemReqAgg.forEach(({ _id, count }) => {
+      const k = _id.leadId.toString();
+      const entry = itemReqMap.get(k) || { Pending: 0, Approved: 0, Rejected: 0 };
+      entry[_id.status] = count;
+      itemReqMap.set(k, entry);
+    });
+
     const leads = leadsDocs.map(l => {
       const doc = l.toObject();
       const idStr = doc._id.toString();
@@ -377,6 +393,14 @@ export const getLeads = async (req, res) => {
       // history log existed — so the count never reads as 0 when a quotation
       // is clearly present.
       doc.quotationCount = quotationCountMap.get(idStr) || (doc.hasQuotation ? 1 : 0);
+      // Pending wins (still waiting on R&D); then Rejected (needs a re-request)
+      // over Approved (done, no action); Approved only when every request is approved.
+      const ir = itemReqMap.get(idStr);
+      doc.itemRequestCounts = ir || { Pending: 0, Approved: 0, Rejected: 0 };
+      doc.itemRequestStatus = !ir ? null
+        : ir.Pending > 0 ? 'Pending'
+        : ir.Rejected > 0 ? 'Rejected'
+        : 'Approved';
       return doc;
     });
 
@@ -665,6 +689,23 @@ export const markLeadAsWon = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Deal cannot be won until payment is verified by Accounts.' });
     }
 
+    // Every point on the company's (dynamic, Settings-configured) Sales
+    // Checklist must be declared before the deal can be won — the Service
+    // team verifies each declared point afterward (see Order.salesChecklist),
+    // so an unconfirmed point here would leave them nothing to check against.
+    // Re-checked server-side, not just in the modal, since this is a real
+    // gate on the deal-won flow.
+    const { getOrCreateSettings } = await import('./adminSettingsController.js');
+    const companySettingsForChecklist = await getOrCreateSettings(req.user.companyId);
+    const checklistConfig = companySettingsForChecklist.salesChecklist || [];
+    const uncheckedPoints = checklistConfig.filter(cfg => !salesChecklist?.[cfg.key]?.checked);
+    if (uncheckedPoints.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Please confirm all checklist points before marking the deal as Won: ${uncheckedPoints.map(c => c.label).join(', ')}`
+      });
+    }
+
     const companyId = (lead.companyId?._id || lead.companyId || req.user.companyId)?.toString();
     const salesPersonId = (lead.assignedTo?._id || lead.assignedTo || req.user._id)?.toString();
     const unit = lead.unit || req.user.unit;
@@ -806,6 +847,11 @@ export const requestPaymentCheck = async (req, res) => {
     const lead = await Lead.findById(req.params.id);
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
     if (!lead.quotation) return res.status(400).json({ success: false, message: 'Please send Quotation first.' });
+    // Same one-request-at-a-time rule as uploadLeadDocuments (which the Leads
+    // page calls first) — guards a direct call too.
+    if (lead.paymentCheckStatus === 'Pending') {
+      return res.status(400).json({ success: false, message: 'A payment is already waiting for Accounts to verify. You can send the next one once Accounts has decided on it.' });
+    }
 
     const LeadPayment = (await import('../models/LeadPayment.js')).default;
     const verifiedPayments = await LeadPayment.find({ leadId: req.params.id, status: 'Verified' });
@@ -836,12 +882,43 @@ export const requestPaymentCheck = async (req, res) => {
   }
 };
 
-// Update Payment Check Status (By Accounts)
+// Update Payment Check Status (By Accounts) — this is the single "Verify"
+// action left on the Accounts side. It reviews the LeadPayment Sales
+// submitted with the request (see uploadLeadDocuments) and only here does
+// that payment actually get verified: ledger entry posted, lead's advanced
+// payment total updated. A Rejected decision leaves the ledger untouched.
 export const updatePaymentCheckStatus = async (req, res) => {
   try {
     const { status, remarks } = req.body;
     const lead = await Lead.findById(req.params.id);
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+
+    const LeadPayment = (await import('../models/LeadPayment.js')).default;
+    const pendingPayment = await LeadPayment.findOne({ leadId: lead._id, status: 'Pending' }).sort({ createdAt: -1 });
+
+    if (pendingPayment && (status === 'Paid' || status === 'Partially Paid')) {
+      pendingPayment.status = 'Verified';
+      pendingPayment.verifiedBy = req.user._id;
+      pendingPayment.verifiedDate = new Date();
+      if (remarks) pendingPayment.remarks = remarks;
+      await pendingPayment.save();
+
+      try {
+        const { Account } = await import('../models/Account.js');
+        const { createLedgerTransaction } = await import('../utils/leadPaymentLedger.js');
+        const bankAccountObj = pendingPayment.bankAccount ? await Account.findById(pendingPayment.bankAccount) : null;
+        await createLedgerTransaction(pendingPayment, bankAccountObj, req.user);
+      } catch (ledgerError) {
+        console.error('⚠️ Ledger transaction creation failed on payment-check verify (payment still saved):', ledgerError.message);
+      }
+
+      const verifiedPayments = await LeadPayment.find({ leadId: lead._id, status: 'Verified' });
+      lead.advancedPaymentAmount = verifiedPayments.reduce((sum, p) => sum + p.amount, 0);
+    } else if (pendingPayment && status === 'Rejected') {
+      pendingPayment.status = 'Rejected';
+      if (remarks) pendingPayment.remarks = remarks;
+      await pendingPayment.save();
+    }
 
     lead.paymentCheckStatus = status;
     lead.history.push({
@@ -951,6 +1028,15 @@ export const uploadLeadDocuments = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
+    // One request at a time (2026-09-25): Accounts' Verify
+    // (updatePaymentCheckStatus) acts on the lead's single newest Pending
+    // LeadPayment — a second submission while one is still waiting left the
+    // earlier one Pending forever, never verified, never in the advance total
+    // (found live: LD-0072). Checked here, before any file/payment is saved,
+    // since this is the step that creates the LeadPayment.
+    if (lead.paymentCheckStatus === 'Pending') {
+      return res.status(400).json({ success: false, message: 'A payment is already waiting for Accounts to verify. You can send the next one once Accounts has decided on it.' });
+    }
 
     const files = req.files; // { po: [...], paymentProof: [...], quotation: [...] }
     if (!files || Object.keys(files).length === 0) {
@@ -994,12 +1080,61 @@ export const uploadLeadDocuments = async (req, res) => {
       performedBy: req.user._id
     });
 
+    // Payment details — Sales now submits these alongside the documents
+    // (previously typed in separately by Accounts' "Add Payment"). Created
+    // Pending: no ledger entry and no effect on lead.advancedPaymentAmount
+    // until Accounts verifies it (see updatePaymentCheckStatus below).
+    const { amount, paymentDate, paymentMethod, bankAccount, transactionId, remarks } = req.body;
+    let leadPayment = null;
+    if (amount && !isNaN(parseFloat(amount))) {
+      const LeadPayment = (await import('../models/LeadPayment.js')).default;
+      const { Account } = await import('../models/Account.js');
+
+      let selectedBankAccount = null;
+      if (bankAccount) {
+        selectedBankAccount = await Account.findOne({ _id: bankAccount, unit: req.user.unit, isBankOrCash: true });
+      }
+      // Include the account number so Accounts' Verify screen (which only
+      // shows this denormalized label, not a live Account lookup) has enough
+      // to tell same-named accounts apart.
+      const bankAccountName = selectedBankAccount
+        ? `${selectedBankAccount.bankDetails?.bankName ? selectedBankAccount.bankDetails.bankName + ' - ' : ''}${selectedBankAccount.accountName} (${selectedBankAccount.accountNumber})`
+        : null;
+
+      leadPayment = new LeadPayment({
+        leadId: lead._id,
+        leadCode: lead.leadCode,
+        companyName: lead.companyName,
+        contactPerson: lead.contactPerson,
+        mobile: lead.mobile,
+        email: lead.email,
+        amount: parseFloat(amount),
+        paymentDate: paymentDate || new Date(),
+        paymentMethod: paymentMethod || 'Bank Transfer',
+        bankAccount: selectedBankAccount ? selectedBankAccount._id : null,
+        bankAccountName,
+        transactionId,
+        remarks,
+        status: 'Pending',
+        companyId: req.user.companyId,
+        addedBy: req.user._id
+      });
+      await leadPayment.save();
+
+      lead.history.push({
+        action: 'Payment Details Submitted',
+        notes: `Sales submitted payment details for account verification: ₹${amount} via ${paymentMethod || 'Bank Transfer'}.`,
+        performedBy: req.user._id
+      });
+    }
+
     await lead.save();
 
     res.json({
       success: true,
       message: 'Documents uploaded successfully',
       documents: newDocs,
+      payment: leadPayment,
       lead
     });
   } catch (error) {

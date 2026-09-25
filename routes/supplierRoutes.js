@@ -9,7 +9,8 @@ import {
   deleteSupplier,
   getSupplierStats,
   exportSuppliersToExcel,
-  importSuppliersFromExcel
+  importSuppliersFromExcel,
+  getSupplierCatalog
 } from '../controllers/supplierController.js';
 
 const router = express.Router();
@@ -21,6 +22,8 @@ const purchasesDelete = checkPermission('accounts', 'purchases', 'delete');
 
 // Supplier CRUD routes
 router.get('/suppliers', auth, purchasesView, getSuppliers);
+// Must come before '/suppliers/:id', or Express matches 'catalog' as an id.
+router.get('/suppliers/catalog', auth, purchasesView, getSupplierCatalog);
 router.get('/suppliers/:id', auth, purchasesView, getSupplierById);
 router.post('/suppliers', auth, purchasesAdd, createSupplier);
 router.put('/suppliers/:id', auth, purchasesEdit, updateSupplier);

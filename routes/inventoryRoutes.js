@@ -12,6 +12,8 @@ import {
   deleteItem,
   bulkDeleteItems,
   adjustStock,
+  auditStock,
+  getStockAuditHistory,
   uploadItemImage,
   uploadItemBrochure,
   deleteItemMedia,
@@ -100,6 +102,10 @@ router.post('/items/bulk-delete', auth, inventoryDelete, bulkDeleteItems);
 router.put('/items/:id', auth, inventoryEdit, updateItem);
 router.delete('/items/:id', auth, inventoryDelete, deleteItem);
 router.post('/items/:id/adjust-stock', auth, inventoryEdit, adjustStock);
+// Store Head's stock audit — role check lives inside the controller (Store
+// Head only, not a togglable feature-permission; see auditStock's comment).
+router.post('/items/:id/stock-audit', auth, auditStock);
+router.get('/items/:id/stock-audit', auth, getStockAuditHistory);
 
 // Category routes
 router.get('/categories', auth, getCategories);

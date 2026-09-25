@@ -6,7 +6,13 @@ import mongoose from 'mongoose';
 // them, just under their own `module` value. See
 // server/docs/qc-module-restructure-client-request.md's 2026-08-31 follow-on
 // for the design discussion.
-export const QC_MODULES = ['inventory', 'productMaster', 'motorMaster'];
+// 'childPart'/'subChildPart' (2026-09) are genuinely independent modules for
+// the two ground-level BOM hierarchy nodes — each configures its checklist
+// directly against its own Item, deliberately NOT sharing a catalog with
+// 'productMaster' the way the old (removed) "Sub Child Part Inventory QC" tab
+// used to (see server/docs/qc-module-restructure-client-request.md's
+// 2026-09-14 follow-on for why that was considered the wrong design).
+export const QC_MODULES = ['inventory', 'productMaster', 'motorMaster', 'childPart', 'subChildPart'];
 
 // One row in a module's master checklist — a possible check R&D has defined,
 // not yet tied to any specific item. 'value' rows name WHAT gets measured
@@ -39,6 +45,14 @@ export const QC_MODULE_STAGES = {
   inventory: ['default'],
   motorMaster: ['default'],
   productMaster: ['initial', 'process', 'final'],
+  // Child Part still goes through a real build pipeline under the legacy
+  // flow, so the same Initial/Process staging Product Master QC's own parts
+  // use still fits — just its own independent catalog now, not borrowed.
+  childPart: ['initial', 'process'],
+  // Sub Child Part's own order flow (subChildPartOrderService.js) is a
+  // single order-level Assign/Start/Complete cycle, no stages — a flat
+  // checklist matches its actual shape (same pattern as inventory/motorMaster).
+  subChildPart: ['default'],
 };
 
 // One document per {company, module, stage} — deliberately NOT a library of

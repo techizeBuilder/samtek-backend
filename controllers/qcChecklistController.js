@@ -4,6 +4,8 @@ import QCItemChecklist from '../models/QCItemChecklist.js';
 import { Item } from '../models/Inventory.js';
 import RDChildPart from '../models/RDChildPart.js';
 import RDBOM from '../models/RDBOM.js';
+import ChildPartBOM from '../models/ChildPartBOM.js';
+import MachineBOM from '../models/MachineBOM.js';
 
 // Shared by every route below — 'inventory'/'motorMaster' are flat (only
 // stage 'default'); 'productMaster' is staged ('initial'/'process'/'final',
@@ -163,11 +165,40 @@ export const reorderMasterChecklist = async (req, res) => {
 // Child Parts before anything reads/writes against them.
 async function resolveTarget(req, res) {
   const { module, stage, itemId, childPartId, subChildPartId } = req.params;
+  const companyId = req.user.companyId;
   if (!isValidModuleStage(module, stage)) {
     res.status(400).json({ success: false, message: 'Invalid QC module/stage' });
     return null;
   }
   const partScoped = isPartScopedStage(module, stage);
+
+  const item = await Item.findOne({ _id: itemId, companyId }).lean();
+  if (!item) {
+    res.status(404).json({ success: false, message: 'Item not found' });
+    return null;
+  }
+
+  // ── Canonical Sub Child Part QC (2026-09-16) ───────────────────────────
+  // A Sub Child Part's initial/process checklist is defined ONCE, keyed to
+  // its own Inventory Item (productKind 'ChildPart'), part ids null —
+  // exactly like the material-list guard makes a linked part's BOM one
+  // shared thing. Two ways in:
+  //  1. Directly, by the Sub Child Part Item itself — the Inventory QC page's
+  //     new "Sub Child Part Inventory" tab, and Production's Sub Child Part
+  //     order QC pull.
+  //  2. Indirectly, from a machine's Product Master QC when the part on that
+  //     machine is LINKED to an Inventory Item — the request comes in with
+  //     machine + child/sub-child ids, but we redirect it to the canonical
+  //     entry so every machine using that part shares one checklist.
+  if (partScoped && item.productKind === 'ChildPart' && !childPartId && !subChildPartId) {
+    return {
+      module, stage, item,
+      filter: { module, stage, item: itemId, childPartId: null, subChildPartId: null, company: companyId },
+      subChildPartCanonical: true,
+      sharedMachineCount: await RDChildPart.countDocuments({ company: companyId, 'subChildParts.inventoryItem': item._id }),
+    };
+  }
+
   if (partScoped && (!childPartId || !subChildPartId)) {
     res.status(400).json({ success: false, message: `${module}/${stage} checklists are configured per Sub Child Part — use the /part route` });
     return null;
@@ -177,24 +208,28 @@ async function resolveTarget(req, res) {
     return null;
   }
 
-  const item = await Item.findOne({ _id: itemId, companyId: req.user.companyId }).lean();
-  if (!item) {
-    res.status(404).json({ success: false, message: 'Item not found' });
-    return null;
-  }
-
   if (partScoped) {
-    const childPart = await RDChildPart.findOne({ _id: childPartId, product: itemId, company: req.user.companyId }).lean();
+    const childPart = await RDChildPart.findOne({ _id: childPartId, product: itemId, company: companyId }).lean();
     const subChildPart = childPart?.subChildParts?.find(s => String(s._id) === String(subChildPartId));
     if (!childPart || !subChildPart) {
       res.status(404).json({ success: false, message: 'Sub Child Part not found on this product' });
       return null;
     }
+    // Linked → redirect to the one canonical entry keyed by the Inventory Item.
+    if (subChildPart.inventoryItem) {
+      return {
+        module, stage, item,
+        filter: { module, stage, item: String(subChildPart.inventoryItem), childPartId: null, subChildPartId: null, company: companyId },
+        subChildPartCanonical: true,
+        redirectedFromMachine: true,
+        sharedMachineCount: await RDChildPart.countDocuments({ company: companyId, 'subChildParts.inventoryItem': subChildPart.inventoryItem }),
+      };
+    }
   }
 
   return {
     module, stage, item,
-    filter: { module, stage, item: itemId, childPartId: partScoped ? childPartId : null, subChildPartId: partScoped ? subChildPartId : null, company: req.user.companyId },
+    filter: { module, stage, item: itemId, childPartId: partScoped ? childPartId : null, subChildPartId: partScoped ? subChildPartId : null, company: companyId },
   };
 }
 
@@ -238,7 +273,18 @@ export const getItemChecklist = async (req, res) => {
     const target = await resolveTarget(req, res);
     if (!target) return; // resolveTarget already sent the error response
     const data = await resolveSelectedChecklist(target.filter);
-    res.json({ success: true, data });
+    res.json({
+      success: true,
+      data: {
+        ...data,
+        // Present only when this checklist is the one canonical entry shared
+        // by every machine that uses this Sub Child Part — the frontend uses
+        // it to auto-fill from what's already defined and to warn before a
+        // change that hits every machine (the BOM-guard idea).
+        subChildPartCanonical: !!target.subChildPartCanonical,
+        sharedMachineCount: target.sharedMachineCount ?? 0,
+      },
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -301,6 +347,22 @@ export const getProductQCParts = async (req, res) => {
     const product = await Item.findOne({ _id: productId, companyId: req.user.companyId, productKind: 'Machine' }).lean();
     if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
 
+    // A real MachineBOM means this machine is on the new hierarchy — its
+    // Child Parts are reusable, independently-stocked units with their own
+    // complete QC pipeline (Fabrication -> Assembly -> QC -> Painting),
+    // already passed before any unit is ever issued to this machine's own
+    // order. There's nothing left to configure in the old RDChildPart/RDBOM
+    // tree below for these machines (confirmed with the user 2026-09-17) —
+    // skip it entirely rather than show a misleading "No BOM created yet"
+    // for a machine that clearly has one, just not this kind.
+    const machineBOM = await MachineBOM.findOne({ machine: productId, company: req.user.companyId }).select('_id').lean();
+    if (machineBOM) {
+      return res.json({
+        success: true,
+        data: { productSourceType: product.productSourceType || '', hasBOM: true, hasMachineBOM: true, childParts: [] },
+      });
+    }
+
     const [childParts, bom] = await Promise.all([
       RDChildPart.find({ product: productId, company: req.user.companyId }).sort({ createdAt: 1 }).lean(),
       RDBOM.findOne({ machine: productId, company: req.user.companyId }).lean(),
@@ -343,6 +405,122 @@ export const getProductQCParts = async (req, res) => {
     res.json({
       success: true,
       data: { productSourceType: product.productSourceType || '', hasBOM: !!bom, childParts: data },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/rd/qc-checklist/child-part-list — the Inventory QC page's "Child
+// Part" tab: every Child Part Item with how many machines use it (still a
+// live read off the legacy RDChildPart tree — purely informational, doesn't
+// share checklist state with anything) and its own, genuinely independent
+// module:'childPart' Initial/Process selected-check counts. Renamed
+// 2026-09-14 from getSubChildPartQCList — it always queried
+// productKind:'ChildPart' (correct), the only thing wrong was counting
+// checklists under the shared 'productMaster' module instead of its own.
+export const getChildPartQCList = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const items = await Item.find({ companyId, productKind: 'ChildPart' })
+      .select('code name image isDiscontinued').sort({ name: 1 }).lean();
+    if (!items.length) return res.json({ success: true, data: [] });
+
+    const ids = items.map(i => i._id);
+    const [checklists, childParts] = await Promise.all([
+      QCItemChecklist.find({
+        module: 'childPart', item: { $in: ids }, childPartId: null, subChildPartId: null, company: companyId,
+      }).lean(),
+      RDChildPart.find({ company: companyId, 'subChildParts.inventoryItem': { $in: ids } })
+        .select('subChildParts.inventoryItem').lean(),
+    ]);
+
+    const countByItemStage = new Map();
+    for (const doc of checklists) countByItemStage.set(`${doc.item}:${doc.stage}`, doc.selectedItems.length);
+    const machineCount = new Map();
+    for (const cp of childParts) {
+      for (const scp of cp.subChildParts || []) {
+        if (!scp.inventoryItem) continue;
+        const k = String(scp.inventoryItem);
+        machineCount.set(k, (machineCount.get(k) || 0) + 1);
+      }
+    }
+
+    res.json({
+      success: true,
+      data: items.map(i => ({
+        _id: i._id, code: i.code, name: i.name, image: i.image, isDiscontinued: i.isDiscontinued,
+        machineCount: machineCount.get(String(i._id)) || 0,
+        initialCount: countByItemStage.get(`${i._id}:initial`) || 0,
+        processCount: countByItemStage.get(`${i._id}:process`) || 0,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── Read-only reference panels (2026-09-14) — Child Part QC / Sub Child Part
+// QC's own "what is this part actually made of" quick-look, matching the
+// compact format Product Master QC's old per-part panel used
+// (`${item}${grade}${brand} · ${qty} ${unit}`), plus a design-file link.
+// Deliberately gated by the SAME feature key as everything else on these two
+// QC pages (qcChildPart/qcSubChildPart), NOT bomManagement — this IS the QC
+// page reading BOM data for reference, not BOM Management itself (same
+// reasoning getProductQCParts above already established). Live reads off the
+// NEW hierarchy (ChildPartBOM / Item.subChildPartDetails) — never stored by
+// this QC feature itself, so it can never drift from BOM Management.
+
+// GET /api/rd/qc-checklist/child-part/:itemId/reference
+export const getChildPartQCReference = async (req, res) => {
+  try {
+    const { itemId } = req.params;
+    const companyId = req.user.companyId;
+    const bom = await ChildPartBOM.findOne({ childPart: itemId, company: companyId })
+      .populate('subChildParts.subChildPart', 'image')
+      .lean();
+    if (!bom) return res.json({ success: true, data: { subChildParts: [], materials: [] } });
+
+    res.json({
+      success: true,
+      data: {
+        subChildParts: (bom.subChildParts || []).filter(s => !s.isDiscontinued).map(s => ({
+          code: s.code, name: s.name, quantity: s.quantity, unit: s.unit,
+          image: s.subChildPart?.image || null,
+        })),
+        materials: (bom.materials || []).filter(m => !m.isDiscontinued).map(m => ({
+          item: m.item, materialGrade: m.materialGrade, brand: m.brand,
+          quantity: m.quantity, unit: m.unit, materialKind: m.materialKind,
+        })),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/rd/qc-checklist/sub-child-part/:itemId/reference
+export const getSubChildPartQCReference = async (req, res) => {
+  try {
+    const { itemId } = req.params;
+    const companyId = req.user.companyId;
+    const item = await Item.findOne({ _id: itemId, companyId, productKind: 'SubChildPart' })
+      .select('image subChildPartDetails')
+      .populate('subChildPartDetails.sourceItem', 'name code materialGrade brand')
+      .lean();
+    if (!item) return res.status(404).json({ success: false, message: 'Sub Child Part not found' });
+
+    const src = item.subChildPartDetails?.sourceItem;
+    res.json({
+      success: true,
+      data: {
+        image: item.image || null,
+        material: src ? {
+          name: src.name, code: src.code,
+          materialGrade: src.materialGrade || '', brand: src.brand || '',
+          quantity: item.subChildPartDetails.sourceQty, unit: item.subChildPartDetails.sourceUnit,
+        } : null,
+      },
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

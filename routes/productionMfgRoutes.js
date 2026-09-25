@@ -9,6 +9,13 @@ import {
   verifyBOM,
   verifyDesign,
   raiseRDRequest,
+  getBomDesignStatus,
+  getSubChildPartMaterialList,
+  requestSubChildPartMaterialController,
+  getMachineMaterialList,
+  requestMachineMaterialController,
+  getSubChildPartJobWork,
+  getStepMaterialStatusController,
   addMaterialDemand,
   updateMaterialStatus,
   assignTeam,
@@ -37,9 +44,24 @@ import {
   savePartChecklist,
   assignPartTeam,
   startPart,
+  getChildPartUnitChecklistRows,
+  saveChildPartUnitChecklist,
+  completeChildPartUnitPainting,
   getFinalChecklist,
   saveFinalChecklist,
+  getQcCheckpoint,
+  submitQcCheckpoint,
+  completeFinalProcessStep,
 } from '../controllers/productionMfgController.js';
+import {
+  assignSubChildPartOrderTeam,
+  startSubChildPartOrder,
+  getSubChildPartChecklist,
+  saveSubChildPartChecklist,
+  submitSubChildPartOrderToQC,
+  requestSubChildPartOrderMaterial,
+  getSubChildPartRawMaterialListController,
+} from '../controllers/subChildPartOrderMfgController.js';
 
 const router = express.Router();
 
@@ -72,6 +94,18 @@ router.post('/orders', ordersAdd, createOrder);
 router.put('/orders/:id/verify-bom', ordersEdit, verifyBOM);
 router.put('/orders/:id/verify-design', ordersEdit, verifyDesign);
 router.put('/orders/:id/raise-rd-request', ordersEdit, raiseRDRequest);
+router.get('/orders/:id/bom-design-status', ordersView, getBomDesignStatus);
+router.get('/orders/:id/sub-child-part-material-list', ordersView, getSubChildPartMaterialList);
+router.post('/orders/:id/sub-child-part-material/request', ordersAdd, requestSubChildPartMaterialController);
+// Machine order Material List (2026-09-17) — new paths, the existing
+// generic material-list/materials/issue routes below stay untouched (still
+// serve the OLD RDBOM-based Job Work/Parts QC gates).
+router.get('/orders/:id/machine-material-list', ordersView, getMachineMaterialList);
+router.post('/orders/:id/machine-material/request', ordersAdd, requestMachineMaterialController);
+router.get('/orders/:id/sub-child-part-job-work', ordersView, getSubChildPartJobWork);
+// Stage 3d (2026-09-24) — generalized per-step twin of the above, any order
+// kind, any step carrying its own materialRefs.
+router.get('/orders/:id/processes/:stepIndex/material-status', ordersView, getStepMaterialStatusController);
 router.put('/orders/:id/mark-material-issued', ordersEdit, receiveMaterialInProduction);
 
 // ── QC-rejected order: Rework / Repair decision ────────────────────────────
@@ -92,12 +126,27 @@ router.put('/orders/:id/materials/:materialId/status', ordersEdit, updateMateria
 router.get('/production-orders/:id/pdf', ordersView, downloadMaterialListPDF);
 
 // ── Process steps  (stepIndex = 0–5) ───────────────────────────────────────
+// Sub Child Part (leaf level) orders — a single order-level Assign/Start/
+// Complete cycle, not the per-step processes/:stepIndex/... routes above
+// (see subChildPartOrderMfgController.js's own header comment).
+router.get('/orders/:id/sub-child-part/material-list', ordersView, getSubChildPartRawMaterialListController);
+router.post('/orders/:id/sub-child-part/material-request', ordersAdd, requestSubChildPartOrderMaterial);
+router.put('/orders/:id/sub-child-part/assign-team', ordersEdit, assignSubChildPartOrderTeam);
+router.put('/orders/:id/sub-child-part/start', ordersEdit, startSubChildPartOrder);
+router.get('/orders/:id/sub-child-part/checklist', ordersView, getSubChildPartChecklist);
+router.put('/orders/:id/sub-child-part/checklist', ordersEdit, saveSubChildPartChecklist);
+router.put('/orders/:id/sub-child-part/submit-qc', ordersEdit, submitSubChildPartOrderToQC);
+
 router.put('/orders/:id/processes/:stepIndex/assign-team', ordersEdit, assignTeam);
 router.put('/orders/:id/processes/:stepIndex/start', ordersEdit, startProcess);
 router.put('/orders/:id/processes/:stepIndex/complete', ordersEdit, markProcessComplete);
 router.put('/orders/:id/processes/:stepIndex/approve-qc', ordersEdit, approveQC);
 router.put('/orders/:id/processes/:stepIndex/reject-qc', ordersEdit, rejectQC);
 router.put('/orders/:id/processes/:stepIndex/notes', ordersEdit, updateProcessNotes);
+// Stage 3b (2026-09-23) — complete-final registered as its own literal
+// segment, same ordering caveat as complete-painting below: a distinct
+// fixed string after :stepIndex, so it never collides with plain /complete.
+router.put('/orders/:id/processes/:stepIndex/complete-final', ordersEdit, completeFinalProcessStep);
 
 // Sub-processes / sub-entries for steps like Fabrication
 router.post('/orders/:id/processes/:stepIndex/sub-entries', ordersAdd, addSubEntry);
@@ -113,9 +162,28 @@ router.put('/orders/:id/parts-qc/:partCheckId/start', ordersEdit, startPart);
 router.get('/orders/:id/parts-qc/:partCheckId/:stage', ordersView, getPartChecklistRows);
 router.put('/orders/:id/parts-qc/:partCheckId/:stage', ordersEdit, savePartChecklist);
 
+// ── Child Part per-UNIT QC (2026-09-16) — same ONE shared QCJob as this
+// order's whole build (ensureQCJobForOrder), but nested per unit
+// (unitChecks[]) instead of per Sub Child Part (partChecks[] above) — see
+// QCJob.js's UnitQCEntrySchema comment. complete-painting registered BEFORE
+// the generic :stage route — Express matches route order, and :stage would
+// otherwise swallow "complete-painting" as if it were a stage name.
+router.put('/orders/:id/child-part/:unitNumber/complete-painting', ordersEdit, completeChildPartUnitPainting);
+router.get('/orders/:id/child-part/:unitNumber/:stage', ordersView, getChildPartUnitChecklistRows);
+router.put('/orders/:id/child-part/:unitNumber/:stage', ordersEdit, saveChildPartUnitChecklist);
+
 // ── Final Testing checklist (every order — R&D's Final stage) ─────────────
 router.get('/orders/:id/final-checklist', ordersView, getFinalChecklist);
 router.put('/orders/:id/final-checklist', ordersEdit, saveFinalChecklist);
+
+// ── QC checkpoint (Stage 3b, 2026-09-23) — the ONE real QC checkpoint on a
+// dynamic Process Definition order, wherever Phase 1's qcRequired flag
+// (or Sub Child Part's fixed last-step rule) puts it. Generalizes
+// final-checklist/sub-child-part/checklist/child-part's :stage submission
+// into one endpoint driven by position — see submitQcCheckpoint's own
+// comment for exactly how it dispatches per order kind.
+router.get('/orders/:id/qc-checkpoint', ordersView, getQcCheckpoint);
+router.put('/orders/:id/qc-checkpoint/submit', ordersEdit, submitQcCheckpoint);
 
 // ── Teams ───────────────────────────────────────────────────────────────────
 router.get('/teams', manpowerView, getTeams);

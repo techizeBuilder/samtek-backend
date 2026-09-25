@@ -4,16 +4,24 @@ import notificationService from '../services/notificationService.js';
 import { getOrCreateSettings } from './adminSettingsController.js';
 
 const FIELD_LABELS = {
+  // Lead Settings
   leadStages: 'Lead Stage',
   leadSources: 'Lead Source',
   businessTypes: 'Business Type',
   documentTypes: 'Document Type',
   leadRejectReasons: 'Lead Reject Reason',
   salesChecklist: 'Sales Checklist',
+  // Quotation Settings
+  termsAndConditions: 'Terms & Conditions',
+  additionalCharges: 'Additional Charge',
+  quotationNotes: 'Quotation Note',
+  quotationNumberSettings: 'Quotation Number Setting',
 };
 
 // The text field each array's items are primarily identified/displayed by —
-// used only for a cheap "is this empty" validation on add/edit.
+// used only for a cheap "is this empty" validation on add/edit. `null` means
+// the item has no single required text field (e.g. Quotation Number Setting,
+// where every field is optional/defaulted).
 const PRIMARY_KEY = {
   leadStages: 'name',
   leadSources: 'name',
@@ -21,6 +29,10 @@ const PRIMARY_KEY = {
   documentTypes: 'name',
   leadRejectReasons: 'label',
   salesChecklist: 'label',
+  termsAndConditions: 'heading',
+  additionalCharges: 'name',
+  quotationNotes: 'text',
+  quotationNumberSettings: null,
 };
 
 // Sales Head proposes a change — nothing on AdminSettings changes yet.
@@ -44,8 +56,12 @@ export const createRequest = async (req, res) => {
     let previousValue = null;
 
     if (action === 'add') {
-      if (!payload || !String(payload[primaryKey] || '').trim()) {
+      if (primaryKey && (!payload || !String(payload[primaryKey] || '').trim())) {
         return res.status(400).json({ success: false, message: `${FIELD_LABELS[field]} value is required` });
+      }
+      // Terms need both a heading and a body, not just the heading.
+      if (field === 'termsAndConditions' && !String(payload?.text || '').trim()) {
+        return res.status(400).json({ success: false, message: 'Terms & Conditions content is required' });
       }
     } else {
       if (!targetId) {
@@ -56,7 +72,7 @@ export const createRequest = async (req, res) => {
         return res.status(404).json({ success: false, message: 'Item not found' });
       }
       previousValue = item.toObject();
-      if (action === 'edit' && payload && payload[primaryKey] !== undefined && !String(payload[primaryKey]).trim()) {
+      if (action === 'edit' && primaryKey && payload && payload[primaryKey] !== undefined && !String(payload[primaryKey]).trim()) {
         return res.status(400).json({ success: false, message: `${FIELD_LABELS[field]} value cannot be empty` });
       }
     }
@@ -65,6 +81,13 @@ export const createRequest = async (req, res) => {
     // never accept a client-supplied key on the proposed payload.
     const cleanPayload = payload ? { ...payload } : null;
     if (cleanPayload && field === 'salesChecklist') delete cleanPayload.key;
+    // Additional Charge price/GST arrive as strings from the form.
+    if (cleanPayload && field === 'additionalCharges') {
+      if (cleanPayload.price !== undefined) cleanPayload.price = Number(cleanPayload.price) || 0;
+      cleanPayload.gst = cleanPayload.gst === undefined || cleanPayload.gst === ''
+        ? 18
+        : (Number(cleanPayload.gst) || 0);
+    }
 
     const request = await LeadSettingRequest.create({
       companyId: req.user.companyId,
@@ -78,8 +101,8 @@ export const createRequest = async (req, res) => {
 
     try {
       await notificationService.createNotification({
-        title: 'New Lead Setting request',
-        message: `${req.user.fullName || req.user.username} requested to ${action} a ${FIELD_LABELS[field]} point`,
+        title: 'New Lead / Quotation Setting request',
+        message: `${req.user.fullName || req.user.username} requested to ${action} a ${FIELD_LABELS[field]} item`,
         type: 'lead',
         targetRole: 'Company Admin',
         targetCompanyId: req.user.companyId,

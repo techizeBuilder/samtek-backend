@@ -6,7 +6,6 @@ import Customer from '../models/Customer.js';
 import notificationService from '../services/notificationService.js';
 import { syncOrderItemsFromForm, autoCheckAllOrderItems } from '../services/storeFlowService.js';
 import { getMachineBillingBOMCost } from '../services/itemPricingService.js';
-import { computeMaterialAvailabilityForOrder } from '../services/materialAvailabilityService.js';
 
 const isSuperadmin = (role) => role === 'Superadmin' || role === 'Super Admin';
 const isAccountsRole = (role) => ['Accounts', 'Accounts Head', 'Account Employee'].includes(role) || isSuperadmin(role);
@@ -236,18 +235,15 @@ export const upsertOrderForm = async (req, res) => {
       console.error('❌ Error auto-checking inventory for Order Form items:', autoCheckErr);
     }
 
-    // 📦 BOM raw-material availability for every In-house Manufactured item on
-    // this order — checks stock, auto-raises pre-approved Purchase Requests
-    // for any shortfall (see materialAvailabilityService.js). Shipped as an
-    // awaited step first, same as autoCheckAllOrderItems right above it, to
-    // measure real added latency before reaching for a fire-and-forget
-    // version — see server/docs/store-orders-material-availability.md.
-    try {
-      const materialAvailabilityResult = await computeMaterialAvailabilityForOrder(order);
-      console.log(`📦 [OrderForm] Material availability for ${order.orderCode}:`, materialAvailabilityResult);
-    } catch (materialAvailabilityErr) {
-      console.error('❌ Error computing material availability for Order Form items:', materialAvailabilityErr);
-    }
+    // 📦 BOM raw-material availability used to run here as a separate,
+    // RDBOM-only pass over every in-house-manufactured item on this order,
+    // regardless of whether it actually needed building (materialAvailabilityService.js's
+    // now-retired computeMaterialAvailabilityForOrder). Cut over 2026-09-16:
+    // this check now happens inside autoCheckAllOrderItems above, only for
+    // an item that's actually "Not Available" and gets a real Machine
+    // Production Order created (storeFlowService.js's applyStoreDecisionToItem,
+    // CASE 2 → machineReorderService.js's checkMachineAssemblyMaterialAvailability,
+    // reading the new MachineBOM) — no separate step needed here any more.
 
     if (newContribution !== previousContribution) {
       await Customer.findByIdAndUpdate(order.customer, {

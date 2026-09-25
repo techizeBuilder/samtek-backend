@@ -64,13 +64,61 @@ const PartQCEntrySchema = new mongoose.Schema({
   rejectReason: { type: String, default: '' },
 }, { timestamps: true });
 
+// One entry per UNIT of a Child Part order (source:'ChildPartProduction')
+// — direct sibling of PartQCEntrySchema above, same nested-under-one-job
+// shape, just keyed by unitNumber instead of childPartId/subChildPartId.
+// Confirmed with the user (2026-09-16) as the deliberate pattern to mirror:
+// ONE QCJob per Child Part order, but each unit reaches/leaves QC entirely
+// independently of its siblings — some units can be mid-Fabrication while
+// another is already Approved and painting. No assignedTeam/startedAt of
+// its own (unlike PartQCEntrySchema) — Child Part already tracks those at
+// the real processes[]/extraUnits[] step level, so this only needs to own
+// the checklist + the QC verdict.
+const UnitQCEntrySchema = new mongoose.Schema({
+  unitNumber: { type: Number, required: true },
+  initial: { type: [ChecklistItemSchema], default: [] },
+  process: { type: [ChecklistItemSchema], default: [] },
+  // Same 4-state lifecycle PartQCEntrySchema.status uses, same meaning:
+  // 'Awaiting Production' (this unit's Assembly isn't done yet) -> 'QC
+  // Pending' (Production saved Process, automatic hand-off, no separate
+  // submit action — see saveChildPartUnitChecklist) -> 'Approved'/'Rejected'.
+  // A Rejected entry needs no explicit reopen: Production just re-edits and
+  // resaves (editable while 'Awaiting Production' OR 'Rejected'), which
+  // flips it straight back to 'QC Pending'.
+  status: { type: String, enum: ['Awaiting Production', 'QC Pending', 'Approved', 'Rejected'], default: 'Awaiting Production' },
+  producedBy: { type: String, default: '' },
+  producedAt: { type: Date, default: null },
+  qcBy: { type: String, default: '' },
+  qcDate: { type: String, default: null },
+  rejectReason: { type: String, default: '' },
+  // Stage 3b (2026-09-23) — set only when this unit's ONE QC checkpoint
+  // (Phase 1's qcRequired flag) happens to sit on the true last step of a
+  // dynamic Process Definition, a real BOM shape the old fixed
+  // Fabrication->Assembly->Painting pipeline never allowed (Painting always
+  // came after Assembly there). Mirrors finalCheckProductionCost/Expense
+  // below (Machine/Sub Child Part's flat-checklist equivalent) — Production
+  // reports cost/expense once, on submission (productionMfgController.js's
+  // submitQcCheckpoint), and decideChildPartUnit applies it once QC
+  // approves, the same "Production uploads it, QC's approval just triggers
+  // the credit" split every other order kind already uses.
+  pendingProductionCost: { type: Number, default: null },
+  pendingProductionExpense: { type: Number, default: null },
+  // Per-unit Machine only (2026-09-24) — set once this unit is fully done:
+  // checkpoint QC-approved AND its true last step finished, whichever came
+  // last (productionMfgController.js's completeMachineUnit). That is the
+  // moment it counts toward the Sale item's approvedQty (or machine stock,
+  // for a no-Sale order) — also what makes the trigger idempotent, and
+  // what the Packaging Queue counts as "N of M units ready".
+  readyAt: { type: Date, default: null },
+}, { timestamps: true });
+
 const QCJobSchema = new mongoose.Schema({
   qcJobId: { type: String, unique: true },
 
   // Source info
   source: {
     type: String,
-    enum: ['Purchase', 'Production', 'Store', 'QC_Rejected', 'Stock'],
+    enum: ['Purchase', 'Production', 'Store', 'QC_Rejected', 'Stock', 'SubChildPartJobWork', 'SubChildPartProduction', 'ChildPartProduction'],
     required: true,
   },
   sourceRefId: { type: String, default: '' },   // orderId / PO number / stock ref
@@ -103,6 +151,11 @@ const QCJobSchema = new mongoose.Schema({
   // Empty for every job except a Production-source one for an in-house/
   // outsource-manufactured product — see PartQCEntrySchema's own comment.
   partChecks: { type: [PartQCEntrySchema], default: [] },
+  // Empty for every job except source:'ChildPartProduction' and a dynamic-
+  // Process-Definition Machine order's job (2026-09-24 — the same per-unit
+  // model, single-stage: only process[] is used) — see UnitQCEntrySchema's
+  // own comment.
+  unitChecks: { type: [UnitQCEntrySchema], default: [] },
   // Set once Production fills in `checklist` above themselves, on the Final
   // Testing process step (see productionMfgController.js's
   // saveFinalChecklist) — their own pre-flight record, same rows QC then
@@ -111,11 +164,19 @@ const QCJobSchema = new mongoose.Schema({
   // Empty for every job whose checklist Production never touches.
   finalCheckFilledBy: { type: String, default: '' },
   finalCheckFilledAt: { type: Date, default: null },
+  // Captured ONCE, on the very first Final Testing submission (redesigned
+  // 2026-09-19 — Production reports the real build cost as part of
+  // submitting the checklist, not through a separate self-certify step).
+  // `finalCheckFilledAt` being already set is what tells saveFinalChecklist
+  // a later submission is a QC-reject resubmit, not a first submit — on a
+  // resubmit these two stay exactly as first captured, never re-asked for.
+  finalCheckProductionCost: { type: Number, default: null },
+  finalCheckProductionExpense: { type: Number, default: null },
 
   // Decision
   status: {
     type: String,
-    enum: ['Pending', 'In Progress', 'Approved', 'Rejected'],
+    enum: ['Draft', 'Pending', 'In Progress', 'Approved', 'Rejected'],
     default: 'Pending',
   },
   decision: { type: String, enum: ['', 'Pass', 'Fail'], default: '' },
@@ -133,6 +194,11 @@ const QCJobSchema = new mongoose.Schema({
   // orders create one QC job per item, and the decision updates only that
   // item's storeQCStatus. Null on legacy/whole-order jobs.
   saleItemId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  // Back-reference to the SubChildPartJobWorkOrder that originated this QC
+  // job (source:'SubChildPartJobWork' only) — same pattern as
+  // purchaseRequestId/saleId above, used to credit stock back onto the
+  // right Sub Child Part Item and close out the order on approval/rejection.
+  subChildPartJobWorkOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'SubChildPartJobWorkOrder', default: null },
   // The customer-facing sales Order.orderCode this job traces back to
   // (e.g. "ORD-0043") — lets QC screens group jobs of the same order.
   orderCode: { type: String, default: '', trim: true },

@@ -1,4 +1,5 @@
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
+import { dimensionSignature } from './fabricationDemandService.js';
 
 // Shared BOM-material grouping, per unit of the machine (buildQty applied by
 // the caller) — used by both materialAvailabilityService.js (Store Orders'
@@ -59,6 +60,37 @@ export function lengthFabricationGroupsFromBOM(bom) {
     }
     const g = groups.get(key);
     g.totalLengthMmPerUnit += lengthMm;
+    dedupeChildPart(g.childParts, mat);
+  }
+  return Array.from(groups.values());
+}
+
+// Groups a BOM's sheet-metal lines by the actual cut (code + dimensionVariantId
+// + the cut's own bomDimensions signature) — two different cuts sharing the
+// same catalog sheet size are NOT the same repeated shape. Extracted from
+// subChildPartReorderService.js's own two inline copies (Tier 2 of
+// checkSubChildPartMaterialAvailability and computeSubChildPartMaterialRows)
+// when that file was rewritten into childPartReorderService.js, so a new
+// consumer doesn't need a third inline copy of the same math. A sheet-metal
+// BOM line only ever records the cut's AREA (never length/width —
+// buildFabricationBomDimensions gives {thickness, area} for a sheet
+// category), so "sheets needed" is total area ÷ one catalog sheet's own
+// area, rounded up — computed by the caller, not here (this function only
+// groups + sums, same division of labor as the two functions above).
+export function sheetMetalCutGroupsFromBOM(bom) {
+  const groups = new Map();
+  for (const mat of bom.materials || []) {
+    if (mat.isDiscontinued || !mat.isSheetMetal || !mat.dimensionVariantId) continue;
+    const key = `${mat.code}#${mat.dimensionVariantId}#${dimensionSignature(mat.bomDimensions)}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key, itemCode: mat.code, itemName: mat.item, dimensionVariantId: mat.dimensionVariantId,
+        fabricationCategory: mat.fabricationCategory, areaMm2PerPiece: Number(mat.bomDimensions?.area) || 0,
+        amountValue: mat.amountValue, amountUnit: mat.amountUnit, quantity: 0, childParts: [],
+      });
+    }
+    const g = groups.get(key);
+    g.quantity += Number(mat.quantity) || 0;
     dedupeChildPart(g.childParts, mat);
   }
   return Array.from(groups.values());

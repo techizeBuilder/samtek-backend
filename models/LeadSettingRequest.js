@@ -1,10 +1,12 @@
 import mongoose from 'mongoose';
 
-// A Sales Head's proposed add/edit/delete to one of the per-company Lead
-// Settings arrays (AdminSettings.leadStages/leadSources/businessTypes/
-// documentTypes/leadRejectReasons/salesChecklist). Nothing here is applied
-// to AdminSettings until a Company Admin (or Super Admin, as a fallback for
-// companies without one yet) approves it — see leadSettingRequestController.js.
+// A Sales Head's proposed add/edit/delete to one of the per-company Lead or
+// Quotation Settings arrays on AdminSettings — Lead: leadStages/leadSources/
+// businessTypes/documentTypes/leadRejectReasons/salesChecklist; Quotation:
+// termsAndConditions/additionalCharges/quotationNotes/quotationNumberSettings.
+// Nothing here is applied to AdminSettings until a Company Admin (or Super
+// Admin, as a fallback for companies without one yet) approves it — see
+// leadSettingRequestController.js.
 const leadSettingRequestSchema = new mongoose.Schema({
   companyId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -15,7 +17,12 @@ const leadSettingRequestSchema = new mongoose.Schema({
 
   field: {
     type: String,
-    enum: ['leadStages', 'leadSources', 'businessTypes', 'documentTypes', 'leadRejectReasons', 'salesChecklist'],
+    enum: [
+      // Lead Settings
+      'leadStages', 'leadSources', 'businessTypes', 'documentTypes', 'leadRejectReasons', 'salesChecklist',
+      // Quotation Settings
+      'termsAndConditions', 'additionalCharges', 'quotationNotes', 'quotationNumberSettings',
+    ],
     required: true
   },
 

@@ -68,7 +68,6 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
         const ProductionOrder = (await import('./models/ProductionOrder.js')).default;
         const ProductionTeam = (await import('./models/ProductionTeam.js')).default;
         const RDMachine = (await import('./models/RDMachine.js')).default;
-        const RDBOM = (await import('./models/RDBOM.js')).default;
         const RDPrototype = (await import('./models/RDPrototype.js')).default;
         const RDChangeRequest = (await import('./models/RDChangeRequest.js')).default;
         const RDToolProcess = (await import('./models/RDToolProcess.js')).default;
@@ -313,6 +312,16 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const purchaseRequestRoutes = (await import('./routes/purchaseRequestRoutes.js')).default;
             app.use('/api/purchase-requests', purchaseRequestRoutes);
             console.log('Purchase Request routes registered at /api/purchase-requests');
+            // Sub Child Part — Out-Source (Purchase) job-work orders.
+            const subChildPartJobWorkOrderRoutes = (await import('./routes/subChildPartJobWorkOrderRoutes.js')).default;
+            app.use('/api/purchase/sub-child-job-work', subChildPartJobWorkOrderRoutes);
+            console.log('Sub Child Part Job Work routes registered at /api/purchase/sub-child-job-work');
+            // Phase 2 — generalized outsource hand-off (Child Part/Machine/
+            // hybrid Sub Child Part), separate from the job-work routes
+            // above, which stay Sub-Child-Part-pure-outsource-only.
+            const outsourceWorkRoutes = (await import('./routes/outsourceWorkRoutes.js')).default;
+            app.use('/api/outsource-work', outsourceWorkRoutes);
+            console.log('Outsource Work routes registered at /api/outsource-work');
             // RFQ (Vendor Bidding) routes
             const rfqRoutes = (await import('./routes/rfqRoutes.js')).default;
             app.use('/api/rfq', rfqRoutes);
@@ -696,6 +705,48 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             }
             catch (cronError) {
                 console.warn('⚠️ Low-stock reorder cron job setup warning:', cronError.message);
+            }
+
+            // ─── Periodic Cron Job — Child Part Low-Stock Auto-Production ────────────
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runChildPartReorderSweep } = await import('./services/childPartReorderService.js');
+                // Same cadence as the raw-material sweep above — this is its
+                // parallel for Child Part items (purchase:false, so they're
+                // never picked up by that other sweep): raises a Production
+                // Order instead of a Purchase Request when stock hits Min
+                // Stock, gated through ChildPartBOM existence, cascading into
+                // a Sub Child Part order for any short Sub Child Part
+                // reference and a Purchase Request for any short direct
+                // material.
+                cron.schedule('*/30 * * * *', async () => {
+                    console.log('⏰ [CRON] Starting Child Part low-stock auto-production sweep...');
+                    await runChildPartReorderSweep();
+                });
+                console.log('✅ Child Part low-stock auto-production cron job scheduled (every 30 minutes)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Child Part reorder cron job setup warning:', cronError.message);
+            }
+
+            // ─── Periodic Cron Job — Sub Child Part (leaf level) Low-Stock Auto-Order ──
+            // NOT the same level as the cron directly above — that one is for
+            // 'ChildPart' (renamed FROM "Sub Child Part" before the 2026-09
+            // hierarchy correction). This is the real, new, lowest level
+            // (productKind:'SubChildPart') — routes each low-stock item to
+            // Production (in-house) or Purchase (job-work vendor) based on its
+            // own jobWork flag. See subChildPartOrderService.js.
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runSubChildPartOrderSweep } = await import('./services/subChildPartOrderService.js');
+                cron.schedule('*/30 * * * *', async () => {
+                    console.log('⏰ [CRON] Starting Sub Child Part (leaf) low-stock auto-order sweep...');
+                    await runSubChildPartOrderSweep();
+                });
+                console.log('✅ Sub Child Part (leaf) low-stock auto-order cron job scheduled (every 30 minutes)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Sub Child Part (leaf) order cron job setup warning:', cronError.message);
             }
         }
         catch (error) {

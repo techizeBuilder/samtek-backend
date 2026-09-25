@@ -5,8 +5,7 @@ import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
   getMachines, createMachine, updateMachine,
   updateDesignStatus, updateReleaseStatus, discontinueMachine, reactivateMachine,
-  getBOMs, getBOMForMachine, getBOMByMachineCode, getBOMCostByMachineCode, createBOM, addMaterial, updateMaterial, deleteMaterial,
-  lockBOM, downloadBOMPdf, discontinueMaterial, reactivateMaterial, updateBOMProductionCost,
+  getBOMCostByMachineCode,
   getPrototypes, createPrototype, updatePrototype,
   getChangeRequests, createChangeRequest, resolveChangeRequest,
   getToolProcesses, addTool, removeTool, discontinueTool, reactivateTool, addProcess, removeProcess,
@@ -28,12 +27,6 @@ import {
   setPlantStatus,
 } from '../controllers/rdController.js';
 import {
-  getSheetMetalGroups,
-  getSheetMetalPlans,
-  saveSheetMetalPlan,
-  deleteSheetMetalPlan,
-} from '../controllers/sheetMetalPlanController.js';
-import {
   getRDExpenseCategories,
   createRDExpense,
   getRDExpenses,
@@ -42,17 +35,64 @@ import {
   deleteRDExpense,
 } from '../controllers/rdExpenseController.js';
 import {
-  getChildParts,
-  generateChildPartCode,
-  createChildPart,
-  updateChildPart,
-  deleteChildPart,
+  generateSubChildPartMasterCode,
+  getSubChildParts,
+  getSubChildPart,
+  createSubChildPart,
+  updateSubChildPart as updateSubChildPartMaster,
+} from '../controllers/subChildPartMasterController.js';
+import {
+  getSubChildPartSheetPlan,
+  saveSubChildPartSheetPlan,
+} from '../controllers/subChildPartSheetPlanController.js';
+import {
+  generateChildPartMasterCode,
+  getChildPartMasters,
+  getChildPartMaster,
+  createChildPartMaster,
+  updateChildPartMaster,
+  addChildPartMasterSubChildPart,
+  updateChildPartMasterSubChildPart,
+  deleteChildPartMasterSubChildPart,
+  discontinueChildPartMasterSubChildPart,
+  reactivateChildPartMasterSubChildPart,
+  addChildPartMasterMaterial,
+  updateChildPartMasterMaterial,
+  deleteChildPartMasterMaterial,
+  discontinueChildPartMasterMaterial,
+  reactivateChildPartMasterMaterial,
+  updateChildPartMasterProductionCost,
+  updateChildPartMasterProcessDefinition,
+  searchSubChildPartInventory,
   uploadChildPartFile,
-  generateSubChildPartCode,
-  addSubChildPart,
-  updateSubChildPart,
-  deleteSubChildPart,
-} from '../controllers/rdChildPartController.js';
+} from '../controllers/childPartBOMController.js';
+import {
+  getMachineBOM,
+  createMachineBOM,
+  addMachineBOMChildPart,
+  updateMachineBOMChildPart,
+  deleteMachineBOMChildPart,
+  discontinueMachineBOMChildPart,
+  reactivateMachineBOMChildPart,
+  addMachineBOMMaterial,
+  updateMachineBOMMaterial,
+  deleteMachineBOMMaterial,
+  discontinueMachineBOMMaterial,
+  reactivateMachineBOMMaterial,
+  updateMachineBOMProductionCost,
+  updateMachineBOMProcessDefinition,
+  downloadMachineBOMPdf,
+  lockMachineBOM,
+} from '../controllers/machineBOMController.js';
+import {
+  getProcessCategoryOptions,
+  addProcessCategoryOption,
+  updateProcessCategoryOption,
+  deleteProcessCategoryOption,
+  addInternalProcessOption,
+  renameInternalProcessOption,
+  deleteInternalProcessOption,
+} from '../controllers/processCategoryOptionController.js';
 import {
   getBOMFieldConfig,
   saveBOMFieldConfig,
@@ -66,6 +106,9 @@ import {
   getItemChecklist,
   saveItemChecklist,
   getProductQCParts,
+  getChildPartQCList,
+  getChildPartQCReference,
+  getSubChildPartQCReference,
 } from '../controllers/qcChecklistController.js';
 
 const router = express.Router();
@@ -103,14 +146,10 @@ const productMasterDelete = checkPermission('rnd', 'productMaster', 'delete');
 const designApprovalEdit = checkPermission('rnd', 'designApproval', 'edit');
 
 const bomManagementView = checkPermission('rnd', 'bomManagement', 'view');
-// getBOMByMachineCode is a cross-department read-only lookup — Production's
-// Order Management ("Bill of Materials by Part", the View Material dialog)
-// calls it directly by machine code, with no R&D bomManagement grant of its
-// own. Gating it under bomManagementView alone silently 403'd every
-// Production-only user; the request never surfaced as an error because the
-// frontend's .catch() folds any failure into "No BOM found for this
-// machine" — indistinguishable from a genuinely missing BOM. Production
-// only ever needs read access, so production.orders.view is accepted too.
+// Cross-department read-only lookup — used by Machine BOM's own PDF download
+// route below, which Production's Process Execution page calls directly with
+// no R&D bomManagement grant of its own. Production only ever needs read
+// access, so production.orders.view is accepted too.
 const bomByCodeView = checkAnyPermission([['rnd', 'bomManagement'], ['production', 'orders']], 'view');
 const bomManagementAdd = checkPermission('rnd', 'bomManagement', 'add');
 const bomManagementEdit = checkPermission('rnd', 'bomManagement', 'edit');
@@ -162,23 +201,11 @@ router.put('/machines/:id/discontinue', productMasterEdit, discontinueMachine);
 router.put('/machines/:id/reactivate', productMasterEdit, reactivateMachine);
 
 // ── BOMs ─────────────────────────────────────────────────────────────────────
-router.get('/boms', bomManagementView, getBOMs);
-router.get('/boms/machine/:machineId', bomManagementView, getBOMForMachine);
-router.get('/boms/by-code/:code', bomByCodeView, getBOMByMachineCode);
+// Cross-department read-only lookup only — Sales Order Form's minimum-billing
+// check. The old per-machine BOM CRUD (create/lock/materials/PDF/sheet-metal
+// plans) was removed along with the Legacy BOM Management tab; this one
+// survives because it reads Item.stdCost, not an RDBOM document directly.
 router.get('/boms/by-code/:code/cost', bomManagementView, getBOMCostByMachineCode);
-router.post('/boms', bomManagementAdd, createBOM);
-router.post('/boms/:id/materials', bomManagementAdd, addMaterial);
-router.put('/boms/:id/materials/:materialId', bomManagementEdit, updateMaterial);
-router.delete('/boms/:id/materials/:materialId', bomManagementDelete, deleteMaterial);
-router.put('/boms/:id/lock', bomManagementEdit, lockBOM);
-router.get('/boms/:id/download', bomManagementView, downloadBOMPdf);
-router.put('/boms/:id/materials/:materialId/discontinue', bomManagementEdit, discontinueMaterial);
-router.put('/boms/:id/materials/:materialId/reactivate', bomManagementEdit, reactivateMaterial);
-router.put('/boms/:id/production-cost', bomManagementEdit, updateBOMProductionCost);
-router.get('/boms/:bomId/sheet-metal-groups', bomManagementView, getSheetMetalGroups);
-router.get('/boms/:bomId/sheet-metal-plans', bomManagementView, getSheetMetalPlans);
-router.post('/boms/:bomId/sheet-metal-plans', bomManagementAdd, saveSheetMetalPlan);
-router.delete('/boms/:bomId/sheet-metal-plans/:planId', bomManagementDelete, deleteSheetMetalPlan);
 
 // ── Prototypes ────────────────────────────────────────────────────────────────
 router.get('/prototypes', prototypeView, getPrototypes);
@@ -206,16 +233,20 @@ router.delete('/quality-params/:machineId/parameters/:paramId', qualityParameter
 router.post('/quality-params/qc-items', qualityParametersAdd, addQCItem);
 router.delete('/quality-params/:machineId/qc-items/:itemId', qualityParametersDelete, deleteQCItem);
 
-// ── QC Checklist (Inventory QC / Product Master QC / Motor Master QC) ───────
-// Replaces the old Quality Params page for these three sidebar entries (see
-// server/docs/qc-module-restructure-client-request.md's 2026-08-31 follow-on).
-// One controller/route set shared by all three modules — the URL's :module
-// segment picks both which QCMasterChecklist document is read/written and,
-// via this map, which feature key gates it. Inventory QC is the only one
-// with a real UI today; Product Master QC / Motor Master QC need no backend
-// changes at all when their turn comes, just a frontend page passing
-// module='productMaster' / 'motorMaster'.
-const QC_MODULE_FEATURE = { inventory: 'qcInventory', productMaster: 'qcProductMaster', motorMaster: 'qcMotorMaster' };
+// ── QC Checklist (Inventory QC / Product Master QC / Motor Master QC /
+// Child Part QC / Sub Child Part QC) ────────────────────────────────────────
+// Replaces the old Quality Params page for these sidebar entries (see
+// server/docs/qc-module-restructure-client-request.md's 2026-08-31 and
+// 2026-09-14 follow-ons). One controller/route set shared by every module —
+// the URL's :module segment picks both which QCMasterChecklist document is
+// read/written and, via this map, which feature key gates it. childPart/
+// subChildPart (2026-09-14) are genuinely independent from productMaster —
+// each configures its own checklist directly against its own Item, not
+// shared/borrowed the way the old "Sub Child Part Inventory QC" tab used to.
+const QC_MODULE_FEATURE = {
+  inventory: 'qcInventory', productMaster: 'qcProductMaster', motorMaster: 'qcMotorMaster',
+  childPart: 'qcChildPart', subChildPart: 'qcSubChildPart',
+};
 const checkQCModulePermission = (action) => (req, res, next) => {
   const feature = QC_MODULE_FEATURE[req.params.module];
   if (!feature) return res.status(400).json({ success: false, message: 'Invalid QC module' });
@@ -244,6 +275,23 @@ router.post('/qc-checklist/:module/:stage/item/:itemId', checkQCModulePermission
 // Product Master QC route (qcProductMaster), not bomManagement, since this
 // IS the QC page reading it, not BOM Management itself.
 router.get('/qc-checklist/productMaster/parts/:productId', checkPermission('rnd', 'qcProductMaster', 'view'), getProductQCParts);
+
+// Inventory QC page's "Child Part" tab — every Child Part Item with its own,
+// independent module:'childPart' Initial/Process checklist counts (see
+// getChildPartQCList's own comment for the 2026-09-14 rename/rescope).
+router.get('/qc-checklist/child-part-list',
+  checkPermission('rnd', 'qcChildPart', 'view'),
+  getChildPartQCList);
+
+// Read-only reference panels — "what is this part actually made of", a live
+// read off the NEW hierarchy (ChildPartBOM / Item.subChildPartDetails), never
+// stored by this QC feature. Same gating pattern as productMaster/parts above.
+router.get('/qc-checklist/child-part/:itemId/reference',
+  checkPermission('rnd', 'qcChildPart', 'view'),
+  getChildPartQCReference);
+router.get('/qc-checklist/sub-child-part/:itemId/reference',
+  checkPermission('rnd', 'qcSubChildPart', 'view'),
+  getSubChildPartQCReference);
 
 // ── Documents ─────────────────────────────────────────────────────────────────
 router.get('/documents', documentationView, getDocuments);
@@ -288,17 +336,87 @@ router.post('/plants', plantMasterAdd, createPlant);
 router.put('/plants/:id', plantMasterEdit, updatePlant);
 router.put('/plants/:id/status', plantMasterEdit, setPlantStatus);
 
-// ── Child Parts (BOM Management: Child Part Creation) ───────────────────────
-router.get('/child-parts', bomManagementView, getChildParts);
-router.get('/child-parts/generate-code', bomManagementView, generateChildPartCode);
-router.post('/child-parts', bomManagementAdd, createChildPart);
-router.put('/child-parts/:id', bomManagementEdit, updateChildPart);
-router.delete('/child-parts/:id', bomManagementDelete, deleteChildPart);
+// Backs ChildPartInventoryTab.jsx (R&D + Store Inventory) — a plain Item
+// query, not tied to any BOM flow. Relocated into childPartBOMController.js
+// when the old per-machine Child Part flow (rdChildPartController.js) was
+// removed.
+router.get('/sub-child-part-inventory', bomManagementView, searchSubChildPartInventory);
+// Generic design-file upload, same relocation reason as above — still the
+// live upload endpoint for Child Part Master / Sub Child Part Master / its
+// Sheet Metal Plan's laser file.
 router.post('/child-parts/upload-file', bomManagementAdd, rdDocumentUpload.single('file'), uploadChildPartFile);
-router.get('/child-parts/:id/sub-parts/generate-code', bomManagementView, generateSubChildPartCode);
-router.post('/child-parts/:id/sub-parts', bomManagementAdd, addSubChildPart);
-router.put('/child-parts/:id/sub-parts/:subId', bomManagementEdit, updateSubChildPart);
-router.delete('/child-parts/:id/sub-parts/:subId', bomManagementDelete, deleteSubChildPart);
+
+// Process Definition master catalog (Category -> Internal Process) — shared
+// picker source for all three BOM levels below (see
+// server/docs/process-inhouse-outsource-redesign-discussion-2026-09.md).
+// Registered before the level-specific blocks since it's a prerequisite for
+// all three.
+router.get('/process-category-options', bomManagementView, getProcessCategoryOptions);
+router.post('/process-category-options', bomManagementAdd, addProcessCategoryOption);
+router.put('/process-category-options/:id', bomManagementEdit, updateProcessCategoryOption);
+router.delete('/process-category-options/:id', bomManagementDelete, deleteProcessCategoryOption);
+router.post('/process-category-options/:id/internal-processes', bomManagementAdd, addInternalProcessOption);
+router.put('/process-category-options/:id/internal-processes/rename', bomManagementEdit, renameInternalProcessOption);
+router.delete('/process-category-options/:id/internal-processes/:name', bomManagementDelete, deleteInternalProcessOption);
+
+// Sub Child Part Master — the new, standalone leaf node (see
+// bom-hierarchy-redesign-2026-09.md). Not machine- or Child-Part-scoped;
+// referencing one from a Child Part's own material list is the next build
+// pass, not this one.
+router.get('/sub-child-parts/generate-code', bomManagementView, generateSubChildPartMasterCode);
+router.get('/sub-child-parts', bomManagementView, getSubChildParts);
+router.get('/sub-child-parts/:id', bomManagementView, getSubChildPart);
+router.post('/sub-child-parts', bomManagementAdd, createSubChildPart);
+router.put('/sub-child-parts/:id', bomManagementEdit, updateSubChildPartMaster);
+router.get('/sub-child-parts/:id/sheet-metal-plan', bomManagementView, getSubChildPartSheetPlan);
+router.post('/sub-child-parts/:id/sheet-metal-plan', bomManagementAdd, saveSubChildPartSheetPlan);
+
+// Child Part Master — the new, standalone Child Part catalog (see
+// bom-hierarchy-redesign-2026-09.md §4, §9). See childPartBOMController.js
+// for how a ChildPartBOM document's existence is what marks a record as
+// belonging here. generate-code is registered before the plain :id route,
+// same ordering reason as /sub-child-parts above.
+router.get('/child-part-master/generate-code', bomManagementView, generateChildPartMasterCode);
+router.get('/child-part-master', bomManagementView, getChildPartMasters);
+router.get('/child-part-master/:id', bomManagementView, getChildPartMaster);
+router.post('/child-part-master', bomManagementAdd, createChildPartMaster);
+router.put('/child-part-master/:id', bomManagementEdit, updateChildPartMaster);
+router.post('/child-part-master/:id/sub-child-parts', bomManagementAdd, addChildPartMasterSubChildPart);
+router.put('/child-part-master/:id/sub-child-parts/:lineId', bomManagementEdit, updateChildPartMasterSubChildPart);
+router.delete('/child-part-master/:id/sub-child-parts/:lineId', bomManagementDelete, deleteChildPartMasterSubChildPart);
+router.put('/child-part-master/:id/sub-child-parts/:lineId/discontinue', bomManagementEdit, discontinueChildPartMasterSubChildPart);
+router.put('/child-part-master/:id/sub-child-parts/:lineId/reactivate', bomManagementEdit, reactivateChildPartMasterSubChildPart);
+router.post('/child-part-master/:id/materials', bomManagementAdd, addChildPartMasterMaterial);
+router.put('/child-part-master/:id/materials/:lineId', bomManagementEdit, updateChildPartMasterMaterial);
+router.delete('/child-part-master/:id/materials/:lineId', bomManagementDelete, deleteChildPartMasterMaterial);
+router.put('/child-part-master/:id/materials/:lineId/discontinue', bomManagementEdit, discontinueChildPartMasterMaterial);
+router.put('/child-part-master/:id/materials/:lineId/reactivate', bomManagementEdit, reactivateChildPartMasterMaterial);
+router.put('/child-part-master/:id/production-cost', bomManagementEdit, updateChildPartMasterProductionCost);
+router.put('/child-part-master/:id/process-definition', bomManagementEdit, updateChildPartMasterProcessDefinition);
+
+// Machine BOM — the final node (see bom-hierarchy-redesign-2026-09.md §5,
+// §9). See machineBOMController.js's own top comment for its shape.
+router.get('/machine-bom/:machineId', bomManagementView, getMachineBOM);
+router.post('/machine-bom', bomManagementAdd, createMachineBOM);
+router.post('/machine-bom/:machineId/child-parts', bomManagementAdd, addMachineBOMChildPart);
+router.put('/machine-bom/:machineId/child-parts/:lineId', bomManagementEdit, updateMachineBOMChildPart);
+router.delete('/machine-bom/:machineId/child-parts/:lineId', bomManagementDelete, deleteMachineBOMChildPart);
+router.put('/machine-bom/:machineId/child-parts/:lineId/discontinue', bomManagementEdit, discontinueMachineBOMChildPart);
+router.put('/machine-bom/:machineId/child-parts/:lineId/reactivate', bomManagementEdit, reactivateMachineBOMChildPart);
+router.post('/machine-bom/:machineId/materials', bomManagementAdd, addMachineBOMMaterial);
+router.put('/machine-bom/:machineId/materials/:lineId', bomManagementEdit, updateMachineBOMMaterial);
+router.delete('/machine-bom/:machineId/materials/:lineId', bomManagementDelete, deleteMachineBOMMaterial);
+router.put('/machine-bom/:machineId/materials/:lineId/discontinue', bomManagementEdit, discontinueMachineBOMMaterial);
+router.put('/machine-bom/:machineId/materials/:lineId/reactivate', bomManagementEdit, reactivateMachineBOMMaterial);
+router.put('/machine-bom/:machineId/production-cost', bomManagementEdit, updateMachineBOMProductionCost);
+router.put('/machine-bom/:machineId/process-definition', bomManagementEdit, updateMachineBOMProcessDefinition);
+router.put('/machine-bom/:machineId/lock', bomManagementEdit, lockMachineBOM);
+// Same dual-permission gate as the old RDBOM download route (bomByCodeView)
+// — Production's own Process Execution page now calls this route directly
+// (2026-09-16 cutover) to view/download a Machine's BOM, so a Production
+// user with only 'production.orders.view' (no R&D BOM Management access)
+// must still be able to reach it, same as before the cutover.
+router.get('/machine-bom/:machineId/download', bomByCodeView, downloadMachineBOMPdf);
 
 // ── BOM Format & Modification ────────────────────────────────────────────────
 router.get('/bom-field-config', bomManagementView, getBOMFieldConfig);

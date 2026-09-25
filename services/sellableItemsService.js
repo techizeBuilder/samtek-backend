@@ -15,6 +15,34 @@ function buildItemEntry(item) {
   };
 }
 
+// A Product Master machine forwarded to Design & Prototype is only sellable
+// once Prototype has released it for production (machineDetails.releaseStatus
+// 'Released') — until then it's still a design in progress, not a product.
+// A machine never forwarded (e.g. a bought-in Purchase Machine) never goes
+// through that pipeline at all, so it stays sellable as before. Found
+// 2026-09-25: this list had no release check at all, so a brand-new Draft /
+// Not Released machine (M-311) showed up in Sales' Leads picker immediately.
+// Mongo `$nor` form so it composes with any other query keys ($or search).
+export const NOT_RELEASED_FOR_SALE = {
+  productKind: 'Machine',
+  'machineDetails.forwardToNextPhase': true,
+  'machineDetails.releaseStatus': { $ne: 'Released' },
+};
+
+// In-memory twin of the query rules below (discontinued, and
+// NOT_RELEASED_FOR_SALE) for one already-loaded Item — used where an item
+// arrives populated inside something else (a Plant's machines/motors) rather
+// than through getSellableItems' own query. Returns the reason it can't be
+// sold right now, or null if it can.
+export function unavailableForSaleReason(item) {
+  if (!item) return null;
+  if (item.isDiscontinued) return 'Discontinued';
+  if (item.productKind === 'Machine' && item.machineDetails?.forwardToNextPhase && item.machineDetails?.releaseStatus !== 'Released') {
+    return 'Not Released';
+  }
+  return null;
+}
+
 /**
  * The single source of truth for "what can this company sell": Product
  * Master machines + Motor Master motors (both live in the Item collection,
@@ -31,7 +59,9 @@ export async function getSellableItems({ companyId, search }) {
   if (!companyId) return [];
 
   const companyIdStr = companyId.toString();
-  const itemQuery = { store: companyIdStr, type: 'Product' };
+  // Discontinued = not being produced/sold for now (until reactivated) —
+  // never offered to Sales either (confirmed with the user 2026-09-25).
+  const itemQuery = { store: companyIdStr, type: 'Product', isDiscontinued: { $ne: true }, $nor: [NOT_RELEASED_FOR_SALE] };
 
   if (search) {
     const re = new RegExp(escapeRegex(search), 'i');

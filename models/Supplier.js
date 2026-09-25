@@ -102,7 +102,24 @@ const supplierSchema = new mongoose.Schema({
     enum: ['194C', '194J', '194Q', '206C_1H', 'None'],
     default: 'None'
   },
+  // Old free-text tags — kept (and still shown on the form) because the RFQ
+  // module's vendor auto-match scores against them (rfqController.js).
   vendorCategories: {
+    type: [String],
+    default: []
+  },
+  // Vendor Master redesign (2026-09-25) — what this vendor actually covers,
+  // as real links instead of free text. Product tab: Items flagged
+  // Purchasable (Inventory / Product Master / Motor Master — never a Child
+  // Part or Sub Child Part, which the BOM creates in-house; their vendor
+  // need is job work, i.e. `services`). Stored by id, so an item rename
+  // never breaks the link.
+  suppliedItems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Item' }],
+  // Services tab: Process Template step names this vendor does as job work.
+  // Matched by name across every BOM level (confirmed with the user) to any
+  // BOM step with that name marked Out Source — the same plain-name key BOMs
+  // themselves store (templates have no ids), see getSupplierCatalog.
+  services: {
     type: [String],
     default: []
   }

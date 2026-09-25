@@ -279,8 +279,20 @@ export const getReadyForPackaging = async (req, res) => {
     //   belongs in the dispatch queue.
     const qcJobsRaw = await QCJob.find({
       company: cid,
-      status: 'Approved',
-      source: { $ne: 'Stock' },   // Stock items go to inventory, never to dispatch
+      // A per-unit Machine job (2026-09-24) shows up as soon as its FIRST
+      // unit is done ("1 of 2 units ready"), not only once the whole job
+      // is Approved — packing itself still waits on the whole Sale order
+      // (getOrderItemsReadiness below, unchanged). Child Part's own
+      // unitChecks jobs are still excluded by the source filter.
+      $or: [
+        { status: 'Approved' },
+        { unitChecks: { $elemMatch: { readyAt: { $ne: null } } } },
+      ],
+      // Stock items go to inventory, never to dispatch — same for Sub Child
+      // Part's own two QC routes and Child Part's (2026-09-19 fix): a
+      // Fan Blade/Fan Bush-style build restocks Store's own inventory, it's
+      // never something a customer's Dispatch order ships out directly.
+      source: { $nin: ['Stock', 'SubChildPartJobWork', 'SubChildPartProduction', 'ChildPartProduction'] },
       _id: { $nin: existingQCJobIds }
     })
       .sort({ updatedAt: -1 })
@@ -337,6 +349,10 @@ export const getReadyForPackaging = async (req, res) => {
       const qty = Math.max(1, Number(job.quantity) || 1);
       const unitsTotal = isPerUnit ? qty : 1;
       const unitsCreated = await PackagingJob.countDocuments({ qcJobId: job._id, company: cid });
+      // Per-unit Machine job: how many units are actually done so far.
+      const unitsReady = job.unitChecks?.length
+        ? job.unitChecks.filter(u => u.readyAt).length
+        : unitsTotal;
 
       return {
         _id: job._id,
@@ -348,6 +364,7 @@ export const getReadyForPackaging = async (req, res) => {
         quantity: qty,
         unitsTotal,
         unitsCreated,
+        unitsReady,
         saleItemId: job.saleItemId || null,
         readiness,
         createdAt: job.createdAt,
@@ -496,9 +513,19 @@ export const createPackagingJob = async (req, res) => {
       sourceSaleItemId = srcProdOrder?.saleItemId || null;
     } else if (actualQcJobId) {
       srcQcJob = await QCJob.findById(actualQcJobId)
-        .select('saleId purchaseRequestId saleItemId quantity category itemCode itemName').lean();
+        .select('saleId purchaseRequestId saleItemId quantity category itemCode itemName unitChecks.readyAt').lean();
       sourceSaleItemId = srcQcJob?.saleItemId || null;
       const qty = Math.max(1, Number(srcQcJob?.quantity) || 1);
+      // Per-unit Machine job (2026-09-24): never pack ahead of the units
+      // actually done. The Sale readiness gate below already blocks this in
+      // practice (the item isn't ready until every unit counted) — this is
+      // the safety net for a job with no resolvable sales order.
+      if (srcQcJob?.unitChecks?.length) {
+        const unitsReady = srcQcJob.unitChecks.filter(u => u.readyAt).length;
+        if (unitsReady < qty) {
+          return res.status(400).json({ success: false, message: `Only ${unitsReady} of ${qty} units are finished — packing opens once every unit is done.` });
+        }
+      }
       const isPerUnit = srcQcJob && (
         srcQcJob.category === 'Finished Good' || await isMachineJobItem(srcQcJob, req.user.companyId)
       );

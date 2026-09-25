@@ -1,8 +1,6 @@
 import { Item } from '../models/Inventory.js';
-import RDBOM from '../models/RDBOM.js';
 import PurchaseInvoice from '../models/PurchaseInvoice.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
-import SheetMetalPlan from '../models/SheetMetalPlan.js';
 import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 
 // Defensive cap in addition to cycle detection, in case of a very deep
@@ -11,10 +9,6 @@ const MAX_BOM_DEPTH = 15;
 
 function round2(n) {
   return Math.round(n * 100) / 100;
-}
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // A Sheet Metal plan's REAL cost breakdown — every whole catalog sheet
@@ -57,124 +51,20 @@ export function computeSheetMetalPlanCostBreakdown(plan, matItem) {
 }
 
 /**
- * Resolves a manufacturing Item's cost by recursively walking its RDBOM.
- * Returns { cost: number|null, issue: string|null }. Recalculated on every
- * BOM change (material add/edit/remove, production cost/expense edit, lock)
- * — does NOT wait for a completed production build; whatever the BOM totals
- * right now (materials + productionCost + productionExpense) is the item's
- * live stdCost/mrp/salePrice. A completed build still re-triggers this same
- * resolution (productionMfgController.js), it just isn't the only trigger.
+ * Used to resolve a manufacturing Item's cost by recursively walking its
+ * old RDBOM. That model (and the whole per-machine Legacy BOM Management
+ * flow that wrote it) is gone — no live UI creates or edits an RDBOM for
+ * either a Machine or a Motor Master motor anymore, so there's nothing left
+ * to walk here. A Machine's own cost now flows through MachineBOM's
+ * `syncMachineBOMPricing` instead (machineBOMController.js), not this path.
+ * Kept as a stub (rather than deleted outright) so `recalculateItemPricing`
+ * below — called from many unrelated sites for every internally-manufactured
+ * Item, Motor included — doesn't need its own callers touched; it already
+ * treats `cost: null` as "nothing to update yet," the same as it always has
+ * for an item with no BOM.
  */
-export async function resolveManufacturingItemCost(item, visiting = new Set(), depth = 0) {
-  if (depth > MAX_BOM_DEPTH) {
-    return { cost: null, issue: `BOM depth exceeded ${MAX_BOM_DEPTH} levels (possible cycle) at item ${item.code}` };
-  }
-  if (visiting.has(item._id.toString())) {
-    return { cost: null, issue: `Circular BOM reference detected at item ${item.code}` };
-  }
-
-  // Product Master machines and Motor Master motors now ARE Item documents
-  // (productKind:'Machine'/'Motor') — no separate RDMachine collection to
-  // cross-reference by code anymore.
-  if (item.productKind !== 'Machine' && item.productKind !== 'Motor') {
-    return { cost: null, issue: `Item "${item.code}" is not a Product Master machine or Motor Master motor — no BOM to build cost from.` };
-  }
-
-  const bom = await RDBOM.findOne({ machine: item._id, company: item.companyId });
-  if (!bom || !bom.materials || bom.materials.length === 0) {
-    return { cost: null, issue: `No BOM found for "${item.code}"` };
-  }
-
-  visiting.add(item._id.toString());
-  try {
-    let materialsTotal = 0;
-    // Sheet Metal lines are priced per-line exactly like any other
-    // fabrication material below (computedWeightPerPieceKg × weightUnitPrice
-    // — this child part's own committed cut, not the whole catalog sheet) —
-    // ONLY the true scrap on top of that (kerf/waste within the cutting
-    // layout, added once per {code, dimensionVariantId} group further down)
-    // gets added. The rest of the whole sheet actually bought — the clean,
-    // uncut leftover — is deliberately NEVER folded into this cost: it's
-    // returned to Store via the Return flow and reused on a future order, so
-    // it was never actually consumed by THIS unit. (Previously this fully
-    // skipped each sheet-metal line's own per-line cost here and substituted
-    // the entire whole-sheet cost per group instead — silently overcharging
-    // every unit for material that mostly ends up back in Store's stock.)
-    const sheetMetalGroupKeys = new Set();
-    for (const mat of bom.materials) {
-      if (mat.isDiscontinued) continue;
-
-      if (mat.isSheetMetal && mat.dimensionVariantId) {
-        sheetMetalGroupKeys.add(`${mat.code}#${mat.dimensionVariantId}`);
-      }
-
-      const matItem = await Item.findOne({
-        code: { $regex: new RegExp(`^${escapeRegex(mat.code)}$`, 'i') },
-        companyId: item.companyId
-      });
-
-      if (!matItem) {
-        return { cost: null, issue: `BOM material code "${mat.code}" has no matching Item — cost not recalculated` };
-      }
-
-      let lineUnitCost;
-      if (mat.computedWeightPerPieceKg != null) {
-        // Fabrication material (RDBOM.MaterialSchema) — priced by this BOM
-        // line's own committed weight (from its entered dimensions, not the
-        // Item's current stock dimensions) × the Item's ₹/kg rate, not by
-        // purchaseCost/stdCost — see Inventory.js's weightUnitPrice comment.
-        lineUnitCost = mat.computedWeightPerPieceKg * (matItem.weightUnitPrice || 0);
-      } else if (matItem.internalManufacturing) {
-        const sub = await resolveManufacturingItemCost(matItem, visiting, depth + 1);
-        if (sub.cost == null) {
-          // Fall back to the sub-part's own last-known value only if it has
-          // one; otherwise the whole roll-up is incomplete.
-          const fallback = matItem.stdCost || matItem.purchaseCost || 0;
-          if (!(fallback > 0)) {
-            return { cost: null, issue: `Sub-part "${matItem.code}": ${sub.issue || 'cost not yet available'}` };
-          }
-          lineUnitCost = fallback;
-        } else {
-          lineUnitCost = sub.cost;
-        }
-      } else {
-        lineUnitCost = matItem.purchaseCost || matItem.stdCost || 0;
-      }
-
-      materialsTotal += lineUnitCost * (mat.quantity || 0);
-    }
-
-    // Sheet Metal groups — the true scrap cost only (see
-    // computeSheetMetalPlanCostBreakdown above), added once per {code,
-    // dimensionVariantId} regardless of how many BOM lines share it, on top
-    // of each line's own per-line cost already summed above. A group with no
-    // saved plan yet contributes 0 (matches lockBOM's own gate — this
-    // situation can't reach a locked, production-costed BOM in normal use,
-    // but shouldn't throw here either).
-    for (const key of sheetMetalGroupKeys) {
-      const [code, dimensionVariantId] = key.split('#');
-      const plan = await SheetMetalPlan.findOne({ bom: bom._id, itemCode: code, dimensionVariantId, company: item.companyId }).lean();
-      if (!plan) continue;
-      const matItem = await Item.findOne({
-        code: { $regex: new RegExp(`^${escapeRegex(code)}$`, 'i') },
-        companyId: item.companyId
-      }).lean();
-      if (!matItem) continue;
-      materialsTotal += computeSheetMetalPlanCostBreakdown(plan, matItem).scrapCost;
-    }
-
-    if (!(materialsTotal > 0)) {
-      return { cost: null, issue: `Computed BOM material cost is zero for "${item.code}" — check linked material costs` };
-    }
-
-    // Total build cost = material roll-up + this build's labor/job-work
-    // (productionCost) + any other one-off production expense — see
-    // RDBOM.productionCost/productionExpense.
-    const total = materialsTotal + (bom.productionCost || 0) + (bom.productionExpense || 0);
-    return { cost: total, issue: null };
-  } finally {
-    visiting.delete(item._id.toString());
-  }
+export async function resolveManufacturingItemCost(item) {
+  return { cost: null, issue: `Item "${item.code}" has no BOM-derived cost source — the old per-machine BOM flow was removed.` };
 }
 
 /**
@@ -359,37 +249,17 @@ export async function recalculateItemPricing(item, visiting = new Set(), depth =
   return { updated, issue };
 }
 
-// When an Item's own cost just changed (BOM recompute above, or a fresh
-// purchase price), any OTHER Item that consumes it as a BOM material must
-// have ITS cost recomputed too — a raw material's price moving must ripple
-// up through every sub-assembly/machine that uses it, across every company,
-// not sit unnoticed until someone happens to reopen that specific BOM.
-// Mirrors resolveManufacturingItemCost's downward walk, just upward; shares
-// its caller's `visiting` set so a cycle can't loop forever and a
-// diamond-shaped BOM graph never recomputes the same item twice. Exported
-// separately (not just used internally by recalculateItemPricing above) for
-// the one write site that sets purchaseCost directly via applyPricingToItem
-// instead of going through recalculateItemPricing — see purchaseController.js's
-// updatePurchaseItemCost (Accounts' manual purchase-cost override).
-export async function cascadeRecalculateToConsumers(item, visiting = new Set(), depth = 0) {
-  if (depth > MAX_BOM_DEPTH) return;
-  const dependentBOMs = await RDBOM.find({
-    company: item.companyId,
-    materials: {
-      $elemMatch: {
-        code: { $regex: new RegExp(`^${escapeRegex(item.code)}$`, 'i') },
-        isDiscontinued: { $ne: true }
-      }
-    }
-  }).select('machine').lean();
-
-  for (const bomRef of dependentBOMs) {
-    if (!bomRef.machine) continue;
-    const consumer = await Item.findById(bomRef.machine);
-    if (!consumer || !consumer.internalManufacturing) continue;
-    await recalculateItemPricing(consumer, visiting, depth);
-  }
-}
+// Used to ripple a changed Item's price up through every RDBOM that consumed
+// it as a material. That model (and the Legacy BOM Management flow that
+// wrote it) is gone, along with resolveManufacturingItemCost above — there's
+// no RDBOM left to search for dependents. Kept as a no-op stub, not deleted,
+// so its one external caller (purchaseController.js's updatePurchaseItemCost)
+// and recalculateItemPricing's own call below don't need touching. Cost
+// cascading to consumers more broadly (MachineBOM/ChildPartBOM legs) was
+// already a known, separate gap — see
+// server/docs/automated-pricing-cascade-design-2026-09.md — unaffected by
+// this removal either way.
+export async function cascadeRecalculateToConsumers() {}
 
 /**
  * Cheap reapply for when a single Item's own profitPercent/discountPercent

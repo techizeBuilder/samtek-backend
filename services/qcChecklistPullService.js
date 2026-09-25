@@ -32,6 +32,7 @@ async function resolveItemForJob(job, companyId) {
 function flatModuleStageForItem(item) {
   if (item.productKind === 'Motor') return { module: 'motorMaster', stage: 'default' };
   if (item.productKind === 'Machine') return { module: 'productMaster', stage: 'final' };
+  if (item.productKind === 'SubChildPart') return { module: 'subChildPart', stage: 'default' };
   return { module: 'inventory', stage: 'default' };
 }
 
@@ -62,15 +63,25 @@ function toChecklistItems(selected) {
 // this exact function) is for.
 export async function ensureFlatChecklist(job, companyId, { force = false } = {}) {
   if (job.checklist?.length > 0 && !force) return false;
+  const rows = await resolveFlatChecklistRows(job, companyId);
+  if (!rows.length) return false;
+  job.checklist = rows;
+  return true;
+}
+
+// Row definitions only (nothing assigned to the job) — the same resolution
+// ensureFlatChecklist persists into job.checklist, split out (2026-09-24) so
+// a per-unit Machine QCJob can resolve its single-stage Final rows fresh
+// into each unit's own unitChecks[] entry instead (see productionMfgController.js's
+// getQcCheckpoint), without ever touching the flat job.checklist.
+export async function resolveFlatChecklistRows(job, companyId) {
   const item = await resolveItemForJob(job, companyId);
-  if (!item) return false;
+  if (!item) return [];
   const { module, stage } = flatModuleStageForItem(item);
   const { selected } = await resolveSelectedChecklist({
     module, stage, item: item._id, childPartId: null, subChildPartId: null, company: companyId,
   });
-  if (!selected.length) return false;
-  job.checklist = toChecklistItems(selected);
-  return true;
+  return toChecklistItems(selected);
 }
 
 // Structural seed only (no checklist rows yet) for an in-house/outsource-
@@ -111,6 +122,19 @@ export async function ensurePartChecksStructure(job, companyId) {
 export async function resolvePartChecklistRows(productId, childPartId, subChildPartId, stage, companyId) {
   const { selected } = await resolveSelectedChecklist({
     module: 'productMaster', stage, item: productId, childPartId, subChildPartId, company: companyId,
+  });
+  return toChecklistItems(selected);
+}
+
+// Same idea, one level down — a Child Part order's own per-UNIT Initial/
+// Process checklist (module:'childPart', staged like productMaster's own
+// per-part checklist above, unlike Sub Child Part's flat single-stage
+// module). No childPartId/subChildPartId needed — a Child Part order's own
+// checklist is keyed purely on the Child Part Item itself, one flat
+// selection per stage, not a tri-level product/childPart/subChildPart tree.
+export async function resolveChildPartUnitChecklistRows(childPartItemId, stage, companyId) {
+  const { selected } = await resolveSelectedChecklist({
+    module: 'childPart', stage, item: childPartItemId, childPartId: null, subChildPartId: null, company: companyId,
   });
   return toChecklistItems(selected);
 }

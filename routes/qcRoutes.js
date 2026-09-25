@@ -14,6 +14,7 @@ import {
   removeChecklistItem,
   syncRDToQCJob,
   decidePartCheck,
+  decideChildPartUnit,
 } from '../controllers/qcController.js';
 
 const router = express.Router();
@@ -58,5 +59,7 @@ router.put('/jobs/:id/decision', qcInspectionEdit, submitDecision);
 // Sub Child Part review, in-house/outsource manufactured products only —
 // same qcInspection gate as everything else on the job detail page.
 router.put('/jobs/:id/parts/:partCheckId/decision', qcInspectionEdit, decidePartCheck);
+// Child Part per-unit review (2026-09-16) — same gate, sibling shape.
+router.put('/jobs/:id/units/:unitNumber/decision', qcInspectionEdit, decideChildPartUnit);
 
 export default router;

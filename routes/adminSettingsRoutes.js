@@ -7,13 +7,9 @@ import {
   leadSourcesCrud,
   businessTypesCrud,
   documentTypesCrud,
-  termsCrud,
-  chargesCrud,
-  notesCrud,
   dispatchChecklistCrud,
   leadRejectReasonsCrud,
   salesChecklistCrud,
-  quotationNumberSettingsCrud,
   hrmsDocumentTypesCrud,
   rolesCrud,
 } from '../controllers/adminSettingsController.js';
@@ -74,35 +70,15 @@ router.post('/sales-checklist', superAdminOnly, salesChecklistCrud.add);
 router.put('/sales-checklist/:id', superAdminOnly, salesChecklistCrud.update);
 router.delete('/sales-checklist/:id', superAdminOnly, salesChecklistCrud.remove);
 
-// ─── Terms & Conditions ───────────────────────────────────────────────────────
-router.get('/terms', termsCrud.list);
-router.post('/terms', superAdminOnly, termsCrud.add);
-router.put('/terms/:id', superAdminOnly, termsCrud.update);
-router.delete('/terms/:id', superAdminOnly, termsCrud.remove);
-
-// ─── Additional Charges ───────────────────────────────────────────────────────
-router.get('/charges', chargesCrud.list);
-router.post('/charges', superAdminOnly, chargesCrud.add);
-router.put('/charges/:id', superAdminOnly, chargesCrud.update);
-router.delete('/charges/:id', superAdminOnly, chargesCrud.remove);
-
-// ─── Quotation Notes ──────────────────────────────────────────────────────────
-router.get('/notes', notesCrud.list);
-router.post('/notes', superAdminOnly, notesCrud.add);
-router.put('/notes/:id', superAdminOnly, notesCrud.update);
-router.delete('/notes/:id', superAdminOnly, notesCrud.remove);
+// ─── Terms & Conditions / Additional Charges / Quotation Notes / Quotation
+//     Number Setting are per-company now — managed by Sales Head via a request
+//     that a Company Admin approves (leadSettingRequestRoutes.js), not here. ──
 
 // ─── Dispatch Checklist ───────────────────────────────────────────────────────
 router.get('/dispatch-checklist', dispatchChecklistCrud.list);
 router.post('/dispatch-checklist', superAdminOnly, dispatchChecklistCrud.add);
 router.put('/dispatch-checklist/:id', superAdminOnly, dispatchChecklistCrud.update);
 router.delete('/dispatch-checklist/:id', superAdminOnly, dispatchChecklistCrud.remove);
-
-// ─── Quotation Number Settings ────────────────────────────────────────────────
-router.get('/quotation-number-settings', quotationNumberSettingsCrud.list);
-router.post('/quotation-number-settings', superAdminOnly, quotationNumberSettingsCrud.add);
-router.put('/quotation-number-settings/:id', superAdminOnly, quotationNumberSettingsCrud.update);
-router.delete('/quotation-number-settings/:id', superAdminOnly, quotationNumberSettingsCrud.remove);
 
 // ─── HRMS: Upload Document Settings ───────────────────────────────────────────
 router.get('/hrms-document-types', hrmsDocumentTypesCrud.list);

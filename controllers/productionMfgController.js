@@ -1,4 +1,4 @@
-import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP, buildProcessSteps } from '../models/ProductionOrder.js';
+import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP, buildStepsFromList, stepsForKind } from '../models/ProductionOrder.js';
 import ProductionTeam from '../models/ProductionTeam.js';
 import Sale from '../models/Sale.js';
 import QCJob from '../models/QCJob.js';
@@ -12,6 +12,13 @@ import { recalculateItemPricing } from '../services/itemPricingService.js';
 import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimensions } from '../services/fabricationDemandService.js';
 import { toMm } from '../utils/unitConversion.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
+import { buildMachineDesignFiles } from './rdController.js';
+import { buildFreshUnitProcesses } from '../services/processStepBuilderService.js';
+import { findSubChildPartMaterialLines, buildSubChildPartMaterialList, requestSubChildPartMaterial, getSubChildPartJobWorkRows, getSubChildPartUnissuedJobWorkMaterials } from '../services/childPartReorderService.js';
+import { findMachineMaterialLines, buildMachineMaterialList, requestMachineMaterial, resolveMachineOrderProcesses } from '../services/machineReorderService.js';
+import { recalculateChildPartCost } from './childPartBOMController.js';
+import MachineBOM from '../models/MachineBOM.js';
+import { syncMachineBOMPricing } from './machineBOMController.js';
 
 import PDFDocument from 'pdfkit';
 
@@ -24,7 +31,7 @@ import PurchaseRequest from '../models/PurchaseRequest.js';
 import RFQ from '../models/RFQ.js';
 import Purchase from '../models/Purchase.js';
 import RDChildPart from '../models/RDChildPart.js';
-import { ensurePartChecksStructure, resolvePartChecklistRows, ensureFlatChecklist, attachPartReference, MANUFACTURING_SOURCE_TYPES } from '../services/qcChecklistPullService.js';
+import { ensurePartChecksStructure, resolvePartChecklistRows, resolveChildPartUnitChecklistRows, ensureFlatChecklist, resolveFlatChecklistRows, attachPartReference, MANUFACTURING_SOURCE_TYPES } from '../services/qcChecklistPullService.js';
 
 // Department-Head-only gate for Issue Material + Receive — mirrors
 // productionExpenseController.js's own HEAD_ROLES/canManage pattern exactly,
@@ -48,7 +55,7 @@ const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNI
 const today = () => new Date().toISOString().split('T')[0];
 
 // ─── ORDER ID GENERATOR ───────────────────────────────────────────────────────
-async function generateOrderId(companyId) {
+export async function generateOrderId(companyId) {
   const year = new Date().getFullYear();
   const count = await ProductionOrder.countDocuments({ company: companyId });
   return `ORD-${year}-${String(count + 1).padStart(3, '0')}`;
@@ -66,6 +73,20 @@ async function generateOrderId(companyId) {
 // one record per machine, so its full QC history is in one place, not
 // scattered across several jobs (see QCJob.js's own comment).
 function qcJobSourceForOrder(order) {
+  // orderKind:'SubChildPart' orders are also created with source:'Stock' (see
+  // subChildPartOrderService.js) — same as a Machine built for the
+  // company's own stock — so without this branch they'd collide with that
+  // existing, differently-shaped 'Stock' QCJob flow. A dedicated source
+  // keeps them cleanly distinguishable (mirrors why the Purchase/Out-Source
+  // route got its own 'SubChildPartJobWork' source instead of reusing an
+  // existing one).
+  if (order.orderKind === 'SubChildPart') return 'SubChildPartProduction';
+  // Same collision-avoidance reasoning as the SubChildPart branch above — a
+  // Child Part order is also created with source:'Stock' (see
+  // childPartReorderService.js), and its QC is a genuinely different shape
+  // (one job, but per-UNIT nested review — see QCJob.js's UnitQCEntrySchema)
+  // from either 'Stock' or the generic Production/partChecks flow.
+  if (order.orderKind === 'ChildPart') return 'ChildPartProduction';
   return order.source === 'QC_Rejected' ? 'QC_Rejected' : (order.source === 'Stock' ? 'Stock' : 'Production');
 }
 
@@ -78,8 +99,11 @@ export async function ensureQCJobForOrder(order, sentBy, userId) {
   if (existingQC) {
     // No-op for a non-manufactured product (ensurePartChecksStructure itself
     // returns false — wrong productKind/productSourceType) — cheap enough
-    // to just always try rather than duplicate that gate here.
+    // to just always try rather than duplicate that gate here. Same for
+    // ensureUnitChecksStructure (Child Part only, mutually exclusive with
+    // the above — a job is never both sources at once).
     if (await ensurePartChecksStructure(existingQC, order.company)) await existingQC.save();
+    if (ensureUnitChecksStructure(existingQC, order)) await existingQC.save();
     return existingQC;
   }
 
@@ -121,7 +145,7 @@ export async function ensureQCJobForOrder(order, sentBy, userId) {
     quantity: order.orderQuantity || 1,
     unit: 'pcs',
     receivedDate: today(),
-    status: 'Pending',
+    status: order.orderKind === 'SubChildPart' ? 'Draft' : 'Pending',
     saleId: order.saleId,
     saleItemId: order.saleItemId || null,
     orderCode: order.orderCode || '',
@@ -144,8 +168,39 @@ export async function ensureQCJobForOrder(order, sentBy, userId) {
   } catch (e) { console.error('QC job notification error:', e); }
 
   if (await ensurePartChecksStructure(qcJob, order.company)) await qcJob.save();
+  if (ensureUnitChecksStructure(qcJob, order)) await qcJob.save();
 
   return qcJob;
+}
+
+// A Machine order built from a dynamic Process Definition (a step flagged
+// qcRequired) — its QC runs per unit, the Child Part model (agreed
+// 2026-09-24, see the Phase 2 discussion doc's "Machine QC checkpoint —
+// per-unit redesign"): one unitChecks[] entry per unit, each submitted and
+// decided on its own. A legacy Machine order (old 'Final Testing' step, no
+// flag anywhere) keeps the flat shared-checklist flow unchanged.
+export function isPerUnitMachineOrder(order) {
+  return order?.orderKind === 'Machine' && (order.processes || []).some(p => p.qcRequired);
+}
+
+// Structural seed only (no checklist rows yet) for a Child Part order's
+// unitChecks[] — one entry per unit (job.quantity, snapshotted from
+// order.orderQuantity at creation above). Confirmed with the user as the
+// deliberate "one QCJob, nested per-unit" shape to mirror from
+// PartQCEntrySchema/ensurePartChecksStructure, just keyed by unit instead of
+// by Sub Child Part — each unit reaches/leaves QC entirely independently of
+// its siblings. Row-level Initial/Process definitions are resolved
+// separately, lazily, the first time Production actually opens ONE unit's
+// checklist (see getChildPartUnitChecklistRows) — no reason to resolve every
+// unit's rows just because the job was opened once. Same skeleton for a
+// per-unit Machine order's job (2026-09-24, isPerUnitMachineOrder) — its
+// single-stage rows are resolved the same lazy way, in getQcCheckpoint.
+function ensureUnitChecksStructure(job, order) {
+  if (job.source !== 'ChildPartProduction' && !isPerUnitMachineOrder(order)) return false;
+  if (job.unitChecks?.length > 0) return false;
+  const buildQty = Math.max(1, Number(job.quantity) || 1);
+  job.unitChecks = Array.from({ length: buildQty }, (_, i) => ({ unitNumber: i + 1 }));
+  return true;
 }
 
 // ─── Sub Child Part QC (in-house/outsource manufactured products only) ─────
@@ -341,6 +396,191 @@ export const savePartChecklist = async (req, res) => {
   }
 };
 
+// ─── Child Part per-UNIT QC (module:'childPart', staged Initial/Process) ──
+// Mirrors the Sub-Child-Part-of-a-Machine partChecks flow above almost
+// exactly (getPartChecklistRows/savePartChecklist), just keyed by
+// unitNumber instead of childPartId/subChildPartId — one QCJob per Child
+// Part order, but each unit reaches/leaves QC entirely independently of its
+// siblings (confirmed with the user 2026-09-16 — this does NOT wait for
+// every unit the way Machine's own Final Testing does). No
+// assignedTeam/startedAt of its own — gated on this unit's own Assembly
+// step (real processes[]/extraUnits[] tracking) being Completed instead,
+// since Child Part already tracks that, unlike a Sub Child Part inside a
+// Machine's old BOM which has no other pipeline tracking it at all.
+
+// GET /orders/:id/child-part/:unitNumber/:stage(initial|process)
+export const getChildPartUnitChecklistRows = async (req, res) => {
+  try {
+    const { stage } = req.params;
+    if (!['initial', 'process'].includes(stage)) return res.status(400).json({ success: false, message: 'stage must be initial or process' });
+    const unitNumber = parseInt(req.params.unitNumber, 10);
+    if (!Number.isFinite(unitNumber) || unitNumber < 1) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order || order.orderKind !== 'ChildPart') return res.status(404).json({ success: false, message: 'Order not found' });
+
+    // ensureQCJobForOrder (not a bare findOne) — this is the FIRST place a
+    // Child Part order's QCJob/unitChecks[] structure needs to exist, no
+    // separate "open the panel first" action the way Machine's Parts QC has.
+    const qcJobDoc = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+    const qcJob = qcJobDoc.toObject();
+    const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
+    if (!entry) return res.status(404).json({ success: false, message: 'Invalid unit number for this order.' });
+
+    if (stage === 'process' && entry.initial.length === 0) {
+      return res.status(400).json({ success: false, message: 'Complete the Initial checklist for this unit before Process.' });
+    }
+
+    const rows = await resolveChildPartUnitChecklistRows(order.subChildPartItem, stage, req.user.companyId);
+    const saved = entry[stage] || [];
+    const savedByParam = new Map(saved.map(r => [r.parameter, r]));
+    // A saved row created before qcStatus/qcRemarks existed on the schema
+    // comes back with those keys genuinely missing — normalize so an old,
+    // never-reviewed row reads as 'Pending', not `undefined`.
+    const merged = rows.map(r => {
+      const found = savedByParam.get(r.parameter);
+      return found ? { type: 'checkbox', qcStatus: 'Pending', qcRemarks: '', ...found } : r;
+    });
+
+    res.json({ success: true, data: { rows: merged, unitStatus: entry.status } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/child-part/:unitNumber/:stage(initial|process) —
+// Production saves its own tick/value results. Saving 'process' is the
+// automatic hand-off to QC (no separate "Submit" action — confirmed with
+// the user as the exact Machine partChecks pattern to mirror).
+export const saveChildPartUnitChecklist = async (req, res) => {
+  try {
+    const { stage } = req.params;
+    if (!['initial', 'process'].includes(stage)) return res.status(400).json({ success: false, message: 'stage must be initial or process' });
+    const unitNumber = parseInt(req.params.unitNumber, 10);
+    if (!Number.isFinite(unitNumber) || unitNumber < 1) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    const { results } = req.body;
+    if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
+    if (results.some(r => r.status === 'Pending')) {
+      return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before saving.' });
+    }
+
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order || order.orderKind !== 'ChildPart') return res.status(404).json({ success: false, message: 'Order not found' });
+
+    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+    const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
+    if (!entry) return res.status(404).json({ success: false, message: 'Invalid unit number for this order.' });
+
+    // Assembly no longer needs to already be 'Completed' before its own
+    // checklist can be filled (redesigned 2026-09-19) — 'In Progress' (i.e.
+    // Started) is now the precondition, since submitting the Process stage
+    // below is what completes Assembly, not the other way around.
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs || procs[1]?.status !== 'In Progress') {
+      return res.status(400).json({ success: false, message: "Start this unit's Assembly before filling its QC checklist." });
+    }
+    if (stage === 'process' && entry.initial.length === 0) {
+      return res.status(400).json({ success: false, message: 'Complete the Initial checklist for this unit before Process.' });
+    }
+    // A unit mid-QC-review or already approved can't be silently overwritten
+    // from underneath QC — Production can still fix a Rejected unit (the
+    // whole point of a reject) or resave before it's been picked up yet.
+    if (!['Awaiting Production', 'Rejected'].includes(entry.status)) {
+      return res.status(400).json({ success: false, message: `This unit is currently ${entry.status} — it can't be edited right now.` });
+    }
+
+    // Fresh row objects each save — qcStatus/qcRemarks aren't included, so
+    // they fall back to schema defaults (Pending/''), correctly clearing out
+    // any stale QC verdict from a prior round when Production resubmits
+    // after a reject.
+    entry[stage] = results.map(r => ({ parameter: r.parameter, standardValue: r.standardValue || '', type: r.type === 'value' ? 'value' : 'checkbox', actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' }));
+
+    if (stage === 'process') {
+      entry.status = 'QC Pending';
+      entry.producedBy = req.user.fullName || req.user.username || 'Production';
+      entry.producedAt = new Date();
+      entry.rejectReason = ''; // clears a previous rejection note now that it's been resubmitted
+
+      // Submitting Process IS what completes Assembly now (redesigned
+      // 2026-09-19) — markProcessComplete refuses Assembly outright, so this
+      // is the only path that advances it. No fabricated qcStatus/qcBy: this
+      // only means "sent to QC", not "QC approved" — decideChildPartUnit
+      // still owns the real verdict, and reopens this back to 'In Progress'
+      // on a Reject (mirrors reopenFinalTestingForRejection's pattern).
+      procs[1].status = 'Completed';
+      procs[1].endDate = today();
+      procs[1].completedAt = new Date();
+    }
+
+    await qcJob.save();
+    if (stage === 'process') {
+      await order.save();
+      try {
+        await notificationService.triggerQCNotification({
+          action: 'qc_job_created',
+          data: { qcJobId: qcJob.qcJobId, itemName: `${order.machineName} — Unit ${unitNumber}`, jobId: qcJob._id },
+          targetCompanyId: req.user.companyId,
+        });
+      } catch (e) { /* non-fatal */ }
+    }
+
+    res.json({ success: true, data: entry });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/child-part/:unitNumber/complete-painting — the actual
+// completion of this unit's build: requires Painting's own gate already
+// passed (startProcess's live unitChecks.status==='Approved' check) and a
+// real total cost for this one unit's build (same required-field
+// convention Sub Child Part's own submitSubChildPartOrderToQC uses for
+// totalJobWorkCost). Mirrors Machine's own per-unit cost capture exactly
+// (approveQC's isFinalStep branch: "a later unit's build always wins over
+// an earlier one") — Painting is Child Part's own final step, just reached
+// through its own dedicated action instead of the generic approveQC, since
+// Machine's isFinalStep math (PROCESS_STEPS.length-1) doesn't apply to
+// Child Part's shorter 3-step pipeline.
+export const completeChildPartUnitPainting = async (req, res) => {
+  try {
+    const unitNumber = parseInt(req.params.unitNumber, 10);
+    if (!Number.isFinite(unitNumber) || unitNumber < 1) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
+    const productionCost = toNonNegNumber(req.body.productionCost);
+    const productionExpense = toNonNegNumber(req.body.productionExpense);
+    if (productionCost === undefined || productionExpense === undefined) {
+      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to complete Painting.' });
+    }
+
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order || order.orderKind !== 'ChildPart') return res.status(404).json({ success: false, message: 'Order not found' });
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    if (procs[2]?.status !== 'In Progress') {
+      return res.status(400).json({ success: false, message: 'Painting is not in progress for this unit.' });
+    }
+
+    procs[2].status = 'Completed';
+    procs[2].qcStatus = 'Approved';
+    procs[2].endDate = today();
+    procs[2].completedAt = new Date();
+
+    if (!order.subChildPartItem) {
+      return res.status(400).json({ success: false, message: 'This order has no linked Child Part Item.' });
+    }
+    await recalculateChildPartCost(order.subChildPartItem, req.user.companyId, { productionCost, productionExpense });
+    await Item.updateOne({ _id: order.subChildPartItem, companyId: req.user.companyId }, { $inc: { qty: 1 } });
+
+    if (allUnitsCompleted(order)) order.status = 'Completed';
+    await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ─── Final Testing checklist (every Production Order, not just manufactured
 // ones — Final applies uniformly regardless of purchase vs in-house, see
 // qcChecklistPullService.js's flatModuleStageForItem) ───────────────────────
@@ -364,41 +604,122 @@ export const getFinalChecklist = async (req, res) => {
   }
 };
 
-// PUT /orders/:id/final-checklist — Production's own fill-in, matched back
-// onto job.checklist by parameter. Locked once QC has actually started
-// reviewing THIS checklist (any row's own qcStatus no longer Pending) so
-// Production can't silently rewrite it out from under an in-progress QC
-// review. Deliberately NOT gated on the job's overall status past 'Pending'
-// — for a manufactured job that overall status legitimately goes 'In
-// Progress' the moment QC starts reviewing the first Sub Child Part
-// (SubChildPartQCReview), which happens well before Production even reaches
-// Final Testing; treating that as "QC already reviewing the Final Check"
-// wrongly locked Production out of ever submitting it (real stuck job,
-// caught 2026-09-02 — traces back to the earlier premature-checklist-pull
-// bug's fallout, but is a distinct gap in its own right).
+// Extracted from the old approveQC self-certify path (its own isFinalStep
+// branch) — pushes a Machine/Motor's real build cost into whichever BOM
+// exists (old RDBOM and/or new MachineBOM), same "later unit wins" rule.
+// Now called once, from saveFinalChecklist's first-ever submission
+// (redesigned 2026-09-19 — see that function's own comment), instead of
+// Production's old separate self-certify click.
+export async function applyManufacturedFinalCost(order, finalCost, finalExpense) {
+  const mfgItem = await Item.findOne({
+    $or: [{ code: order.machineCode }, { name: order.machineName }],
+    companyId: order.company
+  });
+  if (!mfgItem || (mfgItem.productKind !== 'Machine' && mfgItem.productKind !== 'Motor')) return;
+
+  const detailsKey = mfgItem.productKind === 'Machine' ? 'machineDetails' : 'motorDetails';
+  if (!mfgItem[detailsKey]?.firstBuiltAt) {
+    mfgItem[detailsKey] = mfgItem[detailsKey] || {};
+    mfgItem[detailsKey].firstBuiltAt = new Date();
+    await mfgItem.save();
+  }
+  if (!mfgItem.internalManufacturing) return;
+
+  const bom = await RDBOM.findOne({ machine: mfgItem._id, company: order.company });
+  if (bom) {
+    bom.productionCost = finalCost;
+    bom.productionExpense = finalExpense;
+    bom.productionCostSource = 'Actual';
+    bom.productionCostUpdatedAt = new Date();
+    await bom.save();
+  }
+  await recalculateItemPricing(mfgItem);
+
+  const machineBom = await MachineBOM.findOne({ machine: mfgItem._id, company: order.company });
+  if (machineBom) {
+    machineBom.productionCost = finalCost;
+    machineBom.productionExpense = finalExpense;
+    machineBom.productionCostSource = 'Actual';
+    machineBom.productionCostUpdatedAt = new Date();
+    await machineBom.save();
+    await syncMachineBOMPricing(mfgItem, machineBom);
+  }
+}
+
+// PUT /orders/:id/final-checklist — Production's own fill-in AND, on the
+// first-ever submission, the real completion action for this unit's Final
+// Testing step (redesigned 2026-09-19 — replaces the old Start -> fill
+// checklist -> separately click "Mark Complete" -> separately self-certify
+// "Approve QC" chain, same vestigial-self-certify problem already fixed for
+// Child Part's Assembly the same day). Submitting IS what sends this unit to
+// QC and locks the checklist — gated on THIS unit's own Final Testing step
+// still being 'In Progress' (not a bare qcJob-status check, which gave zero
+// real enforcement: Production could resubmit endlessly before ever
+// touching "Mark Complete", confirmed as a real reported bug). Reopens only
+// on a genuine QC reject (qcController.js's reopenFinalTestingForRejection),
+// never on Production's own say-so.
+//
+// productionCost/productionExpense are required ONLY on the first-ever
+// submission (tracked by qcJob.finalCheckFilledAt being unset) — confirmed
+// with the user: Production reports the real build cost once, and a
+// QC-reject/rework resubmission must NOT ask for it again.
 export const saveFinalChecklist = async (req, res) => {
   try {
-    const { results } = req.body;
+    const { results, productionCost, productionExpense } = req.body;
     if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
     if (results.some(r => r.status === 'Pending')) {
       return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before saving.' });
     }
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    const unitNumber = getUnitNumber(req);
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const procs = getUnitProcesses(order, unitNumber);
+    const idx = procs ? procs.findIndex(p => p.step === 'Final Testing') : -1;
+    if (idx === -1) return res.status(400).json({ success: false, message: 'This order has no Final Testing step.' });
+    const proc = procs[idx];
+    if (proc.status !== 'In Progress') {
+      return res.status(400).json({ success: false, message: `Final Testing isn't in progress for this unit (currently ${proc.status}) — it can't be edited right now.` });
+    }
+
     const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId });
     if (!qcJob) return res.status(404).json({ success: false, message: 'Open the Final Testing checklist first.' });
     if (!qcJob.checklist?.length) return res.status(400).json({ success: false, message: 'No Final checklist configured for this product yet.' });
-    // 'Rejected' is the resubmit case — QC rejected the whole Final Check
-    // (see qcController.js's reopenFinalTestingForRejection), Production
-    // fixes whatever failed and saves again here, same as a Sub Child
-    // Part's own Rejected -> resave -> back-to-QC cycle.
-    const qcStartedReviewingFinalCheck = qcJob.checklist.some(c => c.qcStatus !== 'Pending');
-    const lockedFromProduction = qcJob.status === 'Approved'
-      || (qcJob.status === 'In Progress' && qcStartedReviewingFinalCheck);
-    if (lockedFromProduction) {
-      return res.status(400).json({ success: false, message: `QC has already reviewed this Final Check (status: ${qcJob.status}) — it can't be changed from Production anymore.` });
+
+    // The checklist is shared across every unit of a multi-quantity order
+    // (one qcJob, not one per unit — see QCJob.js's own comment), but each
+    // unit's own Final Testing step is independent — so a DIFFERENT unit
+    // could already be sitting at 'QC Pending', awaiting a decision on
+    // exactly the checklist this submission is about to overwrite. Refused
+    // rather than silently clobbering whatever QC is currently looking at.
+    const otherUnitProcsList = [order.processes, ...order.extraUnits.map(u => u.processes)].filter(p => p !== procs);
+    const anotherUnitAwaitingQC = otherUnitProcsList.some(p => p.find(x => x.step === 'Final Testing')?.status === 'QC Pending');
+    if (anotherUnitAwaitingQC) {
+      return res.status(400).json({ success: false, message: 'Another unit of this order is already awaiting a QC decision on this same checklist — wait for that to be decided first.' });
     }
-    const wasRejected = qcJob.status === 'Rejected';
+
+    const isFirstSubmission = !qcJob.finalCheckFilledAt;
+    let finalCost, finalExpense;
+    if (isFirstSubmission) {
+      const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
+      finalCost = toNonNegNumber(productionCost);
+      finalExpense = toNonNegNumber(productionExpense);
+      if (finalCost === undefined || finalExpense === undefined) {
+        return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required on the first submission.' });
+      }
+    }
+    // 'Rejected' is the normal resubmit-after-reject case (see
+    // qcController.js's reopenFinalTestingForRejection). 'Approved' can also
+    // reach here for a multi-unit order: QC already decided Pass for an
+    // EARLIER unit's own submission (this SAME shared checklist), and now a
+    // DIFFERENT unit — independently still 'In Progress' the whole time —
+    // is submitting for the first time. Without also reopening here, the
+    // qcJob would stay stuck at 'Approved' forever: submitDecision only ever
+    // matches a job at status:'In Progress', so QC could never decide on
+    // this unit either (the exact "permanently stuck" bug this whole
+    // redesign was meant to close — found via a real stuck order,
+    // PROD-2026-304928, then re-confirmed reachable through this second
+    // path via a fresh trace, not just assumed fixed).
+    const needsReopenForReview = qcJob.status === 'Rejected' || qcJob.status === 'Approved';
 
     const byParam = new Map(results.map(r => [r.parameter, r]));
     qcJob.checklist = qcJob.checklist.map(row => {
@@ -411,15 +732,75 @@ export const saveFinalChecklist = async (req, res) => {
     });
     qcJob.finalCheckFilledBy = req.user.fullName || req.user.username || 'Production';
     qcJob.finalCheckFilledAt = new Date();
+    if (isFirstSubmission) {
+      qcJob.finalCheckProductionCost = finalCost;
+      qcJob.finalCheckProductionExpense = finalExpense;
+    }
     // Automatic re-send to QC once fixed — no manual "resubmit" action,
     // same principle as everything else in this flow (confirmed 2026-09-01/02).
-    if (wasRejected) {
+    if (needsReopenForReview) {
       qcJob.status = 'Pending';
       qcJob.decision = '';
       qcJob.failReason = '';
     }
     await qcJob.save();
-    res.json({ success: true, data: { rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt } });
+
+    if (isFirstSubmission) {
+      try {
+        await applyManufacturedFinalCost(order, finalCost, finalExpense);
+      } catch (pricingErr) {
+        console.error('❌ Error recalculating item pricing on Final Testing submission:', pricingErr);
+      }
+    }
+
+    const wasAllSubmitted = allUnitsFinalTestingSubmitted(order);
+    proc.status = 'QC Pending';
+    proc.endDate = today();
+    proc.completedAt = new Date();
+    await order.save();
+
+    // 🏪 "Production Completed" — every unit's Final Testing has now been
+    // submitted (relocated from the old approveQC self-certify flow, which
+    // used to fire this on Production's OWN say-so with no real QC review
+    // behind it at all — redesigned 2026-09-19). This is deliberately NOT
+    // the order's real completion (order.status/'Approved from QC' — that
+    // still only happens once QC actually passes it, in qcController.js's
+    // submitDecision). Guarded by a before/after transition check so a
+    // later reject→resubmit cycle on one unit doesn't re-notify Packing on
+    // every resubmission.
+    if (!wasAllSubmitted && allUnitsFinalTestingSubmitted(order)) {
+      try {
+        let linkedSale = null;
+        if (order.saleId) linkedSale = await Sale.findById(order.saleId);
+        if (!linkedSale) {
+          const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
+          const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
+          if (sourceRefId) {
+            linkedSale = await Sale.findOne({
+              $or: [
+                { invoiceNumber: sourceRefId },
+                { _id: /^[0-9a-fA-F]{24}$/.test(sourceRefId) ? sourceRefId : null }
+              ]
+            });
+          }
+        }
+        if (linkedSale) {
+          const { setSaleItemStatus } = await import('../services/storeFlowService.js');
+          await setSaleItemStatus(linkedSale, order.saleItemId, 'Production Completed');
+        }
+      } catch (saleUpdateErr) {
+        console.error('❌ Error updating Sale storeQCStatus on Final Testing submission:', saleUpdateErr);
+      }
+      try {
+        await notificationService.triggerProductionNotification({
+          action: 'production_completed',
+          data: { orderCode: order.orderId, batchNo: order.orderId, orderId: order._id, machineName: order.machineName },
+          targetCompanyId: order.company,
+        });
+      } catch (e) { console.error('Production completed notification error:', e); }
+    }
+
+    res.json({ success: true, data: { rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt, productionCost: qcJob.finalCheckProductionCost, productionExpense: qcJob.finalCheckProductionExpense } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -427,17 +808,27 @@ export const saveFinalChecklist = async (req, res) => {
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
 
-const VALID_ORDER_STATUSES = ['Pending', 'BOM Pending', 'In Progress', 'On Hold', 'Completed'];
+const VALID_ORDER_STATUSES = ['Pending', 'BOM Pending', 'In Progress', 'On Hold', 'Pending QC', 'Completed'];
 
 export const getOrders = async (req, res) => {
   try {
     const companyId = req.user.companyId;
-    const { page = 1, limit = 20, search, status, source } = req.query;
+    const { page = 1, limit = 20, search, status, source, orderKind } = req.query;
     const skip = (page - 1) * limit;
 
     const query = { company: companyId };
     if (status && status !== 'all' && VALID_ORDER_STATUSES.includes(status)) {
       query.status = status;
+    }
+    // Orders page's own Machine Orders / Sub Child Part Orders tabs — every
+    // pre-existing record has no orderKind at all, so 'Machine' also matches
+    // that missing-field case (never silently hides older orders).
+    if (orderKind === 'ChildPart') {
+      query.orderKind = 'ChildPart';
+    } else if (orderKind === 'SubChildPart') {
+      query.orderKind = 'SubChildPart';
+    } else if (orderKind === 'Machine') {
+      query.$or = (query.$or || []).concat([{ orderKind: 'Machine' }, { orderKind: { $exists: false } }]);
     }
 
     // $and holds the search/source conditions separately since both would
@@ -461,31 +852,112 @@ export const getOrders = async (req, res) => {
     }
     if (andConditions.length) query.$and = andConditions;
 
-    const [orders, total, summaryAgg] = await Promise.all([
-      ProductionOrder.find(query)
-        .populate('processes.assignedTeam', 'name supervisor members')
-        .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      ProductionOrder.countDocuments(query),
-      // Summary reflects ALL of the company's orders (not just the current
-      // page/filter), matching the stat-card behavior the Orders page has
-      // always had — these are global counters, not "count of this search".
-      ProductionOrder.aggregate([
-        { $match: { company: new mongoose.Types.ObjectId(companyId) } },
-        {
-          $facet: {
-            statusCounts: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-            priorityCounts: [{ $group: { _id: '$priority', count: { $sum: 1 } } }],
-            sourceCounts: [{ $group: { _id: '$source', count: { $sum: 1 } } }],
-            total: [{ $count: 'count' }],
-          }
+    // Summary ignores search/status/source (still ALL of that tab's orders,
+    // not "count of this search" — matching the stat-card behavior the
+    // Orders page has always had, global counters per machine-document, same
+    // meaning as before grouping existed below) but DOES follow the
+    // Machine/Sub Child Part tab split, same orderKind scoping as `query`
+    // above — otherwise the cards on the Sub Child Part Orders tab (e.g.
+    // "Store Orders", meaningless there since a Sub Child Part order's
+    // source is always 'Stock') showed the whole company's combined total
+    // across both tabs instead of just the tab actually being viewed.
+    const summaryMatch = { company: new mongoose.Types.ObjectId(companyId) };
+    if (orderKind === 'ChildPart') {
+      summaryMatch.orderKind = 'ChildPart';
+    } else if (orderKind === 'SubChildPart') {
+      summaryMatch.orderKind = 'SubChildPart';
+    } else if (orderKind === 'Machine') {
+      summaryMatch.$or = [{ orderKind: 'Machine' }, { orderKind: { $exists: false } }];
+    }
+    const summaryAggPromise = ProductionOrder.aggregate([
+      { $match: summaryMatch },
+      {
+        $facet: {
+          statusCounts: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+          priorityCounts: [{ $group: { _id: '$priority', count: { $sum: 1 } } }],
+          sourceCounts: [{ $group: { _id: '$source', count: { $sum: 1 } } }],
+          total: [{ $count: 'count' }],
         }
-      ]),
+      }
     ]);
 
+    // `grouped=true` (Orders page's main list only — see OrderManagement.jsx)
+    // — one row per real order instead of one per machine-document. Every
+    // other caller of this same endpoint (Job Cards, Process & QC's
+    // useProductionOrdersList) omits this param and gets the exact unchanged
+    // flat per-document list/pagination below, so nothing else needs to
+    // change shape for them.
+    //
+    // Two-query approach instead of one aggregation pipeline: keeps the
+    // grouping key logic as plain, testable JS (mirrors
+    // OrderManagement.jsx's own getRealOrderId exactly, so "how many real
+    // orders exist" always agrees with what the list already displayed
+    // before grouping existed) rather than re-encoding the same branching
+    // logic a second time as Mongo aggregation operators.
+    let orders, total;
+    if (req.query.grouped === 'true') {
+      const lightDocs = await ProductionOrder.find(query)
+        .select('_id orderCode source machineCode rejectionDetails.originalOrderId createdAt')
+        .sort({ createdAt: -1 })
+        .lean();
+
+      // Mirrors getRealOrderId (OrderManagement.jsx) exactly, with one
+      // addition: Stock production has no real order at all (that function
+      // returns null for it) — grouping literal `null` together would
+      // wrongly merge every unrelated Stock entry into one row, so each one
+      // gets its own unique key instead, same as it displays today.
+      const groupKeyFor = (o) => {
+        if (o.orderCode) return o.orderCode;
+        if (o.source === 'QC_Rejected') return o.rejectionDetails?.originalOrderId || o.machineCode || `_solo_${o._id}`;
+        if (!o.source || o.source === 'Store') return o.machineCode || `_solo_${o._id}`;
+        return `_solo_${o._id}`; // Stock
+      };
+
+      const groupMap = new Map();
+      for (const doc of lightDocs) {
+        const key = groupKeyFor(doc);
+        let g = groupMap.get(key);
+        if (!g) { g = { key, ids: [], maxCreatedAt: doc.createdAt }; groupMap.set(key, g); }
+        g.ids.push(doc._id);
+        if (doc.createdAt > g.maxCreatedAt) g.maxCreatedAt = doc.createdAt;
+      }
+      // Groups ordered by their most recently active machine, same overall
+      // recency ordering the ungrouped list already used.
+      const allGroups = [...groupMap.values()].sort((a, b) => b.maxCreatedAt - a.maxCreatedAt);
+      total = allGroups.length;
+      const pageGroups = allGroups.slice(skip, skip + parseInt(limit));
+
+      const idsToFetch = pageGroups.flatMap(g => g.ids);
+      const fullDocs = await ProductionOrder.find({ _id: { $in: idsToFetch } })
+        .populate('processes.assignedTeam', 'name supervisor members')
+        .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
+        .lean();
+      const byId = new Map(fullDocs.map(d => [String(d._id), d]));
+
+      orders = pageGroups.map(g => ({
+        groupKey: g.key,
+        // Oldest first — mirrors the order machines were added on the Order
+        // Form (Sale.items[]), since that's the order ProductionOrder docs
+        // are created in (storeFlowService.js's autoCheckAllOrderItems).
+        machines: g.ids
+          .map(id => byId.get(String(id)))
+          .filter(Boolean)
+          .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)),
+      }));
+    } else {
+      [orders, total] = await Promise.all([
+        ProductionOrder.find(query)
+          .populate('processes.assignedTeam', 'name supervisor members')
+          .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(parseInt(limit))
+          .lean(),
+        ProductionOrder.countDocuments(query),
+      ]);
+    }
+
+    const summaryAgg = await summaryAggPromise;
     const facet = summaryAgg[0] || { statusCounts: [], priorityCounts: [], sourceCounts: [], total: [] };
     const countFrom = (arr, key) => (arr.find(a => a._id === key)?.count) || 0;
     const summary = {
@@ -604,6 +1076,10 @@ export const createOrder = async (req, res) => {
       orderId = await generateOrderId(req.user.companyId);
     }
 
+    // Explicit, never the schema's own bare default — see
+    // resolveMachineOrderProcesses's own comment for why.
+    const processes = await resolveMachineOrderProcesses(machineCode, req.user.companyId);
+
     const order = await ProductionOrder.create({
       orderId,
       machineCode,
@@ -615,6 +1091,7 @@ export const createOrder = async (req, res) => {
       deliveryDate,
       company: req.user.companyId,
       createdBy: req.user._id,
+      processes,
     });
 
     // 🔔 Notify Production Head & Employee about new order
@@ -697,6 +1174,292 @@ export const raiseRDRequest = async (req, res) => {
     await order.save();
 
     res.json({ success: true, message: 'R&D Request raised successfully.', data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/production-mfg/orders/:id/bom-design-status
+//
+// Replaces the per-order "Raise R&D Request" cycle for the common case: if
+// R&D has already locked this machine's BOM (/r&d/bom-management) AND
+// approved its design (/r&d/design-approval — Item.machineDetails.designStatus
+// === 'Approved'), Production never needs to ask — it just gets what's
+// already there. Called whenever Process Execution loads an order; auto-sets
+// bomVerified/designVerified the first time both are true (same flags
+// raiseRDRequest's R&D-approval path already sets, so every existing reader
+// of them — including the Orders list — keeps working unchanged), then it's
+// a no-op on every later call. If either isn't ready yet, the frontend falls
+// back to the existing "Raise R&D Request" button/flow untouched.
+// Shared by both branches below — persists the auto-verify side effect and
+// builds the common part of the response. Kept as one place so a Machine
+// order and a Sub Child Part order both auto-verify/clear rdRequestRaised
+// exactly the same way once their own bomLocked/designApproved go true.
+async function applyAutoVerify(order, bomLocked, designApproved) {
+  let autoVerifiedNow = false;
+  if (bomLocked && designApproved && (!order.bomVerified || !order.designVerified)) {
+    order.bomVerified = true;
+    order.designVerified = true;
+    order.rdRequestRaised = false;
+    if (order.status === 'BOM Pending') order.status = 'Pending';
+    await order.save();
+    autoVerifiedNow = true;
+  }
+  return autoVerifiedNow;
+}
+
+export const getBomDesignStatus = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    // A Sub Child Part order has no machine, no whole-BOM to lock, and no
+    // design-approval workflow of its own — those concepts don't map onto a
+    // part the way they do a machine. Re-interpreted instead as two plain
+    // existence checks: does R&D have a Design File on file for this part
+    // (the same file required at creation), and has R&D actually defined
+    // what it's built from yet (any material lines on whichever machine it's
+    // linked to — there's no separate BOM to lock, so "materials exist" is
+    // the equivalent readiness signal for Production). No BOM PDF here
+    // either — `materials` is returned directly so the UI can show the list
+    // itself instead of a document.
+    if (order.orderKind === 'ChildPart') {
+      const item = await Item.findOne({ _id: order.subChildPartItem, companyId, productKind: 'ChildPart' }).lean();
+      if (!item) {
+        return res.json({
+          success: true,
+          data: {
+            bomLocked: false, designApproved: false, designStatus: null, bomId: null,
+            designFiles: [], materials: [], autoVerified: false, autoVerifiedNow: false,
+            order: { bomVerified: order.bomVerified, designVerified: order.designVerified, rdRequestRaised: order.rdRequestRaised, status: order.status },
+          }
+        });
+      }
+
+      const found = await findSubChildPartMaterialLines(item._id, companyId);
+      const materials = found?.materials || [];
+      const bomLocked = materials.length > 0;
+
+      // Gate stays on the Child Part's OWN image only (informational, not
+      // gating, for the Sub Child Part images added below) — a design call
+      // confirmed with the user 2026-09-16 rather than requiring every
+      // referenced Sub Child Part to also have one before this counts as
+      // approved.
+      const designApproved = !!item.image;
+      const designFiles = [];
+      if (item.image) {
+        designFiles.push({ _id: item._id, name: item.name, version: '', fileUrl: item.image, source: 'Child Part' });
+      }
+      // Roll up each referenced Sub Child Part's own design image too — this
+      // view previously only ever showed the Child Part's own image, same
+      // gap this same rollup already closed at the Machine level
+      // (buildMachineDesignFiles walks Child Part -> Sub Child Part; this
+      // is the equivalent one level down).
+      if (found?.subChildPartLines?.length) {
+        const subChildPartItems = await Item.find({
+          _id: { $in: found.subChildPartLines.map(l => l.subChildPart) }, companyId,
+        }).select('name image').lean();
+        for (const sub of subChildPartItems) {
+          if (sub.image) {
+            designFiles.push({ _id: sub._id, name: sub.name, version: '', fileUrl: sub.image, source: 'Sub Child Part' });
+          }
+        }
+      }
+
+      const autoVerifiedNow = await applyAutoVerify(order, bomLocked, designApproved);
+
+      return res.json({
+        success: true,
+        data: {
+          bomLocked, designApproved, designStatus: designApproved ? 'Present' : 'Missing',
+          bomId: null,
+          designFiles, materials,
+          autoVerified: bomLocked && designApproved,
+          autoVerifiedNow,
+          order: { bomVerified: order.bomVerified, designVerified: order.designVerified, rdRequestRaised: order.rdRequestRaised, status: order.status },
+        },
+      });
+    }
+
+    const machineItem = await Item.findOne({ code: order.machineCode, companyId, productKind: 'Machine' }).lean();
+    if (!machineItem) {
+      return res.json({
+        success: true,
+        data: {
+          bomLocked: false, designApproved: false, designStatus: null, bomId: null,
+          designFiles: [], autoVerified: false, autoVerifiedNow: false,
+          order: { bomVerified: order.bomVerified, designVerified: order.designVerified, rdRequestRaised: order.rdRequestRaised, status: order.status },
+        }
+      });
+    }
+
+    // MachineBOM only — no RDBOM fallback (full cutover, 2026-09-16,
+    // confirmed with the user: real MachineBOM documents already exist and
+    // this order-creation-facing verification point reads the new hierarchy
+    // exclusively now, same "old stays frozen in BOM Management's own
+    // Legacy tab, order flow cuts over" rule already applied to Child Part's
+    // own order-creation cron). A machine with no MachineBOM yet correctly
+    // reads bomLocked:false — nothing to lock yet, not a bug. Reuses
+    // findMachineMaterialLines (machineReorderService.js) — one query now
+    // resolves both the lock flag AND the materials array (2026-09-17,
+    // needed so Process Execution's BOM view has real content to show
+    // before the BOM is even locked — see that function's own comment).
+    const found = await findMachineMaterialLines(machineItem._id, companyId);
+    const bom = found?.bom || null;
+    const bomLocked = !!bom?.isLocked;
+    const designStatus = machineItem.machineDetails?.designStatus || 'Draft';
+    const designApproved = designStatus === 'Approved';
+    const designFiles = await buildMachineDesignFiles(machineItem._id, companyId);
+
+    const autoVerifiedNow = await applyAutoVerify(order, bomLocked, designApproved);
+
+    res.json({
+      success: true,
+      data: {
+        bomLocked, designApproved, designStatus,
+        bomId: bom?._id || null,
+        // MachineBOM's own download route is keyed by the machine ITEM's id
+        // (GET /api/rd/machine-bom/:machineId/download), unlike the old
+        // RDBOM one (GET /api/rd/boms/:bomId/download) — kept as its own
+        // field rather than overloading bomId's meaning, so the frontend's
+        // "View/Download BOM" button can build the right URL.
+        machineItemId: machineItem._id,
+        // The Machine's Child Part references + own materials — lets
+        // Process Execution show a real View of the BOM's content
+        // regardless of lock status (2026-09-17), same as the ChildPart
+        // branch above already does.
+        materials: found?.materials || [],
+        designFiles,
+        autoVerified: bomLocked && designApproved,
+        autoVerifiedNow,
+        order: { bomVerified: order.bomVerified, designVerified: order.designVerified, rdRequestRaised: order.rdRequestRaised, status: order.status },
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /orders/:id/sub-child-part-material-list — Child Part order only
+// (see childPartReorderService.js's buildSubChildPartMaterialList).
+export const getSubChildPartMaterialList = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.orderKind !== 'ChildPart') {
+      return res.status(400).json({ success: false, message: 'This order is not a Sub Child Part order.' });
+    }
+    const data = await buildSubChildPartMaterialList(order, companyId);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /orders/:id/sub-child-part-material/request — Production's "Issue"
+// button raises/grows one material row's request (straight to 'Requested',
+// no R&D approval — stock build). Body: { demandKey, requestQuantity }.
+export const requestSubChildPartMaterialController = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.orderKind !== 'ChildPart') {
+      return res.status(400).json({ success: false, message: 'This order is not a Sub Child Part order.' });
+    }
+    const { demandKey, requestQuantity } = req.body || {};
+    const result = await requestSubChildPartMaterial(order, companyId, demandKey, requestQuantity);
+    if (!result.ok) {
+      return res.status(result.code || 400).json({ success: false, message: result.message });
+    }
+    res.json({ success: true, message: 'Material request sent to Store.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /orders/:id/machine-material-list — Machine order only (2026-09-17,
+// see machineReorderService.js's buildMachineMaterialList). Direct mirror of
+// getSubChildPartMaterialList one tier down. Legacy orderKind fallback
+// (missing/unset === Machine) matches OrderManagement.jsx's own kind filter.
+export const getMachineMaterialList = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.orderKind && order.orderKind !== 'Machine') {
+      return res.status(400).json({ success: false, message: 'This order is not a Machine order.' });
+    }
+    const data = await buildMachineMaterialList(order, companyId);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /orders/:id/machine-material/request — Production's "Issue" button,
+// direct mirror of requestSubChildPartMaterialController one tier down.
+export const requestMachineMaterialController = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.orderKind && order.orderKind !== 'Machine') {
+      return res.status(400).json({ success: false, message: 'This order is not a Machine order.' });
+    }
+    const { demandKey, requestQuantity } = req.body || {};
+    const result = await requestMachineMaterial(order, companyId, demandKey, requestQuantity);
+    if (!result.ok) {
+      return res.status(result.code || 400).json({ success: false, message: result.message });
+    }
+    res.json({ success: true, message: 'Material request sent to Store.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /orders/:id/sub-child-part-job-work — the Job Work step's material
+// inputs (sheet metal → Laser Cutting, "Job Work" Item-Type → its Job Work
+// Type) and whether each is received yet. Drives the Job Work card's
+// expanded panel; the assign-team/start gate uses the same data.
+export const getSubChildPartJobWork = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.orderKind !== 'ChildPart') {
+      return res.status(400).json({ success: false, message: 'This order is not a Sub Child Part order.' });
+    }
+    const rows = await getSubChildPartJobWorkRows(order, companyId);
+    res.json({ success: true, data: { rows, allIssued: rows.every(r => r.issued) } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /orders/:id/processes/:stepIndex/material-status?unit=N — Stage 3d
+// (2026-09-24) — the generalized twin of the Fabrication status endpoint
+// above, for ANY step carrying its own materialRefs (Child Part or
+// Machine), not just the one legacy-named Child Part step. Same response
+// shape ({ materials, allReady }) so the frontend can render both with one
+// component. Shown regardless of the step's own status — Production wants
+// to see ahead of time whether the NEXT unit will have enough, not just
+// while a step is actively in progress.
+export const getStepMaterialStatusController = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const idx = getStepIndex(req, res);
+    if (idx === -1) return;
+    const unitNumber = getUnitNumber(req);
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
+
+    const materials = await resolveStepMaterialLines(order, procs[idx], companyId);
+    res.json({ success: true, data: { materials, allReady: materials.every(m => m.enough) } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -797,6 +1560,121 @@ async function getUnissuedMaterials(order, companyId, filterGroups = null) {
   const relevant = filterGroups ? groups.filter(filterGroups) : groups;
   const demandByKey = new Map((order.materialDemands || []).map(d => [d.materialCode, d]));
   return relevant.filter(g => demandByKey.get(g.key)?.status !== 'Issued').map(g => g.name);
+}
+
+// True for a MachineBOM-driven Machine order's own 2-step pipeline
+// (['Assembly', 'Final Testing'] — see ProductionOrder.js's MACHINE_BOM_STEPS)
+// — decided once at order-creation time (resolveMachineOrderProcesses,
+// machineReorderService.js) and readable straight off the order's own real
+// processes[] shape from then on, no MachineBOM re-query needed. An old
+// RDBOM-only Machine order never matches this (still the 6-step shape), so
+// every check gated on it is a guaranteed no-op for them.
+function isMachineBOMPipeline(procs) {
+  return procs?.length === 2 && procs[0]?.step === 'Assembly' && procs[1]?.step === 'Final Testing';
+}
+
+// Same idea as getUnissuedMaterials above, but for a MachineBOM-driven
+// order's own Assembly step — keyed off the NEW Material List's own live
+// ledger (order.materialDemands[], populated by requestMachineMaterial/
+// Store's handshake, Pass B/C) instead of the OLD RDBOM-driven
+// buildMaterialListGroups Job Work still uses. Already embedded on the
+// order document, so no extra query needed, unlike getUnissuedMaterials.
+function getUnissuedMachineBOMMaterials(order) {
+  return (order.materialDemands || [])
+    .filter(d => d.status !== 'Issued')
+    .map(d => d.materialName);
+}
+
+// Closes the "In-House material consumption gap" (2026-09-23, see the
+// discussion doc's own section) — resolves a dynamic step's own materialRefs
+// (Phase 1's per-step picker, generalized off Out-Source-only) against the
+// order's real BOM lines and joins each one against the live materialDemands
+// ledger, one row per referenced line. Deliberately does NOT reuse
+// buildMaterialListGroups/getUnissuedMaterials above — those read from the
+// legacy RDBOM model (see that function's own comment), which a dynamic
+// Process-Definition order was never built from. Resolves against the SAME
+// ChildPartBOM/MachineBOM-driven lines the order's own Material List
+// already uses (findSubChildPartMaterialLines/findMachineMaterialLines),
+// matching the exact lookup outsourceWorkController.js's
+// getHandoffMaterialInfo already proved out for a first-step hand-off.
+//
+// Same per-line shape getSubChildPartFabricationStatus (childPartReorderService.js)
+// already returns for its own, differently-scoped "all BOM rows" set —
+// mirrored deliberately, not reinvented, so the frontend table can render
+// either one identically. perUnitNeed comes straight off the BOM line's own
+// quantity (no sheet-metal/length-fabrication area recomputation — same
+// simplification outsourceWorkController.js's getHandoffMaterialInfo already
+// made for its own per-materialRefs-line lookup, for the same reason: this
+// is a derived display/bookkeeping feature, not the real quantity engine).
+// Returns [] for a step with no materialRefs at all (an AssembledPart-only
+// step with nothing extra picked, or any legacy hardcoded-pipeline step,
+// which never carries materialRefs in the first place) — every caller below
+// treats an empty result as a safe no-op.
+export async function resolveStepMaterialLines(order, proc, companyId) {
+  const refs = (proc?.materialRefs || []).map(String);
+  if (!refs.length) return [];
+
+  let found = null;
+  if (order.orderKind === 'ChildPart') {
+    found = await findSubChildPartMaterialLines(order.subChildPartItem, companyId);
+  } else if (order.orderKind !== 'SubChildPart') {
+    const mfgItem = await Item.findOne({ $or: [{ code: order.machineCode }, { name: order.machineName }], companyId }).lean();
+    if (mfgItem) found = await findMachineMaterialLines(mfgItem._id, companyId);
+  }
+  if (!found) return []; // nothing this can resolve against
+
+  const lines = found.materials.filter(m => refs.includes(String(m._id)));
+  if (!lines.length) return [];
+
+  const demandByCode = new Map((order.materialDemands || []).map(d => [d.materialCode, d]));
+  return lines.map(l => {
+    const d = demandByCode.get(l.code);
+    const onFloor = Math.max(0, (d?.issuedQuantity || 0) - (d?.consumedQuantity || 0) - (d?.returnPendingQuantity || 0));
+    const perUnitNeed = Number(l.quantity) || 0;
+    return {
+      demandKey: l.code, code: l.code, name: l.item, unit: l.unit || 'Pieces',
+      perUnitNeed, onFloor,
+      issuedQty: d?.issuedQuantity || 0, consumedQty: d?.consumedQuantity || 0,
+      // This UNIT's own share (2026-09-24, found live: the "Consumed" column
+      // used to show consumedQty above — order.materialDemands' own running
+      // total across every unit that's passed this step — on every single
+      // unit's own card. Two units each starting a 1-per-unit step legitimately
+      // sums to 2 order-wide, but showing that same "2" on a card that also
+      // says "Need/unit: 1" reads as this ONE unit over-consuming, when it
+      // didn't. commitStepMaterialConsumption fires exactly once, unconditionally,
+      // at the same moment THIS proc's own status first leaves 'Pending'
+      // (startProcess, or receiveOutsourceHandoffRound for an Out Source
+      // step) — so "has this specific unit's copy of this step already left
+      // Pending" is a reliable, already-available signal for "did this unit
+      // draw its own share yet", no new storage needed.
+      consumedByUnit: proc.status !== 'Pending' ? perUnitNeed : 0,
+      returnPendingQty: d?.returnPendingQuantity || 0, demandStatus: d?.status || null,
+      enough: onFloor + 1e-6 >= perUnitNeed,
+    };
+  });
+}
+
+// Thin boolean wrapper over resolveStepMaterialLines, for assignTeam's own
+// gate (which only ever needs a yes/no, never the full rows).
+async function resolveStepMaterialIssuance(order, proc, companyId) {
+  const lines = await resolveStepMaterialLines(order, proc, companyId);
+  const unissued = lines.filter(l => l.demandStatus !== 'Issued').map(l => l.name);
+  return unissued.length ? { ok: false, unissued } : { ok: true };
+}
+
+// Records that one unit's worth of a step's own referenced material has now
+// been used — mirrors commitSubChildPartUnitConsumption (childPartReorderService.js)
+// exactly, just against the already-resolved, correctly step-scoped `lines`
+// instead of re-deriving "every BOM row". Pure bookkeeping, not a gate —
+// fires regardless of whether `enough` was true, same as the function it
+// mirrors. Caller must still .save() the order afterward.
+export function commitStepMaterialConsumption(order, lines) {
+  const demandByCode = new Map((order.materialDemands || []).map(d => [d.materialCode, d]));
+  for (const l of lines) {
+    if (!(l.perUnitNeed > 0)) continue;
+    const d = demandByCode.get(l.demandKey);
+    if (d) d.consumedQuantity = (d.consumedQuantity || 0) + l.perUnitNeed;
+  }
 }
 
 // Same check, narrowed to one Sub Child Part's own BOM material lines —
@@ -1577,11 +2455,18 @@ export const updateMaterialStatus = async (req, res) => {
 
 // ─── PROCESS OPERATIONS ───────────────────────────────────────────────────────
 
-// stepIndex: 0–5 mapping to PROCESS_STEPS array
+// stepIndex — a rough sanity pre-filter only (0 to the longest pipeline any
+// order kind ever has, PROCESS_STEPS.length). The PRECISE bound — against
+// THIS order's own real processes[]/procs.length, which varies by order
+// (old 6-step Machine, trimmed 3-step Child Part, new 2-step MachineBOM
+// Machine — see ProductionOrder.js's MACHINE_BOM_STEPS) — can only be
+// checked once the order itself is resolved, so every caller re-checks
+// `idx >= procs.length` right after resolving `procs` (same spot the
+// existing `if (!procs) return...` check already lives).
 function getStepIndex(req, res) {
   const idx = parseInt(req.params.stepIndex, 10);
   if (isNaN(idx) || idx < 0 || idx >= PROCESS_STEPS.length) {
-    res.status(400).json({ success: false, message: 'Invalid step index (0–5)' });
+    res.status(400).json({ success: false, message: 'Invalid step index' });
     return -1;
   }
   return idx;
@@ -1606,16 +2491,184 @@ function getUnitProcesses(order, unitNumber) {
   const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
   if (unitNumber > buildQty) return null;
   while (order.extraUnits.length < buildQty - 1) {
-    order.extraUnits.push({ processes: buildProcessSteps() });
+    // Mirror Unit 1's OWN real step OBJECTS (2026-09-24 fix — see
+    // buildFreshUnitProcesses's own comment) — copies category/type/
+    // materialSource/materialRefs/materialQuantities/qcRequired wholesale,
+    // not just step NAMES. The old buildStepsFromList(names-only) fallback
+    // silently lost every dynamic Phase-2 field and re-derived `type` from
+    // the static legacy PROCESS_TYPE_MAP (only knows old hardcoded names),
+    // wrongly stamping a dynamic Out Source step as 'In-House' by default.
+    // Falls back to the orderKind-keyed default only if Unit 1 itself is
+    // somehow still empty (legacy pre-fix ChildPart data, see
+    // new-bom-hierarchy-bug-fixes.md #3/#6) — never fabricates a shape for
+    // Sub Child Part, whose processes[] is empty by design under the old
+    // bespoke flow (a real dynamic Sub Child Part order always has real
+    // processes[], so this branch is effectively legacy-only).
+    const fresh = order.processes.length
+      ? buildFreshUnitProcesses(order.processes)
+      : (order.orderKind === 'ChildPart' ? buildStepsFromList(stepsForKind('ChildPart')) : []);
+    order.extraUnits.push({ processes: fresh });
   }
   return order.extraUnits[unitNumber - 2].processes;
+}
+
+// Stage 3b — the ONE real QC checkpoint's position in a unit's flattened
+// processes[], derived from Phase 1's per-step `qcRequired` flag instead of
+// a hardcoded step name/index. Sub Child Part has no flag at all (Phase 1's
+// BOM UI hides the toggle there) — its rule is fixed: always the true last
+// step, never a per-BOM choice (see the Phase 2 discussion doc's "QC
+// placement" section). Returns -1 for a legacy order with no dynamic
+// Process Definition (nothing flagged, not Sub Child Part) — callers treat
+// -1 as "no checkpoint here, fall through to the existing hardcoded-name
+// behavior unchanged," so this is purely additive for every order that
+// predates this flag.
+export function qcCheckpointIndex(order, procs) {
+  if (order.orderKind === 'SubChildPart') return procs.length - 1;
+  return procs.findIndex(p => p.qcRequired);
+}
+
+// Stage 3b (2026-09-23) — extracted from approveQC's own tail (its
+// historical, unchanged call site) so the same Dispatch/Sale/lead-time/
+// QCJob side effects can also fire from the new completeFinalProcessStep
+// endpoint below, the other place a Machine order can now newly reach
+// allUnitsCompleted (its QC checkpoint sitting before the true last step —
+// a real dynamic-BOM shape the old fixed Final-Testing-is-always-last
+// pipeline never allowed). Caller has already set order.status itself;
+// this only runs the "just transitioned into Completed" side effects.
+// Machine-only — Child Part has never had a Sale/Dispatch concept (it
+// feeds Machine assembly as plain inventory), so its own completion paths
+// (completeChildPartUnitPainting, decideChildPartUnit) never call this.
+//
+// perUnitQc (2026-09-24): a per-unit Machine order (isPerUnitMachineOrder)
+// has already counted every unit toward the Sale item as 'Approved from QC'
+// one at a time (completeMachineUnit below) — the old 'Production Completed'
+// write here would overwrite that with a status the packing gate never
+// accepts, and its QCJob already exists. Only lead-time + notification run.
+async function finalizeMachineOrderCompletion(order, actorName, userId, { perUnitQc = false } = {}) {
+  try {
+    const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
+    const units = [order.processes, ...order.extraUnits.map(u => u.processes)];
+    for (const unitProcs of units) {
+      const starts = unitProcs.map(p => p.startedAt || p.startDate).filter(Boolean).map(d => new Date(d).getTime());
+      const ends = unitProcs.map(p => p.completedAt || p.endDate).filter(Boolean).map(d => new Date(d).getTime());
+      if (!starts.length || !ends.length) continue;
+      const durationDays = Math.max(0, (Math.max(...ends) - Math.min(...starts)) / (1000 * 60 * 60 * 24));
+      await recordLeadTimeSample(order.company, order.machineCode, order.machineName, 'Production', durationDays);
+    }
+  } catch (e) {
+    console.error('Failed to record production lead-time sample:', e.message);
+  }
+
+  try {
+    await notificationService.triggerProductionNotification({
+      action: 'production_completed',
+      data: { orderCode: order.orderId, batchNo: order.orderId, orderId: order._id, machineName: order.machineName },
+      targetCompanyId: order.company,
+    });
+  } catch (e) { console.error('Production completed notification error:', e); }
+
+  if (perUnitQc) return;
+
+  try {
+    const linkedSale = await findLinkedSale(order);
+    if (linkedSale) {
+      const { setSaleItemStatus } = await import('../services/storeFlowService.js');
+      const perItem = await setSaleItemStatus(linkedSale, order.saleItemId, 'Production Completed');
+      console.log(`🏪 [Production Completed] 'Production Completed' for Sale ${linkedSale._id}${perItem ? ` (item ${order.saleItemId})` : ' (sale-level)'}`);
+    } else {
+      console.warn(`⚠️ [Production Completed] Could not find linked Sale for ProductionOrder ${order.orderId}`);
+    }
+  } catch (saleUpdateErr) {
+    console.error('❌ Error updating Sale storeQCStatus on production completion:', saleUpdateErr);
+  }
+
+  try {
+    await ensureQCJobForOrder(order, actorName, userId);
+  } catch (qcCreateErr) {
+    console.error('❌ Error creating QC Job for completed production order:', qcCreateErr);
+  }
+}
+
+// The order's own saleId first, then the legacy "Ref: <invoice/saleId>"
+// notes convention — extracted unchanged from finalizeMachineOrderCompletion
+// so completeMachineUnit resolves the Sale exactly the same way.
+async function findLinkedSale(order) {
+  let linkedSale = null;
+  if (order.saleId) linkedSale = await Sale.findById(order.saleId);
+  if (!linkedSale) {
+    const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
+    const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
+    if (sourceRefId) {
+      linkedSale = await Sale.findOne({
+        $or: [
+          { invoiceNumber: sourceRefId },
+          { _id: /^[0-9a-fA-F]{24}$/.test(sourceRefId) ? sourceRefId : null }
+        ]
+      });
+    }
+  }
+  return linkedSale;
+}
+
+// Per-unit Machine QC (agreed 2026-09-24 — see the Phase 2 discussion doc's
+// "Machine QC checkpoint — per-unit redesign"): the ONE place a unit of a
+// per-unit Machine order becomes done — its checkpoint QC-approved AND its
+// true last step finished. Whichever of those happens last calls this:
+// decideChildPartUnit (qcController.js) when the checkpoint IS the last
+// step, completeFinalProcessStep below when it's mid-sequence (or
+// outsourceWorkController.js's receive, for an outsourced last step).
+// Caller has already set that unit's steps' statuses (not yet saved); this
+// saves the order.
+//
+// A done unit counts once: +1 'Approved from QC' on the Sale item
+// (setSaleItemStatus accumulates approvedQty — the item only turns ready at
+// its full quantity, so the whole-order packing gate is untouched), or +1
+// machine stock for a no-Sale (stock) order — the existing Dispatch-vs-Stock
+// fork, via saleId. entry.readyAt makes a repeat call a no-op for the credit.
+export async function completeMachineUnit(order, job, unitNumber, { actorName, userId } = {}) {
+  const qcJob = job || await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: order.company });
+  const entry = qcJob?.unitChecks?.find(u => u.unitNumber === unitNumber);
+
+  if (entry && !entry.readyAt) {
+    if (order.saleId) {
+      try {
+        const linkedSale = await findLinkedSale(order);
+        if (linkedSale) {
+          const { setSaleItemStatus } = await import('../services/storeFlowService.js');
+          await setSaleItemStatus(linkedSale, order.saleItemId, 'Approved from QC', { qty: 1 });
+        } else {
+          console.warn(`⚠️ [Machine unit done] Could not find linked Sale for ProductionOrder ${order.orderId}`);
+        }
+      } catch (e) { console.error('❌ Error updating Sale on Machine unit completion:', e); }
+    } else {
+      await Item.updateOne(
+        { $or: [{ code: order.machineCode }, { name: order.machineName }], companyId: order.company },
+        { $inc: { qty: 1 } }
+      );
+    }
+    entry.readyAt = new Date();
+    if (qcJob.unitChecks.every(u => u.readyAt)) {
+      qcJob.status = 'Approved';
+      qcJob.decision = 'Pass';
+      qcJob.inspectionEndDate = today();
+      qcJob.transferredToStore = true;
+    }
+    await qcJob.save();
+  }
+
+  const wasCompleted = order.status === 'Completed';
+  if (allUnitsCompleted(order)) order.status = 'Completed';
+  await order.save();
+  if (order.status === 'Completed' && !wasCompleted) {
+    await finalizeMachineOrderCompletion(order, actorName, userId, { perUnitQc: true });
+  }
 }
 
 // True once every step of every unit (the main `processes` plus all
 // `extraUnits`) is Completed. For orderQuantity === 1 orders, extraUnits is
 // always [], so this is identical to the original "all processes complete"
 // check.
-function allUnitsCompleted(order) {
+export function allUnitsCompleted(order) {
   const mainDone = order.processes.every(p => p.status === 'Completed');
 
   // extraUnits entries are created LAZILY (see getUnitProcesses) — only the
@@ -1633,6 +2686,26 @@ function allUnitsCompleted(order) {
   return mainDone && extraDone;
 }
 
+// True once every unit's own Final Testing step has at least been
+// SUBMITTED (status 'QC Pending' or 'Completed', i.e. no longer 'Pending'/
+// 'In Progress') — the new "Production says every unit is built" checkpoint
+// (redesigned 2026-09-19), replacing the old whole-order allUnitsCompleted
+// check that used to gate the "Production Completed" Sale-status update
+// inside approveQC's old self-certify flow (which could fire without QC
+// ever having reviewed anything). Same lazy-extraUnits guard as
+// allUnitsCompleted, same reason.
+function allUnitsFinalTestingSubmitted(order) {
+  const submitted = (procs) => {
+    const ft = procs.find(p => p.step === 'Final Testing');
+    return !!ft && ft.status !== 'Pending' && ft.status !== 'In Progress';
+  };
+  if (!submitted(order.processes)) return false;
+
+  const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
+  if (order.extraUnits.length < buildQty - 1) return false;
+  return order.extraUnits.every(u => submitted(u.processes));
+}
+
 export const assignTeam = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
@@ -1642,19 +2715,46 @@ export const assignTeam = async (req, res) => {
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    // Job Work only, for now (kept as one whole-order stage — confirmed
-    // 2026-09-01; the Sub Child Part version of this same rule lives in
-    // assignPartTeam below). Only gates actually ASSIGNING a team — clearing
-    // one (teamId falsy) is always allowed.
-    if (idx === 0 && teamId) {
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
+
+    // Job Work dropped from Child Part's own pipeline (2026-09-16 — a Sub
+    // Child Part is independently stocked/replenished by its own order flow
+    // now, see ProductionOrder.js's SUB_CHILD_PART_STEPS comment), so the
+    // old idx===0 Job-Work-only checks (once-per-order guard, whole-order
+    // material check) are gone — Fabrication (now idx 0) gets its own
+    // material+team gate at Start time instead (startProcess below), not
+    // here at team-assignment time. Name-based (not idx===0) since a
+    // MachineBOM-driven order's own idx 0 is 'Assembly', not 'Job Work' —
+    // see the isMachineBOMPipeline branch right below for its own gate.
+    if (procs[idx].step === 'Job Work' && teamId && order.orderKind !== 'ChildPart') {
       const unissued = await getUnissuedMaterials(order, req.user.companyId);
+      if (unissued.length > 0) {
+        return res.status(400).json({ success: false, message: `Material not yet received in Production, can't allot work: ${unissued.join(', ')}.` });
+      }
+    } else if (procs[idx].step === 'Assembly' && teamId && isMachineBOMPipeline(procs)) {
+      // MachineBOM-driven order's own Assembly — same "can't allot work
+      // until the material's actually in Production" rule Job Work uses,
+      // just against the new Material List's own live ledger instead of
+      // the old RDBOM-driven one (confirmed with the user 2026-09-17).
+      const unissued = getUnissuedMachineBOMMaterials(order);
       if (unissued.length > 0) {
         return res.status(400).json({ success: false, message: `Material not yet received in Production, can't allot work: ${unissued.join(', ')}.` });
       }
     }
 
-    const procs = getUnitProcesses(order, unitNumber);
-    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    // Generalized twin of the two branches above, for a dynamic Process
+    // Definition step (2026-09-23 — see resolveStepMaterialIssuance's own
+    // comment). Always a safe no-op for anything the branches above already
+    // cover, since a legacy hardcoded-pipeline step never carries
+    // materialRefs at all.
+    if (teamId) {
+      const issuance = await resolveStepMaterialIssuance(order, procs[idx], req.user.companyId);
+      if (!issuance.ok) {
+        return res.status(400).json({ success: false, message: `Material not yet received in Production, can't allot work: ${issuance.unissued.join(', ')}.` });
+      }
+    }
+
     procs[idx].assignedTeam = teamId || null;
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
@@ -1677,29 +2777,51 @@ export const startProcess = async (req, res) => {
     // ─────────────────────────────────────────────────────────────
     // NEW GATEKEEPERS: BOM & Material Issue Validation
     // ─────────────────────────────────────────────────────────────
-    if (!order.bomVerified) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot start process: BOM has not been verified by R&D yet.'
-      });
-    }
+    // bomVerified/materialIssued only ever mean anything for a Machine
+    // order — they're flipped exclusively by processRDRequest's Initial BOM
+    // approval workflow against RDBOM/MachineBOM (see
+    // bom-hierarchy-redesign-build-2026-09.md §20). Neither Child Part nor
+    // Sub Child Part has any R&D verification concept at any tier — both
+    // must skip this gate, not just one of them.
+    //
+    // Bug fixed 2026-09-24: this used to be a single `isSCP` variable
+    // ("is Sub Child Part") that actually checked orderKind==='ChildPart' —
+    // the middle tier, not the lowest one — so a genuine Sub Child Part
+    // order fell through into this gate and got permanently 400'd on Start
+    // (bomVerified/materialIssued default false and are never set for that
+    // kind). Split into two correctly-scoped checks: isMachine for this gate
+    // and the two other Machine-only branches below, isChildPart (renamed
+    // from the same misleading isSCP) kept for the one check further down
+    // that genuinely does mean Child Part specifically.
+    const isMachine = order.orderKind === 'Machine';
+    const isChildPart = order.orderKind === 'ChildPart';
+    if (isMachine) {
+      if (!order.bomVerified) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot start process: BOM has not been verified by R&D yet.'
+        });
+      }
 
-    if (!order.materialIssued) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot start process: All required materials have not been issued yet.'
-      });
+      if (!order.materialIssued) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot start process: All required materials have not been issued yet.'
+        });
+      }
     }
     // ─────────────────────────────────────────────────────────────
 
     const procs = getUnitProcesses(order, unitNumber);
-    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
 
-    // Job Work — can't start without a team allotted first, and (belt-and-
-    // suspenders alongside the existing order.materialIssued check above,
-    // which is whole-order and can go stale) a fresh check that nothing Job
-    // Work itself needs is still unreceived (confirmed 2026-09-01).
-    if (idx === 0) {
+    // Job Work (Machine only — dropped from Child Part's own pipeline
+    // 2026-09-16, see ProductionOrder.js's SUB_CHILD_PART_STEPS comment) —
+    // can't start without a team allotted first, and a fresh check that
+    // nothing Job Work itself needs is still unreceived. Name-based (not
+    // idx===0) since a MachineBOM-driven order's own idx 0 is 'Assembly',
+    // not 'Job Work' — see the isMachineBOMPipeline branch right below.
+    if (isMachine && procs[idx].step === 'Job Work') {
       if (!procs[idx].assignedTeam) {
         return res.status(400).json({ success: false, message: 'Assign a team to Job Work before starting it.' });
       }
@@ -1707,24 +2829,90 @@ export const startProcess = async (req, res) => {
       if (unissued.length > 0) {
         return res.status(400).json({ success: false, message: `Material not yet received in Production: ${unissued.join(', ')}.` });
       }
-    }
-    // Every step after Fabrication (Assembly/Painting/Re-Assembly/Final
-    // Testing) — same "can't start without a team" rule as Job Work,
-    // extended here on request (confirmed 2026-09-02, Final Testing
-    // included for now too). Fabrication itself (idx === 1) is deliberately
-    // excluded — it has no manual Start anymore, work begins per Sub Child
-    // Part instead, each gated on its own team there already.
-    if (idx > 1 && !procs[idx].assignedTeam) {
-      return res.status(400).json({ success: false, message: `Assign a team to ${PROCESS_STEPS[idx]} before starting it.` });
+    } else if (isMachine && procs[idx].step === 'Assembly' && isMachineBOMPipeline(procs)) {
+      // MachineBOM-driven order's own Assembly — same belt-and-braces
+      // assign-time + start-time double-check Job Work's own gate uses,
+      // against the new Material List's own live ledger (confirmed with
+      // the user 2026-09-17). Team-assignment itself is still covered by
+      // the generic stepNeedsTeamGate below (Assembly isn't excluded from
+      // it) — only the extra material check is specific to this branch.
+      const unissued = getUnissuedMachineBOMMaterials(order);
+      if (unissued.length > 0) {
+        return res.status(400).json({ success: false, message: `Material not yet received in Production: ${unissued.join(', ')}.` });
+      }
     }
 
-    // Gate: previous step (of this same unit) must be completed
+    // Generalized twin of the two branches above, for a dynamic Process
+    // Definition step (2026-09-23, extended same day to resolve full rows
+    // instead of a bare boolean — see resolveStepMaterialLines's own
+    // comment). A safe no-op for anything already covered by name above
+    // (legacy steps never carry materialRefs). materialLines is captured
+    // here (not just the issuance boolean) so it can be committed further
+    // down, once every other gate for this step has passed — see
+    // commitStepMaterialConsumption's own call site below.
+    const materialLines = await resolveStepMaterialLines(order, procs[idx], req.user.companyId);
+    const unissuedMaterialLines = materialLines.filter(l => l.demandStatus !== 'Issued').map(l => l.name);
+    if (unissuedMaterialLines.length) {
+      return res.status(400).json({ success: false, message: `Material not yet received in Production: ${unissuedMaterialLines.join(', ')}.` });
+    }
+    // Child Part order — Fabrication (idx 0, the first real step now that
+    // Job Work is dropped) runs PER UNIT with its own team, same as every
+    // other step (generic stepNeedsTeamGate below). Legacy-shape-only
+    // shortfall-check + commit removed 2026-09-24 (the project is still in
+    // active development, no need to carry a fallback for an order shape
+    // nothing creates anymore) — every Child Part order now goes through
+    // the generalized materialLines/commitStepMaterialConsumption path
+    // above uniformly, idx 0 included, same as any other step.
+    //
+    // The OLD "Painting (idx 2) can't Start until QC-approved" check that
+    // used to live here (hardcoded to literal index 2, from the fixed
+    // Fabrication->Assembly->Painting pipeline) was removed 2026-09-24 —
+    // found wrongly firing on a dynamic order's real checkpoint step (which
+    // can legitimately sit at index 2 itself, blocking it from ever
+    // starting at all). It was also redundant: decideChildPartUnit already
+    // sets the checkpoint's own processes[] status to 'Completed' on
+    // Approve, so the generic "previous step must be Completed" gate a few
+    // lines below already correctly blocks the step AFTER the checkpoint
+    // until QC approves it — no separate live QCJob lookup needed.
+
+    // Every step needs a team assigned, EXCEPT Machine's own Job Work/
+    // Fabrication (their own dedicated gates above handle those — Job Work
+    // has its own team+material check together; Fabrication auto-advances
+    // with no team of its own, driven by individual Sub Child Part team
+    // assignments instead, see SubChildPartQCPanel). A MachineBOM-driven
+    // order has neither name, so Assembly IS covered by this generic gate,
+    // same as every step after it. Child Part no longer has an idx-0
+    // exception (removed 2026-09-24 along with the legacy Fabrication-
+    // specific block above) — every one of its steps, idx 0 included, needs
+    // a team the same way now.
+    const stepNeedsTeamGate = isChildPart || !['Job Work', 'Fabrication'].includes(procs[idx].step);
+    if (stepNeedsTeamGate && !procs[idx].assignedTeam) {
+      return res.status(400).json({ success: false, message: `Assign a team to ${procs[idx].step} before starting it.` });
+    }
+
+    // Gate: previous step (of this same unit) must be completed. Child
+    // Part's Fabrication (idx 0) has no predecessor to check at all now
+    // (Job Work is gone) — the old Machine-only "Sub Child Part Fabrication
+    // has no real previous step" carve-out is no longer needed either,
+    // since idx>0 already excludes it. Message reads the real procs[]
+    // step names directly, not stepsForKind(order.orderKind)[idx] — that
+    // static lookup can't tell a MachineBOM-driven order's real shape from
+    // an old-RDBOM one (both share orderKind:'Machine').
     if (idx > 0 && procs[idx - 1].status !== 'Completed') {
       return res.status(400).json({
         success: false,
-        message: `Cannot start ${PROCESS_STEPS[idx]}: ${PROCESS_STEPS[idx - 1]} not yet completed`
+        message: `Cannot start ${procs[idx].step}: ${procs[idx - 1].step} not yet completed`
       });
     }
+
+    // Bookkeeping, not a gate (2026-09-23) — records this unit's own use of
+    // whatever THIS step references, regardless of `enough`, same as
+    // commitSubChildPartUnitConsumption never checking it either. Keeps
+    // "on floor" accurate for the NEXT unit's own pass through this same
+    // step, across however many material-referencing steps a dynamic order
+    // has (see resolveStepMaterialLines's own comment) — not just the
+    // legacy Fabrication-only case.
+    if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
 
     procs[idx].status = 'In Progress';
     procs[idx].startDate = today(); // Assuming today() is defined in your file
@@ -1750,9 +2938,86 @@ export const markProcessComplete = async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     const procs = getUnitProcesses(order, unitNumber);
-    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
 
     const proc = procs[idx];
+
+    // ── Child Part order — its own trimmed pipeline (Fabrication →
+    // Assembly → Painting, Job Work dropped 2026-09-16), one build per
+    // physical unit. Fabrication pauses at 'QC Pending' for the generic
+    // self-certify Approve rubber-stamp (approveQC), same as every other
+    // order kind's own steps. Assembly and Painting are NOT completable
+    // through this generic endpoint (redesigned 2026-09-19 — the old
+    // Start -> Mark Complete -> generic self-certify Approve QC -> only
+    // THEN the real checklist unlocked flow was backwards busywork: nothing
+    // downstream ever read Assembly's own qcStatus/qcBy, the self-certify
+    // step existed only to unlock the real Initial/Process checklist panel).
+    // Assembly's real completion now happens by submitting its Process
+    // checklist (saveChildPartUnitChecklist) — Start there directly once
+    // this step is In Progress. Painting needs a real cost entry and stock
+    // credit, done through the dedicated completeChildPartUnitPainting
+    // action instead (see below), which also checks allUnitsCompleted
+    // itself once it's done.
+    if (order.orderKind === 'ChildPart') {
+      if (proc.status !== 'In Progress') {
+        return res.status(400).json({ success: false, message: `${proc.step} is not in progress.` });
+      }
+      if (proc.step === 'Painting') {
+        return res.status(400).json({ success: false, message: 'Complete Painting through the cost-capture action, not this endpoint.' });
+      }
+      if (proc.step === 'Assembly') {
+        return res.status(400).json({ success: false, message: "Complete Assembly by submitting this unit's Process QC checklist, not this endpoint." });
+      }
+
+      // Stage 3b (2026-09-23) — a real dynamic Process Definition (a BOM-
+      // configured qcRequired flag, not this legacy 3-step fallback) never
+      // literally names its checkpoint "Assembly" or its last step
+      // "Painting", so the two refusals above alone don't catch it. Same
+      // generalization as the fallback further down this function: the
+      // checkpoint completes via its own QC-checklist endpoint
+      // (decideChildPartUnit decides it), the true last step (when it
+      // isn't also the checkpoint) via the new cost-capture action, and
+      // every OTHER step — no QC gate at all once a real checkpoint exists
+      // — straight to Completed.
+      const cpIdx = qcCheckpointIndex(order, procs);
+      if (cpIdx !== -1) {
+        if (idx === cpIdx) {
+          return res.status(400).json({ success: false, message: "Complete this step by submitting its QC checklist, not this endpoint." });
+        }
+        if (idx === procs.length - 1) {
+          return res.status(400).json({ success: false, message: 'Complete this final step through the cost-capture action, not this endpoint.' });
+        }
+        proc.status = 'Completed';
+        proc.endDate = today();
+        proc.completedAt = new Date();
+        // No auto-advance of the next step (2026-09-24, fixed — found live:
+        // completing this step was silently skipping team-assignment AND
+        // the startProcess gate for whatever came next, checkpoint or not,
+        // since a step already sitting at 'In Progress' never goes through
+        // startProcess at all). The next step just stays 'Pending' — already
+        // "unlocked" via the existing canStart (prior step Completed) check
+        // on the frontend, so it falls through to the exact same Assign
+        // Team -> Start flow every order's own first step already uses.
+        // An Outsourcing next step was already excluded from auto-advance
+        // before this fix and needed no further change — its status is (and
+        // always was) driven entirely by its own hand-off lifecycle
+        // (requestOutsourceHandoff/receiveOutsourceHandoffRound), never by
+        // the previous step completing.
+        await order.save();
+        await order.populate('processes.assignedTeam', 'name supervisor members');
+        await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+        return res.json({ success: true, data: order });
+      }
+
+      proc.status = 'QC Pending';
+      proc.endDate = today();
+      proc.completedAt = new Date();
+      await order.save();
+      await order.populate('processes.assignedTeam', 'name supervisor members');
+      await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+      return res.json({ success: true, data: order });
+    }
+
     if (proc.step === 'Fabrication') {
       // Real gate now — every Sub Child Part on the shared QCJob must be QC-
       // Approved (see SubChildPartQCPanel/decidePartCheck), replacing the
@@ -1764,44 +3029,114 @@ export const markProcessComplete = async (req, res) => {
       // and wrongly treating "never touched" the same as "nothing to check".
       const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
       const partChecks = qcJob.partChecks || [];
-      if (partChecks.length > 0 && partChecks.some(p => p.status !== 'Approved')) {
-        return res.status(400).json({ success: false, message: 'All Sub Child Parts must be QC-approved before marking Fabrication as complete.' });
+      // partChecks only ever gets seeded from the OLD RDChildPart tree
+      // (ensurePartChecksStructure) — a MachineBOM-driven order (the new
+      // hierarchy) has none, by design: every Child Part it references
+      // already passed its own independent QC before ever being issued to
+      // this order (see Child Part's own Fabrication -> Assembly -> QC ->
+      // Painting pipeline), so there's nothing left to individually check
+      // here (confirmed with the user 2026-09-17). Only take the
+      // auto-complete shortcut below when there actually were real parts
+      // individually reviewed; otherwise fall through to the same plain
+      // QC Pending / self-certify Approve step every other stage already
+      // uses — skipping straight to 'Completed' with a fabricated
+      // "Sub Child Part QC" label would misrecord a step nothing actually
+      // reviewed.
+      if (partChecks.length > 0) {
+        if (partChecks.some(p => p.status !== 'Approved')) {
+          return res.status(400).json({ success: false, message: 'All Sub Child Parts must be QC-approved before marking Fabrication as complete.' });
+        }
+        // Every Sub Child Part already went through its own individual QC
+        // decision (decidePartCheck) — a further whole-stage Approve/Reject QC
+        // click here would just be redundant, and worse, would let someone
+        // reject a stage whose every part already individually passed. So
+        // unlike every other step, Fabrication skips 'QC Pending' and the
+        // separate approveQC/rejectQC step entirely, completing immediately
+        // once the gate above passes — the parent-level QC flow was meant to
+        // be fully retired here, not just Assign Team/Start (corrected
+        // 2026-09-02, this half was missed the first time).
+        proc.status = 'Completed';
+        proc.qcStatus = 'Approved';
+        proc.qcBy = 'Sub Child Part QC';
+        proc.qcDate = today();
+        proc.endDate = today();
+        proc.completedAt = new Date();
+        if (allUnitsCompleted(order)) {
+          order.status = 'Completed';
+        }
+        await order.save();
+        await order.populate('processes.assignedTeam', 'name supervisor members');
+        await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+        return res.json({ success: true, data: order });
       }
-      // Every Sub Child Part already went through its own individual QC
-      // decision (decidePartCheck) — a further whole-stage Approve/Reject QC
-      // click here would just be redundant, and worse, would let someone
-      // reject a stage whose every part already individually passed. So
-      // unlike every other step, Fabrication skips 'QC Pending' and the
-      // separate approveQC/rejectQC step entirely, completing immediately
-      // once the gate above passes — the parent-level QC flow was meant to
-      // be fully retired here, not just Assign Team/Start (corrected
-      // 2026-09-02, this half was missed the first time).
+      // No individual parts to check — fall through to the generic QC
+      // Pending / approveQC self-certify path below, same as every other step.
+    }
+
+    // MachineBOM-driven order's own Assembly (the new pipeline's first
+    // step) — no self-certify QC step at all, unlike every other step here.
+    // There's nothing individual to review (this order's Child Parts were
+    // each already QC'd on their own pipeline before reaching this order —
+    // see the Fabrication branch's own comment above for the same
+    // reasoning), and unlike the old Fabrication branch this never fakes a
+    // qcStatus/qcBy label for work nobody actually reviewed — they're left
+    // at their schema defaults. Confirmed with the user 2026-09-17: Assembly
+    // is just assign-team + material-check + start + work + Mark Complete,
+    // straight to Completed, no Approve/Reject dialog. Production starts
+    // Final Testing explicitly afterward — no auto-advance, unlike the old
+    // Fabrication's own no-manual-start special case.
+    if (proc.step === 'Assembly' && isMachineBOMPipeline(procs)) {
+      if (proc.status !== 'In Progress') {
+        return res.status(400).json({ success: false, message: 'Assembly is not in progress.' });
+      }
       proc.status = 'Completed';
-      proc.qcStatus = 'Approved';
-      proc.qcBy = 'Sub Child Part QC';
-      proc.qcDate = today();
       proc.endDate = today();
       proc.completedAt = new Date();
-      if (allUnitsCompleted(order)) {
-        order.status = 'Completed';
-      }
       await order.save();
       await order.populate('processes.assignedTeam', 'name supervisor members');
       await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
       return res.json({ success: true, data: order });
     }
-    // Final Testing can't be marked done until Production has actually
-    // filled the real, R&D-configured Final checklist (saveFinalChecklist)
-    // — the same rows QC will then review — instead of the old bare
-    // self-approve with no checklist behind it at all (confirmed
-    // 2026-09-02). QC's own decision (submitDecision) is still the real
-    // gate on the order actually completing; this only gates the work
-    // being logged in the first place.
+
+    // Final Testing has no separate "Mark Complete" anymore (redesigned
+    // 2026-09-19, same vestigial-self-certify problem already fixed for
+    // Child Part's Assembly the same day) — submitting the checklist
+    // (saveFinalChecklist) IS what sends this unit to QC now, cost/expense
+    // included on the first submit. Refused here so this generic endpoint
+    // can't be used to route around that.
     if (proc.step === 'Final Testing') {
-      const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId }).lean();
-      if (!qcJob?.checklist?.length || qcJob.checklist.some(c => c.status === 'Pending')) {
-        return res.status(400).json({ success: false, message: 'Fill the Final Testing checklist before marking this step complete.' });
+      return res.status(400).json({ success: false, message: "Complete Final Testing by submitting its checklist, not this endpoint." });
+    }
+
+    // Stage 3b (2026-09-23) — same generalization as the ChildPart branch
+    // above, for every other order kind (Machine, Sub Child Part). Only
+    // engages for a real dynamic checkpoint (qcCheckpointIndex !== -1);
+    // every legacy hardcoded-pipeline order (nothing flagged, not Sub Child
+    // Part) falls straight through to the unchanged generic QC Pending
+    // self-certify path below, exactly as before this change.
+    const dynCpIdx = qcCheckpointIndex(order, procs);
+    if (dynCpIdx !== -1) {
+      if (idx === dynCpIdx) {
+        return res.status(400).json({
+          success: false,
+          message: proc.type === 'Outsourcing'
+            ? 'This step is completed by submitting its QC checklist (once Purchase has received the hand-off), not here.'
+            : "Complete this step by submitting its QC checklist, not this endpoint.",
+        });
       }
+      if (idx === procs.length - 1) {
+        return res.status(400).json({ success: false, message: 'Complete this final step through the cost-capture action, not this endpoint.' });
+      }
+      proc.status = 'Completed';
+      proc.endDate = today();
+      proc.completedAt = new Date();
+      // No auto-advance of the next step (2026-09-24, fixed) — see the
+      // matching comment in the ChildPart branch above for the full
+      // reasoning; same fix, same rationale, for every other order kind.
+      await order.save();
+      await order.populate('processes.assignedTeam', 'name supervisor members');
+      await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+      return res.json({ success: true, data: order });
     }
 
     proc.status = 'QC Pending';
@@ -1820,44 +3155,65 @@ export const approveQC = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
-    const { qcBy, productionCost, productionExpense } = req.body;
+    const { qcBy } = req.body;
     if (!qcBy) return res.status(400).json({ success: false, message: 'qcBy is required' });
-
-    // 'Final Testing' (the last step) completing means THIS physical unit is
-    // now built — capture its real production cost/expense right here,
-    // regardless of whether other units in a multi-unit order are still in
-    // progress. Required only at this step; earlier steps don't touch cost.
-    const isFinalStep = idx === PROCESS_STEPS.length - 1;
-    let finalCost, finalExpense;
-    if (isFinalStep) {
-      const toNonNegNumber = (v) => {
-        const n = Number(v);
-        return Number.isFinite(n) && n >= 0 ? n : undefined;
-      };
-      finalCost = toNonNegNumber(productionCost);
-      finalExpense = toNonNegNumber(productionExpense);
-      if (finalCost === undefined || finalExpense === undefined) {
-        return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to complete Final Testing' });
-      }
-    }
 
     const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     const procs = getUnitProcesses(order, unitNumber);
-    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
+
+    // Assembly no longer has a self-certify QC step at all (redesigned
+    // 2026-09-19 — see markProcessComplete's own matching refusal); it
+    // completes automatically when saveChildPartUnitChecklist's Process
+    // stage is submitted. Blocked here too since this generic endpoint
+    // isn't otherwise scoped by orderKind/step.
+    if (order.orderKind === 'ChildPart' && procs[idx]?.step === 'Assembly') {
+      return res.status(400).json({ success: false, message: "Assembly completes automatically when its Process QC checklist is submitted — there's nothing to approve here." });
+    }
+
+    // Final Testing also has no self-certify QC step anymore (redesigned
+    // 2026-09-19, same reasoning as the Assembly block above) — it completes
+    // automatically when saveFinalChecklist's checklist is submitted (cost/
+    // expense captured there too, once, on the first submission), and the
+    // REAL decision is QC's own review (qcController.js's submitDecision),
+    // not Production self-certifying here. idx===procs.length-1 is always
+    // 'Final Testing' for every real Machine pipeline shape (old 6-step or
+    // the new 2-step MachineBOM one), so blocking it by name here also
+    // means this function's own isFinalStep/order-completion machinery
+    // below it can never actually fire anymore for any real order kind —
+    // left in place as a harmless, inert fallback rather than deleted, in
+    // case some order shape not accounted for here ever reaches it.
+    if (procs[idx]?.step === 'Final Testing') {
+      return res.status(400).json({ success: false, message: "Final Testing completes automatically when its checklist is submitted, and is decided by QC's own review — there's nothing to approve here." });
+    }
+
+    // Stage 3b (2026-09-23) — a dynamic Process Definition's real QC
+    // checkpoint (qcCheckpointIndex) is decided by the real QC department
+    // (submitDecision, or decideChildPartUnit for Child Part), never
+    // self-certified here — same reasoning as the two name-matched refusals
+    // above, just position-based instead of literal-name so it also covers
+    // whatever R&D actually named the flagged step. No-op for a legacy
+    // order with nothing flagged (qcCheckpointIndex returns -1 there).
+    if (qcCheckpointIndex(order, procs) === idx) {
+      return res.status(400).json({ success: false, message: "This step's QC checkpoint is decided by QC's own review, not self-certified here." });
+    }
+
     const wasCompleted = order.status === 'Completed';
     procs[idx].status = 'Completed';
     procs[idx].qcStatus = 'Approved';
     procs[idx].qcBy = qcBy;
     procs[idx].qcDate = today();
-    // Fabrication no longer has its own manual Start (2026-09-02) — work now
-    // begins per Sub Child Part (SubChildPartQCPanel), independent of the
-    // stage itself needing an explicit start click. The moment the step
-    // immediately before it (always Job Work today) completes, Fabrication
-    // auto-advances to In Progress so that panel — gated on status !==
-    // 'Pending' — actually renders.
-    if (procs[idx + 1]?.step === 'Fabrication' && procs[idx + 1].status === 'Pending') {
+    // Machine order: Fabrication no longer has its own manual Start
+    // (2026-09-02) — work now begins per Sub Child Part (SubChildPartQCPanel),
+    // independent of the stage itself needing an explicit start click. The
+    // moment the step immediately before it (always Job Work today)
+    // completes, Fabrication auto-advances to In Progress so that panel —
+    // gated on status !== 'Pending' — actually renders. A Sub Child Part
+    // order's Fabrication is per-unit and DOES have a manual Start (with a
+    // material gate), so it must not auto-advance.
+    if (order.orderKind !== 'ChildPart' && procs[idx + 1]?.step === 'Fabrication' && procs[idx + 1].status === 'Pending') {
       procs[idx + 1].status = 'In Progress';
       procs[idx + 1].startDate = today();
       procs[idx + 1].startedAt = new Date();
@@ -1872,127 +3228,20 @@ export const approveQC = async (req, res) => {
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
 
-    // 🏗️ This unit just finished Final Testing — mark the machine/motor as
-    // built (first time only) and push this build's real cost/expense into
-    // its BOM, overwriting whatever was there before (a later unit's build
-    // always wins over an earlier one — see RDBOM.productionCost). Product
-    // Master machines and Motor Master motors now ARE Item documents
-    // (productKind:'Machine'/'Motor') — one lookup covers both.
-    if (isFinalStep) {
-      try {
-        const mfgItem = await Item.findOne({
-          $or: [{ code: order.machineCode }, { name: order.machineName }],
-          companyId: order.company
-        });
-        if (mfgItem && (mfgItem.productKind === 'Machine' || mfgItem.productKind === 'Motor')) {
-          const detailsKey = mfgItem.productKind === 'Machine' ? 'machineDetails' : 'motorDetails';
-          if (!mfgItem[detailsKey]?.firstBuiltAt) {
-            mfgItem[detailsKey] = mfgItem[detailsKey] || {};
-            mfgItem[detailsKey].firstBuiltAt = new Date();
-            await mfgItem.save();
-          }
-          if (mfgItem.internalManufacturing) {
-            const bom = await RDBOM.findOne({ machine: mfgItem._id, company: order.company });
-            if (bom) {
-              bom.productionCost = finalCost;
-              bom.productionExpense = finalExpense;
-              bom.productionCostSource = 'Actual';
-              bom.productionCostUpdatedAt = new Date();
-              await bom.save();
-            }
-            await recalculateItemPricing(mfgItem);
-          }
-        }
-      } catch (pricingErr) {
-        console.error('❌ Error recalculating item pricing on unit completion:', pricingErr);
-      }
-    }
+    // (firstBuiltAt + BOM production cost/pricing used to be pushed here,
+    // gated on isFinalStep — removed 2026-09-19, since Final Testing is
+    // refused above before ever reaching this point now. That push happens
+    // once, at saveFinalChecklist's first submission, via
+    // applyManufacturedFinalCost — see that function's own comment.)
 
-    // 📊 Feed the delivery-date estimator: ONE sample PER PHYSICAL UNIT, not
-    // one lump sample for the whole (possibly multi-unit) order. Each unit's
-    // own first-step-start → last-step-end span is used, so:
-    //   - a 3-unit order still contributes 3 honest per-unit durations
-    //     (avgLeadDays stays a genuine "time to build ONE", which the
-    //     estimator then multiplies by however many units a new quote needs)
-    //   - staggered completion (unit 2 finishing weeks after unit 1) doesn't
-    //     inflate the sample — each unit is measured against its own actual
-    //     working span, not the whole order's elapsed wall-clock time.
-    // Only on the transition into Completed, never on a later re-save.
+    // Lead-time sampling / Dispatch notification / Sale status / QCJob
+    // creation — extracted into finalizeMachineOrderCompletion (Stage 3b,
+    // 2026-09-23) so completeFinalProcessStep can reuse the exact same
+    // logic for the other place a Machine order can now reach
+    // allUnitsCompleted. Only on the transition into Completed, never on a
+    // later re-save.
     if (order.status === 'Completed' && !wasCompleted) {
-      try {
-        const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
-        const units = [order.processes, ...order.extraUnits.map(u => u.processes)];
-        for (const unitProcs of units) {
-          // Prefer the precise startedAt/completedAt timestamps; fall back to
-          // the date-only startDate/endDate strings for any step that was
-          // started before this field existed (in-flight orders at deploy time).
-          const starts = unitProcs.map(p => p.startedAt || p.startDate).filter(Boolean).map(d => new Date(d).getTime());
-          const ends = unitProcs.map(p => p.completedAt || p.endDate).filter(Boolean).map(d => new Date(d).getTime());
-          if (!starts.length || !ends.length) continue;
-          const durationDays = Math.max(0, (Math.max(...ends) - Math.min(...starts)) / (1000 * 60 * 60 * 24));
-          await recordLeadTimeSample(order.company, order.machineCode, order.machineName, 'Production', durationDays);
-        }
-      } catch (e) {
-        console.error('Failed to record production lead-time sample:', e.message);
-      }
-    }
-
-    // 🔔 Notify Packing/Dispatch when all processes are done
-    if (order.status === 'Completed') {
-      try {
-        await notificationService.triggerProductionNotification({
-          action: 'production_completed',
-          data: { orderCode: order.orderId, batchNo: order.orderId, orderId: order._id, machineName: order.machineName },
-          targetCompanyId: order.company,
-        });
-      } catch (e) { console.error('Production completed notification error:', e); }
-
-      // 🏪 Update linked Sale storeQCStatus to 'Production Completed'
-      try {
-        // Strategy 1: Use direct saleId reference (most reliable — set when prod order created from Store)
-        let linkedSale = null;
-        if (order.saleId) {
-          linkedSale = await Sale.findById(order.saleId);
-        }
-
-        // Strategy 2: Fall back to notes regex (for older records without saleId)
-        if (!linkedSale) {
-          const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
-          const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
-          if (sourceRefId) {
-            linkedSale = await Sale.findOne({
-              $or: [
-                { invoiceNumber: sourceRefId },
-                { _id: /^[0-9a-fA-F]{24}$/.test(sourceRefId) ? sourceRefId : null }
-              ]
-            });
-          }
-        }
-
-        if (linkedSale) {
-          // Multi-item: only this Production Order's item flips to
-          // 'Production Completed' (sale-level fallback for legacy orders)
-          const { setSaleItemStatus } = await import('../services/storeFlowService.js');
-          const perItem = await setSaleItemStatus(linkedSale, order.saleItemId, 'Production Completed');
-          console.log(`🏪 [Production Completed] 'Production Completed' for Sale ${linkedSale._id}${perItem ? ` (item ${order.saleItemId})` : ' (sale-level)'}`);
-        } else {
-          console.warn(`⚠️ [Production Completed] Could not find linked Sale for ProductionOrder ${order.orderId}`);
-        }
-      } catch (saleUpdateErr) {
-        console.error('❌ Error updating Sale storeQCStatus on production completion:', saleUpdateErr);
-      }
-
-      // (firstBuiltAt + BOM production cost + pricing recalculation now
-      // happen per-unit, right when THAT unit's Final Testing completes —
-      // see the isFinalStep block above. That covers this whole-order
-      // completion too, since it's only reached once every unit is done.)
-
-      // 🏭 Auto-create QC Job for completed production order
-      try {
-        await ensureQCJobForOrder(order, qcBy, req.user._id);
-      } catch (qcCreateErr) {
-        console.error('❌ Error creating QC Job for completed production order:', qcCreateErr);
-      }
+      await finalizeMachineOrderCompletion(order, qcBy, req.user._id);
     }
 
     res.json({ success: true, data: order });
@@ -2013,6 +3262,18 @@ export const rejectQC = async (req, res) => {
     const procs = getUnitProcesses(order, unitNumber);
     if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
     const proc = procs[idx];
+    // Final Testing is decided by QC's own review (qcController.js's
+    // submitDecision), not Production rejecting their own submission —
+    // redesigned 2026-09-19, same reasoning as approveQC's own refusal.
+    // reopenFinalTestingForRejection already handles the real reopen once
+    // QC actually fails it.
+    if (proc?.step === 'Final Testing') {
+      return res.status(400).json({ success: false, message: "Final Testing is decided by QC's own review, not this endpoint." });
+    }
+    // Stage 3b — same position-based twin of approveQC's own refusal above.
+    if (qcCheckpointIndex(order, procs) === idx) {
+      return res.status(400).json({ success: false, message: "This step's QC checkpoint is decided by QC's own review, not this endpoint." });
+    }
     proc.status = 'In Progress';
     proc.qcStatus = 'Rejected';
     proc.qcBy = qcBy;
@@ -2020,6 +3281,332 @@ export const rejectQC = async (req, res) => {
     proc.notes = reason || proc.notes;
     proc.reworks.push({ date: today(), reason: reason || '', rejectedBy: qcBy });
     await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/production-mfg/orders/:id/qc-checkpoint/submit?unit=N — Stage 3b
+// (2026-09-23). Production's self-check + submit for the ONE real QC
+// checkpoint (qcCheckpointIndex), generalizing saveFinalChecklist/
+// saveSubChildPartChecklist/saveChildPartUnitChecklist's "Process" stage
+// into one endpoint driven by position instead of by which of those three
+// hardcoded flows this particular order happens to use. Only valid for an
+// In-House-typed checkpoint — an Out Source one has no self-check layer at
+// all (see the Stage 3b plan's design recap); it's completed by Purchase
+// receiving the hand-off instead (outsourceWorkController.js's
+// receiveOutsourceHandoffRound already creates the QCJob for that case).
+//
+// Cost/expense is a SEPARATE position from the checkpoint (see the plan's
+// worked example: a coating checkpoint mid-sequence, cost captured later on
+// post-painting, the true last step) — only required here when the
+// checkpoint happens to BE the true last step (Sub Child Part, always;
+// Child Part/Machine, only when R&D flagged the last step). Otherwise it's
+// captured later by completeFinalProcessStep below.
+// GET /api/production-mfg/orders/:id/qc-checkpoint?unit=N — Stage 3b
+// (2026-09-23). Resolves where THIS order's one real QC checkpoint sits and
+// returns whatever the frontend needs to render it, generically: which
+// shape to render (Child Part's staged unitChecks[] vs the flat one-stage
+// checklist Sub Child Part/Machine share), whether cost/expense is due here
+// or later (isTrueLastStep), and the current rows/fill state. Ensures the
+// QCJob exists (same ensureQCJobForOrder every other checklist GET uses) so
+// opening this panel is enough to seed it, same as today's getFinalChecklist/
+// getSubChildPartChecklist.
+export const getQcCheckpoint = async (req, res) => {
+  try {
+    const unitNumber = getUnitNumber(req);
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+
+    const cpIdx = qcCheckpointIndex(order, procs);
+    if (cpIdx === -1) return res.json({ success: true, data: { checkpointIndex: -1 } });
+    const proc = procs[cpIdx];
+    const isTrueLastStep = cpIdx === procs.length - 1;
+
+    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+
+    // Per-unit Machine (2026-09-24) — same unitChecks[] entry shape as Child
+    // Part below, but single-stage: Machine's own checklist is Product
+    // Master's one flat Final stage (flatModuleStageForItem), not Child
+    // Part's Initial/Process pair, so it lives in the entry's process[]
+    // alone. Rows resolved fresh and merged with whatever this unit already
+    // saved, exactly like the Child Part merge.
+    if (order.orderKind === 'Machine') {
+      const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
+      let mergedEntry = entry ? entry.toObject() : null;
+      if (mergedEntry) {
+        const masterRows = await resolveFlatChecklistRows(qcJob, req.user.companyId);
+        const savedByParam = new Map((mergedEntry.process || []).map(r => [r.parameter, r]));
+        mergedEntry.process = masterRows.map(r => {
+          const found = savedByParam.get(r.parameter);
+          return found ? { type: 'checkbox', qcStatus: 'Pending', qcRemarks: '', ...found } : r;
+        });
+      }
+      return res.json({
+        success: true,
+        data: {
+          checkpointIndex: cpIdx, step: proc.step, type: proc.type, isTrueLastStep,
+          shape: 'unitChecks', singleStage: true, entry: mergedEntry,
+        },
+      });
+    }
+
+    if (order.orderKind === 'ChildPart') {
+      const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
+      // Fixed 2026-09-24 — found live: this used to return entry.initial/
+      // entry.process exactly as stored, which is empty forever for a
+      // never-yet-opened unit. ensureUnitChecksStructure only seeds the bare
+      // {unitNumber} skeleton on purpose ("Row-level Initial/Process
+      // definitions are resolved separately, lazily, the first time
+      // Production actually opens ONE unit's checklist — see
+      // getChildPartUnitChecklistRows") — but Production no longer opens
+      // that OLD endpoint at all now that this one (Stage 3b) replaced it,
+      // so that lazy resolution never happened for the new flow. Same fix:
+      // resolve both stages' real rows from R&D's QCMasterChecklist here
+      // too, merged with whatever's already been saved — identical merge
+      // getChildPartUnitChecklistRows itself already does.
+      let mergedEntry = entry ? entry.toObject() : null;
+      if (mergedEntry) {
+        const mergeStage = async (stage) => {
+          const masterRows = await resolveChildPartUnitChecklistRows(order.subChildPartItem, stage, req.user.companyId);
+          const savedByParam = new Map((mergedEntry[stage] || []).map(r => [r.parameter, r]));
+          mergedEntry[stage] = masterRows.map(r => {
+            const found = savedByParam.get(r.parameter);
+            return found ? { type: 'checkbox', qcStatus: 'Pending', qcRemarks: '', ...found } : r;
+          });
+        };
+        await mergeStage('initial');
+        await mergeStage('process');
+      }
+      return res.json({
+        success: true,
+        data: {
+          checkpointIndex: cpIdx, step: proc.step, type: proc.type, isTrueLastStep,
+          shape: 'unitChecks', entry: mergedEntry,
+        },
+      });
+    }
+
+    if (!qcJob.checklist?.length) await ensureFlatChecklist(qcJob, req.user.companyId);
+    return res.json({
+      success: true,
+      data: {
+        checkpointIndex: cpIdx, step: proc.step, type: proc.type, isTrueLastStep,
+        shape: 'flat', rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+export const submitQcCheckpoint = async (req, res) => {
+  try {
+    const unitNumber = getUnitNumber(req);
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
+
+    const cpIdx = qcCheckpointIndex(order, procs);
+    if (cpIdx === -1) return res.status(400).json({ success: false, message: 'This order has no QC checkpoint configured.' });
+    const proc = procs[cpIdx];
+    // Design changed 2026-09-24 (see the discussion doc's own section):
+    // Production DOES self-check + submit an Out Source checkpoint now,
+    // same as an In-House one — just not until Purchase has actually
+    // received the hand-off back (proc.status stays 'Pending' until then,
+    // see receiveOutsourceHandoffRound/markProcessComplete's own auto-
+    // advance, so the `!== 'In Progress'` check below already covers most
+    // of this — this explicit check is the clearer, type-aware message).
+    // Cost/expense captured here is Production's own (labor, etc) — the
+    // vendor's own total cost is a separate, deferred Purchase-side field
+    // (OutsourceHandoffSchema.costTotal) not wired into this yet.
+    if (proc.type === 'Outsourcing' && proc.outsourceStatus !== 'Received') {
+      return res.status(400).json({ success: false, message: 'This checkpoint is an Out Source step — Purchase must receive the hand-off before it can be submitted for QC.' });
+    }
+    if (proc.status !== 'In Progress') {
+      return res.status(400).json({ success: false, message: `${proc.step} is not in progress.` });
+    }
+
+    const isTrueLastStep = cpIdx === procs.length - 1;
+    const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
+    const productionCost = toNonNegNumber(req.body.productionCost);
+    const productionExpense = toNonNegNumber(req.body.productionExpense);
+
+    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+
+    if (order.orderKind === 'ChildPart' || order.orderKind === 'Machine') {
+      // Same staged Initial/Process shape saveChildPartUnitChecklist
+      // already uses, resolved off the dynamic checkpoint position instead
+      // of a hardcoded 'Assembly' — same unitChecks[] entry that function
+      // seeds via ensureUnitChecksStructure. A per-unit Machine (2026-09-24)
+      // shares this whole path single-stage: only 'process' exists for it
+      // (see getQcCheckpoint), no Initial prerequisite — every unit is
+      // submitted and decided on its own, so there's no shared checklist
+      // for one unit to overwrite another's (the old flat-path guard
+      // against that, new-bom-hierarchy-bug-fixes.md #10, isn't needed here).
+      const singleStage = order.orderKind === 'Machine';
+      const { results } = req.body;
+      const stage = singleStage ? 'process' : req.body.stage;
+      if (!['initial', 'process'].includes(stage)) return res.status(400).json({ success: false, message: "stage must be 'initial' or 'process'" });
+      if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
+      if (singleStage && results.some(r => r.status === 'Pending')) {
+        return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before submitting.' });
+      }
+      const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
+      if (!entry) return res.status(404).json({ success: false, message: 'No checklist entry for this unit yet.' });
+      if (!singleStage && stage === 'process' && entry.initial.some(c => c.status === 'Pending')) {
+        return res.status(400).json({ success: false, message: 'Complete the Initial checklist for this unit before Process.' });
+      }
+      if (!['Awaiting Production', 'Rejected'].includes(entry.status)) {
+        return res.status(400).json({ success: false, message: `This unit is currently ${entry.status} — it can't be edited right now.` });
+      }
+      if (stage === 'process' && isTrueLastStep && (productionCost === undefined || productionExpense === undefined)) {
+        return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this checkpoint.' });
+      }
+      entry[stage] = results.map(r => ({ parameter: r.parameter, standardValue: r.standardValue || '', type: r.type === 'value' ? 'value' : 'checkbox', actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' }));
+      if (stage === 'process') {
+        entry.status = 'QC Pending';
+        entry.producedBy = req.user.fullName || req.user.username || 'Production';
+        entry.producedAt = new Date();
+        entry.rejectReason = '';
+        if (isTrueLastStep) {
+          entry.pendingProductionCost = productionCost;
+          entry.pendingProductionExpense = productionExpense;
+        }
+        proc.status = 'QC Pending';
+        proc.endDate = today();
+        proc.completedAt = new Date();
+      }
+      await qcJob.save();
+      await order.save();
+      await order.populate('processes.assignedTeam', 'name supervisor members');
+      await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+      return res.json({ success: true, data: { order, entry } });
+    }
+
+    // Sub Child Part — flat one-stage checklist, mirrors
+    // saveFinalChecklist/saveSubChildPartChecklist exactly. (Machine used to
+    // share this too, until 2026-09-24's per-unit redesign moved it onto the
+    // unitChecks path above — one shared checklist + one whole-order QC
+    // decision was what sent a whole multi-unit Machine order to packing off
+    // Unit 1's mid-sequence checkpoint. Sub Child Part is one build, one
+    // decision, so the flat shape still fits it.)
+    const { results } = req.body;
+    if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
+    if (results.some(r => r.status === 'Pending')) {
+      return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before saving.' });
+    }
+    if (!qcJob.checklist?.length) await ensureFlatChecklist(qcJob, req.user.companyId);
+    if (!qcJob.checklist?.length) return res.status(400).json({ success: false, message: 'No QC checklist configured for this item yet.' });
+
+    const isFirstSubmission = !qcJob.finalCheckFilledAt;
+    if (isFirstSubmission && isTrueLastStep && (productionCost === undefined || productionExpense === undefined)) {
+      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required on the first submission.' });
+    }
+
+    const byParam = new Map(results.map(r => [r.parameter, r]));
+    qcJob.checklist = qcJob.checklist.map(row => {
+      const r = byParam.get(row.parameter);
+      return r ? { parameter: row.parameter, standardValue: row.standardValue, type: row.type, actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' } : row.toObject();
+    });
+    qcJob.finalCheckFilledBy = req.user.fullName || req.user.username || 'Production';
+    qcJob.finalCheckFilledAt = new Date();
+    if (isFirstSubmission && isTrueLastStep) {
+      qcJob.finalCheckProductionCost = productionCost;
+      qcJob.finalCheckProductionExpense = productionExpense;
+    }
+    if (['Rejected', 'Approved', 'Draft'].includes(qcJob.status)) {
+      qcJob.status = 'Pending';
+      qcJob.decision = '';
+      qcJob.failReason = '';
+    }
+    await qcJob.save();
+
+    proc.status = 'QC Pending';
+    proc.endDate = today();
+    proc.completedAt = new Date();
+    await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/production-mfg/orders/:id/processes/:stepIndex/complete-final?unit=N
+// Stage 3b (2026-09-23) — completes the TRUE LAST STEP of a dynamic order
+// whose QC checkpoint sits earlier in the sequence (Child Part/Machine
+// only — Sub Child Part's checkpoint is always the last step by its own
+// fixed rule, so it never reaches this). No further QC once the checkpoint
+// has already passed, per the design — Production alone finishes this step
+// and reports its real cost, mirroring completeChildPartUnitPainting's
+// existing pattern exactly (Child Part) or approveQC's now-shared
+// finalizeMachineOrderCompletion tail (Machine), just off a derived
+// position instead of the literal 'Painting'/'Final Testing' names.
+export const completeFinalProcessStep = async (req, res) => {
+  try {
+    const idx = getStepIndex(req, res);
+    if (idx === -1) return;
+    const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
+    const productionCost = toNonNegNumber(req.body.productionCost);
+    const productionExpense = toNonNegNumber(req.body.productionExpense);
+    if (productionCost === undefined || productionExpense === undefined) {
+      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to complete this step.' });
+    }
+    const unitNumber = getUnitNumber(req);
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
+
+    const cpIdx = qcCheckpointIndex(order, procs);
+    if (cpIdx === -1 || cpIdx === procs.length - 1) {
+      return res.status(400).json({ success: false, message: 'This endpoint only applies when a QC checkpoint precedes the true last step.' });
+    }
+    if (idx !== procs.length - 1) {
+      return res.status(400).json({ success: false, message: 'Only the true last step completes through this endpoint.' });
+    }
+    const proc = procs[idx];
+    if (proc.status !== 'In Progress') {
+      return res.status(400).json({ success: false, message: `${proc.step} is not in progress.` });
+    }
+
+    proc.status = 'Completed';
+    proc.qcStatus = 'Approved';
+    proc.endDate = today();
+    proc.completedAt = new Date();
+
+    if (order.orderKind === 'ChildPart') {
+      if (!order.subChildPartItem) return res.status(400).json({ success: false, message: 'This order has no linked Child Part Item.' });
+      await recalculateChildPartCost(order.subChildPartItem, req.user.companyId, { productionCost, productionExpense });
+      await Item.updateOne({ _id: order.subChildPartItem, companyId: req.user.companyId }, { $inc: { qty: 1 } });
+      if (allUnitsCompleted(order)) order.status = 'Completed';
+      await order.save();
+      await order.populate('processes.assignedTeam', 'name supervisor members');
+      await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+      return res.json({ success: true, data: order });
+    }
+
+    // Machine — always a per-unit order here (reaching this endpoint at all
+    // needs a qcRequired checkpoint, see the cpIdx guard above). Its
+    // checkpoint was already QC-approved (the only way it reaches
+    // 'Completed' and unlocks the steps after it), so finishing this true
+    // last step is what makes THIS unit done — counted as 'Approved from
+    // QC' (QC already passed it), not the old whole-order 'Production
+    // Completed' the packing gate never accepted (2026-09-24).
+    try {
+      await applyManufacturedFinalCost(order, productionCost, productionExpense);
+    } catch (pricingErr) {
+      console.error('❌ Error recalculating item pricing on final-step completion:', pricingErr);
+    }
+    await completeMachineUnit(order, null, unitNumber, { actorName: req.user.fullName || req.user.username, userId: req.user._id });
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });

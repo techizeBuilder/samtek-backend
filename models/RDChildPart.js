@@ -11,7 +11,19 @@ const SubChildPartSchema = new mongoose.Schema({
   // the same Documentation-page visibility (see Documentation.jsx's
   // childPartDocs merge).
   image: { type: String, default: '' },
+  // Denormalized the same way name/code/image already are — mirrors
+  // Item.specification so this list doesn't need to populate the linked
+  // Item just to show it.
+  specification: { type: String, default: '', trim: true },
   isDiscontinued: { type: Boolean, default: false },
+  // Sub Child Part Inventory — an Item (productKind: 'ChildPart') that
+  // Production builds to stock and Store holds, reusable across every
+  // machine that links to the SAME one here. Set either by auto-creating a
+  // new one (typing a brand-new code) or by picking an existing one (same
+  // real part reused on this machine too) — see addSubChildPart. Item.code
+  // is globally unique per company, so once linked, "same code" is
+  // guaranteed to mean "same part", never a coincidental collision.
+  inventoryItem: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', default: null },
 }, { timestamps: true });
 
 // Child Part master data — created once per (manufacturing) Product, then

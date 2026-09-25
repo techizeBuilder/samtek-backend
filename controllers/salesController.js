@@ -11,7 +11,7 @@ import { USER_ROLES } from '../shared/schema.js';
 import PriorityProduct from '../models/PriorityProduct.js';
 import CutoffTime from '../models/CutoffTime.js';
 import { sendPaymentReminderEmail, sendQuotationEmail } from '../services/emailService.js';
-import { getSellableItems } from '../services/sellableItemsService.js';
+import { getSellableItems, NOT_RELEASED_FOR_SALE, unavailableForSaleReason } from '../services/sellableItemsService.js';
 import RDPlant from '../models/RDPlant.js';
 
 export const getSales = async (req, res) => {
@@ -1159,7 +1159,7 @@ export const getSalespersonItems = async (req, res) => {
     // Super Admin: no single company to scope to, so Plant bundles (which
     // are always company-scoped) are left out of this cross-company view —
     // keep the prior Item-only, all-companies behavior.
-    let query = { type: 'Product' };
+    let query = { type: 'Product', isDiscontinued: { $ne: true }, $nor: [NOT_RELEASED_FOR_SALE] };
 
     if (search) {
       query.$or = [
@@ -1253,15 +1253,29 @@ export const getSalesPlants = async (req, res) => {
       ];
     }
 
+    const itemSelect = 'code name category subCategory isDiscontinued mrp productKind machineDetails.forwardToNextPhase machineDetails.releaseStatus';
     const plants = await RDPlant.find(query)
       .populate([
-        { path: 'machines.item', select: 'code name category subCategory isDiscontinued mrp' },
-        { path: 'motors.item', select: 'code name category subCategory isDiscontinued mrp' },
+        { path: 'machines.item', select: itemSelect },
+        { path: 'motors.item', select: itemSelect },
       ])
       .sort({ createdAt: -1 })
       .lean();
 
-    res.json({ success: true, data: plants });
+    // An active plant still lists even when one of its own machines/motors
+    // can't be sold right now (discontinued, or forwarded to Design &
+    // Prototype but not yet released) — but Sales' pickers show it greyed
+    // out and unselectable, naming the item and why (confirmed with the user
+    // 2026-09-25). A plant sells as one complete set.
+    const withAvailability = plants.map(plant => ({
+      ...plant,
+      unavailableItems: [...(plant.machines || []), ...(plant.motors || [])]
+        .map(m => m.item)
+        .filter(item => unavailableForSaleReason(item))
+        .map(item => ({ _id: item._id, code: item.code, name: item.name, reason: unavailableForSaleReason(item) })),
+    }));
+
+    res.json({ success: true, data: withAvailability });
   } catch (error) {
     console.error('Get sales plants error:', error);
     res.status(500).json({ success: false, message: 'Internal server error' });

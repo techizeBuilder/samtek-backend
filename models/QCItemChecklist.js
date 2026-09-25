@@ -21,7 +21,7 @@ const SelectedRowSchema = new mongoose.Schema({
 // null for every flat-module selection and for 'final' stage, which always
 // targets the whole assembled/purchased product, never a part.
 const QCItemChecklistSchema = new mongoose.Schema({
-  module: { type: String, enum: ['inventory', 'productMaster', 'motorMaster'], required: true },
+  module: { type: String, enum: ['inventory', 'productMaster', 'motorMaster', 'childPart', 'subChildPart'], required: true },
   stage: { type: String, enum: ['default', 'initial', 'process', 'final'], default: 'default' },
   item: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   childPartId: { type: mongoose.Schema.Types.ObjectId, default: null },

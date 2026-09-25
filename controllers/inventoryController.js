@@ -1220,6 +1220,7 @@ const sanitizeItemData = (data) => {
   if (sanitized.sourceType) sanitized.sourceType = sanitized.sourceType.trim();
   if (sanitized.itemSourceType) sanitized.itemSourceType = sanitized.itemSourceType.trim();
   if (sanitized.itemProcessType) sanitized.itemProcessType = sanitized.itemProcessType.trim();
+  if (sanitized.jobWorkType) sanitized.jobWorkType = sanitized.jobWorkType.trim();
   if (sanitized.dimensionVariants && Array.isArray(sanitized.dimensionVariants)) {
     sanitized.dimensionVariants = sanitized.dimensionVariants.map((dv) => ({
       // Preserve the existing variant's _id when the form round-tripped one
@@ -1286,6 +1287,15 @@ const sanitizeItemData = (data) => {
   if ((sanitized.unitType !== undefined || sanitized.unit !== undefined) && !sanitized.fabricationRef) {
     sanitized.receiveUnitType = sanitized.unitType;
     sanitized.receiveUnit = sanitized.unit;
+  }
+
+  // Job Work Type only means anything when Item Type is "Job Work" — enforced
+  // here (not just on the form) so it can't linger stale on an item whose
+  // Item Type was later changed away from Job Work. Guarded on itemType
+  // actually being part of this payload, same reasoning as Receive Unit
+  // above — a partial update that doesn't touch itemType leaves this alone.
+  if (sanitized.itemType !== undefined && sanitized.itemType.trim().toLowerCase() !== 'job work') {
+    sanitized.jobWorkType = '';
   }
 
   // Convert numeric fields
@@ -1619,6 +1629,126 @@ export const adjustStock = async (req, res) => {
     });
   } catch (error) {
     console.error('Adjust stock error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Store Head's stock audit — a physical count compared against the system
+// quantity, with a required reason, applied as an absolute set (unlike
+// adjustStock above, which is a relative +/- delta and is never called from
+// any UI). Gated by role directly rather than a feature-permission: this
+// screen is shared by Unit Head/R&D/Store (see ModernInventoryUI.jsx), and a
+// per-company permission toggle can't express "only ever Store Head" the way
+// a role check does — see the plan note in this session's history. Works for
+// a plain Inventory item, a Product Master machine, or a Motor Master motor
+// alike since they're all the same Item collection, no productKind filter.
+//
+// A fabrication item (fabricationRef set) has NO meaningful top-level qty —
+// its real stock lives per-size in dimensionVariants[].subStock (see
+// fabricationDims.js's itemDisplayQty/formatDims on the frontend). For those,
+// `variantId` is required and the audit targets that one variant's subStock
+// instead of item.qty, exactly like every other per-size stock change in
+// this app (Material Flow/Min Stock/Order Qty are the one exception, entered
+// once and fanned out — subStock itself is always per-variant).
+export const auditStock = async (req, res) => {
+  try {
+    const STOCK_AUDIT_ROLES = ['Store Head', 'Super Admin', 'Superadmin'];
+    if (!STOCK_AUDIT_ROLES.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only Store Head can perform a stock audit.' });
+    }
+
+    const { id } = req.params;
+    const { countedQty, reason, variantId } = req.body;
+
+    if (countedQty === undefined || countedQty === null || isNaN(Number(countedQty)) || Number(countedQty) < 0) {
+      return res.status(400).json({ message: 'Counted Qty must be a non-negative number' });
+    }
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ message: 'A reason is required for a stock audit adjustment' });
+    }
+
+    const item = await Item.findById(id);
+    if (!item) {
+      return res.status(404).json({ message: 'Item not found' });
+    }
+
+    const newQty = Number(countedQty);
+    let systemQty;
+    let variantLabel = '';
+    const isFabrication = item.dimensionVariants && item.dimensionVariants.length > 0;
+
+    if (isFabrication) {
+      if (!variantId) {
+        return res.status(400).json({ message: 'Select which size/dimension you are auditing' });
+      }
+      const variant = item.dimensionVariants.id(variantId);
+      if (!variant) {
+        return res.status(404).json({ message: 'Dimension variant not found — it may have been removed since this was opened.' });
+      }
+      systemQty = variant.subStock || 0;
+      variant.subStock = newQty;
+      variantLabel = variant.designation || Object.entries(variant.values || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
+    } else {
+      systemQty = item.qty || 0;
+      item.qty = newQty;
+    }
+
+    const variance = newQty - systemQty;
+    await item.save();
+
+    const StockAudit = (await import('../models/StockAudit.js')).default;
+    const audit = await StockAudit.create({
+      itemId: item._id,
+      itemCode: item.code || '',
+      itemName: item.name || '',
+      productKind: item.productKind || '',
+      unit: isFabrication ? (item.receiveUnit || 'Pieces') : (item.unit || ''),
+      variantId: isFabrication ? variantId : null,
+      variantLabel,
+      systemQty,
+      countedQty: newQty,
+      variance,
+      reason: String(reason).trim(),
+      companyId: req.user.companyId,
+      auditedBy: req.user._id,
+    });
+
+    res.json({
+      message: 'Stock audit recorded successfully',
+      item,
+      audit,
+    });
+  } catch (error) {
+    console.error('Stock audit error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// Past stock-audit actions for one item — same Store-Head-only gate as
+// auditStock itself, since this is just the read side of that same action.
+export const getStockAuditHistory = async (req, res) => {
+  try {
+    const STOCK_AUDIT_ROLES = ['Store Head', 'Super Admin', 'Superadmin'];
+    if (!STOCK_AUDIT_ROLES.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only Store Head can view stock audit history.' });
+    }
+
+    const { id } = req.params;
+    const StockAudit = (await import('../models/StockAudit.js')).default;
+
+    const filter = { itemId: id };
+    if (req.user.role !== 'Superadmin' && req.user.role !== 'Super Admin') {
+      filter.companyId = req.user.companyId;
+    }
+
+    const history = await StockAudit.find(filter)
+      .sort({ createdAt: -1 })
+      .populate('auditedBy', 'username fullName')
+      .lean();
+
+    res.json({ history });
+  } catch (error) {
+    console.error('Stock audit history error:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };
@@ -2883,8 +3013,28 @@ export const getInventoryStats = async (req, res) => {
           { companyId: req.user.companyId }
         ]
       };
+    } else if (req.user.companyId) {
+      // Default company filtering for every other role (R&D, Sales,
+      // Accounts, Production, etc.) — mirrors getItems' own default fallback
+      // above. Without this, any role not already covered by one of the
+      // blocks above fell through with NO company filter at all, returning
+      // every company's items in one global count (confirmed: an R&D user
+      // was seeing the whole database's item count here, not their own
+      // company's). There is no cross-company "Super Admin" role in this
+      // app anymore (every user always belongs to exactly one company), so
+      // this is a straight default, not an opt-in.
+      const companyIdStr = String(req.user.companyId);
+      baseMatchStage = {
+        $or: [
+          { store: companyIdStr },
+          { store: req.user.companyId },
+          { companyId: companyIdStr },
+          { companyId: req.user.companyId }
+        ]
+      };
     }
-    // Super Admin / Super Admin sees all — no filter
+    // Only a user with no companyId at all (shouldn't happen in practice)
+    // falls through with no filter.
 
     // Inventory's own dashboard stats — exclude Product Master machines /
     // Motor Master motors, same reasoning as getItems' productKind=none.
@@ -3157,6 +3307,7 @@ const INVENTORY_ITEM_FIELD_MAP = {
   ItemSourceType: 'itemSourceType',
   ItemType: 'itemType',
   ItemProcessType: 'itemProcessType',
+  JobWorkType: 'jobWorkType',
 };
 
 export const getInventoryDropdownOptions = async (req, res) => {
@@ -3170,6 +3321,7 @@ export const getInventoryDropdownOptions = async (req, res) => {
       ItemSourceType: options.filter(o => o.field === 'ItemSourceType').map(toOption),
       ItemType: options.filter(o => o.field === 'ItemType').map(toOption),
       ItemProcessType: options.filter(o => o.field === 'ItemProcessType').map(toOption),
+      JobWorkType: options.filter(o => o.field === 'JobWorkType').map(toOption),
     };
     res.json({ success: true, data: grouped });
   } catch (err) {
@@ -3180,7 +3332,7 @@ export const getInventoryDropdownOptions = async (req, res) => {
 export const addInventoryDropdownOption = async (req, res) => {
   try {
     const { field, value } = req.body;
-    if (!['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType', 'ItemProcessType'].includes(field)) {
+    if (!['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType', 'ItemProcessType', 'JobWorkType'].includes(field)) {
       return res.status(400).json({ success: false, message: 'Invalid field type.' });
     }
     if (!value || !value.trim()) {
@@ -3377,11 +3529,17 @@ export const getPendingRequests = async (req, res) => {
   try {
     const companyId = req.user.companyId;
 
-    // Find all active orders that have materials with 'Requested' status
+    // Find all active orders that have materials with 'Requested' status.
+    // .lean() — a Child Part order's material row can itself be a Sub Child
+    // Part reference (see childPartReorderService.js); the isSubChildPart
+    // tag added below is ad-hoc (materialDemands.status entries have no such
+    // schema field), and Mongoose's default toJSON strips ad-hoc properties
+    // from a live document on the way out — .lean() (plain JS objects) is
+    // what lets it actually survive to the response.
     const pendingOrders = await ProductionOrder.find({
       company: companyId,
       "materialDemands.status": "Requested"
-    }).select('orderId machineCode machineName materialDemands createdAt').sort({ createdAt: -1 });
+    }).select('orderId machineCode machineName materialDemands createdAt orderKind').sort({ createdAt: -1 }).lean();
 
     // Filter to only return the demands that are actually requested
     const filteredOrders = pendingOrders.map(order => ({
@@ -3389,9 +3547,43 @@ export const getPendingRequests = async (req, res) => {
       orderId: order.orderId,
       machineCode: order.machineCode,
       machineName: order.machineName,
+      // A SubChildPart order repurposes machineCode/machineName for the Sub
+      // Child Part itself — flag it so Store's list can label it, since the
+      // transfer mechanics are otherwise identical to a machine demand.
+      orderKind: order.orderKind || 'Machine',
       createdAt: order.createdAt,
       pendingMaterials: order.materialDemands.filter(m => m.status === 'Requested')
     })).filter(o => o.pendingMaterials.length > 0);
+
+    // A Child Part order's own material list can include Sub Child Part
+    // reference rows alongside its plain/fabrication ones (see
+    // childPartReorderService.js) — no category/lineKind is persisted on
+    // materialDemands[] for ANY row type, so this is resolved live: one
+    // batched lookup (not per-row/per-order) against which of this page's
+    // materialCodes belong to a productKind:'SubChildPart' Item, so Store's
+    // list can badge them distinctly from an ordinary raw material row.
+    // A Machine order's own material list can likewise include Child Part
+    // reference rows (see machineReorderService.js) — same live resolution,
+    // one tier up, so Store's list can badge those distinctly too.
+    const materialCodes = [...new Set(
+      filteredOrders.flatMap(o => o.pendingMaterials.map(m => m.sourceItemCode || m.materialCode))
+    )];
+    const subChildPartCodes = new Set(
+      (await Item.find({ code: { $in: materialCodes }, companyId, productKind: 'SubChildPart' })
+        .select('code').lean())
+        .map(i => i.code)
+    );
+    const childPartCodes = new Set(
+      (await Item.find({ code: { $in: materialCodes }, companyId, productKind: 'ChildPart' })
+        .select('code').lean())
+        .map(i => i.code)
+    );
+    for (const o of filteredOrders) {
+      for (const m of o.pendingMaterials) {
+        m.isSubChildPart = subChildPartCodes.has(m.sourceItemCode || m.materialCode);
+        m.isChildPart = childPartCodes.has(m.sourceItemCode || m.materialCode);
+      }
+    }
 
     res.json({ success: true, data: filteredOrders });
   } catch (err) {

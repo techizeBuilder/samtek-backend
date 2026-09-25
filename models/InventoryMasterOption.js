@@ -6,14 +6,16 @@ import mongoose from 'mongoose';
 // ItemCategory (multi-select: Fabrication/Sheet Metal/Machining/Job Work/
 // Assembly), SourceType (Purchase/In House), ItemSourceType (In House/Out
 // Source/Both), ItemType (the client's real business classification — Raw
-// Material/Tool/Readymade Material/Assets).
+// Material/Tool/Readymade Material/Assets), JobWorkType (only shown when
+// ItemType is "Job Work" — which specific outsourced service, e.g. Powder
+// Coating/Anodizing/Heat Treatment).
 // Deliberately NOT reusing the existing Category/Group models — those are a
 // different, already-live system used by Product/Motor Master's own
 // dropdowns and Sales/Quotation filtering, left untouched by this.
 const InventoryMasterOptionSchema = new mongoose.Schema({
   field: {
     type: String,
-    enum: ['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType', 'ItemProcessType'],
+    enum: ['ItemCategory', 'SourceType', 'ItemSourceType', 'ItemType', 'ItemProcessType', 'JobWorkType'],
     required: true,
   },
   value: { type: String, required: true, trim: true },

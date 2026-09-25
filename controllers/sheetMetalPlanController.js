@@ -231,4 +231,20 @@ export const deleteSheetMetalPlan = async (req, res) => {
   }
 };
 
-export { sheetMetalGroupsFromBOM };
+// How many pieces of one repeated cut size fit on one catalog sheet — simple
+// grid packing (try the cut both ways round, take whichever orientation
+// fits more), NOT the same problem the whole-machine Sheet Metal Plan
+// solves. That plan nests MANY DIFFERENT cut sizes from MANY DIFFERENT Child
+// Parts onto shared sheets, which is a real layout-optimization problem R&D
+// decides by hand — this is only ever asked for ONE repeated size at a time
+// (building N copies of a single Sub Child Part to top up stock, see
+// childPartReorderService.js), which a plain grid fits deterministically.
+// Returns 0 if the cut doesn't fit the catalog sheet in either orientation.
+function piecesPerCatalogSheet(catalogLengthMm, catalogWidthMm, cutLengthMm, cutWidthMm) {
+  if (!(catalogLengthMm > 0) || !(catalogWidthMm > 0) || !(cutLengthMm > 0) || !(cutWidthMm > 0)) return 0;
+  const straight = Math.floor(catalogLengthMm / cutLengthMm) * Math.floor(catalogWidthMm / cutWidthMm);
+  const rotated = Math.floor(catalogLengthMm / cutWidthMm) * Math.floor(catalogWidthMm / cutLengthMm);
+  return Math.max(straight, rotated);
+}
+
+export { sheetMetalGroupsFromBOM, sheetAreaFromItem, sheetAreaForVariant, piecesPerCatalogSheet };

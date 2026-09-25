@@ -74,19 +74,27 @@ class NotificationService {
     targetUnit = null, targetCompanyId = null,
     data = {}, priority = 'medium'
   }) {
+    // ✅ FIX 1: Jab targetUserId set ho, targetRole null karo
+    // Warna targetRole:'all' se ye notification sabko dikhti thi
+    const effectiveTargetRole = targetUserId ? null : (targetRole || 'all');
+
+    // A DB failure here is a real failure — let it throw/propagate normally.
+    const notification = new Notification({
+      title, message, type, icon,
+      targetRole: effectiveTargetRole,
+      targetUserId, targetUnit, targetCompanyId,
+      data, priority
+    });
+    await notification.save();
+
+    // The real-time Pusher push is best-effort on top of an already-saved
+    // notification — it must never be treated as a creation failure (that
+    // would make notifyRoles' Promise.all reject and mislabel every caller's
+    // "notification created" as an error, even though the notification is
+    // sitting in the DB and will show up fine on the next bell/list load).
+    // A broken/misconfigured Pusher app key (see config/pusher.js) should
+    // only ever cost the instant toast, never the notification itself.
     try {
-      // ✅ FIX 1: Jab targetUserId set ho, targetRole null karo
-      // Warna targetRole:'all' se ye notification sabko dikhti thi
-      const effectiveTargetRole = targetUserId ? null : (targetRole || 'all');
-
-      const notification = new Notification({
-        title, message, type, icon,
-        targetRole: effectiveTargetRole,
-        targetUserId, targetUnit, targetCompanyId,
-        data, priority
-      });
-      await notification.save();
-
       const payload = {
         id: notification._id,
         title: notification.title,
@@ -116,12 +124,11 @@ class NotificationService {
         const channel = getRoleChannel(effectiveTargetRole, targetCompanyId);
         await pusher.trigger(channel, 'notification', payload);
       }
-
-      return notification;
-    } catch (error) {
-      console.error('Error creating notification:', error);
-      throw error;
+    } catch (pushError) {
+      console.error(`Pusher real-time push failed (notification ${notification._id} was still saved): ${pushError.message || pushError}`);
     }
+
+    return notification;
   }
 
   // Notify multiple roles at once
@@ -475,6 +482,29 @@ class NotificationService {
         title: '📝 Sales Order Form Submitted',
         message: `Order Form for ${data?.orderCode || 'order'} has been submitted by ${data?.submittedBy || 'Sales'}. Ready for review.`,
         type: 'account', icon: 'file-text', priority: 'medium',
+        data, ...common
+      });
+    }
+
+    if (action === 'sub_child_job_work_created') {
+      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+        title: 'New Sub Child Job Work Order',
+        message: `${data?.itemName || 'Sub Child Part'} needs outsourced job work (${(data?.jobWorkTypes || []).join(', ')}) — Order ${data?.orderId}`,
+        type: 'purchase', icon: 'shopping-cart', priority: 'high',
+        data, ...common
+      });
+    }
+
+    // Phase 2 — Production explicitly requested a hand-off for a Child
+    // Part/Machine/hybrid Sub Child Part order's Out Source step(s), via
+    // outsourceWorkController.js's requestOutsourceHandoff. Same recipients
+    // as the Sub Child Job Work notification above — Purchase Requests
+    // already route through the Accounts role family in this app.
+    if (action === 'outsource_handoff_requested') {
+      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+        title: 'Outsource Work Requested',
+        message: `${data?.machineName || 'An order'} needs outsourced work (${(data?.stepNames || []).join(', ')}) — Order ${data?.orderCode}`,
+        type: 'purchase', icon: 'shopping-cart', priority: 'high',
         data, ...common
       });
     }

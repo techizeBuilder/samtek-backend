@@ -23,8 +23,10 @@ const salesEdit = checkPermission('accounts', 'sales', 'edit');
 // Get leads sent to account for payment processing
 router.get('/leads', salesView, getLeadsForPayment);
 
-// Get bank accounts for payment selection
-router.get('/bank-accounts', salesView, getBankAccounts);
+// Get bank accounts for payment selection — Sales now picks one too when
+// submitting a payment-check request (see leadController.uploadLeadDocuments);
+// getBankAccounts itself strips the balance for non-Accounts roles.
+router.get('/bank-accounts', checkAnyPermission([['sales', 'leads'], ['accounts', 'sales']], 'view'), getBankAccounts);
 
 // Add advanced payment for a lead
 router.post('/', salesAdd, addLeadPayment);

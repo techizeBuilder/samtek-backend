@@ -92,21 +92,39 @@ const saleItemSchema = new mongoose.Schema({
   },
   // BOM raw-material availability for an In-house Manufactured item —
   // separate from isAvailableInInventory above (which only checks the
-  // FINISHED product's own stock). Computed once at Order Form submission
-  // (see server/services/materialAvailabilityService.js) via a targeted
-  // Sale.updateOne on this one field — never written through a load-then-
-  // save of the whole Sale document, so it can't race with anything else
-  // concurrently touching this Sale. Absent/computedAt:null means not
-  // computed yet (computation errored, or this item predates the feature) —
-  // Store Orders' hover tooltips simply omit themselves in that case.
+  // FINISHED product's own stock). Computed once, the moment a real Machine
+  // Production Order is created for this item (see
+  // server/services/machineReorderService.js's checkMachineAssemblyMaterialAvailability,
+  // called from storeFlowService.js's applyStoreDecisionToItem CASE 2 — this
+  // used to be a separate Order-Form-submission pass over the OLD RDBOM,
+  // retired 2026-09-16) via a targeted Sale.updateOne on this one field —
+  // never written through a load-then-save of the whole Sale document, so it
+  // can't race with anything else concurrently touching this Sale.
+  // Absent/computedAt:null means not computed yet — either this item is
+  // already Available (nothing being built, nothing to check) or its
+  // machine has no MachineBOM yet (no RDBOM fallback any more — see
+  // machineReorderService.js's own header comment) — Store Orders' hover
+  // tooltips simply omit themselves in that case.
   materialAvailability: {
     computedAt: { type: Date, default: null },
+    // The Machine's own direct materials/tools (Tier 1/2/3 of its
+    // MachineBOM) — a raw-material-code-level shortfall still raises a flat
+    // Purchase Request, same as before the cutover.
     available: [{
       code: String, name: String, neededQty: Number, availableQty: Number, unit: String,
     }],
     needsPurchase: [{
       code: String, name: String, neededQty: Number, availableQty: Number, shortfallQty: Number,
       unit: String, purchaseRequestId: String,
+    }],
+    // Child Part reference lines (MachineBOM.childParts[]) — new 2026-09-16.
+    // A shortfall here raises a real Child Part order (not a flat Purchase
+    // Request, unlike the two arrays above), so a short row carries which
+    // order got raised instead of a purchaseRequestId.
+    childParts: [{
+      code: String, name: String, neededQty: Number, availableQty: Number, shortfallQty: Number,
+      productionOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', default: null },
+      productionOrderCode: String,
     }],
   },
 });
