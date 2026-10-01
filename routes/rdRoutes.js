@@ -160,7 +160,6 @@ const bomManagementAdd = checkPermission('rnd', 'bomManagement', 'add');
 const bomManagementEdit = checkPermission('rnd', 'bomManagement', 'edit');
 const bomManagementDelete = checkPermission('rnd', 'bomManagement', 'delete');
 
-const prototypeView = checkPermission('rnd', 'prototype', 'view');
 const prototypeAdd = checkPermission('rnd', 'prototype', 'add');
 const prototypeEdit = checkPermission('rnd', 'prototype', 'edit');
 
@@ -218,7 +217,9 @@ router.put('/approval/items/:id/release', designApprovalEdit, updateItemReleaseS
 router.get('/boms/by-code/:code/cost', bomManagementView, getBOMCostByMachineCode);
 
 // ── Prototypes ────────────────────────────────────────────────────────────────
-router.get('/prototypes', prototypeView, getPrototypes);
+// The Approval page's Machine flow reads prototypes too, so a role with only
+// designApproval (no separate prototype grant) can still see them.
+router.get('/prototypes', checkAnyPermission([['rnd', 'prototype'], ['rnd', 'designApproval']], 'view'), getPrototypes);
 router.post('/prototypes', prototypeAdd, createPrototype);
 router.put('/prototypes/:id', prototypeEdit, updatePrototype);
 

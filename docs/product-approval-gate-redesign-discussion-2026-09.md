@@ -1,6 +1,6 @@
 # Product Approval Gate Redesign — Design, BOM, QC List, Prototype, Release
 
-**Status as of 2026-09-30: DESIGN ONLY. No code has been written for this redesign yet.**
+**Status as of 2026-10-01: BUILT (committed, not yet pushed/run against real data). See `product-approval-gate-build-2026-10.md` for what shipped.**
 This file is Claude's own working-memory reference for this redesign (so a context
 compaction doesn't lose the decisions below) — it is not the user-facing change report.
 Once this is actually built, a separate plain-language change report follows the user's
@@ -183,17 +183,14 @@ makes); `models/RDRequest.js` (keep — Material Change still uses it); `routes/
 (lines ~312/315/316 — `approveRequestsView`/`approveRequestsEdit` permission-gated
 routes); `routes/productionMfgRoutes.js:94` (`raise-rd-request` route).
 
-## 5. Still open / not yet decided (do not build against guesses here — ask first)
+## 5. Open items — resolved 2026-10-01
 
-- Where Material Change requests move to once `/r&d/approve-requests` goes away.
-- Whether `/r&d/prototype` stays as a route or is fully merged away.
-- Whether to also close the "soft gate" gap (§2 — Lead/Order controllers never check
-  sellability server-side, only the picker query does) as part of this work, now that a
-  second/third gate (QC List, Child Part/Sub Child Part release) is being added on top.
-- Exact UI shape of the consolidated Approval page (tab layout, what "approve these
-  first" looks like when a parent is blocked by unapproved children).
-- Whether QC List approval needs to cover every configured stage for an item (e.g.
-  Machine's Final + Process checklists) or just one canonical one.
+- Material Change requests: **deleted along with `/r&d/approve-requests`** (user: "not needed anymore"). With no reviewer left, Production's extra-material request (`addMaterialDemand`) now applies immediately and routes straight to Store.
+- `/r&d/prototype`: **folded into the Approval page's Machine flow**; the route redirects there.
+- Soft sales gate: **closed** — `orderController` create/update reject unsellable items server-side (Leads hold no item references, so nothing to check there).
+- QC List approval: requires **every configured checklist stage** non-empty, plus every QC-flagged BOM step covered; editing a checklist voids the sign-off.
+- Existing data: **grandfathered as approved + Released** by `scripts/migrateProductApprovalGate.js` (dev data, per user).
+- Still open: exact permission model (reuses `rnd.designApproval` view/edit; Prototype add/edit still uses `rnd.prototype`).
 
 ## 6. Key files (for quick reload after compaction)
 
@@ -222,4 +219,4 @@ Frontend (`D:\cs\Samtek-Frontend\Samtek-Frontend\client\src`):
 
 ## 7. Next step
 
-Not yet started. Waiting on the open items in §5 before writing an implementation plan.
+Built — see `product-approval-gate-build-2026-10.md`. Remaining: run the migration script against the dev DB, then click through the Approval page end to end.
