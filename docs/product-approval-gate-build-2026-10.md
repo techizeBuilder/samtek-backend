@@ -20,7 +20,7 @@ Plain-language change report for `product-approval-gate-redesign-discussion-2026
 - **"Raise R&D Request" is gone**, and so is Material Change review. Extra-material requests now take effect immediately and go straight to Store.
 
 ## Existing data
-Run `node scripts/migrateProductApprovalGate.js --dry-run`, then without the flag. It marks every existing Machine / Child Part / Sub Child Part approved + Released, moves "BOM Pending" orders to Pending, turns stuck "Pending R&D" demands into Requested, and drops the old `rdrequests` collection.
+No migration script (removed at the user's request — existing items are approved by hand while testing). Until an item is approved and released it counts as Not Released: unreleased Machines aren't sellable, and unreleased Child Parts / Sub Child Parts get no automatic orders. Orders left in "BOM Pending" by the old flow, material demands stuck at "Pending R&D", and the old `rdrequests` collection are not cleaned up automatically.
 
 ## Not done / worth knowing
 - Machine BOMs only reference Child Parts today, so "directly referenced Sub Child Part" (design §3c) has nothing to check at Machine level yet.

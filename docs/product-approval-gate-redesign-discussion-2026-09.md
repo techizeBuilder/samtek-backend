@@ -189,7 +189,7 @@ routes); `routes/productionMfgRoutes.js:94` (`raise-rd-request` route).
 - `/r&d/prototype`: **folded into the Approval page's Machine flow**; the route redirects there.
 - Soft sales gate: **closed** — `orderController` create/update reject unsellable items server-side (Leads hold no item references, so nothing to check there).
 - QC List approval: requires **every configured checklist stage** non-empty, plus every QC-flagged BOM step covered; editing a checklist voids the sign-off.
-- Existing data: **grandfathered as approved + Released** by `scripts/migrateProductApprovalGate.js` (dev data, per user).
+- Existing data: **no migration** — approved by hand during testing (the migration script was written, then removed at the user's request).
 - Still open: exact permission model (reuses `rnd.designApproval` view/edit; Prototype add/edit still uses `rnd.prototype`).
 
 ## 6. Key files (for quick reload after compaction)
