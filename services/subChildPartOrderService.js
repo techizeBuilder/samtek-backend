@@ -37,6 +37,7 @@ import { sheetAreaFromItem } from '../controllers/sheetMetalPlanController.js';
 import { raisePlainPurchaseRequest, raiseFabricationPurchaseRequest } from './materialAvailabilityService.js';
 import { checkAndReserve, getFreeQtyExcludingOrder } from './materialReservationService.js';
 import { flattenProcessDefinition, classifyProcessDefinition, buildOrderStepsFromProcessDefinition } from './processStepBuilderService.js';
+import { isReleased } from './productApprovalService.js';
 import notificationService from './notificationService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
@@ -464,6 +465,10 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
   if (!DEMAND_SOURCES.includes(demandSource)) {
     throw new Error(`createSubChildPartOrderForItem: unknown demandSource "${demandSource}"`);
   }
+  // Product Approval Gate — see the same guard in childPartReorderService.js's
+  // createChildPartOrderForItem: the reorder cron and the Child Part cascade
+  // (this function's only callers) wait until this part is Released.
+  if (!isReleased(item)) return { created: false, reason: 'not-released' };
   if (!item.subChildPartDetails?.sourceItem) {
     console.error(`[SubChildPartOrder] Skipping ${item.code} — no source raw material configured.`);
     return { created: false, reason: 'no-source-item' };

@@ -4,16 +4,13 @@ import { checkPermission, checkAnyPermission } from '../middleware/permissions.j
 import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
   getMachines, createMachine, updateMachine,
-  updateDesignStatus, updateReleaseStatus, discontinueMachine, reactivateMachine,
+  discontinueMachine, reactivateMachine,
   getBOMCostByMachineCode,
   getPrototypes, createPrototype, updatePrototype,
   getChangeRequests, createChangeRequest, resolveChangeRequest,
   getToolProcesses, addTool, removeTool, discontinueTool, reactivateTool, addProcess, removeProcess,
   getQualityParams, addQualityParam, deleteQualityParam, addQCItem, deleteQCItem,
   getDocuments, createDocument, deleteDocument,
-  getRDRequests,
-  processRDRequest,
-  getRDRequestReviewData,
   getDropdownOptions,
   addDropdownOption,
   updateDropdownOption,
@@ -26,6 +23,10 @@ import {
   updatePlant,
   setPlantStatus,
 } from '../controllers/rdController.js';
+import {
+  getApprovalItems, getApprovalItemDetail,
+  updateItemDesignStatus, updateItemBomApproval, updateItemQcApproval, updateItemReleaseStatus,
+} from '../controllers/productApprovalController.js';
 import {
   getRDExpenseCategories,
   createRDExpense,
@@ -143,10 +144,10 @@ const productMasterAdd = checkPermission('rnd', 'productMaster', 'add');
 const productMasterEdit = checkPermission('rnd', 'productMaster', 'edit');
 const productMasterDelete = checkPermission('rnd', 'productMaster', 'delete');
 
-// design-status / release-status are the machine's design/release governance
-// workflow — design-status is confirmed (via DesignApproval.jsx / RDContext.jsx)
-// to be used exclusively by the Design Approval page, so it's gated under
-// designApproval rather than productMaster.
+// The /approval/* routes below are the design/BOM/QC/release governance
+// workflow, used exclusively by the consolidated Approval page, so they're
+// gated under designApproval rather than productMaster.
+const designApprovalView = checkPermission('rnd', 'designApproval', 'view');
 const designApprovalEdit = checkPermission('rnd', 'designApproval', 'edit');
 
 const bomManagementView = checkPermission('rnd', 'bomManagement', 'view');
@@ -159,7 +160,6 @@ const bomManagementAdd = checkPermission('rnd', 'bomManagement', 'add');
 const bomManagementEdit = checkPermission('rnd', 'bomManagement', 'edit');
 const bomManagementDelete = checkPermission('rnd', 'bomManagement', 'delete');
 
-const prototypeView = checkPermission('rnd', 'prototype', 'view');
 const prototypeAdd = checkPermission('rnd', 'prototype', 'add');
 const prototypeEdit = checkPermission('rnd', 'prototype', 'edit');
 
@@ -180,9 +180,6 @@ const documentationView = checkPermission('rnd', 'documentation', 'view');
 const documentationAdd = checkPermission('rnd', 'documentation', 'add');
 const documentationDelete = checkPermission('rnd', 'documentation', 'delete');
 
-const approveRequestsView = checkPermission('rnd', 'approveRequests', 'view');
-const approveRequestsEdit = checkPermission('rnd', 'approveRequests', 'edit');
-
 const plantMasterView = checkPermission('rnd', 'plantMaster', 'view');
 const plantMasterAdd = checkPermission('rnd', 'plantMaster', 'add');
 const plantMasterEdit = checkPermission('rnd', 'plantMaster', 'edit');
@@ -199,10 +196,18 @@ router.delete('/expenses/:id', expensesDelete, deleteRDExpense);
 router.get('/machines', productMasterView, getMachines);
 router.post('/machines', productMasterAdd, createMachine);
 router.put('/machines/:id', productMasterEdit, updateMachine);
-router.put('/machines/:id/design-status', designApprovalEdit, updateDesignStatus);
-router.put('/machines/:id/release-status', designApprovalEdit, updateReleaseStatus);
 router.put('/machines/:id/discontinue', productMasterEdit, discontinueMachine);
 router.put('/machines/:id/reactivate', productMasterEdit, reactivateMachine);
+
+// ── Product Approval (Design + BOM + QC List + Prototype + Release) ─────────
+// One consolidated page (/r&d/design-approval) across Sub Child Part / Child
+// Part / Machine — see docs/product-approval-gate-redesign-discussion-2026-09.md.
+router.get('/approval/items', designApprovalView, getApprovalItems);
+router.get('/approval/items/:id', designApprovalView, getApprovalItemDetail);
+router.put('/approval/items/:id/design', designApprovalEdit, updateItemDesignStatus);
+router.put('/approval/items/:id/bom', designApprovalEdit, updateItemBomApproval);
+router.put('/approval/items/:id/qc', designApprovalEdit, updateItemQcApproval);
+router.put('/approval/items/:id/release', designApprovalEdit, updateItemReleaseStatus);
 
 // ── BOMs ─────────────────────────────────────────────────────────────────────
 // Cross-department read-only lookup only — Sales Order Form's minimum-billing
@@ -212,7 +217,9 @@ router.put('/machines/:id/reactivate', productMasterEdit, reactivateMachine);
 router.get('/boms/by-code/:code/cost', bomManagementView, getBOMCostByMachineCode);
 
 // ── Prototypes ────────────────────────────────────────────────────────────────
-router.get('/prototypes', prototypeView, getPrototypes);
+// The Approval page's Machine flow reads prototypes too, so a role with only
+// designApproval (no separate prototype grant) can still see them.
+router.get('/prototypes', checkAnyPermission([['rnd', 'prototype'], ['rnd', 'designApproval']], 'view'), getPrototypes);
 router.post('/prototypes', prototypeAdd, createPrototype);
 router.put('/prototypes/:id', prototypeEdit, updatePrototype);
 
@@ -308,12 +315,6 @@ router.get('/documents', documentationView, getDocuments);
 router.post('/documents', documentationAdd, rdDocumentUpload.single('file'), createDocument);
 router.delete('/documents/:id', documentationDelete, deleteDocument);
 
-//production rnd request
-router.get('/production-rnd-requests', approveRequestsView, getRDRequests);
-// PUT /api/rd-requests/:id/process
-// Body: { "action": "Approve" } OR { "action": "Reject", "rejectReason": "Incomplete requirements" }
-router.put('/:id/process', approveRequestsEdit, processRDRequest);
-router.get('/production-rnd-requests/:id/review', approveRequestsView, getRDRequestReviewData);
 // Master-options (RDMasterOption CRUD) is shared across three different
 // features (productMaster, motorMaster, plantMaster — confirmed via frontend:
 // ProductMaster.jsx, MotorMaster.jsx and PlantMaster.jsx all call this same

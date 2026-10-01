@@ -8,7 +8,6 @@ import {
   createOrder,
   verifyBOM,
   verifyDesign,
-  raiseRDRequest,
   getBomDesignStatus,
   getSubChildPartMaterialList,
   requestSubChildPartMaterialController,
@@ -91,7 +90,6 @@ router.get('/orders/active', ordersView, getActiveOrders);
 router.post('/orders', ordersAdd, createOrder);
 router.put('/orders/:id/verify-bom', ordersEdit, verifyBOM);
 router.put('/orders/:id/verify-design', ordersEdit, verifyDesign);
-router.put('/orders/:id/raise-rd-request', ordersEdit, raiseRDRequest);
 router.get('/orders/:id/bom-design-status', ordersView, getBomDesignStatus);
 router.get('/orders/:id/sub-child-part-material-list', ordersView, getSubChildPartMaterialList);
 router.post('/orders/:id/sub-child-part-material/request', ordersAdd, requestSubChildPartMaterialController);
