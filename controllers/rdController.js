@@ -1048,11 +1048,13 @@ export const getPrototypes = async (req, res) => {
     // Opt-in pagination: the "New Prototype" modal's machine picker and other
     // consumers expect the full unfiltered array — only paginate/filter when
     // page/limit is explicitly sent by the Prototype Management list view.
-    const { page, limit, status, withStatusCounts } = req.query;
+    const { page, limit, status, withStatusCounts, machine } = req.query;
     const isPaginated = !!(page || limit);
 
     const query = { company: companyId };
     if (status && status !== 'All') query.status = status;
+    // The consolidated Approval page lists one machine's prototypes at a time.
+    if (machine) query.machine = machine;
 
     let statusCounts;
     if (withStatusCounts === 'true') {
