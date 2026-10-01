@@ -55,6 +55,7 @@ import { raisePlainPurchaseRequest, raiseFabricationPurchaseRequest } from './ma
 import { checkAndReserve } from './materialReservationService.js';
 import { dimensionSignature } from './fabricationDemandService.js';
 import { createSubChildPartOrderForItem } from './subChildPartOrderService.js';
+import { isReleased } from './productApprovalService.js';
 import { buildOrderStepsFromProcessDefinition } from './processStepBuilderService.js';
 import notificationService from './notificationService.js';
 
@@ -595,6 +596,13 @@ export async function createChildPartOrderForItem(item, companyId, { demandSourc
   if (!DEMAND_SOURCES.includes(demandSource)) {
     throw new Error(`createChildPartOrderForItem: unknown demandSource "${demandSource}"`);
   }
+
+  // Product Approval Gate (docs/product-approval-gate-redesign-discussion-2026-09.md
+  // §3f): every caller of this function is automatic — the reorder cron and
+  // the Machine -> Child Part cascade — and neither may start a part's orders
+  // until R&D has Released it. The manual/internal path that builds the first
+  // unit for QC/Prototype never goes through here.
+  if (!isReleased(item)) return { created: false, reason: 'not-released' };
 
   const existing = await ProductionOrder.exists({
     subChildPartItem: item._id, orderKind: 'ChildPart', status: { $in: OPEN_STATUSES }, ...demandSourceMatch(demandSource, demandRefId),

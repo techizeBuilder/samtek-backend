@@ -1,6 +1,35 @@
 import mongoose from 'mongoose';
 import { ProcessCategorySchema } from './ProcessDefinitionSchema.js';
 
+// Product Approval Gate (see docs/product-approval-gate-redesign-discussion-2026-09.md).
+// The same four approvals sit in machineDetails / childPartDetails /
+// subChildPartDetails, under identical names, so one service
+// (services/productApprovalService.js) drives all three BOM tiers.
+// bomApproved is its OWN flag — independent of MachineBOM.isLocked ("Lock
+// BOM" keeps working exactly as before). qcListApproved is R&D's sign-off on
+// the item's own configured QCItemChecklist, reset whenever that checklist
+// is edited. Audit fields record who/when for each decision.
+const approvalGateFields = {
+  bomApproved: { type: Boolean, default: false },
+  bomApprovedAt: { type: Date, default: null },
+  bomApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  qcListApproved: { type: Boolean, default: false },
+  qcListApprovedAt: { type: Date, default: null },
+  qcListApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  designApprovedAt: { type: Date, default: null },
+  designApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  releasedAt: { type: Date, default: null },
+  releasedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+};
+// Child Part / Sub Child Part have no prior design/release state, so they get
+// the full set; Machine already has designStatus/releaseStatus/rejectionNote.
+const partApprovalFields = {
+  designStatus: { type: String, enum: ['Draft', 'Testing', 'Approved', 'Rejected'], default: 'Draft' },
+  releaseStatus: { type: String, enum: ['Not Released', 'Released'], default: 'Not Released' },
+  rejectionNote: { type: String, default: '' },
+  ...approvalGateFields,
+};
+
 const itemSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -196,6 +225,12 @@ const itemSchema = new mongoose.Schema({
     // Machine's own Total Weight once its BOM references Child Parts
     // instead of flat raw materials.
     unitWeightKg: { type: Number, default: 0 },
+    ...partApprovalFields,
+  },
+  // Child Part specific state — only the approval gate lives here today (its
+  // material/Sub Child Part list is on its own ChildPartBOM document).
+  childPartDetails: {
+    ...partApprovalFields,
   },
   // Universal active/discontinued toggle — client asked for this on both
   // Inventory items and Product Master machines ("Continue"/"Discontinue"),
@@ -234,6 +269,7 @@ const itemSchema = new mongoose.Schema({
     designStatus: { type: String, enum: ['Draft', 'Testing', 'Approved', 'Rejected'], default: 'Draft' },
     releaseStatus: { type: String, enum: ['Not Released', 'Released'], default: 'Not Released' },
     rejectionNote: { type: String, default: '' },
+    ...approvalGateFields,
     // Set the first time a ProductionOrder for this machine reaches 'Completed'
     // — see itemPricingService.js.
     firstBuiltAt: { type: Date, default: null },

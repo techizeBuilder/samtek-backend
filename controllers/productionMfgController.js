@@ -3,7 +3,6 @@ import ProductionTeam from '../models/ProductionTeam.js';
 import Sale from '../models/Sale.js';
 import QCJob from '../models/QCJob.js';
 import notificationService from '../services/notificationService.js';
-import RDRequest from '../models/RDRequest.js'
 import RDBOM from '../models/RDBOM.js';
 import mongoose from 'mongoose';
 import { Item } from '../models/Inventory.js'; // Adjust path
@@ -13,6 +12,7 @@ import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimens
 import { toMm } from '../utils/unitConversion.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
 import { buildMachineDesignFiles } from './rdController.js';
+import { computeDesignReadiness, isPurchaseMachine } from '../services/productApprovalService.js';
 import { buildFreshUnitProcesses } from '../services/processStepBuilderService.js';
 import { findSubChildPartMaterialLines, buildSubChildPartMaterialList, requestSubChildPartMaterial, getSubChildPartJobWorkRows, getSubChildPartUnissuedJobWorkMaterials } from '../services/childPartReorderService.js';
 import { findMachineMaterialLines, buildMachineMaterialList, requestMachineMaterial, resolveMachineOrderProcesses } from '../services/machineReorderService.js';
@@ -969,60 +969,19 @@ export const verifyDesign = async (req, res) => {
   }
 };
 
-// Fast-fetch utility
-const getTrueMachineCode = async (machineName, companyId) => {
-  const item = await Item.findOne({ name: machineName, companyId })
-    .select('code -_id')
-    .lean();
-
-  if (!item) throw new Error(`Machine name "${machineName}" not found in Inventory.`);
-  return item.code;
-};
-
-export const raiseRDRequest = async (req, res) => {
-  try {
-    const order = await ProductionOrder.findOne({
-      _id: req.params.id,
-      company: req.user.companyId
-    });
-
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-
-    // 1. Get the true code from inventory based on the machine name
-    const trueCode = await getTrueMachineCode(order.machineName, req.user.companyId);
-
-    // 2. Create the workspace for R&D
-    await RDRequest.create({
-      productionOrderId: order._id,
-      machineCode: trueCode, // Pass the corrected code
-      machineName: order.machineName,
-      company: req.user.companyId
-    });
-
-    // 3. Update the Production Order with the corrected code and new status
-    order.machineCode = trueCode;
-    order.rdRequestRaised = true;
-    order.status = 'BOM Pending';
-    await order.save();
-
-    res.json({ success: true, message: 'R&D Request raised successfully.', data: order });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
 // GET /api/production-mfg/orders/:id/bom-design-status
 //
-// Replaces the per-order "Raise R&D Request" cycle for the common case: if
-// R&D has already locked this machine's BOM (/r&d/bom-management) AND
-// approved its design (/r&d/design-approval — Item.machineDetails.designStatus
-// === 'Approved'), Production never needs to ask — it just gets what's
-// already there. Called whenever Process Execution loads an order; auto-sets
-// bomVerified/designVerified the first time both are true (same flags
-// raiseRDRequest's R&D-approval path already sets, so every existing reader
-// of them — including the Orders list — keeps working unchanged), then it's
-// a no-op on every later call. If either isn't ready yet, the frontend falls
-// back to the existing "Raise R&D Request" button/flow untouched.
+// Production's per-order gate, fully automatic (the manual "Raise R&D
+// Request" escape hatch was removed with the Product Approval Gate — see
+// docs/product-approval-gate-redesign-discussion-2026-09.md §3g): once this
+// item's BOM is locked (/r&d/bom-management) AND its design is approved
+// (/r&d/design-approval) — design approval being RECURSIVE, i.e. every Child
+// Part / Sub Child Part underneath is design-approved too — Production just
+// gets what's already there. Called whenever Process Execution loads an
+// order; auto-sets bomVerified/designVerified the first time both are true,
+// then it's a no-op on every later call. It deliberately does NOT wait on QC
+// List Approved, Prototype or Release — those gate Sales and the automatic
+// supply chain, not a specific order that's already underway.
 // Shared by both branches below — persists the auto-verify side effect and
 // builds the common part of the response. Kept as one place so a Machine
 // order and a Sub Child Part order both auto-verify/clear rdRequestRaised
@@ -1078,7 +1037,8 @@ export const getBomDesignStatus = async (req, res) => {
       // confirmed with the user 2026-09-16 rather than requiring every
       // referenced Sub Child Part to also have one before this counts as
       // approved.
-      const designApproved = !!item.image;
+      const designReadiness = await computeDesignReadiness(item, companyId);
+      const designApproved = designReadiness.ok;
       const designFiles = [];
       if (item.image) {
         designFiles.push({ _id: item._id, name: item.name, version: '', fileUrl: item.image, source: 'Child Part' });
@@ -1104,7 +1064,8 @@ export const getBomDesignStatus = async (req, res) => {
       return res.json({
         success: true,
         data: {
-          bomLocked, designApproved, designStatus: designApproved ? 'Present' : 'Missing',
+          bomLocked, designApproved, designStatus: designApproved ? 'Approved' : 'Pending',
+          designBlockers: designReadiness.blockers,
           bomId: null,
           designFiles, materials,
           autoVerified: bomLocked && designApproved,
@@ -1140,8 +1101,11 @@ export const getBomDesignStatus = async (req, res) => {
     const found = await findMachineMaterialLines(machineItem._id, companyId);
     const bom = found?.bom || null;
     const bomLocked = !!bom?.isLocked;
-    const designStatus = machineItem.machineDetails?.designStatus || 'Draft';
-    const designApproved = designStatus === 'Approved';
+    // A Purchase Machine (not forwarded to Design & Prototype) has no Design
+    // stage at all, so it can't be held up by one.
+    const designReadiness = isPurchaseMachine(machineItem) ? { ok: true, blockers: [] } : await computeDesignReadiness(machineItem, companyId);
+    const designApproved = designReadiness.ok;
+    const designStatus = isPurchaseMachine(machineItem) ? 'Not Required' : (designApproved ? 'Approved' : (machineItem.machineDetails?.designStatus || 'Draft'));
     const designFiles = await buildMachineDesignFiles(machineItem._id, companyId);
 
     const autoVerifiedNow = await applyAutoVerify(order, bomLocked, designApproved);
@@ -1150,6 +1114,7 @@ export const getBomDesignStatus = async (req, res) => {
       success: true,
       data: {
         bomLocked, designApproved, designStatus,
+        designBlockers: designReadiness.blockers,
         bomId: bom?._id || null,
         // MachineBOM's own download route is keyed by the machine ITEM's id
         // (GET /api/rd/machine-bom/:machineId/download), unlike the old
@@ -1920,8 +1885,8 @@ export const addMaterialDemand = async (req, res) => {
     const sourceItem = await Item.findOne({ code: materialCode.trim(), companyId });
 
     // Fabrication materials (sourceItem.fabricationRef set) are keyed by
-    // weight+cut, not a flat code — mirrors rdController.js's
-    // processRDRequest merge-key logic. targetDemandCode, when given, pins
+    // weight+cut, not a flat code (the same merge-key rule
+    // the Initial BOM approval used before it was removed). targetDemandCode, when given, pins
     // this request to one EXACT existing demand line (Production adjusting
     // an already-demanded cut's quantity) instead of deriving a key from
     // freshly-entered dimensions — avoids a mistyped dimension silently
@@ -1984,11 +1949,16 @@ export const addMaterialDemand = async (req, res) => {
       });
     }
 
-    const originalBomQty = materialExists && materialExists.bomQuantity !== undefined
-      ? materialExists.bomQuantity : null;
-
-    // Capture previous quantity so we can revert if R&D rejects
-    const previousQuantity = materialExists ? materialExists.quantity : null;
+    // R&D no longer reviews extra-material requests (the Material Change
+    // queue was removed with the Product Approval Gate), so a demand change
+    // takes effect immediately and is routed straight to the store.
+    // Status routing: Production may already hold, or be about to receive,
+    // at least the new quantity.
+    const newQty = Number(quantity);
+    const held = materialExists ? Math.max(materialExists.transferredQuantity || 0, materialExists.issuedQuantity || 0) : 0;
+    let newStatus = 'Requested';
+    if (materialExists && held >= newQty) newStatus = 'Issued';
+    else if (materialExists && (materialExists.transferredQuantity || 0) > (materialExists.issuedQuantity || 0)) newStatus = 'In Transit';
 
     let updatedOrder;
     if (materialExists) {
@@ -1996,8 +1966,8 @@ export const addMaterialDemand = async (req, res) => {
         { _id: orderId, "materialDemands.materialCode": demandMaterialCode },
         {
           $set: {
-            "materialDemands.$.status": "Pending R&D",
-            "materialDemands.$.quantity": Number(quantity),
+            "materialDemands.$.status": newStatus,
+            "materialDemands.$.quantity": newQty,
             "materialDemands.$.unit": unit
           }
         },
@@ -2010,7 +1980,7 @@ export const addMaterialDemand = async (req, res) => {
           $push: {
             materialDemands: {
               materialCode: demandMaterialCode, materialName, bomQuantity: null,
-              quantity: Number(quantity), unit, status: 'Pending R&D',
+              quantity: newQty, unit, status: newStatus,
               ...fabricationFields,
             }
           }
@@ -2019,23 +1989,7 @@ export const addMaterialDemand = async (req, res) => {
       );
     }
 
-    await RDRequest.create({
-      productionOrderId: order._id,
-      machineCode: order.machineCode,
-      machineName: order.machineName,
-      requestType: 'Material Change',
-      materialChangeDetails: {
-        materialCode: demandMaterialCode,
-        materialName,
-        bomQuantity: originalBomQty,
-        requestedQuantity: Number(quantity),
-        previousQuantity, // 👈 Saved for Rejection Rollbacks
-        unit
-      },
-      company: companyId
-    });
-
-    res.json({ success: true, data: updatedOrder, message: 'Demand sent to R&D for approval.' });
+    res.json({ success: true, data: updatedOrder, message: 'Material demand updated.' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -2575,9 +2529,9 @@ export const startProcess = async (req, res) => {
     // NEW GATEKEEPERS: BOM & Material Issue Validation
     // ─────────────────────────────────────────────────────────────
     // bomVerified/materialIssued only ever mean anything for a Machine
-    // order — they're flipped exclusively by processRDRequest's Initial BOM
-    // approval workflow against RDBOM/MachineBOM (see
-    // bom-hierarchy-redesign-build-2026-09.md §20). Neither Child Part nor
+    // order — they're set automatically by getBomDesignStatus once the BOM is
+    // locked and the design approved (recursive; see
+    // product-approval-gate-redesign-discussion-2026-09.md §3g). Neither Child Part nor
     // Sub Child Part has any R&D verification concept at any tier — both
     // must skip this gate, not just one of them.
     //

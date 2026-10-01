@@ -11,6 +11,7 @@ import QCJob from '../models/QCJob.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import { computeOrderFinancials } from '../utils/orderFinancials.js';
+import { findUnsellableItems } from '../services/sellableItemsService.js';
 import {
   ensureSaleForOrder,
   applyStoreDecisionToItem,
@@ -104,6 +105,17 @@ const createOrder = async (req, res) => {
         status: false,
         message: 'Validation failed.',
         errors
+      });
+    }
+
+    // Product Approval Gate: unreleased / discontinued items can't be ordered,
+    // even by a direct API call that bypasses the picker.
+    const unsellable = await findUnsellableItems(products.map(p => p.productId));
+    if (unsellable.length > 0) {
+      return res.status(400).json({
+        status: false,
+        message: `Not available for sale: ${unsellable.map(i => `${i.code} (${i.reason})`).join(', ')}`,
+        unsellable,
       });
     }
 
@@ -473,6 +485,20 @@ const updateOrder = async (req, res) => {
 
     // Update priority if provided
     if (req.body.priority) order.priority = req.body.priority;
+
+    // Product Approval Gate — only items NEW to this order are checked; one
+    // that was already on it and has since been pulled back stays editable.
+    if (products && products.length > 0) {
+      const alreadyOnOrder = new Set((order.products || []).map(p => String(p.product)));
+      const unsellable = await findUnsellableItems(products.map(p => p.productId).filter(id => !alreadyOnOrder.has(String(id))));
+      if (unsellable.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Not available for sale: ${unsellable.map(i => `${i.code} (${i.reason})`).join(', ')}`,
+          unsellable,
+        });
+      }
+    }
 
     // Update products if provided
     if (products && products.length > 0) {

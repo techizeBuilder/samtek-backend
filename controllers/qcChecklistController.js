@@ -7,6 +7,7 @@ import RDBOM from '../models/RDBOM.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
 import MachineBOM from '../models/MachineBOM.js';
 import { flattenProcessDefinition } from '../services/processStepBuilderService.js';
+import { invalidateQcApproval } from '../services/productApprovalService.js';
 
 // Item-level (and legacy part-level) checklists are never step-scoped — every
 // filter for them pins both step keys to null so a per-step row (QC
@@ -341,6 +342,8 @@ export const saveItemChecklist = async (req, res) => {
       { $set: { selectedItems: resolved, updatedBy: req.user._id }, $setOnInsert: target.filter },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+    // Product Approval Gate: editing the checklist voids R&D's QC List sign-off.
+    await invalidateQcApproval(doc.item, req.user.companyId);
     res.json({ success: true, data: doc });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -492,6 +495,8 @@ export const saveItemStepChecklist = async (req, res) => {
       { $set: { selectedItems: resolved, updatedBy: req.user._id }, $setOnInsert: filter },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+    // Product Approval Gate: editing the checklist voids R&D's QC List sign-off.
+    await invalidateQcApproval(doc.item, req.user.companyId);
     res.json({ success: true, data: doc });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -507,6 +512,7 @@ export const deleteItemStepChecklist = async (req, res) => {
     const filter = stepFilter(req, res, target);
     if (!filter) return;
     await QCItemChecklist.deleteOne(filter);
+    await invalidateQcApproval(filter.item, req.user.companyId);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

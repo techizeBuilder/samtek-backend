@@ -15,17 +15,18 @@ function buildItemEntry(item) {
   };
 }
 
-// A Product Master machine forwarded to Design & Prototype is only sellable
-// once Prototype has released it for production (machineDetails.releaseStatus
-// 'Released') — until then it's still a design in progress, not a product.
-// A machine never forwarded (e.g. a bought-in Purchase Machine) never goes
-// through that pipeline at all, so it stays sellable as before. Found
-// 2026-09-25: this list had no release check at all, so a brand-new Draft /
-// Not Released machine (M-311) showed up in Sales' Leads picker immediately.
-// Mongo `$nor` form so it composes with any other query keys ($or search).
+// A Machine is only sellable once R&D has Released it through the Product
+// Approval Gate (machineDetails.releaseStatus 'Released') — see
+// docs/product-approval-gate-redesign-discussion-2026-09.md. Machines forwarded
+// to Design & Prototype need Design + BOM + QC List + a passed Prototype first;
+// a Purchase Machine needs only its QC List approved — but BOTH must be
+// Released, so this no longer depends on forwardToNextPhase. (Found
+// 2026-09-25: this list once had no release check at all, so a brand-new
+// Draft machine showed up in Sales' Leads picker immediately.) Motors aren't
+// gated. Mongo `$nor` form so it composes with any other query keys ($or
+// search).
 export const NOT_RELEASED_FOR_SALE = {
   productKind: 'Machine',
-  'machineDetails.forwardToNextPhase': true,
   'machineDetails.releaseStatus': { $ne: 'Released' },
 };
 
@@ -37,10 +38,24 @@ export const NOT_RELEASED_FOR_SALE = {
 export function unavailableForSaleReason(item) {
   if (!item) return null;
   if (item.isDiscontinued) return 'Discontinued';
-  if (item.productKind === 'Machine' && item.machineDetails?.forwardToNextPhase && item.machineDetails?.releaseStatus !== 'Released') {
+  if (item.productKind === 'Machine' && item.machineDetails?.releaseStatus !== 'Released') {
     return 'Not Released';
   }
   return null;
+}
+
+// Server-side enforcement for write paths (Order create/update). The pickers
+// already hide these items, but a direct API call used to slip straight
+// through. Returns [{ _id, code, name, reason }] for every given item id
+// that can't be sold right now (empty array = all fine).
+export async function findUnsellableItems(itemIds) {
+  const ids = [...new Set((itemIds || []).filter(Boolean).map(String))];
+  if (ids.length === 0) return [];
+  const items = await Item.find({ _id: { $in: ids } })
+    .select('code name isDiscontinued productKind machineDetails.releaseStatus').lean();
+  return items
+    .map(i => ({ _id: String(i._id), code: i.code, name: i.name, reason: unavailableForSaleReason(i) }))
+    .filter(i => i.reason);
 }
 
 /**
