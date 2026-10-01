@@ -201,29 +201,26 @@ const setFields = (item, fields) =>
     { new: true }
   ).lean();
 
-// Design workflow: Draft -> Testing -> Approved/Rejected (Rejected can be
-// re-submitted to Testing). Approving is refused while any part underneath
-// isn't design-approved (§3c).
-export async function setDesignStatus({ id, companyId, userId, status, note }) {
+// Design Approved — a simple approve/revoke, same flow as BOM and QC List
+// (the old Draft -> Testing -> Approved/Rejected steps were dropped
+// 2026-10-01). Approving is refused while any part underneath isn't
+// design-approved (§3c); revoking sends the design back to Draft. Any item
+// still carrying a legacy 'Testing'/'Rejected' status simply counts as not
+// approved.
+export async function setDesignApproved({ id, companyId, userId, approved }) {
   const item = await loadItem(id, companyId);
   if (!item) return fail(404, 'Item not found');
   if (isPurchaseMachine(item)) return fail(400, 'A Purchase Machine has no Design stage');
-  if (!['Testing', 'Approved', 'Rejected', 'Draft'].includes(status)) return fail(400, 'Invalid design status');
 
-  const current = approvalOf(item).designStatus;
-  if (status === 'Approved') {
-    if (current !== 'Testing') return fail(400, 'Send the design to Testing before approving it');
+  if (approved) {
     const sub = [];
     for (const part of await getReferencedParts(item, companyId)) sub.push(...(await computeDesignReadiness(part, companyId)).blockers);
     if (sub.length) return fail(409, 'Approve the parts underneath first — their designs are not approved yet', sub);
+    return { ok: true, item: await setFields(item, { designStatus: 'Approved', rejectionNote: '', designApprovedAt: new Date(), designApprovedBy: userId }) };
   }
-  if (status === 'Rejected' && !String(note || '').trim()) return fail(400, 'A rejection reason is required');
-
-  const fields = { designStatus: status, rejectionNote: status === 'Rejected' ? String(note).trim() : '' };
-  if (status === 'Approved') Object.assign(fields, { designApprovedAt: new Date(), designApprovedBy: userId });
-  // Any design change pulls a previously granted Release back — the verdict
-  // no longer matches what R&D approved.
-  if (status !== 'Approved' && approvalOf(item).releaseStatus === 'Released') Object.assign(fields, { releaseStatus: 'Not Released', releasedAt: null, releasedBy: null });
+  const fields = { designStatus: 'Draft', designApprovedAt: null, designApprovedBy: null };
+  // The Release rested on this design, so it is pulled back too.
+  if (approvalOf(item).releaseStatus === 'Released') Object.assign(fields, { releaseStatus: 'Not Released', releasedAt: null, releasedBy: null });
   return { ok: true, item: await setFields(item, fields) };
 }
 

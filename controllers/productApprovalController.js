@@ -5,7 +5,7 @@ import { Item } from '../models/Inventory.js';
 import {
   APPROVAL_KINDS, approvalOf, isPurchaseMachine,
   computeDesignReadiness, computeReleaseReadiness, computeQcReadiness, getPrototypeStatus,
-  setDesignStatus, setBomApproved, setQcListApproved, setReleaseStatus, listApprovalItems,
+  setDesignApproved, setBomApproved, setQcListApproved, setReleaseStatus, listApprovalItems,
 } from '../services/productApprovalService.js';
 import { buildMachineDesignFiles } from './rdController.js';
 
@@ -57,9 +57,9 @@ export const getApprovalItemDetail = async (req, res) => {
 
 const base = (req) => ({ id: req.params.id, companyId: req.user.companyId, userId: req.user._id });
 
-// PUT /approval/items/:id/design   { status: Draft|Testing|Approved|Rejected, note? }
+// PUT /approval/items/:id/design   { approved: boolean }
 export const updateItemDesignStatus = async (req, res) => {
-  try { respond(res, await setDesignStatus({ ...base(req), status: req.body.status, note: req.body.note })); } catch (err) { fail500(res, err); }
+  try { respond(res, await setDesignApproved({ ...base(req), approved: !!req.body.approved })); } catch (err) { fail500(res, err); }
 };
 // PUT /approval/items/:id/bom      { approved: boolean }
 export const updateItemBomApproval = async (req, res) => {

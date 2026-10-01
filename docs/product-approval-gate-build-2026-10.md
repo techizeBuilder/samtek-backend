@@ -4,7 +4,7 @@ Plain-language change report for `product-approval-gate-redesign-discussion-2026
 
 ## What changed for R&D
 - **One Approval page** (`/r&d/design-approval`, sidebar "Approval") replaces Design Approval, Prototype Management and Approve Requests. Three tabs — Sub Child Part, Child Part, Machine — each row shows Design, BOM, QC List, Prototype (Machines) and Release as chips. **Manage** opens the step-by-step panel.
-- **Design** is recursive: a Machine can't be design-approved until every Child Part (and their Sub Child Parts) underneath is. The refusal names exactly which parts to approve first.
+- **Design** is a one-click Approve / Revoke, like BOM and QC List (no Testing or Reject steps). It is recursive: a Machine can't be design-approved until every Child Part (and their Sub Child Parts) underneath is. The refusal names exactly which parts to approve first.
 - **BOM Approved** is its own sign-off, separate from "Lock BOM" (which is untouched). Needs an actual BOM and every part underneath BOM-approved.
 - **QC List Approved** signs off the checklist configured on that item. Every configured stage must have rows, and every QC-flagged BOM step needs its checklist. **Editing the checklist afterwards voids the sign-off** (and pulls Release back).
 - **Prototype** testing now lives inside a Machine's Manage panel. One passed prototype is required before release.
