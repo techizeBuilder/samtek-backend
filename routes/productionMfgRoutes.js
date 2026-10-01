@@ -47,11 +47,9 @@ import {
   getChildPartUnitChecklistRows,
   saveChildPartUnitChecklist,
   completeChildPartUnitPainting,
-  getFinalChecklist,
-  saveFinalChecklist,
-  getQcCheckpoint,
-  submitQcCheckpoint,
   completeFinalProcessStep,
+  submitBatchQcStep,
+  submitUnitQcStep,
 } from '../controllers/productionMfgController.js';
 import {
   assignSubChildPartOrderTeam,
@@ -147,6 +145,11 @@ router.put('/orders/:id/processes/:stepIndex/notes', ordersEdit, updateProcessNo
 // segment, same ordering caveat as complete-painting below: a distinct
 // fixed string after :stepIndex, so it never collides with plain /complete.
 router.put('/orders/:id/processes/:stepIndex/complete-final', ordersEdit, completeFinalProcessStep);
+// QC multi-checkpoint redesign (slice 2, 2026-09-26) — Production's submit-
+// only action for a Sub Child Part's QC step (no ?unit=, always whole-batch).
+router.put('/orders/:id/processes/:stepIndex/batch-qc-step/submit', ordersEdit, submitBatchQcStep);
+// Stage B (2026-09-26) — same idea, per-unit, for a Child Part order.
+router.put('/orders/:id/processes/:stepIndex/unit-qc-step/submit', ordersEdit, submitUnitQcStep);
 
 // Sub-processes / sub-entries for steps like Fabrication
 router.post('/orders/:id/processes/:stepIndex/sub-entries', ordersAdd, addSubEntry);
@@ -171,19 +174,6 @@ router.put('/orders/:id/parts-qc/:partCheckId/:stage', ordersEdit, savePartCheck
 router.put('/orders/:id/child-part/:unitNumber/complete-painting', ordersEdit, completeChildPartUnitPainting);
 router.get('/orders/:id/child-part/:unitNumber/:stage', ordersView, getChildPartUnitChecklistRows);
 router.put('/orders/:id/child-part/:unitNumber/:stage', ordersEdit, saveChildPartUnitChecklist);
-
-// ── Final Testing checklist (every order — R&D's Final stage) ─────────────
-router.get('/orders/:id/final-checklist', ordersView, getFinalChecklist);
-router.put('/orders/:id/final-checklist', ordersEdit, saveFinalChecklist);
-
-// ── QC checkpoint (Stage 3b, 2026-09-23) — the ONE real QC checkpoint on a
-// dynamic Process Definition order, wherever Phase 1's qcRequired flag
-// (or Sub Child Part's fixed last-step rule) puts it. Generalizes
-// final-checklist/sub-child-part/checklist/child-part's :stage submission
-// into one endpoint driven by position — see submitQcCheckpoint's own
-// comment for exactly how it dispatches per order kind.
-router.get('/orders/:id/qc-checkpoint', ordersView, getQcCheckpoint);
-router.put('/orders/:id/qc-checkpoint/submit', ordersEdit, submitQcCheckpoint);
 
 // ── Teams ───────────────────────────────────────────────────────────────────
 router.get('/teams', manpowerView, getTeams);

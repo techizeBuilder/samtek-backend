@@ -26,6 +26,7 @@ export function flattenProcessDefinition(processDefinition) {
         materialRefs: proc.materialRefs || [],
         materialQuantities: proc.materialQuantities || [],
         qcRequired: !!proc.qcRequired,
+        finalQc: !!proc.finalQc,
       });
     }
   }
@@ -93,6 +94,7 @@ export function buildOrderStepsFromProcessDefinition(processDefinition) {
     materialRefs: step.materialRefs,
     materialQuantities: step.materialQuantities,
     qcRequired: step.qcRequired,
+    finalQc: step.finalQc,
     outsourceStatus: step.type === 'OutSource' ? 'NotStarted' : 'NotStarted',
     status: 'Pending',
     assignedTeam: null,
@@ -131,6 +133,7 @@ export function buildFreshUnitProcesses(sourceProcesses) {
     materialRefs: p.materialRefs,
     materialQuantities: p.materialQuantities,
     qcRequired: p.qcRequired,
+    finalQc: p.finalQc,
     outsourceStatus: 'NotStarted',
     status: 'Pending',
     assignedTeam: null,

@@ -64,53 +64,161 @@ const PartQCEntrySchema = new mongoose.Schema({
   rejectReason: { type: String, default: '' },
 }, { timestamps: true });
 
-// One entry per UNIT of a Child Part order (source:'ChildPartProduction')
-// — direct sibling of PartQCEntrySchema above, same nested-under-one-job
-// shape, just keyed by unitNumber instead of childPartId/subChildPartId.
-// Confirmed with the user (2026-09-16) as the deliberate pattern to mirror:
-// ONE QCJob per Child Part order, but each unit reaches/leaves QC entirely
-// independently of its siblings — some units can be mid-Fabrication while
-// another is already Approved and painting. No assignedTeam/startedAt of
-// its own (unlike PartQCEntrySchema) — Child Part already tracks those at
-// the real processes[]/extraUnits[] step level, so this only needs to own
-// the checklist + the QC verdict.
+// QC multi-checkpoint redesign (2026-09-26, slice 2 — see
+// server/docs/qc-multi-checkpoint-redesign-discussion-2026-09.md). Production
+// no longer self-checks: it only submits a step, and QC fills the checklist
+// and decides. One layer, not two — the old ChecklistItemSchema's
+// actualValue/status-vs-qcStatus/qcRemarks split existed only because
+// Production filled first and QC verified second; that's gone, so this
+// collapses back to one fill, by QC. `source` distinguishes a Machine step's
+// Process rows from its Final rows on the one step that carries both flags
+// (finalQc + qcRequired) — everywhere else it's always 'process'.
+const QCFilledRowSchema = new mongoose.Schema({
+  parameter: { type: String, required: true },
+  standardValue: { type: String, default: '' },
+  type: { type: String, enum: ['checkbox', 'value'], default: 'checkbox' },
+  actualValue: { type: String, default: '' },
+  status: { type: String, enum: ['Pending', 'Pass', 'Fail'], default: 'Pending' },
+  remarks: { type: String, default: '' },
+  source: { type: String, enum: ['process', 'final'], default: 'process' },
+}, { _id: false });
+
+// One submit-then-decide cycle on a single QC-flagged step, for a Child
+// Part/Machine unit. A reject doesn't overwrite the previous attempt — it
+// stays in `steps[].attempts[]` as history, and Production's resubmission
+// pushes a NEW attempt (confirmed with the user: "how qc will work on
+// resubmitted" — every attempt kept, full re-check each time).
+const StepAttemptSchema = new mongoose.Schema({
+  attemptNumber: { type: Number, required: true },
+  submittedAt: { type: Date, default: null },
+  submittedBy: { type: String, default: '' },
+  rows: { type: [QCFilledRowSchema], default: [] },
+  decidedAt: { type: Date, default: null },
+  decidedBy: { type: String, default: '' },
+  decision: { type: String, enum: ['', 'Pass', 'Reject'], default: '' },
+  rejectReason: { type: String, default: '' },
+}, { _id: true, timestamps: true });
+
+// One QC-flagged BOM step's own history, for one unit. A unit can now have
+// SEVERAL of these (replacing the old single-checkpoint-per-order rule) —
+// identified by category+stepName, since that's the same key BOM Management/
+// QC Parameters already use (QCItemChecklist.stepCategory/stepName, slice 1).
+const StepEntrySchema = new mongoose.Schema({
+  category: { type: String, required: true },
+  stepName: { type: String, required: true },
+  // Machine only — this step also carries the machine's mandatory Final
+  // checklist (see QCFilledRowSchema's own `source` tag) on top of its
+  // Process one, if it's also qcRequired.
+  finalQc: { type: Boolean, default: false },
+  // Mirrors the latest attempt's own state — same convention the old
+  // per-unit `status` used, just one per step instead of one per unit.
+  // 'Awaiting Production': nothing submitted yet, or rejected and not yet
+  // resubmitted. 'QC Pending': submitted, QC hasn't decided the latest
+  // attempt. 'Approved'/'Rejected': the latest attempt's own decision.
+  status: { type: String, enum: ['Awaiting Production', 'QC Pending', 'Approved', 'Rejected'], default: 'Awaiting Production' },
+  attempts: { type: [StepAttemptSchema], default: [] },
+  // Set only when this step is the true last step of the flattened
+  // sequence — Production reports cost/expense once, on submission, and the
+  // QC decision applies it only once Approved (same "Production uploads it,
+  // QC's approval triggers the credit" split every order kind already uses).
+  pendingProductionCost: { type: Number, default: null },
+  pendingProductionExpense: { type: Number, default: null },
+}, { _id: true, timestamps: true });
+
+// One entry per UNIT of a Child Part order (source:'ChildPartProduction') or
+// a per-unit Machine order — direct sibling of PartQCEntrySchema above, same
+// nested-under-one-job shape, just keyed by unitNumber instead of
+// childPartId/subChildPartId. Confirmed with the user (2026-09-16) as the
+// deliberate pattern to mirror: ONE QCJob per order, but each unit reaches/
+// leaves QC entirely independently of its siblings. No assignedTeam/
+// startedAt of its own — Child Part/Machine already track those at the real
+// processes[]/extraUnits[] step level, so this only needs to own the
+// checklists + the QC verdicts.
+//
+// `steps[]` (2026-09-26, slice 2) is the NEW home for what used to sit
+// directly on the unit (`initial`/`process`/`status`/`producedBy`/`qcBy`/
+// `pendingProductionCost`) — a unit can now have several independent QC
+// steps, so all of that moves down into StepEntrySchema, one per step.
+// Nothing pre-listed: an entry is appended to `steps[]` only the first time
+// that step is actually submitted, per the design ("a step appears in the
+// QC job only when it is submitted").
+//
+// The old flat fields below stay on the schema, UNUSED by `steps[]`-based
+// orders, only because slice 2 is built and tested one order kind at a time
+// (Sub Child Part first, per the discussion doc) — Child Part and Machine's
+// CURRENT single-checkpoint code (getQcCheckpoint/submitQcCheckpoint/
+// decideChildPartUnit, untouched until that same slice's Child Part/Machine
+// stages) still reads/writes these directly. Remove them once every order
+// kind is migrated onto `steps[]` (slice 2's own cleanup, not slice 4 — that
+// one's for the OLDER single-checkpoint design, a separate thing).
 const UnitQCEntrySchema = new mongoose.Schema({
   unitNumber: { type: Number, required: true },
+  steps: { type: [StepEntrySchema], default: [] },
   initial: { type: [ChecklistItemSchema], default: [] },
   process: { type: [ChecklistItemSchema], default: [] },
-  // Same 4-state lifecycle PartQCEntrySchema.status uses, same meaning:
-  // 'Awaiting Production' (this unit's Assembly isn't done yet) -> 'QC
-  // Pending' (Production saved Process, automatic hand-off, no separate
-  // submit action — see saveChildPartUnitChecklist) -> 'Approved'/'Rejected'.
-  // A Rejected entry needs no explicit reopen: Production just re-edits and
-  // resaves (editable while 'Awaiting Production' OR 'Rejected'), which
-  // flips it straight back to 'QC Pending'.
   status: { type: String, enum: ['Awaiting Production', 'QC Pending', 'Approved', 'Rejected'], default: 'Awaiting Production' },
   producedBy: { type: String, default: '' },
   producedAt: { type: Date, default: null },
   qcBy: { type: String, default: '' },
   qcDate: { type: String, default: null },
   rejectReason: { type: String, default: '' },
-  // Stage 3b (2026-09-23) — set only when this unit's ONE QC checkpoint
-  // (Phase 1's qcRequired flag) happens to sit on the true last step of a
-  // dynamic Process Definition, a real BOM shape the old fixed
-  // Fabrication->Assembly->Painting pipeline never allowed (Painting always
-  // came after Assembly there). Mirrors finalCheckProductionCost/Expense
-  // below (Machine/Sub Child Part's flat-checklist equivalent) — Production
-  // reports cost/expense once, on submission (productionMfgController.js's
-  // submitQcCheckpoint), and decideChildPartUnit applies it once QC
-  // approves, the same "Production uploads it, QC's approval just triggers
-  // the credit" split every other order kind already uses.
   pendingProductionCost: { type: Number, default: null },
   pendingProductionExpense: { type: Number, default: null },
-  // Per-unit Machine only (2026-09-24) — set once this unit is fully done:
-  // checkpoint QC-approved AND its true last step finished, whichever came
-  // last (productionMfgController.js's completeMachineUnit). That is the
-  // moment it counts toward the Sale item's approvedQty (or machine stock,
-  // for a no-Sale order) — also what makes the trigger idempotent, and
-  // what the Packaging Queue counts as "N of M units ready".
+  // Per-unit Machine (and, from slice 2, Child Part) — set once this unit is
+  // fully done: every QC step Approved AND its true last step finished,
+  // whichever came last (productionMfgController.js's completeMachineUnit /
+  // the Child Part equivalent). That is the moment it counts toward the
+  // Sale item's approvedQty (or stock, for a no-Sale order) — also what
+  // makes the trigger idempotent, and what the Packaging Queue counts as
+  // "N of M units ready" (packagingDispatchController.js reads only this
+  // field on unitChecks[], untouched by the steps[] reshape above).
   readyAt: { type: Date, default: null },
 }, { timestamps: true });
+
+// One submit-then-decide cycle on a Sub Child Part's whole-batch QC step.
+// Unlike the unit-based StepAttemptSchema, a decision here is a QUANTITY
+// split, not a plain Pass/Reject — QC splits whatever was submitted into
+// Passed/Rework/Scrap (must sum to qtySubmitted), with a reason required
+// once Rework or Scrap is non-zero.
+const BatchStepAttemptSchema = new mongoose.Schema({
+  attemptNumber: { type: Number, required: true },
+  qtySubmitted: { type: Number, required: true },
+  submittedAt: { type: Date, default: null },
+  submittedBy: { type: String, default: '' },
+  rows: { type: [QCFilledRowSchema], default: [] },
+  decidedAt: { type: Date, default: null },
+  decidedBy: { type: String, default: '' },
+  passedQty: { type: Number, default: null },
+  reworkQty: { type: Number, default: null },
+  scrapQty: { type: Number, default: null },
+  reason: { type: String, default: '' },
+}, { _id: true, timestamps: true });
+
+// One QC-flagged BOM step's own history, for a Sub Child Part order's whole
+// build quantity (Sub Child Part is always handled as one physical batch,
+// never per-unit — confirmed with the user: "sub child part is deal with in
+// whole qty"). `qtyEnteringStep` is fixed once, the first time this step is
+// reached — order.orderQuantity for the very first QC step, or the previous
+// QC step's own resolved `passedQty` for any step after it (whatever
+// survived every earlier step's scrap). A step is fully resolved once
+// `passedQty + scrapQty === qtyEnteringStep && reworkPendingQty === 0` — the
+// next step (or, on the true last step, stock/Sale crediting) reads that off
+// the real processes[] step's own `status`, exactly the same "previous step
+// Completed" gate every other step already uses (see submitBatchQcDecision).
+const BatchStepEntrySchema = new mongoose.Schema({
+  category: { type: String, required: true },
+  stepName: { type: String, required: true },
+  qtyEnteringStep: { type: Number, default: null },
+  passedQty: { type: Number, default: 0 },
+  scrapQty: { type: Number, default: 0 },
+  // Currently out for rework, not yet resubmitted — 0 means this step has
+  // nothing outstanding (either never had a reject, or the rework already
+  // came back and was itself decided).
+  reworkPendingQty: { type: Number, default: 0 },
+  attempts: { type: [BatchStepAttemptSchema], default: [] },
+  pendingProductionCost: { type: Number, default: null },
+  pendingProductionExpense: { type: Number, default: null },
+}, { _id: true, timestamps: true });
 
 const QCJobSchema = new mongoose.Schema({
   qcJobId: { type: String, unique: true },
@@ -152,10 +260,14 @@ const QCJobSchema = new mongoose.Schema({
   // outsource-manufactured product — see PartQCEntrySchema's own comment.
   partChecks: { type: [PartQCEntrySchema], default: [] },
   // Empty for every job except source:'ChildPartProduction' and a dynamic-
-  // Process-Definition Machine order's job (2026-09-24 — the same per-unit
-  // model, single-stage: only process[] is used) — see UnitQCEntrySchema's
-  // own comment.
+  // Process-Definition Machine order's job — see UnitQCEntrySchema's own
+  // comment.
   unitChecks: { type: [UnitQCEntrySchema], default: [] },
+  // Empty for every job except source:'SubChildPartProduction' with at
+  // least one QC-flagged step (slice 2) — see BatchStepEntrySchema's own
+  // comment. Sibling of unitChecks, same lazy-append convention, just
+  // whole-batch instead of per-unit.
+  batchSteps: { type: [BatchStepEntrySchema], default: [] },
   // Set once Production fills in `checklist` above themselves, on the Final
   // Testing process step (see productionMfgController.js's
   // saveFinalChecklist) — their own pre-flight record, same rows QC then

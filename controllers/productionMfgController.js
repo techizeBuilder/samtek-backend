@@ -31,7 +31,8 @@ import PurchaseRequest from '../models/PurchaseRequest.js';
 import RFQ from '../models/RFQ.js';
 import Purchase from '../models/Purchase.js';
 import RDChildPart from '../models/RDChildPart.js';
-import { ensurePartChecksStructure, resolvePartChecklistRows, resolveChildPartUnitChecklistRows, ensureFlatChecklist, resolveFlatChecklistRows, attachPartReference, MANUFACTURING_SOURCE_TYPES } from '../services/qcChecklistPullService.js';
+import { ensurePartChecksStructure, resolvePartChecklistRows, resolveChildPartUnitChecklistRows, attachPartReference, MANUFACTURING_SOURCE_TYPES } from '../services/qcChecklistPullService.js';
+import { getQcStepIndices, needsUnitSteps, needsBatchSteps, submitBatchStepForQC, submitUnitStepForQC } from '../services/qcStepService.js';
 
 // Department-Head-only gate for Issue Material + Receive — mirrors
 // productionExpenseController.js's own HEAD_ROLES/canManage pattern exactly,
@@ -72,7 +73,7 @@ export async function generateOrderId(companyId) {
 // only ever coming into existence at the very end. Client's own reasoning:
 // one record per machine, so its full QC history is in one place, not
 // scattered across several jobs (see QCJob.js's own comment).
-function qcJobSourceForOrder(order) {
+export function qcJobSourceForOrder(order) {
   // orderKind:'SubChildPart' orders are also created with source:'Stock' (see
   // subChildPartOrderService.js) — same as a Machine built for the
   // company's own stock — so without this branch they'd collide with that
@@ -104,6 +105,7 @@ export async function ensureQCJobForOrder(order, sentBy, userId) {
     // the above — a job is never both sources at once).
     if (await ensurePartChecksStructure(existingQC, order.company)) await existingQC.save();
     if (ensureUnitChecksStructure(existingQC, order)) await existingQC.save();
+    if (ensureBatchStepsStructure(existingQC, order)) await existingQC.save();
     return existingQC;
   }
 
@@ -169,6 +171,7 @@ export async function ensureQCJobForOrder(order, sentBy, userId) {
 
   if (await ensurePartChecksStructure(qcJob, order.company)) await qcJob.save();
   if (ensureUnitChecksStructure(qcJob, order)) await qcJob.save();
+  if (ensureBatchStepsStructure(qcJob, order)) await qcJob.save();
 
   return qcJob;
 }
@@ -179,27 +182,39 @@ export async function ensureQCJobForOrder(order, sentBy, userId) {
 // per-unit redesign"): one unitChecks[] entry per unit, each submitted and
 // decided on its own. A legacy Machine order (old 'Final Testing' step, no
 // flag anywhere) keeps the flat shared-checklist flow unchanged.
+//
+// Slice 2 (2026-09-26): now delegates to qcStepService.js's needsUnitSteps,
+// broadened to also count a step flagged ONLY finalQc (not just qcRequired)
+// — name kept (isPerUnitMachineOrder) since it's referenced by name in
+// several other files' comments, only the body moved.
 export function isPerUnitMachineOrder(order) {
-  return order?.orderKind === 'Machine' && (order.processes || []).some(p => p.qcRequired);
+  return needsUnitSteps(order);
 }
 
-// Structural seed only (no checklist rows yet) for a Child Part order's
-// unitChecks[] — one entry per unit (job.quantity, snapshotted from
+// Structural seed only (no checklist rows yet) for a Child Part/Machine
+// order's unitChecks[] — one entry per unit (job.quantity, snapshotted from
 // order.orderQuantity at creation above). Confirmed with the user as the
 // deliberate "one QCJob, nested per-unit" shape to mirror from
 // PartQCEntrySchema/ensurePartChecksStructure, just keyed by unit instead of
 // by Sub Child Part — each unit reaches/leaves QC entirely independently of
-// its siblings. Row-level Initial/Process definitions are resolved
-// separately, lazily, the first time Production actually opens ONE unit's
-// checklist (see getChildPartUnitChecklistRows) — no reason to resolve every
-// unit's rows just because the job was opened once. Same skeleton for a
-// per-unit Machine order's job (2026-09-24, isPerUnitMachineOrder) — its
-// single-stage rows are resolved the same lazy way, in getQcCheckpoint.
+// its siblings. `steps[]` inside each unit stays empty here (slice 2) —
+// entries are appended lazily, only the first time a given step is actually
+// submitted (see submitQcStep), never pre-listed.
 function ensureUnitChecksStructure(job, order) {
   if (job.source !== 'ChildPartProduction' && !isPerUnitMachineOrder(order)) return false;
   if (job.unitChecks?.length > 0) return false;
   const buildQty = Math.max(1, Number(job.quantity) || 1);
-  job.unitChecks = Array.from({ length: buildQty }, (_, i) => ({ unitNumber: i + 1 }));
+  job.unitChecks = Array.from({ length: buildQty }, (_, i) => ({ unitNumber: i + 1, steps: [] }));
+  return true;
+}
+
+// Sub Child Part twin of ensureUnitChecksStructure — whole-batch, not
+// per-unit (slice 2, 2026-09-26). batchSteps[] entries are appended lazily
+// too, same principle: nothing pre-listed, only what's actually submitted.
+function ensureBatchStepsStructure(job, order) {
+  if (!needsBatchSteps(order)) return false;
+  if (job.batchSteps?.length > 0) return false;
+  job.batchSteps = [];
   return true;
 }
 
@@ -581,29 +596,6 @@ export const completeChildPartUnitPainting = async (req, res) => {
   }
 };
 
-// ─── Final Testing checklist (every Production Order, not just manufactured
-// ones — Final applies uniformly regardless of purchase vs in-house, see
-// qcChecklistPullService.js's flatModuleStageForItem) ───────────────────────
-// Production fills THE SAME job.checklist[] QC will review — no separate
-// "Production's copy" — mirroring the Sub Child Part pattern one level up:
-// Production records it first, QC can still edit before deciding (confirmed
-// 2026-09-02: wire R&D's Final checklist into Production first, then QC).
-
-// GET /orders/:id/final-checklist — ensures the shared QCJob exists this
-// early (same one Sub Child Part QC already created, for a manufactured
-// product) and its checklist is pulled, then returns it.
-export const getFinalChecklist = async (req, res) => {
-  try {
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-    if (!qcJob.checklist?.length && await ensureFlatChecklist(qcJob, req.user.companyId)) await qcJob.save();
-    res.json({ success: true, data: { rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt } });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
 // Extracted from the old approveQC self-certify path (its own isFinalStep
 // branch) — pushes a Machine/Motor's real build cost into whichever BOM
 // exists (old RDBOM and/or new MachineBOM), same "later unit wins" rule.
@@ -645,166 +637,6 @@ export async function applyManufacturedFinalCost(order, finalCost, finalExpense)
     await syncMachineBOMPricing(mfgItem, machineBom);
   }
 }
-
-// PUT /orders/:id/final-checklist — Production's own fill-in AND, on the
-// first-ever submission, the real completion action for this unit's Final
-// Testing step (redesigned 2026-09-19 — replaces the old Start -> fill
-// checklist -> separately click "Mark Complete" -> separately self-certify
-// "Approve QC" chain, same vestigial-self-certify problem already fixed for
-// Child Part's Assembly the same day). Submitting IS what sends this unit to
-// QC and locks the checklist — gated on THIS unit's own Final Testing step
-// still being 'In Progress' (not a bare qcJob-status check, which gave zero
-// real enforcement: Production could resubmit endlessly before ever
-// touching "Mark Complete", confirmed as a real reported bug). Reopens only
-// on a genuine QC reject (qcController.js's reopenFinalTestingForRejection),
-// never on Production's own say-so.
-//
-// productionCost/productionExpense are required ONLY on the first-ever
-// submission (tracked by qcJob.finalCheckFilledAt being unset) — confirmed
-// with the user: Production reports the real build cost once, and a
-// QC-reject/rework resubmission must NOT ask for it again.
-export const saveFinalChecklist = async (req, res) => {
-  try {
-    const { results, productionCost, productionExpense } = req.body;
-    if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
-    if (results.some(r => r.status === 'Pending')) {
-      return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before saving.' });
-    }
-    const unitNumber = getUnitNumber(req);
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    const procs = getUnitProcesses(order, unitNumber);
-    const idx = procs ? procs.findIndex(p => p.step === 'Final Testing') : -1;
-    if (idx === -1) return res.status(400).json({ success: false, message: 'This order has no Final Testing step.' });
-    const proc = procs[idx];
-    if (proc.status !== 'In Progress') {
-      return res.status(400).json({ success: false, message: `Final Testing isn't in progress for this unit (currently ${proc.status}) — it can't be edited right now.` });
-    }
-
-    const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId });
-    if (!qcJob) return res.status(404).json({ success: false, message: 'Open the Final Testing checklist first.' });
-    if (!qcJob.checklist?.length) return res.status(400).json({ success: false, message: 'No Final checklist configured for this product yet.' });
-
-    // The checklist is shared across every unit of a multi-quantity order
-    // (one qcJob, not one per unit — see QCJob.js's own comment), but each
-    // unit's own Final Testing step is independent — so a DIFFERENT unit
-    // could already be sitting at 'QC Pending', awaiting a decision on
-    // exactly the checklist this submission is about to overwrite. Refused
-    // rather than silently clobbering whatever QC is currently looking at.
-    const otherUnitProcsList = [order.processes, ...order.extraUnits.map(u => u.processes)].filter(p => p !== procs);
-    const anotherUnitAwaitingQC = otherUnitProcsList.some(p => p.find(x => x.step === 'Final Testing')?.status === 'QC Pending');
-    if (anotherUnitAwaitingQC) {
-      return res.status(400).json({ success: false, message: 'Another unit of this order is already awaiting a QC decision on this same checklist — wait for that to be decided first.' });
-    }
-
-    const isFirstSubmission = !qcJob.finalCheckFilledAt;
-    let finalCost, finalExpense;
-    if (isFirstSubmission) {
-      const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
-      finalCost = toNonNegNumber(productionCost);
-      finalExpense = toNonNegNumber(productionExpense);
-      if (finalCost === undefined || finalExpense === undefined) {
-        return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required on the first submission.' });
-      }
-    }
-    // 'Rejected' is the normal resubmit-after-reject case (see
-    // qcController.js's reopenFinalTestingForRejection). 'Approved' can also
-    // reach here for a multi-unit order: QC already decided Pass for an
-    // EARLIER unit's own submission (this SAME shared checklist), and now a
-    // DIFFERENT unit — independently still 'In Progress' the whole time —
-    // is submitting for the first time. Without also reopening here, the
-    // qcJob would stay stuck at 'Approved' forever: submitDecision only ever
-    // matches a job at status:'In Progress', so QC could never decide on
-    // this unit either (the exact "permanently stuck" bug this whole
-    // redesign was meant to close — found via a real stuck order,
-    // PROD-2026-304928, then re-confirmed reachable through this second
-    // path via a fresh trace, not just assumed fixed).
-    const needsReopenForReview = qcJob.status === 'Rejected' || qcJob.status === 'Approved';
-
-    const byParam = new Map(results.map(r => [r.parameter, r]));
-    qcJob.checklist = qcJob.checklist.map(row => {
-      const r = byParam.get(row.parameter);
-      // Same reset-on-resubmit as savePartChecklist above: omitting
-      // qcStatus/qcRemarks here lets them fall back to schema defaults,
-      // clearing out QC's prior verdict now that Production has changed the
-      // underlying row.
-      return r ? { parameter: row.parameter, standardValue: row.standardValue, type: row.type, actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' } : row.toObject();
-    });
-    qcJob.finalCheckFilledBy = req.user.fullName || req.user.username || 'Production';
-    qcJob.finalCheckFilledAt = new Date();
-    if (isFirstSubmission) {
-      qcJob.finalCheckProductionCost = finalCost;
-      qcJob.finalCheckProductionExpense = finalExpense;
-    }
-    // Automatic re-send to QC once fixed — no manual "resubmit" action,
-    // same principle as everything else in this flow (confirmed 2026-09-01/02).
-    if (needsReopenForReview) {
-      qcJob.status = 'Pending';
-      qcJob.decision = '';
-      qcJob.failReason = '';
-    }
-    await qcJob.save();
-
-    if (isFirstSubmission) {
-      try {
-        await applyManufacturedFinalCost(order, finalCost, finalExpense);
-      } catch (pricingErr) {
-        console.error('❌ Error recalculating item pricing on Final Testing submission:', pricingErr);
-      }
-    }
-
-    const wasAllSubmitted = allUnitsFinalTestingSubmitted(order);
-    proc.status = 'QC Pending';
-    proc.endDate = today();
-    proc.completedAt = new Date();
-    await order.save();
-
-    // 🏪 "Production Completed" — every unit's Final Testing has now been
-    // submitted (relocated from the old approveQC self-certify flow, which
-    // used to fire this on Production's OWN say-so with no real QC review
-    // behind it at all — redesigned 2026-09-19). This is deliberately NOT
-    // the order's real completion (order.status/'Approved from QC' — that
-    // still only happens once QC actually passes it, in qcController.js's
-    // submitDecision). Guarded by a before/after transition check so a
-    // later reject→resubmit cycle on one unit doesn't re-notify Packing on
-    // every resubmission.
-    if (!wasAllSubmitted && allUnitsFinalTestingSubmitted(order)) {
-      try {
-        let linkedSale = null;
-        if (order.saleId) linkedSale = await Sale.findById(order.saleId);
-        if (!linkedSale) {
-          const notesRefMatch = order.notes ? order.notes.match(/Ref:\s*(\S+)/) : null;
-          const sourceRefId = notesRefMatch ? notesRefMatch[1] : null;
-          if (sourceRefId) {
-            linkedSale = await Sale.findOne({
-              $or: [
-                { invoiceNumber: sourceRefId },
-                { _id: /^[0-9a-fA-F]{24}$/.test(sourceRefId) ? sourceRefId : null }
-              ]
-            });
-          }
-        }
-        if (linkedSale) {
-          const { setSaleItemStatus } = await import('../services/storeFlowService.js');
-          await setSaleItemStatus(linkedSale, order.saleItemId, 'Production Completed');
-        }
-      } catch (saleUpdateErr) {
-        console.error('❌ Error updating Sale storeQCStatus on Final Testing submission:', saleUpdateErr);
-      }
-      try {
-        await notificationService.triggerProductionNotification({
-          action: 'production_completed',
-          data: { orderCode: order.orderId, batchNo: order.orderId, orderId: order._id, machineName: order.machineName },
-          targetCompanyId: order.company,
-        });
-      } catch (e) { console.error('Production completed notification error:', e); }
-    }
-
-    res.json({ success: true, data: { rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt, productionCost: qcJob.finalCheckProductionCost, productionExpense: qcJob.finalCheckProductionExpense } });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
 
 // ─── ORDERS ───────────────────────────────────────────────────────────────────
 
@@ -2512,21 +2344,6 @@ function getUnitProcesses(order, unitNumber) {
   return order.extraUnits[unitNumber - 2].processes;
 }
 
-// Stage 3b — the ONE real QC checkpoint's position in a unit's flattened
-// processes[], derived from Phase 1's per-step `qcRequired` flag instead of
-// a hardcoded step name/index. Sub Child Part has no flag at all (Phase 1's
-// BOM UI hides the toggle there) — its rule is fixed: always the true last
-// step, never a per-BOM choice (see the Phase 2 discussion doc's "QC
-// placement" section). Returns -1 for a legacy order with no dynamic
-// Process Definition (nothing flagged, not Sub Child Part) — callers treat
-// -1 as "no checkpoint here, fall through to the existing hardcoded-name
-// behavior unchanged," so this is purely additive for every order that
-// predates this flag.
-export function qcCheckpointIndex(order, procs) {
-  if (order.orderKind === 'SubChildPart') return procs.length - 1;
-  return procs.findIndex(p => p.qcRequired);
-}
-
 // Stage 3b (2026-09-23) — extracted from approveQC's own tail (its
 // historical, unchanged call site) so the same Dispatch/Sale/lead-time/
 // QCJob side effects can also fire from the new completeFinalProcessStep
@@ -2684,26 +2501,6 @@ export function allUnitsCompleted(order) {
 
   const extraDone = order.extraUnits.every(u => u.processes.every(p => p.status === 'Completed'));
   return mainDone && extraDone;
-}
-
-// True once every unit's own Final Testing step has at least been
-// SUBMITTED (status 'QC Pending' or 'Completed', i.e. no longer 'Pending'/
-// 'In Progress') — the new "Production says every unit is built" checkpoint
-// (redesigned 2026-09-19), replacing the old whole-order allUnitsCompleted
-// check that used to gate the "Production Completed" Sale-status update
-// inside approveQC's old self-certify flow (which could fire without QC
-// ever having reviewed anything). Same lazy-extraUnits guard as
-// allUnitsCompleted, same reason.
-function allUnitsFinalTestingSubmitted(order) {
-  const submitted = (procs) => {
-    const ft = procs.find(p => p.step === 'Final Testing');
-    return !!ft && ft.status !== 'Pending' && ft.status !== 'In Progress';
-  };
-  if (!submitted(order.processes)) return false;
-
-  const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
-  if (order.extraUnits.length < buildQty - 1) return false;
-  return order.extraUnits.every(u => submitted(u.processes));
 }
 
 export const assignTeam = async (req, res) => {
@@ -2973,15 +2770,17 @@ export const markProcessComplete = async (req, res) => {
       // configured qcRequired flag, not this legacy 3-step fallback) never
       // literally names its checkpoint "Assembly" or its last step
       // "Painting", so the two refusals above alone don't catch it. Same
-      // generalization as the fallback further down this function: the
-      // checkpoint completes via its own QC-checklist endpoint
-      // (decideChildPartUnit decides it), the true last step (when it
-      // isn't also the checkpoint) via the new cost-capture action, and
-      // every OTHER step — no QC gate at all once a real checkpoint exists
-      // — straight to Completed.
-      const cpIdx = qcCheckpointIndex(order, procs);
-      if (cpIdx !== -1) {
-        if (idx === cpIdx) {
+      // generalization as the fallback further down this function: every
+      // QC-flagged step (Stage B, 2026-09-26 — broadened from the single
+      // qcCheckpointIndex to every flagged index, same fix already applied
+      // to the generic branch below in Stage A) completes via its own
+      // QC-checklist endpoint (decideChildPartUnitStep decides it), the
+      // true last step (when it isn't also QC-flagged) via the new
+      // cost-capture action, and every OTHER step — no QC gate at all once
+      // a real checkpoint exists — straight to Completed.
+      const qcStepIndices = getQcStepIndices(order, procs);
+      if (qcStepIndices.length > 0) {
+        if (qcStepIndices.includes(idx)) {
           return res.status(400).json({ success: false, message: "Complete this step by submitting its QC checklist, not this endpoint." });
         }
         if (idx === procs.length - 1) {
@@ -3098,25 +2897,31 @@ export const markProcessComplete = async (req, res) => {
       return res.json({ success: true, data: order });
     }
 
-    // Final Testing has no separate "Mark Complete" anymore (redesigned
-    // 2026-09-19, same vestigial-self-certify problem already fixed for
-    // Child Part's Assembly the same day) — submitting the checklist
-    // (saveFinalChecklist) IS what sends this unit to QC now, cost/expense
-    // included on the first submit. Refused here so this generic endpoint
-    // can't be used to route around that.
-    if (proc.step === 'Final Testing') {
-      return res.status(400).json({ success: false, message: "Complete Final Testing by submitting its checklist, not this endpoint." });
-    }
+    // Slice 4 cleanup (2026-09-28): the OLD hardcoded 'Final Testing' name
+    // check (which used to refuse this endpoint for a legacy order, pointing
+    // at saveFinalChecklist) is gone along with that mechanism — a legacy
+    // order's own "Final Testing"-named step (e.g. M-311/SCP-004-6 before
+    // R&D flags them) now just falls through to the generic QC Pending
+    // self-certify path below, same as any other unconfigured step. A
+    // dynamic order's own flagged step is still correctly caught by the
+    // qcStepIndices block right below.
+    const qcStepIndicesForThisStep = getQcStepIndices(order, procs);
 
-    // Stage 3b (2026-09-23) — same generalization as the ChildPart branch
-    // above, for every other order kind (Machine, Sub Child Part). Only
-    // engages for a real dynamic checkpoint (qcCheckpointIndex !== -1);
-    // every legacy hardcoded-pipeline order (nothing flagged, not Sub Child
-    // Part) falls straight through to the unchanged generic QC Pending
-    // self-certify path below, exactly as before this change.
-    const dynCpIdx = qcCheckpointIndex(order, procs);
-    if (dynCpIdx !== -1) {
-      if (idx === dynCpIdx) {
+    // Stage 3b (2026-09-23), broadened for the QC multi-checkpoint redesign
+    // (2026-09-26, slice 2) — same generalization as the ChildPart branch
+    // above, for every other order kind (Machine, Sub Child Part). `idx ===
+    // dynCpIdx` used to only catch the FIRST qcRequired step
+    // (qcCheckpointIndex); now catches EVERY flagged step, so a second (or
+    // later) QC step on a Machine/Sub Child Part order can no longer bypass
+    // QC by completing straight through this generic endpoint — a real gap
+    // opened the moment slice 1 allowed more than one flag per BOM. Only
+    // engages for a real dynamic order (qcStepIndices.length > 0); every
+    // legacy hardcoded-pipeline order (nothing flagged) falls straight
+    // through to the unchanged generic QC Pending self-certify path below,
+    // exactly as before this change.
+    const qcStepIndices = qcStepIndicesForThisStep;
+    if (qcStepIndices.length > 0) {
+      if (qcStepIndices.includes(idx)) {
         return res.status(400).json({
           success: false,
           message: proc.type === 'Outsourcing'
@@ -3173,30 +2978,26 @@ export const approveQC = async (req, res) => {
       return res.status(400).json({ success: false, message: "Assembly completes automatically when its Process QC checklist is submitted — there's nothing to approve here." });
     }
 
-    // Final Testing also has no self-certify QC step anymore (redesigned
-    // 2026-09-19, same reasoning as the Assembly block above) — it completes
-    // automatically when saveFinalChecklist's checklist is submitted (cost/
-    // expense captured there too, once, on the first submission), and the
-    // REAL decision is QC's own review (qcController.js's submitDecision),
-    // not Production self-certifying here. idx===procs.length-1 is always
-    // 'Final Testing' for every real Machine pipeline shape (old 6-step or
-    // the new 2-step MachineBOM one), so blocking it by name here also
-    // means this function's own isFinalStep/order-completion machinery
-    // below it can never actually fire anymore for any real order kind —
-    // left in place as a harmless, inert fallback rather than deleted, in
-    // case some order shape not accounted for here ever reaches it.
-    if (procs[idx]?.step === 'Final Testing') {
-      return res.status(400).json({ success: false, message: "Final Testing completes automatically when its checklist is submitted, and is decided by QC's own review — there's nothing to approve here." });
-    }
+    // Slice 4 cleanup (2026-09-28): the OLD hardcoded 'Final Testing' refusal
+    // (pointing at the now-deleted saveFinalChecklist) is gone — a legacy
+    // order's own "Final Testing"-named step now self-certifies through here
+    // normally, same as any other unconfigured step, matching
+    // markProcessComplete's own equivalent fix. A dynamic order's real QC
+    // step is still correctly caught by the qcStepIndices check right below.
 
     // Stage 3b (2026-09-23) — a dynamic Process Definition's real QC
-    // checkpoint (qcCheckpointIndex) is decided by the real QC department
-    // (submitDecision, or decideChildPartUnit for Child Part), never
-    // self-certified here — same reasoning as the two name-matched refusals
-    // above, just position-based instead of literal-name so it also covers
-    // whatever R&D actually named the flagged step. No-op for a legacy
-    // order with nothing flagged (qcCheckpointIndex returns -1 there).
-    if (qcCheckpointIndex(order, procs) === idx) {
+    // checkpoint(s) are decided by the real QC department (submitDecision,
+    // or decideChildPartUnit for Child Part/Machine), never self-certified
+    // here — same reasoning as the two name-matched refusals above, just
+    // position-based instead of literal-name so it also covers whatever
+    // R&D actually named the flagged step. Broadened (Stage B, 2026-09-26)
+    // from the single qcCheckpointIndex to every flagged index — same
+    // latent-gap fix already applied to markProcessComplete's generic
+    // branch in Stage A (a second QC-flagged step could otherwise
+    // self-certify past QC through this endpoint). No behavior change for
+    // Machine (still only ever reaches its one real flagged step today) or
+    // a legacy order with nothing flagged (still returns an empty array).
+    if (getQcStepIndices(order, procs).includes(idx)) {
       return res.status(400).json({ success: false, message: "This step's QC checkpoint is decided by QC's own review, not self-certified here." });
     }
 
@@ -3262,16 +3063,13 @@ export const rejectQC = async (req, res) => {
     const procs = getUnitProcesses(order, unitNumber);
     if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
     const proc = procs[idx];
-    // Final Testing is decided by QC's own review (qcController.js's
-    // submitDecision), not Production rejecting their own submission —
-    // redesigned 2026-09-19, same reasoning as approveQC's own refusal.
-    // reopenFinalTestingForRejection already handles the real reopen once
-    // QC actually fails it.
-    if (proc?.step === 'Final Testing') {
-      return res.status(400).json({ success: false, message: "Final Testing is decided by QC's own review, not this endpoint." });
-    }
-    // Stage 3b — same position-based twin of approveQC's own refusal above.
-    if (qcCheckpointIndex(order, procs) === idx) {
+    // Slice 4 cleanup (2026-09-28): same fix as approveQC's own equivalent —
+    // the OLD hardcoded 'Final Testing' refusal is gone, a legacy order's
+    // step falls through to the generic path below like any other
+    // unconfigured step.
+    // Stage 3b — same position-based twin of approveQC's own refusal above,
+    // broadened the same way (Stage B, 2026-09-26).
+    if (getQcStepIndices(order, procs).includes(idx)) {
       return res.status(400).json({ success: false, message: "This step's QC checkpoint is decided by QC's own review, not this endpoint." });
     }
     proc.status = 'In Progress';
@@ -3280,257 +3078,6 @@ export const rejectQC = async (req, res) => {
     proc.qcDate = today();
     proc.notes = reason || proc.notes;
     proc.reworks.push({ date: today(), reason: reason || '', rejectedBy: qcBy });
-    await order.save();
-    await order.populate('processes.assignedTeam', 'name supervisor members');
-    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
-    res.json({ success: true, data: order });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// PUT /api/production-mfg/orders/:id/qc-checkpoint/submit?unit=N — Stage 3b
-// (2026-09-23). Production's self-check + submit for the ONE real QC
-// checkpoint (qcCheckpointIndex), generalizing saveFinalChecklist/
-// saveSubChildPartChecklist/saveChildPartUnitChecklist's "Process" stage
-// into one endpoint driven by position instead of by which of those three
-// hardcoded flows this particular order happens to use. Only valid for an
-// In-House-typed checkpoint — an Out Source one has no self-check layer at
-// all (see the Stage 3b plan's design recap); it's completed by Purchase
-// receiving the hand-off instead (outsourceWorkController.js's
-// receiveOutsourceHandoffRound already creates the QCJob for that case).
-//
-// Cost/expense is a SEPARATE position from the checkpoint (see the plan's
-// worked example: a coating checkpoint mid-sequence, cost captured later on
-// post-painting, the true last step) — only required here when the
-// checkpoint happens to BE the true last step (Sub Child Part, always;
-// Child Part/Machine, only when R&D flagged the last step). Otherwise it's
-// captured later by completeFinalProcessStep below.
-// GET /api/production-mfg/orders/:id/qc-checkpoint?unit=N — Stage 3b
-// (2026-09-23). Resolves where THIS order's one real QC checkpoint sits and
-// returns whatever the frontend needs to render it, generically: which
-// shape to render (Child Part's staged unitChecks[] vs the flat one-stage
-// checklist Sub Child Part/Machine share), whether cost/expense is due here
-// or later (isTrueLastStep), and the current rows/fill state. Ensures the
-// QCJob exists (same ensureQCJobForOrder every other checklist GET uses) so
-// opening this panel is enough to seed it, same as today's getFinalChecklist/
-// getSubChildPartChecklist.
-export const getQcCheckpoint = async (req, res) => {
-  try {
-    const unitNumber = getUnitNumber(req);
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    const procs = getUnitProcesses(order, unitNumber);
-    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
-
-    const cpIdx = qcCheckpointIndex(order, procs);
-    if (cpIdx === -1) return res.json({ success: true, data: { checkpointIndex: -1 } });
-    const proc = procs[cpIdx];
-    const isTrueLastStep = cpIdx === procs.length - 1;
-
-    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-
-    // Per-unit Machine (2026-09-24) — same unitChecks[] entry shape as Child
-    // Part below, but single-stage: Machine's own checklist is Product
-    // Master's one flat Final stage (flatModuleStageForItem), not Child
-    // Part's Initial/Process pair, so it lives in the entry's process[]
-    // alone. Rows resolved fresh and merged with whatever this unit already
-    // saved, exactly like the Child Part merge.
-    if (order.orderKind === 'Machine') {
-      const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
-      let mergedEntry = entry ? entry.toObject() : null;
-      if (mergedEntry) {
-        const masterRows = await resolveFlatChecklistRows(qcJob, req.user.companyId);
-        const savedByParam = new Map((mergedEntry.process || []).map(r => [r.parameter, r]));
-        mergedEntry.process = masterRows.map(r => {
-          const found = savedByParam.get(r.parameter);
-          return found ? { type: 'checkbox', qcStatus: 'Pending', qcRemarks: '', ...found } : r;
-        });
-      }
-      return res.json({
-        success: true,
-        data: {
-          checkpointIndex: cpIdx, step: proc.step, type: proc.type, isTrueLastStep,
-          shape: 'unitChecks', singleStage: true, entry: mergedEntry,
-        },
-      });
-    }
-
-    if (order.orderKind === 'ChildPart') {
-      const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
-      // Fixed 2026-09-24 — found live: this used to return entry.initial/
-      // entry.process exactly as stored, which is empty forever for a
-      // never-yet-opened unit. ensureUnitChecksStructure only seeds the bare
-      // {unitNumber} skeleton on purpose ("Row-level Initial/Process
-      // definitions are resolved separately, lazily, the first time
-      // Production actually opens ONE unit's checklist — see
-      // getChildPartUnitChecklistRows") — but Production no longer opens
-      // that OLD endpoint at all now that this one (Stage 3b) replaced it,
-      // so that lazy resolution never happened for the new flow. Same fix:
-      // resolve both stages' real rows from R&D's QCMasterChecklist here
-      // too, merged with whatever's already been saved — identical merge
-      // getChildPartUnitChecklistRows itself already does.
-      let mergedEntry = entry ? entry.toObject() : null;
-      if (mergedEntry) {
-        const mergeStage = async (stage) => {
-          const masterRows = await resolveChildPartUnitChecklistRows(order.subChildPartItem, stage, req.user.companyId);
-          const savedByParam = new Map((mergedEntry[stage] || []).map(r => [r.parameter, r]));
-          mergedEntry[stage] = masterRows.map(r => {
-            const found = savedByParam.get(r.parameter);
-            return found ? { type: 'checkbox', qcStatus: 'Pending', qcRemarks: '', ...found } : r;
-          });
-        };
-        await mergeStage('initial');
-        await mergeStage('process');
-      }
-      return res.json({
-        success: true,
-        data: {
-          checkpointIndex: cpIdx, step: proc.step, type: proc.type, isTrueLastStep,
-          shape: 'unitChecks', entry: mergedEntry,
-        },
-      });
-    }
-
-    if (!qcJob.checklist?.length) await ensureFlatChecklist(qcJob, req.user.companyId);
-    return res.json({
-      success: true,
-      data: {
-        checkpointIndex: cpIdx, step: proc.step, type: proc.type, isTrueLastStep,
-        shape: 'flat', rows: qcJob.checklist, filledBy: qcJob.finalCheckFilledBy, filledAt: qcJob.finalCheckFilledAt,
-      },
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-export const submitQcCheckpoint = async (req, res) => {
-  try {
-    const unitNumber = getUnitNumber(req);
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    const procs = getUnitProcesses(order, unitNumber);
-    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit number' });
-
-    const cpIdx = qcCheckpointIndex(order, procs);
-    if (cpIdx === -1) return res.status(400).json({ success: false, message: 'This order has no QC checkpoint configured.' });
-    const proc = procs[cpIdx];
-    // Design changed 2026-09-24 (see the discussion doc's own section):
-    // Production DOES self-check + submit an Out Source checkpoint now,
-    // same as an In-House one — just not until Purchase has actually
-    // received the hand-off back (proc.status stays 'Pending' until then,
-    // see receiveOutsourceHandoffRound/markProcessComplete's own auto-
-    // advance, so the `!== 'In Progress'` check below already covers most
-    // of this — this explicit check is the clearer, type-aware message).
-    // Cost/expense captured here is Production's own (labor, etc) — the
-    // vendor's own total cost is a separate, deferred Purchase-side field
-    // (OutsourceHandoffSchema.costTotal) not wired into this yet.
-    if (proc.type === 'Outsourcing' && proc.outsourceStatus !== 'Received') {
-      return res.status(400).json({ success: false, message: 'This checkpoint is an Out Source step — Purchase must receive the hand-off before it can be submitted for QC.' });
-    }
-    if (proc.status !== 'In Progress') {
-      return res.status(400).json({ success: false, message: `${proc.step} is not in progress.` });
-    }
-
-    const isTrueLastStep = cpIdx === procs.length - 1;
-    const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
-    const productionCost = toNonNegNumber(req.body.productionCost);
-    const productionExpense = toNonNegNumber(req.body.productionExpense);
-
-    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-
-    if (order.orderKind === 'ChildPart' || order.orderKind === 'Machine') {
-      // Same staged Initial/Process shape saveChildPartUnitChecklist
-      // already uses, resolved off the dynamic checkpoint position instead
-      // of a hardcoded 'Assembly' — same unitChecks[] entry that function
-      // seeds via ensureUnitChecksStructure. A per-unit Machine (2026-09-24)
-      // shares this whole path single-stage: only 'process' exists for it
-      // (see getQcCheckpoint), no Initial prerequisite — every unit is
-      // submitted and decided on its own, so there's no shared checklist
-      // for one unit to overwrite another's (the old flat-path guard
-      // against that, new-bom-hierarchy-bug-fixes.md #10, isn't needed here).
-      const singleStage = order.orderKind === 'Machine';
-      const { results } = req.body;
-      const stage = singleStage ? 'process' : req.body.stage;
-      if (!['initial', 'process'].includes(stage)) return res.status(400).json({ success: false, message: "stage must be 'initial' or 'process'" });
-      if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
-      if (singleStage && results.some(r => r.status === 'Pending')) {
-        return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before submitting.' });
-      }
-      const entry = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
-      if (!entry) return res.status(404).json({ success: false, message: 'No checklist entry for this unit yet.' });
-      if (!singleStage && stage === 'process' && entry.initial.some(c => c.status === 'Pending')) {
-        return res.status(400).json({ success: false, message: 'Complete the Initial checklist for this unit before Process.' });
-      }
-      if (!['Awaiting Production', 'Rejected'].includes(entry.status)) {
-        return res.status(400).json({ success: false, message: `This unit is currently ${entry.status} — it can't be edited right now.` });
-      }
-      if (stage === 'process' && isTrueLastStep && (productionCost === undefined || productionExpense === undefined)) {
-        return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this checkpoint.' });
-      }
-      entry[stage] = results.map(r => ({ parameter: r.parameter, standardValue: r.standardValue || '', type: r.type === 'value' ? 'value' : 'checkbox', actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' }));
-      if (stage === 'process') {
-        entry.status = 'QC Pending';
-        entry.producedBy = req.user.fullName || req.user.username || 'Production';
-        entry.producedAt = new Date();
-        entry.rejectReason = '';
-        if (isTrueLastStep) {
-          entry.pendingProductionCost = productionCost;
-          entry.pendingProductionExpense = productionExpense;
-        }
-        proc.status = 'QC Pending';
-        proc.endDate = today();
-        proc.completedAt = new Date();
-      }
-      await qcJob.save();
-      await order.save();
-      await order.populate('processes.assignedTeam', 'name supervisor members');
-      await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
-      return res.json({ success: true, data: { order, entry } });
-    }
-
-    // Sub Child Part — flat one-stage checklist, mirrors
-    // saveFinalChecklist/saveSubChildPartChecklist exactly. (Machine used to
-    // share this too, until 2026-09-24's per-unit redesign moved it onto the
-    // unitChecks path above — one shared checklist + one whole-order QC
-    // decision was what sent a whole multi-unit Machine order to packing off
-    // Unit 1's mid-sequence checkpoint. Sub Child Part is one build, one
-    // decision, so the flat shape still fits it.)
-    const { results } = req.body;
-    if (!Array.isArray(results) || !results.length) return res.status(400).json({ success: false, message: 'results is required' });
-    if (results.some(r => r.status === 'Pending')) {
-      return res.status(400).json({ success: false, message: 'Every checklist item must be marked Pass or Fail before saving.' });
-    }
-    if (!qcJob.checklist?.length) await ensureFlatChecklist(qcJob, req.user.companyId);
-    if (!qcJob.checklist?.length) return res.status(400).json({ success: false, message: 'No QC checklist configured for this item yet.' });
-
-    const isFirstSubmission = !qcJob.finalCheckFilledAt;
-    if (isFirstSubmission && isTrueLastStep && (productionCost === undefined || productionExpense === undefined)) {
-      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required on the first submission.' });
-    }
-
-    const byParam = new Map(results.map(r => [r.parameter, r]));
-    qcJob.checklist = qcJob.checklist.map(row => {
-      const r = byParam.get(row.parameter);
-      return r ? { parameter: row.parameter, standardValue: row.standardValue, type: row.type, actualValue: r.actualValue || '', status: r.status, remarks: r.remarks || '' } : row.toObject();
-    });
-    qcJob.finalCheckFilledBy = req.user.fullName || req.user.username || 'Production';
-    qcJob.finalCheckFilledAt = new Date();
-    if (isFirstSubmission && isTrueLastStep) {
-      qcJob.finalCheckProductionCost = productionCost;
-      qcJob.finalCheckProductionExpense = productionExpense;
-    }
-    if (['Rejected', 'Approved', 'Draft'].includes(qcJob.status)) {
-      qcJob.status = 'Pending';
-      qcJob.decision = '';
-      qcJob.failReason = '';
-    }
-    await qcJob.save();
-
-    proc.status = 'QC Pending';
-    proc.endDate = today();
-    proc.completedAt = new Date();
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
@@ -3566,9 +3113,17 @@ export const completeFinalProcessStep = async (req, res) => {
     const procs = getUnitProcesses(order, unitNumber);
     if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
 
-    const cpIdx = qcCheckpointIndex(order, procs);
-    if (cpIdx === -1 || cpIdx === procs.length - 1) {
-      return res.status(400).json({ success: false, message: 'This endpoint only applies when a QC checkpoint precedes the true last step.' });
+    // Broadened for the QC multi-checkpoint redesign (2026-09-26, slice 2):
+    // reachable whenever at least one step is QC-flagged AND the true last
+    // step itself isn't one of them (today's single "checkpoint mid-
+    // sequence" case, generalized to "any flagged step mid-sequence"). Sub
+    // Child Part reaches this for the first time here — its old single
+    // checkpoint was always the last index by definition, so this was
+    // unreachable for it before; with several QC steps possible, its true
+    // last step can now legitimately be un-flagged.
+    const qcStepIndices = getQcStepIndices(order, procs);
+    if (qcStepIndices.length === 0 || qcStepIndices.includes(procs.length - 1)) {
+      return res.status(400).json({ success: false, message: 'This endpoint only applies when a QC step precedes the true last step.' });
     }
     if (idx !== procs.length - 1) {
       return res.status(400).json({ success: false, message: 'Only the true last step completes through this endpoint.' });
@@ -3594,6 +3149,32 @@ export const completeFinalProcessStep = async (req, res) => {
       return res.json({ success: true, data: order });
     }
 
+    // Sub Child Part (2026-09-26, slice 2) — the true last step has no QC
+    // flag of its own, but at least one earlier step does. Reaching this
+    // step at all requires every earlier step 'Completed' (the same generic
+    // "previous step Completed" gate every step goes through), which for a
+    // QC-flagged batch step only happens once it's fully resolved (see
+    // submitBatchQcDecision) — so whatever survived every earlier step's
+    // scrap is exactly the last QC step's own final `passedQty`. No lead-
+    // time sampling — Sub Child Part has none today, this doesn't add one.
+    if (order.orderKind === 'SubChildPart') {
+      if (!order.subChildPartItem) return res.status(400).json({ success: false, message: 'This order has no linked Sub Child Part Item.' });
+      const lastQcIdx = Math.max(...qcStepIndices);
+      const lastQcStep = procs[lastQcIdx];
+      const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: order.company });
+      const batchEntry = qcJob?.batchSteps?.find(b => b.category === lastQcStep.category && b.stepName === lastQcStep.step);
+      // Whatever survived every earlier QC step's scrap — that step is
+      // guaranteed fully resolved already, since reaching this step at all
+      // required its 'Completed' status (see submitBatchQcDecision).
+      const survivedQty = batchEntry?.passedQty ?? order.orderQuantity ?? 1;
+      await Item.updateOne({ _id: order.subChildPartItem, companyId: req.user.companyId }, { $inc: { qty: survivedQty } });
+      order.status = 'Completed';
+      await order.save();
+      await order.populate('processes.assignedTeam', 'name supervisor members');
+      await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+      return res.json({ success: true, data: order });
+    }
+
     // Machine — always a per-unit order here (reaching this endpoint at all
     // needs a qcRequired checkpoint, see the cpIdx guard above). Its
     // checkpoint was already QC-approved (the only way it reaches
@@ -3610,6 +3191,131 @@ export const completeFinalProcessStep = async (req, res) => {
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/processes/:stepIndex/batch-qc-step/submit — QC multi-
+// checkpoint redesign (slice 2, 2026-09-26). Production's submit-only action
+// for a Sub Child Part's QC-flagged step — no checklist to fill, QC does
+// that (see submitBatchQcDecision, qcController.js). Sub Child Part is
+// always handled as one whole-quantity batch, never per-unit, so there's no
+// ?unit= param here. Quantity is never typed by Production: it's always
+// exactly this step's own outstanding amount — the full remaining balance
+// on a first submission, or exactly `reworkPendingQty` on a resubmission
+// after a QC Rework verdict.
+export const submitBatchQcStep = async (req, res) => {
+  try {
+    const idx = getStepIndex(req, res);
+    if (idx === -1) return;
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.orderKind !== 'SubChildPart') {
+      return res.status(400).json({ success: false, message: 'This endpoint is for Sub Child Part orders only.' });
+    }
+    const procs = order.processes;
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
+    const proc = procs[idx];
+    if (!proc.qcRequired && !proc.finalQc) {
+      return res.status(400).json({ success: false, message: `${proc.step} is not a QC step.` });
+    }
+    if (proc.status !== 'In Progress') {
+      return res.status(400).json({ success: false, message: `${proc.step} is not in progress.` });
+    }
+
+    const isTrueLastStep = idx === procs.length - 1;
+    const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
+    const productionCost = toNonNegNumber(req.body.productionCost);
+    const productionExpense = toNonNegNumber(req.body.productionExpense);
+
+    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+    const existing = qcJob.batchSteps.find(b => b.category === proc.category && b.stepName === proc.step);
+    const isFirstSubmission = !existing || existing.attempts.length === 0;
+
+    if (isTrueLastStep && isFirstSubmission && (productionCost === undefined || productionExpense === undefined)) {
+      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this step.' });
+    }
+
+    // The find-entry/fix-qtyEnteringStep/compute-outstanding-qty/push-attempt
+    // mechanic is shared with the outsourced-receive trigger (slice 3, see
+    // receiveOutsourceHandoffRound in outsourceWorkController.js) — factored
+    // out into qcStepService.js so both read the exact same accounting.
+    let entry;
+    try {
+      ({ entry } = submitBatchStepForQC(qcJob, order, procs, idx, req.user.fullName || req.user.username || 'Production'));
+    } catch (e) {
+      return res.status(e.status || 500).json({ success: false, message: e.message });
+    }
+    if (isTrueLastStep && isFirstSubmission) {
+      entry.pendingProductionCost = productionCost;
+      entry.pendingProductionExpense = productionExpense;
+    }
+
+    await qcJob.save();
+    await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: { order, entry } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /orders/:id/processes/:stepIndex/unit-qc-step/submit?unit=N — QC
+// multi-checkpoint redesign, Stage B (2026-09-26), broadened to Machine in
+// Stage C (2026-09-28). Production's submit-only action for a Child Part or
+// Machine unit's QC-flagged (qcRequired) or Final-flagged (finalQc) step —
+// no checklist to fill, QC does that (see decideChildPartUnitStep,
+// qcController.js). Sibling of submitBatchQcStep, but per-unit and
+// Pass/Reject (no quantity concept) — see submitUnitStepForQC
+// (qcStepService.js) for the shared piece.
+export const submitUnitQcStep = async (req, res) => {
+  try {
+    const idx = getStepIndex(req, res);
+    if (idx === -1) return;
+    const unitNumber = getUnitNumber(req);
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.orderKind !== 'ChildPart' && order.orderKind !== 'Machine') {
+      return res.status(400).json({ success: false, message: 'This endpoint is for Child Part or Machine orders only.' });
+    }
+    const procs = getUnitProcesses(order, unitNumber);
+    if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
+    const proc = procs[idx];
+    if (!proc.qcRequired && !proc.finalQc) {
+      return res.status(400).json({ success: false, message: `${proc.step} is not a QC step.` });
+    }
+    if (proc.status !== 'In Progress') {
+      return res.status(400).json({ success: false, message: `${proc.step} is not in progress.` });
+    }
+
+    const isTrueLastStep = idx === procs.length - 1;
+    const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
+    const productionCost = toNonNegNumber(req.body.productionCost);
+    const productionExpense = toNonNegNumber(req.body.productionExpense);
+
+    const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+    const unit = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
+    if (!unit) return res.status(404).json({ success: false, message: 'No QC entry for this unit yet.' });
+    const existing = unit.steps.find(s => s.category === proc.category && s.stepName === proc.step);
+    const isFirstSubmission = !existing || existing.attempts.length === 0;
+
+    if (isTrueLastStep && isFirstSubmission && (productionCost === undefined || productionExpense === undefined)) {
+      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this step.' });
+    }
+
+    const entry = submitUnitStepForQC(qcJob, unit, proc, req.user.fullName || req.user.username || 'Production');
+    if (isTrueLastStep && isFirstSubmission) {
+      entry.pendingProductionCost = productionCost;
+      entry.pendingProductionExpense = productionExpense;
+    }
+
+    await qcJob.save();
+    await order.save();
+    await order.populate('processes.assignedTeam', 'name supervisor members');
+    await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
+    res.json({ success: true, data: { order, entry } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

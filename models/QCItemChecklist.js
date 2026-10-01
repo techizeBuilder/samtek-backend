@@ -26,11 +26,21 @@ const QCItemChecklistSchema = new mongoose.Schema({
   item: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
   childPartId: { type: mongoose.Schema.Types.ObjectId, default: null },
   subChildPartId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  // Per-step checklists (QC multi-checkpoint redesign, 2026-09-25): one
+  // document per QC-flagged BOM step, identified by its Process Definition
+  // category + step name (step names are unique within a category, never
+  // across the whole BOM — so both are needed). null on every item-level
+  // (and legacy part-level) checklist — readers that don't pass these get
+  // them defaulted to null (qcChecklistController.js's
+  // resolveSelectedChecklist), so a step row can never be mistaken for the
+  // item-level one.
+  stepCategory: { type: String, default: null, trim: true },
+  stepName: { type: String, default: null, trim: true },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   selectedItems: { type: [SelectedRowSchema], default: [] },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
-QCItemChecklistSchema.index({ module: 1, stage: 1, item: 1, childPartId: 1, subChildPartId: 1, company: 1 }, { unique: true });
+QCItemChecklistSchema.index({ module: 1, stage: 1, item: 1, childPartId: 1, subChildPartId: 1, stepCategory: 1, stepName: 1, company: 1 }, { unique: true });
 
 export default mongoose.model('QCItemChecklist', QCItemChecklistSchema);

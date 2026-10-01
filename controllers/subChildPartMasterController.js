@@ -162,7 +162,9 @@ function validateBody(body, { requireImage }) {
   if (requireImage && !image) return 'A Design File (image or PDF) is required.';
   if (!sourceItemId) return 'A source raw material is required — a Sub Child Part is always exactly one material.';
   if (!(Number(sourceQty) > 0)) return 'sourceQty must be a positive number — how much of the source material one Sub Child Part unit consumes.';
-  return validateProcessDefinition(cleanProcessDefinition(processDefinition), { requireAtLeastOne: true });
+  // Sub Child Part now picks its own QC steps too (QC multi-checkpoint
+  // redesign, 2026-09-25) — no longer implicitly "always the last step".
+  return validateProcessDefinition(cleanProcessDefinition(processDefinition), { requireAtLeastOne: true, requireAtLeastOneQcStep: true });
 }
 
 // Fabrication Master source material with more than one catalog dimension
@@ -276,7 +278,7 @@ export const updateSubChildPart = async (req, res) => {
     if (sourceUnit !== undefined) item.subChildPartDetails.sourceUnit = sourceUnit.trim();
     if (processDefinition !== undefined) {
       const cleaned = cleanProcessDefinition(processDefinition);
-      const err = validateProcessDefinition(cleaned, { requireAtLeastOne: true });
+      const err = validateProcessDefinition(cleaned, { requireAtLeastOne: true, requireAtLeastOneQcStep: true });
       if (err) return res.status(400).json({ success: false, message: err });
       item.subChildPartDetails.processDefinition = cleaned;
     }

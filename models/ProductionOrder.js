@@ -73,6 +73,10 @@ const ProcessStepSchema = new mongoose.Schema({
     default: [],
   },
   qcRequired: { type: Boolean, default: false },
+  // Machine only — snapshot of the BOM step's Final QC flag (QC multi-
+  // checkpoint redesign, 2026-09-25). Carried onto orders now; read from
+  // slice 2 of that redesign onward.
+  finalQc: { type: Boolean, default: false },
   // Only meaningful when type === 'Outsourcing' — drives the "waiting on
   // outsource" vs "send for outsourcing" UI (ProcessExecution.jsx, Stage 5).
   // Advanced by outsourceWorkController.js (Stage 3), never by the generic
@@ -189,6 +193,17 @@ const OutsourceHandoffSchema = new mongoose.Schema({
     dummy: { type: Boolean, default: false },
   },
   rounds: { type: [OutsourceHandoffRoundSchema], default: [] },
+  // QC multi-checkpoint redesign, slice 3 (2026-09-26) — Sub Child Part
+  // only. null means "covers the whole order" (every existing hand-off, and
+  // every normal first-time send of a QC-flagged step). Set to a number
+  // only when this hand-off is a REWORK RESEND for a Sub Child Part step
+  // QC already partially decided on: the exact reworkPendingQty QC set,
+  // snapshotted once at request time (outsourceWorkController.js's
+  // requestOutsourceHandoff) — never typed by Purchase or Production, same
+  // "never typed" convention submitBatchQcStep already uses for the
+  // in-house side. Read back on receive (receiveOutsourceHandoffRound) as
+  // the new attempt's qtySubmitted.
+  subChildPartQty: { type: Number, default: null },
   // What Purchase actually paid the vendor for this hand-off — captured on
   // the completing round. Independent of QC (see this schema's own header
   // comment).

@@ -109,6 +109,10 @@ import {
   getChildPartQCList,
   getChildPartQCReference,
   getSubChildPartQCReference,
+  getItemQcSteps,
+  getItemStepChecklist,
+  saveItemStepChecklist,
+  deleteItemStepChecklist,
 } from '../controllers/qcChecklistController.js';
 
 const router = express.Router();
@@ -269,6 +273,12 @@ router.get('/qc-checklist/:module/:stage/item/:itemId/part/:childPartId/:subChil
 router.post('/qc-checklist/:module/:stage/item/:itemId/part/:childPartId/:subChildPartId', checkQCModulePermission('edit'), saveItemChecklist);
 router.get('/qc-checklist/:module/:stage/item/:itemId', checkQCModulePermission('view'), getItemChecklist);
 router.post('/qc-checklist/:module/:stage/item/:itemId', checkQCModulePermission('edit'), saveItemChecklist);
+// Per-step checklists (QC multi-checkpoint redesign, 2026-09-25) — the step
+// itself travels as ?category=&step= (names can contain spaces/slashes).
+router.get('/qc-checklist/:module/qc-steps/:itemId', checkQCModulePermission('view'), getItemQcSteps);
+router.get('/qc-checklist/:module/:stage/item/:itemId/step', checkQCModulePermission('view'), getItemStepChecklist);
+router.post('/qc-checklist/:module/:stage/item/:itemId/step', checkQCModulePermission('edit'), saveItemStepChecklist);
+router.delete('/qc-checklist/:module/:stage/item/:itemId/step', checkQCModulePermission('edit'), deleteItemStepChecklist);
 // Product Master QC only — read-only Child Part/Sub Child Part + BOM tree
 // (material/grade/brand/qty), always a live read off BOM Management's own
 // data, never stored by this feature. Gated the same as every other

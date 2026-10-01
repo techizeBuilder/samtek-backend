@@ -574,7 +574,7 @@ export const updateMachineBOMProcessDefinition = async (req, res) => {
     const assemblyLineIds = bom.childParts.map(l => l._id);
     const materialLineQuantities = Object.fromEntries(bom.materials.map(m => [String(m._id), Number(m.quantity) || 0]));
     const err = validateProcessDefinition(cleaned, {
-      materialLineIds, assemblyLineIds, materialLineQuantities, requireExactlyOneQcStep: true,
+      materialLineIds, assemblyLineIds, materialLineQuantities, requireAtLeastOneQcStep: true, requireExactlyOneFinalQc: true,
     });
     if (err) return res.status(400).json({ success: false, message: err });
 

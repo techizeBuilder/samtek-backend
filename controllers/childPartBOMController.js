@@ -669,7 +669,7 @@ export const updateChildPartMasterProcessDefinition = async (req, res) => {
     const assemblyLineIds = bom.subChildParts.map(l => l._id);
     const materialLineQuantities = Object.fromEntries(bom.materials.map(m => [String(m._id), Number(m.quantity) || 0]));
     const err = validateProcessDefinition(cleaned, {
-      materialLineIds, assemblyLineIds, materialLineQuantities, requireExactlyOneQcStep: true,
+      materialLineIds, assemblyLineIds, materialLineQuantities, requireAtLeastOneQcStep: true,
     });
     if (err) return res.status(400).json({ success: false, message: err });
 

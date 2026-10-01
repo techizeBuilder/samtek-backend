@@ -51,7 +51,7 @@ export const getSupplierCatalog = async (req, res) => {
     const items = await Item.find({
       companyId, purchase: true, ...notDiscontinued,
       productKind: { $nin: ['SubChildPart', 'ChildPart'] },
-    }).select('code name productKind category subCategory unit').sort({ name: 1 }).lean();
+    }).select('code name productKind category subCategory itemCategories unit').sort({ name: 1 }).lean();
     const sourceOf = (it) => it.productKind === 'Machine' ? 'Product Master' : it.productKind === 'Motor' ? 'Motor Master' : 'Inventory';
 
     const byName = new Map();

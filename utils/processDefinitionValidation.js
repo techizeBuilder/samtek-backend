@@ -44,6 +44,7 @@ export function cleanProcessDefinition(raw) {
               materialRefs,
               materialQuantities,
               qcRequired: p?.qcRequired === true,
+              finalQc: p?.finalQc === true,
             };
           })
           .filter(p => p.name)
@@ -77,21 +78,23 @@ const VALID_TYPES = ['InHouse', 'OutSource'];
 //   qty" rule, not a split). Only checked for a line actually referenced by
 //   more than one step; a single-step reference is untouched, exactly like
 //   today's zero-extra-input behavior.
-// - requireExactlyOneQcStep: Child Part / Machine only (never Sub Child
-//   Part — its QC point is always implicitly the last step, not a per-BOM
-//   choice). Confirmed with the user 2026-09-22: exactly one internal
-//   process must carry qcRequired:true once the process definition is
-//   non-empty — multiple would each need their own distinct checklist,
-//   which today's QC Parameters setup (one checklist per level) doesn't
-//   support. Skipped entirely when there are zero internal processes at
-//   all, matching this field's existing optional-for-now behavior at these
-//   two levels.
+// - requireAtLeastOneQcStep: every level (QC multi-checkpoint redesign,
+//   2026-09-25 — replaces the old requireExactlyOneQcStep). At least one
+//   internal process must be a QC step (qcRequired, or — Machine — the
+//   finalQc step, which is QC'd too). Any number may be flagged; each gets
+//   its own per-step checklist in QC Parameters.
+// - requireExactlyOneFinalQc: Machine only — exactly one internal process
+//   carries finalQc (the machine's Final checklist step), mandatory.
+// Both are skipped when there are zero internal processes at all, matching
+// the field's existing optional-for-now behavior at Child Part/Machine level
+// (Sub Child Part already requires at least one process via requireAtLeastOne).
 export function validateProcessDefinition(processDefinition, {
   requireAtLeastOne = false,
   materialLineIds = null,
   assemblyLineIds = null,
   materialLineQuantities = null,
-  requireExactlyOneQcStep = false,
+  requireAtLeastOneQcStep = false,
+  requireExactlyOneFinalQc = false,
 } = {}) {
   const categories = Array.isArray(processDefinition) ? processDefinition : [];
   const allProcesses = categories.flatMap(cat => (Array.isArray(cat?.internalProcesses) ? cat.internalProcesses : []));
@@ -100,10 +103,14 @@ export function validateProcessDefinition(processDefinition, {
     if (allProcesses.length === 0) return 'Define at least one process category with at least one internal process.';
   }
 
-  if (requireExactlyOneQcStep && allProcesses.length > 0) {
-    const qcCount = allProcesses.filter(p => p?.qcRequired).length;
-    if (qcCount === 0) return 'Flag exactly one internal process as the QC checkpoint.';
-    if (qcCount > 1) return 'Only one internal process can be the QC checkpoint — unflag the others first.';
+  if (requireAtLeastOneQcStep && allProcesses.length > 0) {
+    if (!allProcesses.some(p => p?.qcRequired || p?.finalQc)) return 'Flag at least one step for QC.';
+  }
+
+  if (requireExactlyOneFinalQc && allProcesses.length > 0) {
+    const finalCount = allProcesses.filter(p => p?.finalQc).length;
+    if (finalCount === 0) return 'Pick one step as the Final QC step.';
+    if (finalCount > 1) return 'Only one step can be the Final QC step — unflag the others first.';
   }
 
   const materialIdSet = materialLineIds ? new Set(materialLineIds.map(String)) : null;

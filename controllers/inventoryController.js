@@ -3036,63 +3036,128 @@ export const getInventoryStats = async (req, res) => {
     // Only a user with no companyId at all (shouldn't happen in practice)
     // falls through with no filter.
 
-    // Inventory's own dashboard stats — exclude Product Master machines /
-    // Motor Master motors, same reasoning as getItems' productKind=none.
-    baseMatchStage.productKind = null;
+    // Company-only scoping, captured before the two exclusions below are
+    // added — the discontinued-count pipeline further down needs company
+    // scoping WITHOUT the isDiscontinued exclusion (it's specifically
+    // counting discontinued items).
+    const companyMatchStage = { ...baseMatchStage };
+
+    // Inventory's own dashboard stats — Store manages plain Inventory AND
+    // Child Part / Sub Child Part stock (both real physical inventory,
+    // same qty/minStock fields, no dimensionVariants), so both are
+    // included (2026-09-29, confirmed with the user — Child Part/Sub Child
+    // Part inventory was previously excluded entirely from this dashboard).
+    // Product Master machines / Motor Master motors stay excluded — they're
+    // not Store's own stock the way these are.
+    baseMatchStage.productKind = { $in: [null, 'ChildPart', 'SubChildPart'] };
+    // Exclude discontinued items (2026-09-29) — previously counted here,
+    // silently inflating totalItems/totalValue/totalQty and lowStockCount
+    // with retired stock. Matches the convention already used elsewhere in
+    // this codebase (e.g. supplierController.js's catalog builder).
+    baseMatchStage.isDiscontinued = { $ne: true };
 
     console.log('Debug - Base match stage:', JSON.stringify(baseMatchStage));
 
     const hasFilter = Object.keys(baseMatchStage).length > 0;
 
-    const pipeline = [];
-    if (hasFilter) pipeline.push({ $match: baseMatchStage });
-    pipeline.push({
-      $group: {
-        _id: null,
-        totalItems: { $sum: 1 },
-        totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } },
-        totalQty: { $sum: '$qty' },
-        lowStockCount: {
-          $sum: { $cond: [{ $lte: ['$qty', '$minStock'] }, 1, 0] }
+    // A fabrication item (fabricationRef set) keeps its top-level `qty` at
+    // 0 always — real stock lives per catalog size in dimensionVariants[]
+    // .subStock/minStock (see Item.js's own comments on qty/minStock/
+    // dimensionVariants). Every pipeline below used to read `qty` directly,
+    // so a fabrication item always silently counted as zero stock — same
+    // bug found and fixed in the MIS Inventory Report (2026-09-29),
+    // confirmed live: "Angle" showed qty=0 here despite 18 real units.
+    // isFabricationExpr wraps fabricationRef in $ifNull before comparing —
+    // in an aggregation EXPRESSION (unlike a $match query filter), $ne/$eq
+    // do NOT treat a missing field the same as an explicit null, so the
+    // bare form wrongly flagged every item that predates this field (93 of
+    // 126 real items checked) as "fabrication", zeroing their real qty via
+    // the dimensionVariants branch. Caught before shipping by re-verifying
+    // against real data, not assumed from the first working example.
+    const isFabricationExpr = { $ne: [{ $ifNull: ['$fabricationRef', null] }, null] };
+    const effectiveQtyStage = {
+      $addFields: {
+        effectiveQty: {
+          $cond: [isFabricationExpr, { $sum: '$dimensionVariants.subStock' }, '$qty']
         }
       }
-    });
+    };
+    const isLowStockExpr = {
+      $cond: [
+        isFabricationExpr,
+        {
+          $gt: [
+            {
+              $size: {
+                $filter: {
+                  input: { $ifNull: ['$dimensionVariants', []] },
+                  as: 'dv',
+                  cond: { $and: [{ $ne: ['$$dv.isLeftover', true] }, { $lte: ['$$dv.subStock', '$$dv.minStock'] }] }
+                }
+              }
+            },
+            0
+          ]
+        },
+        { $lte: ['$qty', '$minStock'] }
+      ]
+    };
+
+    const pipeline = [];
+    if (hasFilter) pipeline.push({ $match: baseMatchStage });
+    pipeline.push(
+      effectiveQtyStage,
+      {
+        $group: {
+          _id: null,
+          totalItems: { $sum: 1 },
+          totalValue: { $sum: { $multiply: ['$effectiveQty', '$stdCost'] } },
+          totalQty: { $sum: '$effectiveQty' },
+          lowStockCount: { $sum: { $cond: [isLowStockExpr, 1, 0] } }
+        }
+      }
+    );
 
     const stats = await Item.aggregate(pipeline);
 
-    // Category stats pipeline
-    const categoryPipeline = [];
-    if (hasFilter) categoryPipeline.push({ $match: baseMatchStage });
-    categoryPipeline.push(
-      { $group: { _id: '$category', count: { $sum: 1 }, totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } } } },
-      { $sort: { count: -1 } }
-    );
-    const categoryStats = await Item.aggregate(categoryPipeline);
+    // Real classification breakdown for the "Inventory Overview" bars
+    // (2026-09-29) — replaces the old `type` (Material/Product/Spares/
+    // Assemblies, an internal system field — see its own model comment:
+    // "NOT the client's business classification") and `category` (mostly
+    // blank, superseded by itemType/itemCategories — see the Vendor
+    // Batching work) groupings, per the user's own correction, confirmed
+    // against /r&d/inventory's real create form (SimpleInventoryForm.jsx).
+    //
+    // Plain Inventory items are broken down by itemCategories — the
+    // client's real, multi-select "Item Category" field (field #7 on that
+    // form, e.g. Fabrication/Sheet Metal/Raw Material/Tool) — an item can
+    // land in more than one bucket, and one with none falls into
+    // "Unspecified" rather than being silently dropped.
+    const plainItemMatchStage = { ...companyMatchStage, productKind: null, isDiscontinued: { $ne: true } };
+    const itemCategoryStats = await Item.aggregate([
+      { $match: plainItemMatchStage },
+      effectiveQtyStage,
+      { $addFields: { categoryGroups: { $cond: [{ $gt: [{ $size: { $ifNull: ['$itemCategories', []] } }, 0] }, '$itemCategories', ['Unspecified']] } } },
+      { $unwind: '$categoryGroups' },
+      { $group: { _id: '$categoryGroups', totalQty: { $sum: '$effectiveQty' }, totalItems: { $sum: 1 } } },
+      { $sort: { totalQty: -1 } }
+    ]);
 
-    // Type stats pipeline
-    const typePipeline = [];
-    if (hasFilter) typePipeline.push({ $match: baseMatchStage });
-    typePipeline.push({
-      $group: {
-        _id: '$type',
-        count: { $sum: 1 },
-        totalQty: { $sum: '$qty' },
-        totalValue: { $sum: { $multiply: ['$qty', '$stdCost'] } }
-      }
-    });
-    const typeStats = await Item.aggregate(typePipeline);
+    // Child Part / Sub Child Part never populate itemCategories (created
+    // via BOM Management, not the Inventory form — confirmed against real
+    // data: every Child Part/Sub Child Part item checked has itemCategories
+    // []), so each gets its own single bucket instead of "Unspecified".
+    const cpScpMatchStage = { ...companyMatchStage, productKind: { $in: ['ChildPart', 'SubChildPart'] }, isDiscontinued: { $ne: true } };
+    const cpScpStats = await Item.aggregate([
+      { $match: cpScpMatchStage },
+      { $group: { _id: '$productKind', totalQty: { $sum: '$qty' }, totalItems: { $sum: 1 } } }
+    ]);
+    const KIND_LABELS = { ChildPart: 'Child Part', SubChildPart: 'Sub Child Part' };
 
-    // Per-category total qty for inventory overview bars
-    const categoryQtyPipeline = [];
-    if (hasFilter) categoryQtyPipeline.push({ $match: baseMatchStage });
-    categoryQtyPipeline.push({
-      $group: {
-        _id: '$category',
-        totalQty: { $sum: '$qty' },
-        totalItems: { $sum: 1 }
-      }
-    });
-    const categoryQtyStats = await Item.aggregate(categoryQtyPipeline);
+    const inventoryBreakdown = [
+      ...itemCategoryStats.map(c => ({ label: c._id, totalQty: c.totalQty, totalItems: c.totalItems })),
+      ...cpScpStats.map(c => ({ label: KIND_LABELS[c._id] || c._id, totalQty: c.totalQty, totalItems: c.totalItems }))
+    ];
 
     // Item Type stats (client's Raw Material/Tool/Readymade Material/Assets
     // classification, Item.itemType) — the new form no longer collects
@@ -3108,21 +3173,22 @@ export const getInventoryStats = async (req, res) => {
 
     // Discontinued count — Item Status is now a real, form-editable field
     // (see SimpleInventoryForm.jsx), so this is meaningful going forward.
+    // Uses companyMatchStage (company + productKind:null, no discontinued
+    // exclusion) — baseMatchStage now excludes discontinued items, which
+    // would make an isDiscontinued:true match here always return zero.
     const discontinuedPipeline = [];
-    if (hasFilter) discontinuedPipeline.push({ $match: baseMatchStage });
+    if (Object.keys(companyMatchStage).length) discontinuedPipeline.push({ $match: companyMatchStage });
     discontinuedPipeline.push({ $match: { isDiscontinued: true } }, { $count: 'count' });
     const discontinuedResult = await Item.aggregate(discontinuedPipeline);
 
     res.json({
       stats: {
         ...stats[0] || { totalItems: 0, totalValue: 0, totalQty: 0, lowStockCount: 0 },
-        totalCategories: categoryStats.length,
+        totalCategories: itemCategoryStats.length,
         totalItemTypes: itemTypeStats.length,
         discontinuedCount: discontinuedResult[0]?.count || 0
       },
-      categoryStats,
-      typeStats,
-      categoryQtyStats,
+      inventoryBreakdown,
       itemTypeStats
     });
   } catch (error) {

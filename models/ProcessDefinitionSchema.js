@@ -64,16 +64,18 @@ import mongoose from 'mongoose';
 // server-side) — an allocation of an already-computed number, never a new
 // calculation.
 //
-// qcRequired marks this internal process as the ONE QC checkpoint for the
-// whole order — confirmed with the user 2026-09-22: not "mandatory final
-// gate plus optional extras", exactly one checkpoint per order, wherever
-// R&D flags it, reusing whichever single checklist structure that level
-// already has (Sub Child Part's flat checklist, Child Part's initial+process
-// combo, Machine's final checklist). Steps after the flagged one get no
-// further QC review. Meaningless for Sub Child Part (its rule is simply
-// "always the last step", not a per-BOM choice — the UI never shows this
-// toggle there) — validated as exactly-one-flagged for Child Part/Machine
-// only (see processDefinitionValidation.js).
+// qcRequired marks this internal process as a QC step — multi-select, at
+// every BOM level including Sub Child Part (QC multi-checkpoint redesign,
+// agreed 2026-09-25, see server/docs/qc-multi-checkpoint-redesign-discussion-2026-09.md;
+// replaces the earlier "exactly one checkpoint per order" rule). Each QC
+// step gets its own checklist in QC Parameters, keyed by category + step
+// name (QCItemChecklist.stepCategory/stepName). Every BOM needs at least one
+// QC step (validated in processDefinitionValidation.js).
+//
+// finalQc — Machine only: the ONE step that also gets the machine's Final
+// checklist (usually after assembly/testing, though steps may follow it).
+// Exactly one per Machine BOM, mandatory. Independent of qcRequired — a step
+// can carry both (a Process check of how it was built + the Final check).
 const InternalProcessSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   type: { type: String, enum: ['InHouse', 'OutSource'], required: true },
@@ -84,6 +86,7 @@ const InternalProcessSchema = new mongoose.Schema({
     default: [],
   },
   qcRequired: { type: Boolean, default: false },
+  finalQc: { type: Boolean, default: false },
 }, { _id: true, timestamps: false });
 
 const ProcessCategorySchema = new mongoose.Schema({

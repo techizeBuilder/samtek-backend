@@ -23,12 +23,14 @@
 // any level) still needs no Store write at all, dummy or otherwise — see
 // this file's own comment on sendOutsourceHandoffRound for why.
 import ProductionOrder from '../models/ProductionOrder.js';
+import QCJob from '../models/QCJob.js';
 import SubChildPartJobWorkOrder from '../models/SubChildPartJobWorkOrder.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
 import MachineBOM from '../models/MachineBOM.js';
 import { Item } from '../models/Inventory.js';
 import notificationService from '../services/notificationService.js';
-import { qcCheckpointIndex, resolveStepMaterialLines, commitStepMaterialConsumption, completeMachineUnit, allUnitsCompleted } from './productionMfgController.js';
+import { resolveStepMaterialLines, commitStepMaterialConsumption, completeMachineUnit, allUnitsCompleted, ensureQCJobForOrder, qcJobSourceForOrder } from './productionMfgController.js';
+import { getQcStepIndices, submitBatchStepForQC, submitUnitStepForQC, markJobApproved } from '../services/qcStepService.js';
 import { buildFreshUnitProcesses } from '../services/processStepBuilderService.js';
 import { computeSubChildPartRawMaterialAvailabilityLive } from '../services/subChildPartOrderService.js';
 import { resolveCatalogVariant, wholeSheetTargets } from './subChildPartJobWorkOrderController.js';
@@ -203,11 +205,37 @@ export const requestOutsourceHandoff = async (req, res) => {
     // which unit(s) are the ones reaching it.
     const isFirstStepOfOrder = sorted[0] === 0;
 
+    // QC multi-checkpoint redesign, slice 3 (2026-09-26) — Sub Child Part
+    // only. If this run covers a QC-flagged step, snapshot how much this
+    // hand-off actually needs to move: null (whole order) for a first-ever
+    // send, or the exact reworkPendingQty QC decided on for a resend after
+    // Rework — never typed by Production, same "computed, not typed"
+    // convention submitBatchStepForQC already uses. No "nothing outstanding"
+    // guard needed here: validateContiguousOutSourceRun above already
+    // refuses re-requesting a step whose outsourceStatus isn't 'NotStarted',
+    // and the only way it's back to 'NotStarted' with a real batchSteps
+    // entry already on record is submitBatchQcDecision's own Rework reset —
+    // which only ever fires with reworkPendingQty>0 by construction (the
+    // Passed/Rework/Scrap split always sums to the whole outstanding
+    // quantity, so "resolved" and "reworkPendingQty===0" happen together).
+    let subChildPartQty = null;
+    if (order.orderKind === 'SubChildPart') {
+      const qcStepIndices = getQcStepIndices(order, order.processes);
+      const qcStepIdx = sorted.find(idx => qcStepIndices.includes(idx));
+      if (qcStepIdx !== undefined) {
+        const proc = order.processes[qcStepIdx];
+        const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: order.company });
+        const entry = qcJob?.batchSteps?.find(b => b.category === proc.category && b.stepName === proc.step);
+        if (entry && entry.attempts.length > 0) subChildPartQty = entry.reworkPendingQty;
+      }
+    }
+
     order.outsourceHandoffs.push({
       unitIndices: units,
       stepIndices: sorted,
       stepNames,
       isFirstStepOfOrder,
+      subChildPartQty,
       status: 'Requested',
       requestedAt: new Date(),
       requestedBy: req.user._id,
@@ -415,18 +443,18 @@ export const sendOutsourceHandoffRound = async (req, res) => {
 // PUT /api/outsource-work/orders/:id/handoffs/:handoffId/rounds/:roundId/receive
 // — Purchase's "Receive Round". Once every step on this hand-off has been
 // received, the hand-off completes and each covered step is marked done.
-// A NON-checkpoint step goes straight to 'Completed' (no review needed —
-// only the ONE real checkpoint, qcCheckpointIndex, ever needs QC). The
-// checkpoint step itself is handled differently (2026-09-24 design change,
-// see the discussion doc's own section — supersedes this function's
-// original Stage 3/3b behavior, which sent an Out Source checkpoint
-// straight to QC with no Production self-check at all): Production DOES
-// self-check + submit an outsourced checkpoint now, same as an in-house
-// one, just gated on the hand-off actually being back — so this only flips
-// the checkpoint to 'In Progress' (unlocking QcCheckpointPanel, per
-// ProcessExecution.jsx's own `proc.status !== 'Pending'` mount gate) and
-// leaves QCJob creation to submitQcCheckpoint, exactly like it already
-// works for an in-house checkpoint. No QCJob touched here at all anymore.
+//
+// Every QC-flagged step (Sub Child Part, Child Part, Machine — all three,
+// as of slice 4/2026-09-28) submits straight to the job (batchSteps for Sub
+// Child Part, unitChecks[].steps for Child Part/Machine) the moment it's
+// received — no self-check phase, no waiting for a separate submit click.
+// See each order kind's own branch inside this function for the detail. A
+// non-QC step completes straight through; if it's the true last step, it
+// credits stock/Sale directly (Item.qty for Sub Child Part/Child Part,
+// completeMachineUnit for Machine). The old single-checkpoint fallback
+// (qcCheckpointIndex, QcCheckpointPanel) is gone — an order for an item
+// whose BOM genuinely has no QC flag anywhere refuses cleanly instead
+// (see the final `else` below).
 export const receiveOutsourceHandoffRound = async (req, res) => {
   try {
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
@@ -443,65 +471,145 @@ export const receiveOutsourceHandoffRound = async (req, res) => {
 
     const covered = new Set(handoff.rounds.filter(r => r.status === 'Received').flatMap(r => r.coveredSteps));
     const nowComplete = handoff.stepNames.every(s => covered.has(s));
-    // Units whose TRUE LAST step this receive just completed, with their QC
-    // checkpoint earlier in the sequence (already approved — the only way
-    // the steps after it ever unlock). Those units are done right here, the
-    // outsourced twin of completeFinalProcessStep (2026-09-24, found while
-    // planning the per-unit Machine QC redesign: nothing ever marked such a
-    // unit done — no Sale/stock credit, order never Completed). No
-    // Production cost here: the vendor's own cost is the separate, still
-    // deferred Purchase-side capture.
-    const unitsFinishedHere = [];
     if (nowComplete) {
       handoff.status = 'Completed';
       handoff.completedAt = new Date();
-      // Advance every unit this hand-off covers (2026-09-25 — multi-unit
-      // batching), each against its OWN qcCheckpointIndex — position-based,
-      // but resolved per unit since it reads that unit's own procs array
-      // (always the same index in practice, since batching requires every
-      // included unit to share the same stepIndices run, but computed
-      // properly rather than assumed).
-      for (const unitIndex of handoff.unitIndices) {
-        const procs = resolveUnitProcesses(order, unitIndex);
-        const cpIdx = qcCheckpointIndex(order, procs);
+
+      if (order.orderKind === 'SubChildPart') {
+        // QC multi-checkpoint redesign, slice 3 (2026-09-26) — a Sub Child
+        // Part hand-off's unitIndices is always [0] (confirmed via
+        // normalizeHandoffRow's own comment: never independently-progressing
+        // units), so this operates directly on order.processes instead of
+        // going through the per-unit loop the ChildPart/Machine branch below
+        // uses. A QC-flagged step submits to the same batchSteps
+        // mechanic Production's own submitBatchQcStep uses (see
+        // submitBatchStepForQC, qcStepService.js) — receiving the round back
+        // IS the submission trigger here, there's no separate self-check
+        // phase to wait through. A non-QC step still completes straight
+        // through, unchanged from before.
+        const procs = order.processes;
+        const qcStepIndices = getQcStepIndices(order, procs);
+        let qcJob = null;
         for (const idx of handoff.stepIndices) {
           const proc = procs[idx];
           proc.outsourceStatus = 'Received';
-          // Bookkeeping, not a gate (2026-09-24, found live: an Out Source
-          // step's own materialRefs never had their consumption committed
-          // anywhere — commitStepMaterialConsumption only ever fired from
-          // startProcess, which an Outsourcing step never goes through at
-          // all, so "on floor" for whatever it references stayed frozen
-          // forever). Same mirror-shape fix as startProcess's own commit:
-          // resolve this step's lines against this unit, commit unconditionally.
           const materialLines = await resolveStepMaterialLines(order, proc, req.user.companyId);
           if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
-          if (idx === cpIdx) {
-            proc.status = 'In Progress';
-            if (!proc.startDate) { proc.startDate = today(); proc.startedAt = new Date(); }
+
+          if (qcStepIndices.includes(idx)) {
+            if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+            // Quantity is never typed by Purchase either — falls back to
+            // auto-compute (the whole order) on a first-ever send, or uses
+            // the exact rework quantity snapshotted at request time
+            // (requestOutsourceHandoff) on a resend.
+            submitBatchStepForQC(qcJob, order, procs, idx, req.user.fullName || req.user.username || 'Purchase (Outsourced)', { qtyOverride: handoff.subChildPartQty ?? undefined });
           } else {
             proc.status = 'Completed';
             proc.endDate = today();
             proc.completedAt = new Date();
-            if (cpIdx !== -1 && idx === procs.length - 1) unitsFinishedHere.push(unitIndex + 1);
+            // True last step with no QC flag anywhere in the pipeline
+            // (design section 10's rare case) — whoever finishes it runs
+            // the finishing logic; mirrors completeFinalProcessStep's Sub
+            // Child Part branch exactly (whatever survived every earlier
+            // QC step's scrap is that step's own final passedQty).
+            if (idx === procs.length - 1 && order.subChildPartItem) {
+              let survivedQty = Math.max(1, Number(order.orderQuantity) || 1);
+              if (qcStepIndices.length) {
+                const lastQcStep = procs[Math.max(...qcStepIndices)];
+                if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+                const batchEntry = qcJob.batchSteps.find(b => b.category === lastQcStep.category && b.stepName === lastQcStep.step);
+                survivedQty = batchEntry?.passedQty ?? survivedQty;
+              }
+              await Item.updateOne({ _id: order.subChildPartItem, companyId: order.company }, { $inc: { qty: survivedQty } });
+              order.status = 'Completed';
+            }
           }
         }
+        if (qcJob) await qcJob.save();
+      } else if ((order.orderKind === 'ChildPart' || order.orderKind === 'Machine') && getQcStepIndices(order, order.processes).length > 0) {
+        // QC multi-checkpoint redesign — Child Part's own outsourced QC steps
+        // (2026-09-28, the direct per-unit counterpart of the Sub Child Part
+        // branch above), broadened to Machine the same night once the
+        // pattern was confirmed live on Child Part. A dynamic order (a real
+        // Process Definition configured, so at least one step is
+        // qcRequired/finalQc per slice 1's own rule) no longer uses the old
+        // single-checkpoint self-check at all for its outsourced steps —
+        // every QC-flagged step in this hand-off's stepIndices submits
+        // independently to the same per-step QC job Production's own
+        // in-house submit uses (Stage B, submitUnitStepForQC) — bundling two
+        // QC steps into one round submits BOTH, each its own entry, each its
+        // own decision; no quantity to chain between them (unlike Sub Child
+        // Part's whole-batch model) since Pass/Reject is per unit per step
+        // here. A non-QC step (e.g. a plain "painting" pass after the QC
+        // gate already passed) still completes straight through, crediting
+        // stock/Sale itself if it's the true last step of this unit — the
+        // outsourced counterpart of completeFinalProcessStep's Child
+        // Part/Machine branches, since an Outsourcing step never reaches
+        // that endpoint (Production has no button for one at all).
+        // Deliberately does NOT apply any cost here (no Production-side form
+        // exists for an Outsourcing step) — decideChildPartUnitStep's own
+        // true-last-step Pass branch already treats a null
+        // pendingProductionCost/Expense as "skip cost recalc, still credit
+        // qty", the same "vendor cost capture still deferred" convention
+        // already used everywhere else outsourced steps touch cost in this
+        // file; Machine's own build cost (applyManufacturedFinalCost) is a
+        // separate, old-Final-Testing-only concept, untouched here too.
+        let qcJob = null;
+        for (const unitIndex of handoff.unitIndices) {
+          const procs = resolveUnitProcesses(order, unitIndex);
+          const qcStepIndices = getQcStepIndices(order, procs);
+          for (const idx of handoff.stepIndices) {
+            const proc = procs[idx];
+            proc.outsourceStatus = 'Received';
+            const materialLines = await resolveStepMaterialLines(order, proc, req.user.companyId);
+            if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
+
+            if (qcStepIndices.includes(idx)) {
+              if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+              const unit = qcJob.unitChecks.find(u => u.unitNumber === unitIndex + 1);
+              submitUnitStepForQC(qcJob, unit, proc, req.user.fullName || req.user.username || 'Purchase (Outsourced)');
+            } else {
+              proc.status = 'Completed';
+              proc.endDate = today();
+              proc.completedAt = new Date();
+              if (idx === procs.length - 1) {
+                if (order.subChildPartItem) {
+                  await Item.updateOne({ _id: order.subChildPartItem, companyId: order.company }, { $inc: { qty: 1 } });
+                  if (allUnitsCompleted(order)) {
+                    order.status = 'Completed';
+                    if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+                    markJobApproved(qcJob);
+                  }
+                } else if (order.orderKind === 'Machine') {
+                  // completeMachineUnit already handles the Sale-vs-stock
+                  // credit, entry.readyAt, job-Approved, and
+                  // allUnitsCompleted/order.status/finalizeMachineOrderCompletion
+                  // internally — same function the in-house true-last-step
+                  // path (decideChildPartUnitStep) and the old Final Testing
+                  // flow (completeFinalProcessStep) both already reuse.
+                  if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
+                  await completeMachineUnit(order, qcJob, unitIndex + 1, {
+                    actorName: req.user.fullName || req.user.username, userId: req.user._id,
+                  });
+                }
+              }
+            }
+          }
+        }
+        if (qcJob) await qcJob.save();
+      } else {
+        // Slice 4 cleanup (2026-09-28): the old single-checkpoint fallback
+        // (qcCheckpointIndex) is removed — every real order for Child Part,
+        // Machine, and hybrid Sub Child Part is confirmed dynamic (flagged)
+        // at every level as of tonight. Only reachable now if an order gets
+        // created for an item whose BOM genuinely has no qcRequired/finalQc
+        // flag anywhere (e.g. M-311, SCP-004/005/006 before R&D flags them)
+        // — refuse clearly rather than silently misbehave with no QC
+        // mechanism at all.
+        throw new HttpError(400, `${order.machineName || order.orderId} has no QC step configured on its BOM — ask R&D to flag at least one step before outsourcing work for it.`);
       }
     }
 
-    if (order.orderKind === 'Machine') {
-      // completeMachineUnit saves the order itself (per unit, in turn).
-      for (const unitNumber of unitsFinishedHere) {
-        await completeMachineUnit(order, null, unitNumber, { actorName: req.user.fullName || req.user.username, userId: req.user._id });
-      }
-    } else if (order.orderKind === 'ChildPart' && unitsFinishedHere.length) {
-      // Same stock credit completeFinalProcessStep's Child Part branch gives
-      // an in-house last step, one per finished unit.
-      if (order.subChildPartItem) {
-        await Item.updateOne({ _id: order.subChildPartItem, companyId: order.company }, { $inc: { qty: unitsFinishedHere.length } });
-      }
-      if (allUnitsCompleted(order)) order.status = 'Completed';
-    }
 
     await order.save();
     res.json({ success: true, data: order });
@@ -577,10 +685,15 @@ function normalizeHandoffRow(order, handoff) {
     // ProductionOrder/outsourceHandoffs machinery (so `unitIndices` exists
     // on its hand-offs too, always `[0]` in practice — there's no real
     // second unit to batch). Showing unitIndices.length there was
-    // technically accurate but meaningless — always `orderQuantity`
-    // instead, matching pre-batching display and normalizeJobWorkOrderRow's
-    // own unitCount below for the same order kind.
-    unitCount: order.orderKind === 'SubChildPart' ? order.orderQuantity : (handoff.unitIndices || []).length,
+    // technically accurate but meaningless — always `orderQuantity` instead,
+    // matching pre-batching display and normalizeJobWorkOrderRow's own
+    // unitCount below for the same order kind — UNLESS this hand-off is a
+    // slice-3 rework resend, which covers only part of the order
+    // (`subChildPartQty`, see OutsourceHandoffSchema); showing the whole
+    // order's quantity there would be actively misleading to Purchase.
+    unitCount: order.orderKind === 'SubChildPart'
+      ? (handoff.subChildPartQty ?? order.orderQuantity)
+      : (handoff.unitIndices || []).length,
     stepNames: handoff.stepNames || [],
     coveredSteps: [...covered],
     rounds: handoff.rounds || [],
