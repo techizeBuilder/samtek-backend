@@ -1207,6 +1207,8 @@ company in this shared dev database — a real, deterministic collision risk unr
 this pass, worked around in the test script rather than fixed. `node --check` + runtime
 import check on every touched/new backend file.
 
+**Update 2026-10-09 (procurement-v2):** the reservation ledger now tracks the size (`dimensionVariantId`), a per-line key, and `issuedQuantity` (what Store already transferred). Free stock is stock − (reserved − issued), Store transfers record the issue, defective returns re-reserve, and stale rows are swept daily. See `procurement-v2/procurement-v2-changes-2026-10.md` §10.
+
 ## 20. Machine order — BOM view, Material List, and R&D approval queue cutover
 
 Back on Machine order's Process Execution page. Three pieces, refined through direct

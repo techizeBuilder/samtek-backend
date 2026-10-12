@@ -330,6 +330,16 @@ const QCJobSchema = new mongoose.Schema({
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   }],
 
+  // Purchase jobs (2026-10-12 — purchase money, accounts Slice 2): how much
+  // QC passed, recorded at the Pass decision (before the machine path trims
+  // `quantity` to the dispatch share), and the money it made payable on the
+  // PO's bill — posted once (services/purchaseAcceptanceService.js).
+  acceptedQty: { type: Number, default: null },
+  acceptance: {
+    value: { type: Number, default: null },     // ₹ incl. GST added to the bill's accepted value
+    postedAt: { type: Date, default: null },
+  },
+
   notes: { type: String, default: '' },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },

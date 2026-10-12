@@ -73,6 +73,7 @@ import {
   updateInventoryDropdownOption,
   deleteInventoryDropdownOption,
 } from '../controllers/inventoryController.js';
+import { listReservations } from '../controllers/reservationController.js';
 
 const router = express.Router();
 
@@ -152,6 +153,8 @@ router.get('/inventory/stats', auth, getInventoryStats);
 // Production - Store Material Transfer Handshake Routes
 router.get('/inventory/material-issues', auth, authorizeRoles("Store Head", "Store Employee"), getMaterialIssueLogs);
 router.get('/inventory/pending-requests', auth, authorizeRoles("Store Head", "Store Employee"), getPendingRequests);
+// Store → Reservations page (2026-10-09): what's reserved for which order.
+router.get('/inventory/reservations', auth, authorizeRoles("Store Head", "Store Employee", "Company Admin"), listReservations);
 router.post('/inventory/transfer-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferMaterialToProduction);
 router.post('/inventory/transfer-sheet-metal/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferSheetMetalPlanToProduction);
 router.post('/inventory/transfer-fabrication-material/:id', auth, authorizeRoles("Store Head", "Store Employee"), transferFabricationMaterialToProduction);

@@ -226,81 +226,265 @@ export const sendQuotationEmail = async ({ to, customerName, leadCode, companyNa
   }
 };
 
+// HTML-escape anything typed by a person (vendor charge names, term text,
+// remarks) before it goes into an email body.
+const esc = (v) => String(v ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const money = (n) => `₹${(Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-IN')}`;
+const day = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+const td = 'padding: 8px; border: 1px solid #e5e7eb;';
+
 /**
- * Send Purchase Order Email to Vendor
+ * Send a Purchase Order to the vendor (procurement-v2, 2026-10-08) — the
+ * full order: every line with code, qty + unit, rate, GST, amount and its
+ * own due date; the PO's charges (with their GST); payment terms; totals;
+ * delivery address and transport. Sent automatically when a PO becomes a
+ * real order (created directly, or approved by the Company Admin), and by
+ * the "Send / Resend PO email" button.
+ *
+ * Returns { success, error, notConfigured } — when the Purchase mailbox isn't
+ * set up nothing is sent and success is FALSE (it used to report a mock
+ * success, which wrongly marked the PO as "Sent").
  */
-export const sendPurchaseOrderEmail = async ({ to, vendorName, poNumber, items, grandTotal, companyName }) => {
-  const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
+export const sendPurchaseOrderEmail = async ({ mailer: givenMailer, to, vendorName, companyName, purchase }) => {
+  const poNumber = purchase.purchaseOrderNumber;
+  const mailer = givenMailer || await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send PO ${poNumber} to: ${to}`);
-    return { success: true, mocked: true, message: 'No SMTP config, mock success' };
+    return { success: false, notConfigured: true, error: 'Purchase email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
   }
   const { transporter, fromAddress } = mailer;
-  const subject = `🛒 New Purchase Order ${poNumber} from ${companyName}`;
+  const subject = `🛒 Purchase Order ${poNumber} from ${companyName}`;
 
-  const itemsRows = items.map(item => `
+  const lines = purchase.items || [];
+  // A PO with an advance: the delivery days start when the advance is paid
+  // (2026-10-12), so the email gives the days, not a date.
+  const onAdvance = purchase.deliveryClock?.startsOn === 'advance' && !purchase.deliveryClock?.startedAt;
+  const deliverBy = (it) => (onAdvance
+    ? (Number(it.deliveryDays) > 0 ? `${it.deliveryDays} days after advance` : 'after advance')
+    : day(it.expectedDeliveryDate || purchase.expectedDeliveryDate));
+  const itemsRows = lines.map((it, i) => {
+    const code = it.item?.code ? ` <span style="color:#6b7280;font-size:12px;">(${esc(it.item.code)})</span>` : '';
+    const unit = it.purchaseUnit ? ` ${esc(it.purchaseUnit)}` : '';
+    const gst = it.gstInclusive ? 'incl.' : `${Number(it.gstRate) || 0}%`;
+    const amount = (Number(it.totalPrice) || 0) + (Number(it.gstAmount) || 0);
+    return `
         <tr>
-            <td style="padding: 8px; border: 1px solid #e5e7eb;">${item.itemName}</td>
-            <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: center;">${item.quantity}</td>
-            <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">₹${item.unitPrice.toLocaleString('en-IN')}</td>
-            <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">₹${(item.quantity * item.unitPrice).toLocaleString('en-IN')}</td>
-        </tr>
-    `).join('');
+          <td style="${td}">${i + 1}</td>
+          <td style="${td}">${esc(it.itemName)}${code}${(it.fabricationDimensionLines || []).length ? `<div style="color:#6b7280;font-size:12px;margin-top:4px;">${(it.fabricationDimensionLines || []).map(l => `${esc(formatDims(l.values))} × ${l.quantity} pcs`).join('<br/>')}</div>` : ''}</td>
+          <td style="${td} text-align:center;">${it.quantity}${unit}${(it.fabricationDimensionLines || []).length ? '<div style="color:#6b7280;font-size:11px;">(calculated weight)</div>' : ''}</td>
+          <td style="${td} text-align:right;">${money(it.unitPrice)}</td>
+          <td style="${td} text-align:center;">${gst}</td>
+          <td style="${td} text-align:right;">${money(amount)}</td>
+          <td style="${td} text-align:center;">${deliverBy(it)}</td>
+        </tr>`;
+  }).join('');
+
+  const charges = purchase.charges || [];
+  const chargesRows = charges.map(c => `
+        <tr>
+          <td style="padding: 4px 0; color:#374151;">${esc(c.label)}${c.gstPercent ? ` <span style="color:#6b7280;">(+${c.gstPercent}% GST)</span>` : ''}</td>
+          <td style="padding: 4px 0; text-align:right; color:#111827;">${money((Number(c.amount) || 0) + (Number(c.gstAmount) || 0))}</td>
+        </tr>`).join('');
+
+  const terms = purchase.paymentTerms || {};
+  const termItems = [
+    terms.advancePercent != null ? `<li>Advance: <strong>${terms.advancePercent}%</strong></li>` : '',
+    terms.creditDays != null ? `<li>Credit: <strong>${terms.creditDays} days</strong></li>` : '',
+    ...(terms.others || []).map(o => `<li>${esc(o.label)}: <strong>${esc(o.value)}</strong></li>`),
+  ].filter(Boolean).join('');
+
+  const goods = Number(purchase.totalAmount) || 0;
+  const gstTotal = (Number(purchase.taxAmount) || 0) + (Number(purchase.chargesGstTotal) || 0);
+  const chargesTotal = (Number(purchase.chargesTotal) || 0) + (Number(purchase.poChargesTotal) || 0);
 
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #f9fafb; padding: 20px;">
-      <div style="background: #1e40af; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 24px;">🛒 New Purchase Order</h1>
-        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${companyName}</p>
+    <div style="font-family: Arial, sans-serif; max-width: 720px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: #1e40af; padding: 26px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 22px;">🛒 Purchase Order ${esc(poNumber)}</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${esc(companyName)} · ${day(purchase.orderDate || purchase.createdAt)}</p>
       </div>
+      <div style="background: white; padding: 26px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 15px;">Dear <strong>${esc(vendorName)}</strong>,</p>
+        <p style="color: #6b7280;">We are pleased to place the following purchase order with you. Please confirm receipt and deliver as per the ${onAdvance ? 'delivery times below — they count from the day we pay the advance' : 'dates below'}.</p>
 
-      <div style="background: white; padding: 30px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
-        <p style="color: #374151; font-size: 16px;">Dear <strong>${vendorName}</strong>,</p>
-        <p style="color: #6b7280;">
-          We are pleased to place the following Purchase Order (PO Number: <strong>${poNumber}</strong>) with you.
-          Please review the items and prepare the shipment as per our agreement.
-        </p>
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin: 18px 0;">
+          <thead>
+            <tr style="background: #f3f4f6;">
+              <th style="${td} text-align:left;">#</th>
+              <th style="${td} text-align:left;">Item</th>
+              <th style="${td} text-align:center;">Qty</th>
+              <th style="${td} text-align:right;">Rate</th>
+              <th style="${td} text-align:center;">GST</th>
+              <th style="${td} text-align:right;">Amount</th>
+              <th style="${td} text-align:center;">Deliver by</th>
+            </tr>
+          </thead>
+          <tbody>${itemsRows}</tbody>
+        </table>
 
-        <div style="margin: 24px 0;">
-          <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-            <thead>
-              <tr style="background: #f3f4f6;">
-                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: left;">Item Name</th>
-                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: center;">Qty</th>
-                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">Unit Price</th>
-                <th style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">Total Price</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${itemsRows}
-              <tr style="font-weight: bold; background: #f9fafb;">
-                <td colSpan="3" style="padding: 8px; border: 1px solid #e5e7eb; text-align: right;">Grand Total:</td>
-                <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: right; color: #1e40af; font-size: 16px;">₹${grandTotal.toLocaleString('en-IN')}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        ${charges.length ? `
+        <div style="margin: 12px 0;">
+          <p style="color:#111827; font-weight:bold; margin:0 0 6px;">Charges</p>
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">${chargesRows}</table>
+        </div>` : ''}
 
-        <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">
-          Please confirm receipt of this order and share the expected delivery date.
-        </p>
-        <p style="color: #6b7280; font-size: 13px;">Thank you for your cooperation.</p>
-        <p style="color: #111827; font-weight: bold;">— ${companyName}</p>
+        <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin: 14px 0; border-top: 2px solid #e5e7eb;">
+          <tr><td style="padding: 6px 0; color:#6b7280;">Goods</td><td style="padding: 6px 0; text-align:right;">${money(goods)}</td></tr>
+          ${chargesTotal ? `<tr><td style="padding: 6px 0; color:#6b7280;">Charges</td><td style="padding: 6px 0; text-align:right;">${money(chargesTotal)}</td></tr>` : ''}
+          ${purchase.gstSplit?.type === 'CGST_SGST'
+            ? `<tr><td style="padding: 6px 0; color:#6b7280;">CGST</td><td style="padding: 6px 0; text-align:right;">${money(gstTotal / 2)}</td></tr>
+          <tr><td style="padding: 6px 0; color:#6b7280;">SGST</td><td style="padding: 6px 0; text-align:right;">${money(gstTotal / 2)}</td></tr>`
+            : `<tr><td style="padding: 6px 0; color:#6b7280;">${purchase.gstSplit?.type === 'IGST' ? 'IGST' : 'GST'}</td><td style="padding: 6px 0; text-align:right;">${money(gstTotal)}</td></tr>`}
+          <tr style="font-weight:bold;"><td style="padding: 8px 0; color:#111827;">Grand Total</td><td style="padding: 8px 0; text-align:right; color:#1e40af; font-size:16px;">${money(purchase.grandTotal)}</td></tr>
+        </table>
+
+        ${termItems ? `
+        <div style="background:#f0f4ff; border-left:4px solid #1e40af; border-radius:4px; padding:14px 18px; margin:14px 0;">
+          <p style="color:#1e40af; font-weight:bold; margin:0 0 6px;">Payment terms</p>
+          <ul style="color:#374151; margin:0; padding-left:18px; line-height:1.8;">${termItems}</ul>
+        </div>` : ''}
+
+        <p style="color:#374151; font-size:13px; margin: 10px 0;"><strong>Deliver to:</strong> ${esc(purchase.deliveryAddress || '')}</p>
+        <p style="color:#374151; font-size:13px; margin: 6px 0;"><strong>Transport:</strong> ${purchase.transportBy === 'Company' ? 'We will collect the goods from you.' : 'Please deliver to the address above.'}</p>
+        ${purchase.notes ? `<p style="color:#374151; font-size:13px; margin: 6px 0;"><strong>Notes:</strong> ${esc(purchase.notes)}</p>` : ''}
+
+        <p style="color: #6b7280; font-size: 13px; margin-top: 20px;">Please quote PO number <strong>${esc(poNumber)}</strong> on your invoice and delivery challan.</p>
+        <p style="color: #111827; font-weight: bold;">— ${esc(companyName)} Procurement Team</p>
       </div>
-    </div>
-    `;
+    </div>`;
 
   try {
-    const result = await transporter.sendMail({
-      from: `"${companyName}" <${fromAddress}>`,
-      to,
-      subject,
-      html
-    });
+    const result = await transporter.sendMail({ from: `"${companyName} Procurement" <${fromAddress}>`, to, subject, html });
     console.log(`✅ PO Email sent to ${to} for PO ${poNumber}`);
     return { success: true, messageId: result.messageId };
   } catch (error) {
     console.error(`❌ PO Email failed to ${to}:`, error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Tells the vendor a PO is cancelled (gap 13, 2026-10-09) — the whole PO, or
+ * (short close) only the items still to be delivered. `lines` = the
+ * cancelled lines { itemName, quantity, purchaseUnit }.
+ */
+export const sendPurchaseOrderCancellationEmail = async ({ to, vendorName, companyName, poNumber, full, lines = [], reason = '' }) => {
+  const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
+  if (!mailer) {
+    console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send the cancellation of PO ${poNumber} to: ${to}`);
+    return { success: false, notConfigured: true, error: 'Purchase email is not configured yet.' };
+  }
+  const { transporter, fromAddress } = mailer;
+  const subject = full
+    ? `❌ Purchase Order ${poNumber} cancelled — ${companyName}`
+    : `Purchase Order ${poNumber}: remaining items cancelled — ${companyName}`;
+  const rows = lines.map(l => `<li>${esc(l.itemName || 'Item')} — ${esc(String(l.quantity ?? ''))} ${esc(l.purchaseUnit || '')}</li>`).join('');
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: white; border-radius: 8px; padding: 26px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+        <h2 style="color:#b91c1c; margin:0 0 14px;">${full ? 'Purchase Order cancelled' : 'Remaining items cancelled'}</h2>
+        <p style="color:#374151;">Dear <strong>${esc(vendorName || 'Vendor')}</strong>,</p>
+        <p style="color:#374151;">
+          ${full
+            ? `Our Purchase Order <strong>${esc(poNumber)}</strong> is <strong>cancelled</strong>. Please do not dispatch anything against it.`
+            : `On our Purchase Order <strong>${esc(poNumber)}</strong>, the items below are <strong>cancelled</strong> — please do not dispatch them. What you have already delivered stays as it is.`}
+        </p>
+        ${rows ? `<ul style="color:#374151; line-height:1.8;">${rows}</ul>` : ''}
+        ${reason ? `<p style="color:#374151; font-size:13px;"><strong>Reason:</strong> ${esc(reason)}</p>` : ''}
+        <p style="color:#6b7280; font-size:13px; margin-top:18px;">If you have any questions, please reply to this email quoting PO <strong>${esc(poNumber)}</strong>.</p>
+        <p style="color:#111827; font-weight:bold;">— ${esc(companyName)} Procurement Team</p>
+      </div>
+    </div>`;
+  try {
+    const result = await transporter.sendMail({ from: `"${companyName} Procurement" <${fromAddress}>`, to, subject, html });
+    console.log(`✅ PO cancellation email sent to ${to} for PO ${poNumber}`);
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    console.error(`❌ PO cancellation email failed to ${to}:`, error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * One quotation request for SEVERAL items to one vendor (procurement-v2,
+ * 2026-10-08) — replaces one-email-per-item. The link opens the vendor's
+ * multi-item quotation page (/vendor-quotation/:token), where they price
+ * every item and add their charges and payment terms.
+ */
+// reminder = true (point 16, 2026-10-10): the same request and link sent
+// again, marked as a reminder — Purchase's "Send reminder" button.
+export const sendQuotationRequestEmail = async ({ mailer, to, vendorName, requestNo, items, link, expiresAt, companyName, validityDays = null, reminder = false }) => {
+  const resolvedMailer = mailer || await getDeptMailer(DEPARTMENTS.PURCHASE);
+  if (!resolvedMailer) {
+    console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send quotation request ${requestNo} to: ${to}`);
+    return { success: false, error: 'Purchase email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
+  }
+  const { transporter, fromAddress } = resolvedMailer;
+  const subject = `${reminder ? 'Reminder: ' : ''}📋 Request for Quotation ${requestNo} — ${items.length} item${items.length === 1 ? '' : 's'} | ${companyName}`;
+
+  const rows = items.map((it, i) => `
+        <tr>
+          <td style="${td}">${i + 1}</td>
+          <td style="${td}">${esc(it.itemName)}${it.itemCode ? ` <span style="color:#6b7280;font-size:12px;">(${esc(it.itemCode)})</span>` : ''}
+            ${(it.fabricationDimensionLines || []).length ? `<div style="color:#6b7280;font-size:12px;margin-top:4px;">${(it.fabricationDimensionLines || []).map(l => `${formatDims(l.values)} × ${l.quantity}`).join('<br/>')}</div>` : ''}
+          </td>
+          <td style="${td} text-align:center;">${it.quantity} ${esc(it.purchaseUnit || '')}</td>
+        </tr>`).join('');
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: linear-gradient(135deg, #1e40af, #7c3aed); padding: 28px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 22px;">📋 Request for Quotation</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${esc(companyName)} · ${esc(requestNo)}</p>
+      </div>
+      <div style="background: white; padding: 28px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 15px;">Dear <strong>${esc(vendorName)}</strong>,</p>
+        ${reminder ? `<p style="color: #92400e; background:#fff7ed; border:1px solid #fed7aa; border-radius:6px; padding:10px 12px; font-size: 14px;">A friendly reminder: we haven't received your quotation for <strong>${esc(requestNo)}</strong> yet. The same link below still works.</p>` : ''}
+        <p style="color: #6b7280; line-height: 1.6;">Please send us your best quotation for the items below — all of them on one page.</p>
+
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin: 16px 0;">
+          <thead>
+            <tr style="background: #f3f4f6;">
+              <th style="${td} text-align:left;">#</th>
+              <th style="${td} text-align:left;">Item</th>
+              <th style="${td} text-align:center;">Quantity</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+
+        <p style="color: #374151; font-weight: bold; font-size: 14px;">On the quotation page, please give:</p>
+        <ul style="color: #6b7280; line-height: 1.9; margin: 0 0 18px; padding-left: 20px; font-size: 13px;">
+          <li>Price per unit, GST % and whether your price includes GST — for each item</li>
+          <li>Delivery time (days) and warranty, if any</li>
+          <li>Any charges (freight, packing…) and your payment terms</li>
+          <li>Leave an item blank if you can't supply it</li>
+          ${validityDays ? `<li>Your prices will be treated as valid for <strong>${Number(validityDays)} days</strong> from the day you submit</li>` : ''}
+        </ul>
+
+        <div style="text-align: center; margin: 26px 0;">
+          <a href="${link}" style="display: inline-block; background: linear-gradient(135deg, #1e40af, #7c3aed); color: white; text-decoration: none; padding: 14px 34px; border-radius: 8px; font-weight: bold; font-size: 16px;">
+            📝 Submit Your Quotation
+          </a>
+        </div>
+
+        <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; padding: 12px;">
+          <p style="color: #92400e; font-size: 13px; margin: 0;">⏰ This link is valid until <strong>${day(expiresAt)}</strong>. You can submit once — please check everything before submitting.</p>
+        </div>
+
+        <p style="color: #6b7280; font-size: 13px; margin-top: 22px;">Thank you for your partnership.</p>
+        <p style="color: #111827; font-weight: bold;">— ${esc(companyName)} Procurement Team</p>
+      </div>
+    </div>`;
+
+  try {
+    const result = await transporter.sendMail({ from: `"${companyName} Procurement" <${fromAddress}>`, to, subject, html });
+    console.log(`✅ Quotation request ${requestNo} emailed to ${to}`);
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    console.error(`❌ Quotation request email failed to ${to}:`, error.message);
     return { success: false, error: error.message };
   }
 };

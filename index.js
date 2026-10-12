@@ -312,6 +312,11 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const purchaseRequestRoutes = (await import('./routes/purchaseRequestRoutes.js')).default;
             app.use('/api/purchase-requests', purchaseRequestRoutes);
             console.log('Purchase Request routes registered at /api/purchase-requests');
+            // Item-wise PR consolidation (2026-10) — ItemQuoteGroup CRUD +
+            // group-based quoting, see itemQuoteGroupController.js.
+            const itemQuoteGroupRoutes = (await import('./routes/itemQuoteGroupRoutes.js')).default;
+            app.use('/api/item-quote-groups', itemQuoteGroupRoutes);
+            console.log('Item Quote Group routes registered at /api/item-quote-groups');
             // Sub Child Part — Out-Source (Purchase) job-work orders.
             const subChildPartJobWorkOrderRoutes = (await import('./routes/subChildPartJobWorkOrderRoutes.js')).default;
             app.use('/api/purchase/sub-child-job-work', subChildPartJobWorkOrderRoutes);
@@ -330,6 +335,18 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.get('/api/vendor-bid/:token', getBidByToken);
             app.post('/api/vendor-bid/:token', submitBidByToken);
             console.log('RFQ / Vendor Bidding routes registered at /api/rfq + /api/vendor-bid/:token');
+            // One quotation email per vendor for several items (procurement-v2):
+            // authenticated sender + the vendor's public page (no auth, by token)
+            const quotationRequestRoutes = (await import('./routes/quotationRequestRoutes.js')).default;
+            app.use('/api/quotation-requests', quotationRequestRoutes);
+            const { getQuotationByToken, submitQuotationByToken } = await import('./controllers/quotationRequestController.js');
+            app.get('/api/vendor-quotation/:token', getQuotationByToken);
+            app.post('/api/vendor-quotation/:token', submitQuotationByToken);
+            console.log('Quotation request routes registered at /api/quotation-requests + /api/vendor-quotation/:token');
+            // Manual quotations with uploaded evidence (procurement-v2, 2026-10-09)
+            const manualQuotationRoutes = (await import('./routes/manualQuotationRoutes.js')).default;
+            app.use('/api/manual-quotations', manualQuotationRoutes);
+            console.log('Manual quotation routes registered at /api/manual-quotations');
             // Purchase Exchange (QC-rejected purchased goods -> vendor replacement) routes
             const purchaseExchangeRoutes = (await import('./routes/purchaseExchangeRoutes.js')).default;
             app.use('/api/purchase-exchange', purchaseExchangeRoutes);
@@ -364,6 +381,22 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const leadSettingRequestRoutes = (await import('./routes/leadSettingRequestRoutes.js')).default;
             app.use('/api/lead-setting-requests', leadSettingRequestRoutes);
             console.log('Lead Setting Request routes registered at /api/lead-setting-requests');
+            // Vendor approvals (Purchase requests -> Company Admin approves) — procurement-v2
+            const vendorApprovalRoutes = (await import('./routes/vendorApprovalRoutes.js')).default;
+            app.use('/api/vendor-approvals', vendorApprovalRoutes);
+            console.log('Vendor Approval routes registered at /api/vendor-approvals');
+            // Company-wide purchase settings (Company Admin rules + Purchase templates) — procurement-v2
+            const purchaseSettingsRoutes = (await import('./routes/purchaseSettingsRoutes.js')).default;
+            app.use('/api/purchase-settings', purchaseSettingsRoutes);
+            console.log('Purchase Settings routes registered at /api/purchase-settings');
+            // Company Admin approval of POs above the threshold — procurement-v2
+            const poApprovalRoutes = (await import('./routes/poApprovalRoutes.js')).default;
+            app.use('/api/po-approvals', poApprovalRoutes);
+            console.log('PO Approval routes registered at /api/po-approvals');
+            // Purchase audit log (read only) — procurement-v2 gap 17
+            const purchaseAuditRoutes = (await import('./routes/purchaseAuditRoutes.js')).default;
+            app.use('/api/purchase-audit', purchaseAuditRoutes);
+            console.log('Purchase Audit routes registered at /api/purchase-audit');
             // Sales -> R&D new-product requests (raised from a lead's Quotation page)
             const salesItemRequestRoutes = (await import('./routes/salesItemRequestRoutes.js')).default;
             app.use('/api/sales-item-requests', salesItemRequestRoutes);
@@ -705,6 +738,105 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             }
             catch (cronError) {
                 console.warn('⚠️ Low-stock reorder cron job setup warning:', cronError.message);
+            }
+
+            // ─── Daily Cron Job — stale material reservations (2026-10-09) ──
+            // A reservation whose order no longer exists, or already
+            // Completed, is removed so it can't hold stock forever.
+            try {
+                const cron = (await import('node-cron')).default;
+                const { sweepStaleReservations } = await import('./services/materialReservationService.js');
+                cron.schedule('30 2 * * *', async () => {
+                    try {
+                        const r = await sweepStaleReservations();
+                        console.log(`⏰ [CRON] Stale reservation sweep: ${r.stale} removed of ${r.checked}`);
+                    } catch (e) {
+                        console.error('Stale reservation sweep failed:', e);
+                    }
+                });
+                console.log('✅ Stale reservation sweep scheduled (daily 2:30 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Stale reservation sweep setup warning:', cronError.message);
+            }
+
+            // ─── Daily Cron Job — Vendor document expiry reminders (procurement-v2) ──
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runVendorDocumentExpirySweep } = await import('./services/vendorApprovalService.js');
+                // Daily at 9:15 AM — reminds Purchase + Company Admin 30 days
+                // before a vendor document expires and on the day it does.
+                cron.schedule('15 9 * * *', async () => {
+                    console.log('⏰ [CRON] Starting vendor document expiry sweep...');
+                    const sent = await runVendorDocumentExpirySweep();
+                    console.log(`✅ [CRON] Vendor document expiry sweep done — ${sent} reminder(s) sent`);
+                });
+                console.log('✅ Vendor document expiry cron job scheduled (daily at 9:15 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Vendor document expiry cron job setup warning:', cronError.message);
+            }
+
+            // ─── Daily Cron Job — Overdue PO deliveries (procurement-v2, 2026-10-10) ─
+            // One alert per late PO line per date, to whoever created the PO, plus
+            // an audit-log entry (services/deliveryFollowUpService.js).
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runOverdueDeliverySweep } = await import('./services/deliveryFollowUpService.js');
+                cron.schedule('30 9 * * *', async () => {
+                    try {
+                        const r = await runOverdueDeliverySweep();
+                        console.log(`✅ [CRON] Overdue delivery sweep done — ${r.alerted} PO(s) alerted of ${r.checked} open`);
+                    } catch (err) {
+                        console.error('❌ [CRON] Overdue delivery sweep failed:', err.message);
+                    }
+                });
+                console.log('✅ Overdue delivery cron job scheduled (daily at 9:30 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Overdue delivery cron job setup warning:', cronError.message);
+            }
+
+            // ─── Daily Cron Job — Quote reminders (procurement-v2 point 16, 2026-10-10) ─
+            // Tells Purchase about quotation requests with no reply, links that ran
+            // out, and quotes about to expire — one notification per person
+            // (services/quoteReminderService.js). Never emails the vendor itself.
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runQuoteReminderSweep } = await import('./services/quoteReminderService.js');
+                cron.schedule('35 9 * * *', async () => {
+                    try {
+                        const r = await runQuoteReminderSweep();
+                        console.log(`✅ [CRON] Quote reminder sweep done — ${r.notified} person(s) notified (no reply ${r.noReply}, link expired ${r.linkExpired}, expiring ${r.expiring})`);
+                    } catch (err) {
+                        console.error('❌ [CRON] Quote reminder sweep failed:', err.message);
+                    }
+                });
+                console.log('✅ Quote reminder cron job scheduled (daily at 9:35 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Quote reminder cron job setup warning:', cronError.message);
+            }
+
+            // ─── Daily Cron Job — Purchase payments overdue (2026-10-12) ─────────────
+            // A PO bill past its full-payment date (credit days after everything
+            // passed QC) → the PO shows Overdue and Accounts hears once
+            // (services/purchaseAcceptanceService.js).
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runPaymentOverdueSweep } = await import('./services/purchaseAcceptanceService.js');
+                cron.schedule('40 9 * * *', async () => {
+                    try {
+                        const r = await runPaymentOverdueSweep();
+                        console.log(`✅ [CRON] Purchase payment overdue sweep done — ${r.flagged} bill(s) flagged`);
+                    } catch (err) {
+                        console.error('❌ [CRON] Purchase payment overdue sweep failed:', err.message);
+                    }
+                });
+                console.log('✅ Purchase payment overdue cron job scheduled (daily at 9:40 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Purchase payment overdue cron job setup warning:', cronError.message);
             }
 
             // ─── Periodic Cron Job — Child Part Low-Stock Auto-Production ────────────

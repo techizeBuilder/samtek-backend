@@ -22,9 +22,28 @@ import mongoose from 'mongoose';
 // hook (order reaches 'Completed') and storeFlowService.js's explicit
 // release-before-delete (an order deleted before completion, e.g. Store
 // re-routing an item away from Production).
+//
+// Reservation pipeline fix (2026-10-09, procurement-v2 gap 9):
+//   - A row now means "still to be ISSUED for this order":
+//       remaining = quantity (the full need) − issuedQuantity
+//       free(item, size) = stock − Σ remaining of every row for (item, size)
+//     Store's transfer raises issuedQuantity (materialReservationService
+//     recordIssue) instead of the stock being counted twice until the order
+//     completes; a defective return lowers it again (re-reserve).
+//   - dimensionVariantId: the fabrication SIZE (null for any other item) —
+//     fabrication stock lives per size (dimensionVariants[].subStock), so
+//     reservations must too.
+//   - lineKey: the BOM line / cut group, so two lines of the same item on one
+//     order (two sheet cut-groups, two sizes) never overwrite each other.
+//   One row per (item, size, order, line).
 const MaterialReservationSchema = new mongoose.Schema({
   item: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', required: true },
+  dimensionVariantId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  lineKey: { type: String, default: '' },
+  // The order's full need for this line — re-written on every availability
+  // re-check; never reduced by issuing (that's issuedQuantity).
   quantity: { type: Number, required: true, min: 0 },
+  issuedQuantity: { type: Number, default: 0, min: 0 },
   // Generic — the claiming order can be a ProductionOrder (Machine/
   // ChildPart/SubChildPart orderKind, the vast majority of callers) or a
   // SubChildPartJobWorkOrder (the Out-Source route's own order model).
@@ -33,8 +52,8 @@ const MaterialReservationSchema = new mongoose.Schema({
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
 }, { timestamps: true });
 
-// Every getFreeQty() call filters by {item, company} — this is the hot path.
-MaterialReservationSchema.index({ item: 1, company: 1 });
+// Every getFreeQty() call filters by {item, size, company} — the hot path.
+MaterialReservationSchema.index({ item: 1, dimensionVariantId: 1, company: 1 });
 // releaseReservationsForOrder() looks up by this.
 MaterialReservationSchema.index({ reservedByOrderId: 1 });
 

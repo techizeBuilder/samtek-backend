@@ -19,3 +19,6 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Daily work reports (kept locally, not in git)
+docs/daily report/

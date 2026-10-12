@@ -24,6 +24,51 @@ import { dimensionSignature, resolveFabricationWeight } from '../services/fabric
 import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
 import { toMm, toMm2 } from '../utils/unitConversion.js';
+import { recordIssue, recordReturn, heldForEarlierOrders } from '../services/materialReservationService.js';
+
+// ── Reservations on Store transfers (2026-10-09, reservation pipeline fix) ──
+// A transfer issues material to an order: that order's reservation for the
+// item (and fabrication size) is raised by the issued quantity, so the stock
+// isn't counted twice (once gone from stock, once still "reserved") until the
+// order completes. If the transfer takes stock still reserved for orders that
+// claimed it EARLIER, it goes through anyway (user decision: warn, don't
+// block — physical stock can be wrong) and the response carries a warning.
+async function reservationWarning({ itemId, variantId = null, companyId, order, stockBefore, qty, unit }) {
+  try {
+    const held = await heldForEarlierOrders({ itemId, variantId, companyId, orderId: order._id, currentQty: stockBefore });
+    if (!(qty > held.freeForThisOrder) || !held.earlier.length) return null;
+    const taken = Math.round((qty - Math.max(0, held.freeForThisOrder)) * 1000) / 1000;
+    const who = held.earlier.map(e => `${e.orderCode || 'another order'} (${e.remaining})`).join(', ');
+    return `${taken} ${unit || ''} of this was reserved for earlier order(s): ${who}. Make sure they can still be supplied.`.replace(/\s+/g, ' ');
+  } catch (err) {
+    console.error('reservationWarning error:', err);
+    return null;
+  }
+}
+// Demand pieces (cut to the BOM size) → catalog pieces of the reserved size,
+// by material: pieces × (area or length each) ÷ one catalog piece. 0 when the
+// demand has no amount data or the catalog size can't be read.
+export function catalogEquivalentPieces({ sourceItem, catalogVariantId, demand, isSheet, qty }) {
+  const catalog = sourceItem?.dimensionVariants?.id ? sourceItem.dimensionVariants.id(catalogVariantId)
+    : (sourceItem?.dimensionVariants || []).find(v => String(v._id) === String(catalogVariantId));
+  if (!catalog || demand?.amountValue == null || !demand?.amountUnit) return 0;
+  const perPiece = isSheet ? toMm2(demand.amountValue, demand.amountUnit) : toMm(demand.amountValue, demand.amountUnit);
+  const capacity = isSheet
+    ? (Number(catalog.values?.width) || 0) * (Number(catalog.values?.length) || 0)
+    : (Number(catalog.values?.length) || 0);
+  if (!(perPiece > 0) || !(capacity > 0)) return 0;
+  return Math.round(((perPiece * (Number(qty) || 0)) / capacity) * 1000) / 1000;
+}
+
+async function issueOnReservation({ order, itemId, variantId = null, qty }) {
+  try {
+    await recordIssue({ orderId: order._id, itemId, variantId, qty });
+  } catch (err) {
+    // Never fail a physical transfer over the ledger; it self-heals on
+    // order completion / the daily stale sweep.
+    console.error(`recordIssue failed for order ${order.orderId}:`, err);
+  }
+}
 
 // Delivery Challan Order for Unit Head Inventory
 const DELIVERY_CHALLAN_ORDER = [
@@ -3651,6 +3696,33 @@ export const getPendingRequests = async (req, res) => {
       }
     }
 
+    // Reservation-aware stock note per row (2026-10-09): how much is in stock
+    // for this row (the item, or that fabrication size), how much of it is
+    // still reserved for orders that claimed it EARLIER, and so how much this
+    // order can take without touching their claims. Store is warned, never
+    // blocked (user decision).
+    const stockItems = await Item.find({ code: { $in: materialCodes }, companyId }).select('code qty dimensionVariants').lean();
+    const itemByCode = new Map(stockItems.map(i => [i.code, i]));
+    for (const o of filteredOrders) {
+      for (const m of o.pendingMaterials) {
+        const it = itemByCode.get(m.sourceItemCode || m.materialCode);
+        if (!it) continue;
+        const variantId = m.fabricationCategory ? (m.dimensionVariantId || null) : null;
+        if (m.fabricationCategory && !variantId) continue;
+        const stock = variantId
+          ? ((it.dimensionVariants || []).find(v => String(v._id) === String(variantId))?.subStock || 0)
+          : (it.qty || 0);
+        const held = await heldForEarlierOrders({ itemId: it._id, variantId, companyId, orderId: o._id, currentQty: stock });
+        m.stockCheck = {
+          stock,
+          unit: variantId ? 'piece(s)' : (m.unit || ''),
+          heldForEarlier: held.heldTotal,
+          freeForThisOrder: held.freeForThisOrder,
+          earlier: held.earlier.map(e => ({ orderCode: e.orderCode, remaining: e.remaining })),
+        };
+      }
+    }
+
     res.json({ success: true, data: filteredOrders });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -3710,6 +3782,10 @@ export const transferMaterialToProduction = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Insufficient stock in Store for this transfer.' });
     }
 
+    // Reservation: warn if earlier orders' claims were taken; record the issue.
+    const warning = await reservationWarning({ itemId: item._id, companyId, order, stockBefore: (item.qty || 0) + transferQty, qty: transferQty, unit: demand.unit });
+    await issueOnReservation({ order, itemId: item._id, qty: transferQty });
+
     // 2. UPDATE ORDER
     const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
 
@@ -3734,7 +3810,7 @@ export const transferMaterialToProduction = async (req, res) => {
       company: companyId
     });
 
-    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.` });
+    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.`, warning });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -3799,6 +3875,11 @@ export const transferSheetMetalPlanToProduction = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Insufficient sheet stock in Store for this transfer.' });
     }
 
+    // Reservation (per size): warn if earlier orders' claims were taken; record the issue.
+    const issuedVariant = item.dimensionVariants.id(demand.dimensionVariantId);
+    const warning = await reservationWarning({ itemId: item._id, variantId: demand.dimensionVariantId, companyId, order, stockBefore: (issuedVariant?.subStock || 0) + transferQty, qty: transferQty, unit: 'sheet(s)' });
+    await issueOnReservation({ order, itemId: item._id, variantId: demand.dimensionVariantId, qty: transferQty });
+
     const demandIndex = order.materialDemands.findIndex(m => m.materialCode === materialCode);
     order.materialDemands[demandIndex].transferredQuantity = (order.materialDemands[demandIndex].transferredQuantity || 0) + transferQty;
     order.materialDemands[demandIndex].status = 'In Transit';
@@ -3818,7 +3899,7 @@ export const transferSheetMetalPlanToProduction = async (req, res) => {
       company: companyId,
     });
 
-    res.json({ success: true, message: `Successfully transferred ${transferQty} sheet(s) to Production.` });
+    res.json({ success: true, message: `Successfully transferred ${transferQty} sheet(s) to Production.`, warning });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -3921,6 +4002,7 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
 
     // Snapshot before mutating — used for the audit log and the leftover calc.
     const sourceValuesSnapshot = { ...(sourceVariant.values || {}) };
+    const sourceStockBefore = sourceVariant.subStock || 0;
 
     // Deduct the STOCK PIECES actually consumed — not the demand quantity
     // fulfilled (the core bug fix: these are no longer assumed equal).
@@ -3985,6 +4067,22 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
 
     await sourceItem.save();
 
+    // Reservation (2026-10-09): the order reserved CATALOG pieces of
+    // demand.dimensionVariantId. Cut from that size → those stock pieces are
+    // issued. Cut from a leftover / another size → the catalog material this
+    // transfer saved (pieces fulfilled × size each ÷ one catalog piece);
+    // without amount data nothing is recorded and the claim stays until the
+    // order completes (the safe direction).
+    let warning = null;
+    const reservedVariantId = demand.dimensionVariantId || null;
+    if (reservedVariantId && String(sourceVariantId) === String(reservedVariantId)) {
+      warning = await reservationWarning({ itemId: sourceItem._id, variantId: reservedVariantId, companyId, order, stockBefore: sourceStockBefore, qty: piecesConsumed, unit: 'piece(s)' });
+      await issueOnReservation({ order, itemId: sourceItem._id, variantId: reservedVariantId, qty: piecesConsumed });
+    } else if (reservedVariantId) {
+      const equivalent = catalogEquivalentPieces({ sourceItem, catalogVariantId: reservedVariantId, demand, isSheet, qty: qtyFulfilled });
+      if (equivalent > 0) await issueOnReservation({ order, itemId: sourceItem._id, variantId: reservedVariantId, qty: equivalent });
+    }
+
     // Update the demand — transferredQuantity tracks demanded PIECES
     // (qtyFulfilled), the same unit as quantity/issuedQuantity everywhere
     // else in this app; stockPiecesConsumed only ever affects Item stock.
@@ -4009,7 +4107,7 @@ export const transferFabricationMaterialToProduction = async (req, res) => {
       company: companyId
     });
 
-    res.json({ success: true, message: `Successfully transferred ${qtyFulfilled} piece(s) to Production (${piecesConsumed} stock piece(s) consumed).` });
+    res.json({ success: true, message: `Successfully transferred ${qtyFulfilled} piece(s) to Production (${piecesConsumed} stock piece(s) consumed).`, warning });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -4098,6 +4196,8 @@ export const bulkTransferOrderMaterials = async (req, res) => {
       demand.transferredQuantity = (demand.transferredQuantity || 0) + transferQty;
       demand.status = 'In Transit';
       orderUpdated = true;
+      // Reservation (2026-10-09): this order's claim is now issued.
+      await issueOnReservation({ order, itemId: deductedItem._id, qty: transferQty });
 
       await StoreTransferLog.create({
         productionOrderId: order._id,
@@ -4480,6 +4580,24 @@ export const confirmReturn = async (req, res) => {
           },
           { upsert: true, new: true }
         );
+
+        // Reservation (user decision 2026-10-09): a defective return means the
+        // order still needs a good replacement — reserve it for the order again.
+        try {
+          const srcItem = await Item.findOne({ code: sourceCode, companyId }).select('dimensionVariants').lean();
+          if (srcItem) {
+            let qty = log.quantityReturned;
+            const variantId = demand.fabricationCategory ? (demand.dimensionVariantId || null) : null;
+            const hasCut = demand.bomDimensions && Object.keys(demand.bomDimensions).length > 0;
+            if (demand.fabricationCategory && hasCut) {
+              const category = getCategoryByKey(demand.fabricationCategory);
+              qty = catalogEquivalentPieces({ sourceItem: srcItem, catalogVariantId: variantId, demand, isSheet: category?.calcType === 'sheet', qty: log.quantityReturned });
+            }
+            if (qty > 0) await recordReturn({ orderId: order._id, itemId: srcItem._id, variantId, qty });
+          }
+        } catch (err) {
+          console.error('recordReturn failed:', err);
+        }
 
       } else if (demand.fabricationCategory) {
         // Fabrication materials don't use Item.qty for stock — the piece

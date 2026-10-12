@@ -7,6 +7,8 @@ import { Item } from '../models/Inventory.js';
 import { Company } from '../models/Company.js';
 import { sendRFQEmail, sendVendorBidConfirmationEmail } from '../services/emailService.js';
 import { getDeptMailer, DEPARTMENTS } from '../config/mailAccounts.js';
+import { ELIGIBLE_VENDOR_FILTER } from '../services/vendorApprovalService.js';
+import { resolveMasterItemId } from './purchaseQuoteController.js';
 import crypto from 'crypto';
 import notificationService from '../services/notificationService.js';
 
@@ -63,10 +65,11 @@ export const getVendorsForRFQ = async (req, res) => {
     const categoryKeywords = itemCategory ? itemCategory.split(/[\s\-_,]+/).filter(w => w.length > 2) : [];
     const allKeywords = [...new Set([...nameKeywords, ...categoryKeywords])];
 
-    // Get all active vendors
+    // Get all active vendors — Company-Admin-approved only (procurement-v2)
     const allVendors = await Supplier.find({
+      companyId,
       unit: { $in: [unit, 'Main'] },
-      status: 'active'
+      ...ELIGIBLE_VENDOR_FILTER
     }).select('supplierName email phone vendorCategories rating unit');
 
     // Score each vendor for auto-match
@@ -243,10 +246,11 @@ export const createRFQ = async (req, res) => {
       console.warn('Could not fetch inventory item for RFQ matching:', e.message);
     }
 
-    // 4. Fetch all active vendors
+    // 4. Fetch all active vendors — Company-Admin-approved only (procurement-v2)
     const allVendors = await Supplier.find({
+      companyId,
       unit: { $in: [unit, 'Main'] },
-      status: 'active'
+      ...ELIGIBLE_VENDOR_FILTER
     });
 
     let matchedVendors = [];
@@ -719,11 +723,12 @@ export const selectVendor = async (req, res) => {
       grandTotal,
       expectedDeliveryDate: expectedDelivery,
       unit: rfq.unit,
+      companyId,
       createdBy: req.user._id,
       deliveryAddress,
       terms: `Delivery within ${winningBid.deliveryDays} days. Warranty: ${winningBid.warrantyMonths} months.`,
       notes: `Auto-generated from RFQ ${rfq.rfqNo}. Vendor selected from bidding process.`,
-      purchaseRequest: pr._id,
+      purchaseRequests: [pr._id],
       status: 'Draft'
     });
 
@@ -762,15 +767,8 @@ export const selectVendor = async (req, res) => {
     //    This ensures invoice exists before goods are even received — no duplicate on receipt
     try {
       const { createAutoPurchaseInvoice } = await import('./purchaseInvoiceController.js');
-      // Fetch the full purchase request with populated PO for the invoice helper
-      const fullPR = await PurchaseRequest.findById(pr._id).populate({
-        path: 'purchaseOrder',
-        populate: { path: 'supplier' }
-      });
-      if (fullPR) {
-        await createAutoPurchaseInvoice(fullPR, req.user);
-        console.log(`✅ [PO Created] Purchase Invoice auto-created for PO ${po.purchaseOrderNumber}`);
-      }
+      await createAutoPurchaseInvoice(po, req.user);
+      console.log(`✅ [PO Created] Purchase Invoice auto-created for PO ${po.purchaseOrderNumber}`);
     } catch (invoiceErr) {
       // Non-fatal — log but don't fail the PO creation response
       console.error('❌ [PO Created] Invoice creation failed (non-fatal):', invoiceErr.message);
@@ -804,7 +802,8 @@ export const getBidByToken = async (req, res) => {
   try {
     const bid = await VendorBid.findOne({ bidToken: req.params.token })
       .populate('vendor', 'supplierName email phone')
-      .populate('rfq', 'rfqNo productName quantity quantityUnit requiredByDate notes status');
+      .populate('rfq', 'rfqNo productName quantity quantityUnit requiredByDate notes status')
+      .populate('purchaseRequest', 'requestId');
 
     if (!bid) {
       return res.status(404).json({ success: false, message: 'Invalid or expired bid link' });
@@ -815,8 +814,11 @@ export const getBidByToken = async (req, res) => {
       return res.status(410).json({ success: false, message: 'This bid link has expired' });
     }
 
-    // Check RFQ is still open
-    if (bid.rfq.status !== 'Open') {
+    // Check RFQ is still open — only applies to the legacy RFQ path (bid.rfq
+    // set). A direct quote (Purchase redesign — bid.purchaseRequest set, no
+    // RFQ parent) has no Open/Closed/Awarded concept of its own; the token
+    // expiry above is its only gate.
+    if (bid.rfq && bid.rfq.status !== 'Open') {
       return res.status(400).json({
         success: false,
         message: bid.status === 'Submitted'
@@ -828,13 +830,13 @@ export const getBidByToken = async (req, res) => {
     res.json({
       success: true,
       data: {
-        rfqNo: bid.rfq.rfqNo,
+        rfqNo: bid.rfq?.rfqNo || null,
         productName: bid.productName,
         quantity: bid.quantity,
-        quantityUnit: bid.rfq.quantityUnit || null,
+        quantityUnit: bid.purchaseUnit || bid.rfq?.quantityUnit || null,
         fabricationDimensionLines: bid.fabricationDimensionLines || [],
-        requiredByDate: bid.rfq.requiredByDate,
-        notes: bid.rfq.notes,
+        requiredByDate: bid.rfq?.requiredByDate || null,
+        notes: bid.rfq?.notes || null,
         vendorName: bid.vendor.supplierName,
         bidStatus: bid.status,
         // If already submitted, return submitted values
@@ -842,7 +844,8 @@ export const getBidByToken = async (req, res) => {
           unitPrice: bid.unitPrice,
           deliveryDays: bid.deliveryDays,
           warrantyMonths: bid.warrantyMonths,
-          remarks: bid.remarks
+          remarks: bid.remarks,
+          gstInclusive: bid.gstInclusive
         } : null
       }
     });
@@ -857,7 +860,7 @@ export const getBidByToken = async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 export const submitBidByToken = async (req, res) => {
   try {
-    const { unitPrice, deliveryDays, warrantyMonths, remarks } = req.body;
+    const { unitPrice, deliveryDays, warrantyMonths, remarks, gstInclusive } = req.body;
 
     if (!unitPrice || unitPrice <= 0) {
       return res.status(400).json({ success: false, message: 'Please enter a valid unit price' });
@@ -867,7 +870,9 @@ export const submitBidByToken = async (req, res) => {
     }
 
     const bid = await VendorBid.findOne({ bidToken: req.params.token })
-      .populate('rfq', 'status productName quantity');
+      .populate('rfq', 'status productName quantity')
+      .populate('purchaseRequest', 'itemId productName')
+      .populate('group', 'item');
 
     if (!bid) {
       return res.status(404).json({ success: false, message: 'Invalid bid link' });
@@ -880,8 +885,15 @@ export const submitBidByToken = async (req, res) => {
     if (bid.status === 'Submitted') {
       return res.status(400).json({ success: false, message: 'You have already submitted your bid' });
     }
+    // Replaced by a newer request / quote, declined, or the item was already
+    // ordered (procurement-v2) — an old link can't bring it back to life.
+    if (bid.status !== 'Invited') {
+      return res.status(410).json({ success: false, message: 'This quotation request is no longer open.' });
+    }
 
-    if (bid.rfq.status !== 'Open') {
+    // Only the legacy RFQ path has an Open/Closed/Awarded gate — a direct
+    // quote (bid.rfq null) is gated by the token expiry above only.
+    if (bid.rfq && bid.rfq.status !== 'Open') {
       return res.status(400).json({ success: false, message: 'This RFQ is no longer accepting bids' });
     }
 
@@ -891,8 +903,19 @@ export const submitBidByToken = async (req, res) => {
     bid.deliveryDays = parseInt(deliveryDays);
     bid.warrantyMonths = parseInt(warrantyMonths) || 0;
     bid.remarks = remarks || '';
+    bid.gstInclusive = !!gstInclusive;
     bid.status = 'Submitted';
     bid.submittedAt = new Date();
+
+    // Item-scoped vendor charges — only knowable now that the vendor has
+    // actually submitted a rate (a quote's unitPrice is 0 until this
+    // moment). Decided once, here, same as the Manual path — never
+    // recomputed later (see vendorChargesService.js). Resolving the real
+    // Charges are typed on the PO now (procurement-v2) — the old automatic
+    // vendor charges are retired, so a vendor-submitted quote carries none.
+    bid.itemCharges = [];
+    bid.itemChargesTotal = 0;
+
     await bid.save();
 
     res.json({

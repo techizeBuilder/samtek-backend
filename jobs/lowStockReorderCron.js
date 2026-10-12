@@ -4,6 +4,7 @@ import { generatePurchaseRequestId } from '../services/storeFlowService.js';
 import { resolveFabricationLines } from '../controllers/purchaseRequestController.js';
 import { dimensionSignature } from '../services/fabricationDemandService.js';
 import notificationService from '../services/notificationService.js';
+import { getFreeQty } from '../services/materialReservationService.js';
 
 // Material Flow — Low Stock Auto-Purchase sweep.
 //
@@ -33,7 +34,10 @@ async function notifyCreated(request, companyId) {
 
 // Non-fabrication branch: a single flat reorder against the item's own qty.
 async function checkPlainItem(item, stats) {
-  if (!item.materialFlow || item.qty > item.minStock) return;
+  // Free stock (2026-10-09, user decision): stock still reserved for orders
+  // doesn't count toward the minimum.
+  if (!item.materialFlow) return;
+  if ((await getFreeQty(item._id, item.qty || 0, item.companyId)) > item.minStock) return;
 
   const existing = await PurchaseRequest.exists({
     reorderItemId: item._id,
@@ -67,9 +71,14 @@ async function checkPlainItem(item, stats) {
 // Item.dimensionVariants[]._id is NOT stable across item edits (see
 // PurchaseRequest.js's reorderItemId comment for why).
 async function checkFabricationVariants(item, stats) {
-  const flagged = (item.dimensionVariants || []).filter(
-    (dv) => !dv.isLeftover && dv.materialFlow && (dv.subStock || 0) <= (dv.minStock || 0)
-  );
+  // Per size, free stock (2026-10-09): that size's pieces minus what's still
+  // reserved for orders of that size.
+  const flagged = [];
+  for (const dv of item.dimensionVariants || []) {
+    if (dv.isLeftover || !dv.materialFlow) continue;
+    const free = await getFreeQty(item._id, dv.subStock || 0, item.companyId, { variantId: dv._id });
+    if (free <= (dv.minStock || 0)) flagged.push(dv);
+  }
   if (!flagged.length) return;
 
   const openAutoPRs = await PurchaseRequest.find({

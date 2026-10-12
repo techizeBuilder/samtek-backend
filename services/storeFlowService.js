@@ -6,7 +6,7 @@ import ProductionOrder from '../models/ProductionOrder.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import { Item } from '../models/Inventory.js';
 import { checkMachineAssemblyMaterialAvailability, resolveMachineOrderProcesses } from './machineReorderService.js';
-import { releaseReservationsForOrder } from './materialReservationService.js';
+import { releaseReservationsForOrder, getFreeQty } from './materialReservationService.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Multi-item Store flow service
@@ -211,7 +211,10 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
   let splitSibling = null;
   if (decision?.autoCheck) {
     const neededQty = saleItem.quantity || 1;
-    const availableQty = invItem?.qty || 0;
+    // Free stock (2026-10-09): what's on hand minus what Production orders
+    // still have reserved — stock already claimed for production isn't
+    // available to sell. The deduction below (Available → QC) stays immediate.
+    const availableQty = invItem ? Math.max(0, await getFreeQty(invItem._id, invItem.qty || 0, companyId)) : 0;
     const stockPart = Math.floor(availableQty); // machines count in whole units
     productType = productTypeForItem(invItem);
 

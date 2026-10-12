@@ -44,6 +44,22 @@ const accountSchema = new mongoose.Schema({
     ifsc: String,
     branch: String,
     upiId: String
+  },
+  // Purchase money accounts (procurement-v2, 2026-10-12) are kept per
+  // company + unit — before this, accounts were found by unit name only, so
+  // two companies with a unit called "Main" would have shared them. Older
+  // accounts (bank / cash etc.) have no companyId and are unaffected.
+  // systemKey marks an account the software creates and posts to itself
+  // (services/purchaseLedgerService.js), e.g. 'advance_to_vendors'.
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    default: null,
+    index: true
+  },
+  systemKey: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true

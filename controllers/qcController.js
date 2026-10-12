@@ -611,19 +611,9 @@ export const submitDecision = async (req, res) => {
       job.failReason = failReason;
 
       if (job.source === 'Purchase') {
-        try {
-          const { createQCRejectedPurchaseReturn } = await import('./purchaseInvoiceController.js');
-          await createQCRejectedPurchaseReturn(job, req.user, parsedRejectQty);
-          console.log(`✅ [QC Partial Rejection] Created purchase return for ${parsedRejectQty} of ${job.itemName}; ${job.quantity} remaining in QC`);
-        } catch (returnError) {
-          console.error('❌ Error creating purchase return for partially rejected purchase item:', returnError);
-        }
-        try {
-          const { createQCRejectedPurchaseExchange } = await import('./purchaseExchangeController.js');
-          await createQCRejectedPurchaseExchange(job, req.user, parsedRejectQty);
-        } catch (exchangeError) {
-          console.error('❌ Error creating purchase exchange for partially rejected purchase item:', exchangeError);
-        }
+        // Recorded after the save below as a PurchaseRejection waiting for
+        // the vendor's answer (2026-10-12, purchaseRejectionService) — no
+        // automatic return / exchange email any more.
       } else if (job.source === 'Store') {
         // Store sent this item straight to QC (e.g. a Purchase/Manufacturing
         // Machine already sitting in stock) — the rejected qty simply goes
@@ -664,6 +654,11 @@ export const submitDecision = async (req, res) => {
 
       await job.save();
 
+      if (job.source === 'Purchase') {
+        const { onMaterialRejected } = await import('../services/purchaseRejectionService.js');
+        await onMaterialRejected(job, parsedRejectQty, req.user, req);
+      }
+
       try {
         await notificationService.triggerQCNotification({
           action: 'qc_failed',
@@ -683,6 +678,9 @@ export const submitDecision = async (req, res) => {
 
     if (decision === 'Pass') {
       job.transferredToStore = true;
+      // Purchase money (2026-10-12): what QC passed, recorded before the
+      // machine path below trims job.quantity to the dispatch share.
+      if (job.source === 'Purchase') job.acceptedQty = job.quantity;
 
       // Sub Child Part Job Work — a dedicated path, not threaded through the
       // generic shouldAddToInventory/itemCode-resolution logic below (that
@@ -1010,21 +1008,9 @@ export const submitDecision = async (req, res) => {
       job.returnedToSource = true;
 
       if (job.source === 'Purchase') {
-        // Auto-create purchase return for rejected purchase items
-        try {
-          const { createQCRejectedPurchaseReturn } = await import('./purchaseInvoiceController.js');
-          await createQCRejectedPurchaseReturn(job, req.user);
-          console.log(`✅ [QC Rejection] Created purchase return for rejected purchase item: ${job.itemName}`);
-        } catch (returnError) {
-          console.error('❌ Error creating purchase return for rejected purchase item:', returnError);
-        }
-        try {
-          const { createQCRejectedPurchaseExchange } = await import('./purchaseExchangeController.js');
-          await createQCRejectedPurchaseExchange(job, req.user);
-          console.log(`✅ [QC Rejection] Created purchase exchange for rejected purchase item: ${job.itemName}`);
-        } catch (exchangeError) {
-          console.error('❌ Error creating purchase exchange for rejected purchase item:', exchangeError);
-        }
+        // Recorded after the save below as a PurchaseRejection waiting for
+        // the vendor's answer (2026-10-12, purchaseRejectionService) — no
+        // automatic return / exchange email any more.
       } else if (job.source === 'SubChildPartJobWork' && job.subChildPartJobWorkOrderId) {
         // Full reject — the whole remaining quantity is rejected, nothing
         // left for QC to still decide on this order. Same "just a landing
@@ -1128,6 +1114,19 @@ export const submitDecision = async (req, res) => {
     }
 
     await job.save();
+
+    // Purchase money (2026-10-12, accounts Slice 2): passed material becomes
+    // payable on the PO's bill (+ ledger); the last pass settles the PO.
+    if (decision === 'Pass' && job.source === 'Purchase') {
+      const { onMaterialAccepted } = await import('../services/purchaseAcceptanceService.js');
+      await onMaterialAccepted(job, req.user, req);
+    }
+    // QC failed what was left: a PurchaseRejection, waiting for the vendor's
+    // answer (2026-10-12, accounts Slice 3).
+    if (decision === 'Fail' && job.source === 'Purchase') {
+      const { onMaterialRejected } = await import('../services/purchaseRejectionService.js');
+      await onMaterialRejected(job, job.quantity, req.user, req);
+    }
 
     // 🔔 Notify based on QC decision
     try {
@@ -1287,16 +1286,18 @@ async function createRejectedProductionOrder(qcJob, user, qty) {
 // step can share one resolution instead of querying it twice.
 async function resolvePurchaseSaleContext(job) {
   const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+  const companyId = job.company;
 
   // Strategy 1: direct purchaseRequestId reference (most reliable)
   let pr = null;
   if (job.purchaseRequestId) {
-    pr = await PurchaseRequest.findById(job.purchaseRequestId);
+    pr = await PurchaseRequest.findOne({ _id: job.purchaseRequestId, companyId });
   }
 
   // Strategy 2: fall back to searching by requestId / itemCode
   if (!pr) {
     pr = await PurchaseRequest.findOne({
+      companyId,
       $or: [
         { requestId: job.sourceRefId },
         { requestId: job.itemCode },
@@ -1309,9 +1310,9 @@ async function resolvePurchaseSaleContext(job) {
   // Strategy 3: search by PO number
   if (!pr && job.sourceRefId) {
     const Purchase = (await import('../models/Purchase.js')).default;
-    const po = await Purchase.findOne({ purchaseOrderNumber: job.sourceRefId });
+    const po = await Purchase.findOne({ purchaseOrderNumber: job.sourceRefId, companyId });
     if (po) {
-      pr = await PurchaseRequest.findOne({ purchaseOrder: po._id });
+      pr = await PurchaseRequest.findOne({ purchaseOrder: po._id, companyId });
     }
   }
 

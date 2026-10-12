@@ -24,7 +24,7 @@ async function generatePRRequestId() {
 }
 
 async function sendExchangeEmailFor(exchange, po) {
-    const vendor = await Supplier.findById(exchange.vendor).lean();
+    const vendor = await Supplier.findOne({ _id: exchange.vendor, companyId: exchange.companyId }).lean();
     if (!vendor || !vendor.email) {
         console.error(`❌ [Purchase Exchange] Vendor ${exchange.vendor} has no email on file — cannot send exchange request.`);
         return { success: false, error: 'Vendor has no email on file' };
@@ -168,14 +168,17 @@ export const assignExchangeVendor = async (req, res) => {
             return res.status(400).json({ success: false, message: `Cannot assign vendor — status is ${exchange.status}` });
         }
 
-        const vendor = await Supplier.findOne({ _id: vendorId, status: 'active' });
-        if (!vendor) return res.status(404).json({ success: false, message: 'Active vendor not found' });
+        // Replacement vendor must be Company-Admin-approved + active (procurement-v2).
+        const vendor = await Supplier.findOne({ _id: vendorId, companyId: req.user.companyId, status: 'active', approvalStatus: 'Approved' });
+        if (!vendor) return res.status(404).json({ success: false, message: 'Approved, active vendor not found' });
 
         exchange.vendor = vendor._id;
         exchange.status = 'Pending Vendor Response';
         await exchange.save();
 
-        const po = exchange.originalPurchaseOrder ? await mongoose.model('Purchase').findById(exchange.originalPurchaseOrder) : null;
+        const po = exchange.originalPurchaseOrder
+          ? await mongoose.model('Purchase').findOne({ _id: exchange.originalPurchaseOrder, companyId: exchange.companyId })
+          : null;
         await sendExchangeEmailFor(exchange, po);
 
         res.json({ success: true, data: exchange });

@@ -407,6 +407,15 @@ export const updateCompany = async (req, res) => {
       updateData.companyType = undefined;
     }
 
+    // Point 15 (2026-10-10): the company's GSTIN decides CGST + SGST vs IGST
+    // on purchase orders — same check as on create.
+    if (updateData.gst) {
+      updateData.gst = String(updateData.gst).trim().toUpperCase();
+      if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[Z]{1}[0-9A-Z]{1}$/.test(updateData.gst)) {
+        return res.status(400).json({ success: false, message: 'Please provide a valid GST number (15 characters)', errors: { gst: 'Please provide a valid GST number (15 characters)' } });
+      }
+    }
+
     console.log('Finding and updating company:', id);
 
     const company = await Company.findByIdAndUpdate(

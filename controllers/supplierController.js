@@ -1,3 +1,4 @@
+import { checkGstin, cleanGstin, stateFromText } from '../services/gstStateService.js';
 import mongoose from 'mongoose';
 import Supplier from '../models/Supplier.js';
 import { Item } from '../models/Inventory.js';
@@ -6,6 +7,15 @@ import ChildPartBOM from '../models/ChildPartBOM.js';
 import MachineBOM from '../models/MachineBOM.js';
 import * as XLSX from 'xlsx';
 import multer from 'multer';
+import { computeVendorRating, computeVendorItemPricing } from '../services/vendorRatingService.js';
+import Purchase from '../models/Purchase.js';
+import VendorApprovalRequest from '../models/VendorApprovalRequest.js';
+import { removeVendorUpload, discardRequestUploads } from '../middleware/vendorDocumentUpload.js';
+import {
+  ELIGIBLE_VENDOR_FILTER, SENSITIVE_FIELDS, SENSITIVE_LABELS, stripServerControlled,
+  diffSensitiveFields, validateForSubmission, getVendorStanding, activityEntry,
+  notifyCompanyAdminOfRequest,
+} from '../services/vendorApprovalService.js';
 
 // suppliedItems/services arrive straight from the Vendor Master form — keep
 // only valid Item ids and trimmed, non-empty, de-duplicated (case-
@@ -27,6 +37,11 @@ function cleanVendorCoverage(body) {
     });
   } else {
     delete body.services;
+  }
+  // The vendor-level commercial fields were removed (procurement-v2) —
+  // charges, payment terms and GST are entered on the PO. Never accept them.
+  for (const key of ['charges', 'paymentAdvancePercent', 'paymentBalancePercent', 'creditDays', 'paymentNotes', 'gstRate']) {
+    delete body[key];
   }
 }
 
@@ -120,9 +135,16 @@ const upload = multer({
 export const getSuppliers = async (req, res) => {
   try {
     const unit = req.user.unit;
-    const { page, limit, search, supplierType } = req.query;
-    const query = { unit: { $in: [unit, 'Main'] } };
+    const { page, limit, search, supplierType, approvalStatus, eligible, withStanding } = req.query;
+    const query = { companyId: req.user.companyId, unit: { $in: [unit, 'Main'] } };
     if (supplierType) query.supplierType = supplierType;
+    // Vendor Master v2 (procurement-v2): Vendor Master's status chips filter
+    // by approvalStatus; quoting/ordering screens (By Vendor) ask for
+    // eligible=true so a Draft/Pending/Suspended/Blacklisted/Inactive vendor
+    // is never offered. Pickers for invoices/payments pass neither and keep
+    // seeing every vendor — money owed to a suspended vendor still gets paid.
+    if (approvalStatus) query.approvalStatus = { $in: String(approvalStatus).split(',') };
+    if (eligible === 'true') Object.assign(query, ELIGIBLE_VENDOR_FILTER);
     if (search) {
       query.$or = [
         { supplierName: { $regex: search, $options: 'i' } },
@@ -143,8 +165,25 @@ export const getSuppliers = async (req, res) => {
         Supplier.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
         Supplier.countDocuments(query),
       ]);
+      // Vendor Master's own page only — the derived stage (Probationary/
+      // Active/Watchlist) and any change waiting for the Company Admin. Not
+      // computed for pickers: the rating lookup is per vendor.
+      let rows = suppliers;
+      if (withStanding === 'true' && suppliers.length) {
+        const ids = suppliers.map(s => s._id);
+        const [standing, pending] = await Promise.all([
+          getVendorStanding(req.user.companyId, suppliers),
+          VendorApprovalRequest.find({ vendor: { $in: ids }, status: 'Pending' })
+            .select('vendor type payload previousValue requestedAt').lean(),
+        ]);
+        rows = suppliers.map(s => ({
+          ...s.toObject(),
+          standing: standing.get(String(s._id)) || { stage: s.approvalStatus },
+          pendingRequests: pending.filter(p => String(p.vendor) === String(s._id)),
+        }));
+      }
       return res.json({
-        suppliers,
+        suppliers: rows,
         pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
       });
     }
@@ -159,7 +198,7 @@ export const getSuppliers = async (req, res) => {
 
 export const getSupplierById = async (req, res) => {
   try {
-    const supplier = await Supplier.findById(req.params.id);
+    const supplier = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
     if (!supplier) {
       return res.status(404).json({ message: 'Supplier not found' });
     }
@@ -170,10 +209,43 @@ export const getSupplierById = async (req, res) => {
   }
 };
 
+// Point 15 (2026-10-10): the GSTIN decides CGST + SGST vs IGST on POs, so
+// it must be well-formed (blank = not GST-registered); address states are
+// stored by their proper name (a typed '09' or 'UP' becomes 'Uttar Pradesh').
+// Returns an error message, or null.
+function cleanVendorGst(body) {
+  if (body.gstNumber !== undefined) {
+    body.gstNumber = cleanGstin(body.gstNumber);
+    const { error } = checkGstin(body.gstNumber);
+    if (error) return error;
+  }
+  for (const key of ['address', 'billingAddress', 'dispatchAddress']) {
+    const st = body[key]?.state;
+    if (st) body[key].state = stateFromText(st)?.name || st;
+  }
+  return null;
+}
+
 export const createSupplier = async (req, res) => {
   try {
-    const supplierData = { ...req.body, unit: req.user.unit };
+    // Approval fields, documents and history are server-controlled — a new
+    // vendor always starts as a Draft (Vendor Master v2, procurement-v2).
+    const supplierData = stripServerControlled({ ...req.body });
+    supplierData.unit = req.user.unit;
+    supplierData.companyId = req.user.companyId;
+    // Vendor-creation split (2026-10): Products/Services are assigned later,
+    // via a separate edit — never as part of creating the vendor. The form
+    // no longer sends these on create, but createSupplier has no field
+    // whitelist otherwise, so strip them explicitly rather than trust that.
+    delete supplierData.suppliedItems;
+    delete supplierData.services;
     cleanVendorCoverage(supplierData);
+    const gstProblem = cleanVendorGst(supplierData);
+    if (gstProblem) return res.status(400).json({ message: gstProblem });
+    supplierData.approvalStatus = 'Draft';
+    supplierData.createdBy = req.user._id;
+    supplierData.updatedBy = req.user._id;
+    supplierData.activity = [activityEntry('Created', req.user)];
     const supplier = new Supplier(supplierData);
     await supplier.save();
     res.status(201).json({ message: 'Supplier created successfully', supplier });
@@ -186,30 +258,135 @@ export const createSupplier = async (req, res) => {
   }
 };
 
+const APPROVED_LIKE = ['Approved', 'Suspended', 'Blacklisted'];
+
 export const updateSupplier = async (req, res) => {
   try {
-    cleanVendorCoverage(req.body);
-    const supplier = await Supplier.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    );
-    if (!supplier) {
+    const vendor = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
+    if (!vendor) {
       return res.status(404).json({ message: 'Supplier not found' });
     }
-    res.json({ message: 'Supplier updated successfully', supplier });
+    // Under review — the Company Admin must approve exactly what was
+    // submitted, so editing is closed until Purchase withdraws it.
+    if (vendor.approvalStatus === 'Pending Approval') {
+      return res.status(409).json({ message: 'This vendor is waiting for Company Admin approval — withdraw the submission to edit it.' });
+    }
+    cleanVendorCoverage(req.body);
+    const gstProblem = cleanVendorGst(req.body);
+    if (gstProblem) return res.status(400).json({ message: gstProblem });
+    // companyId (and every approval/document/history field) is never
+    // editable from this form — see stripServerControlled.
+    stripServerControlled(req.body);
+
+    // On an approved (or suspended/blacklisted) vendor, legal name / GSTIN /
+    // PAN / bank details don't change straight away: the change goes to the
+    // Company Admin as one DetailsChange request and the old values stay
+    // live until it's approved. A second edit merges into the same pending
+    // request; editing a field back to its live value drops it from the
+    // request, and an emptied request is cancelled.
+    // Contract with the form: a sensitive field that IS sent means "this is
+    // the value I want". So while a change is pending, VendorMaster.jsx
+    // pre-fills those inputs with the PROPOSED values — otherwise saving an
+    // unrelated field would resend the live values and cancel the request.
+    let sentForApproval = [];
+    if (APPROVED_LIKE.includes(vendor.approvalStatus)) {
+      const { changes, previous } = diffSensitiveFields(vendor, req.body);
+      const touched = SENSITIVE_FIELDS.filter(f => f in req.body);
+      for (const field of SENSITIVE_FIELDS) delete req.body[field];
+
+      let request = await VendorApprovalRequest.findOne({ vendor: vendor._id, type: 'DetailsChange', status: 'Pending' });
+      if (request) {
+        const payload = { ...(request.payload || {}) };
+        for (const field of touched) {
+          if (field in changes) payload[field] = changes[field];
+          else delete payload[field];
+        }
+        if (Object.keys(payload).length === 0) {
+          request.status = 'Cancelled';
+        } else {
+          request.payload = payload;
+          request.previousValue = { ...previous, ...(request.previousValue || {}) };
+          request.requestedBy = req.user._id;
+          request.requestedAt = new Date();
+          request.markModified('payload');
+          request.markModified('previousValue');
+        }
+        await request.save();
+        if (request.status === 'Pending') sentForApproval = Object.keys(payload);
+      } else if (Object.keys(changes).length) {
+        request = await VendorApprovalRequest.create({
+          companyId: vendor.companyId,
+          vendor: vendor._id,
+          type: 'DetailsChange',
+          payload: changes,
+          previousValue: previous,
+          requestedBy: req.user._id,
+        });
+        sentForApproval = Object.keys(changes);
+      }
+      if (request?.status === 'Pending' && Object.keys(changes).length) {
+        await notifyCompanyAdminOfRequest(request, vendor, req.user);
+      }
+    }
+
+    const sentLabels = sentForApproval.map(f => SENSITIVE_LABELS[f] || f);
+    // Step 2 of vendor creation (D2) saves only Products & Services from its
+    // own dialog — label that in the history instead of a generic "Edited".
+    const bodyKeys = Object.keys(req.body);
+    const coverageOnly = bodyKeys.length > 0 && bodyKeys.every(k => k === 'suppliedItems' || k === 'services');
+    req.body.updatedBy = req.user._id;
+    const supplier = await Supplier.findOneAndUpdate(
+      { _id: req.params.id, companyId: req.user.companyId },
+      {
+        $set: req.body,
+        $push: {
+          activity: activityEntry(
+            sentLabels.length ? `Edited — sent for approval: ${sentLabels.join(', ')}`
+              : coverageOnly ? 'Products & Services updated' : 'Edited',
+            req.user
+          ),
+        },
+      },
+      { new: true, runValidators: true }
+    );
+    res.json({
+      message: sentLabels.length
+        ? `Saved. ${sentLabels.join(', ')} change sent to the Company Admin for approval — the current values stay until it's approved.`
+        : 'Supplier updated successfully',
+      supplier,
+      sentForApproval: sentLabels,
+    });
   } catch (error) {
     console.error('Error updating supplier:', error);
-    res.status(500).json({ message: 'Error updating supplier' });
+    res.status(error.name === 'ValidationError' ? 400 : 500).json({ message: error.message || 'Error updating supplier' });
   }
 };
 
+// Only a vendor that was never approved (Draft/Rejected) and has no PO can
+// be deleted — an approved vendor carries history, so it's suspended or
+// blacklisted instead (procurement-v2).
 export const deleteSupplier = async (req, res) => {
   try {
-    const supplier = await Supplier.findByIdAndDelete(req.params.id);
+    const supplier = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
     if (!supplier) {
       return res.status(404).json({ message: 'Supplier not found' });
     }
+    if (!['Draft', 'Rejected'].includes(supplier.approvalStatus)) {
+      return res.status(409).json({ message: 'Only Draft or Rejected vendors can be deleted — suspend or blacklist an approved vendor instead.' });
+    }
+    if (await Purchase.exists({ supplier: supplier._id, companyId: req.user.companyId })) {
+      return res.status(409).json({ message: 'This vendor already has purchase orders and can\'t be deleted.' });
+    }
+    // Its uploaded files go with it — document files and any request
+    // evidence — so nothing is left on disk that no record points at.
+    const requests = await VendorApprovalRequest.find({ vendor: supplier._id }).select('evidence').lean();
+    const fileUrls = [
+      ...(supplier.documents || []).map(d => d.fileUrl),
+      ...requests.flatMap(r => (r.evidence || []).map(e => e.fileUrl)),
+    ];
+    await VendorApprovalRequest.deleteMany({ vendor: supplier._id });
+    await supplier.deleteOne();
+    await Promise.all(fileUrls.map(removeVendorUpload));
     res.json({ message: 'Supplier deleted successfully' });
   } catch (error) {
     console.error('Error deleting supplier:', error);
@@ -217,11 +394,200 @@ export const deleteSupplier = async (req, res) => {
   }
 };
 
+// ── Vendor Master v2 — approval lifecycle (procurement-v2, 2026-10-08) ───────
+
+// POST /api/suppliers/:id/submit — Draft/Rejected → Pending Approval. Returns
+// 400 with `missing` (plain sentences) when the vendor isn't complete yet.
+export const submitForApproval = async (req, res) => {
+  try {
+    const vendor = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
+    if (!vendor) return res.status(404).json({ message: 'Supplier not found' });
+    if (!['Draft', 'Rejected'].includes(vendor.approvalStatus)) {
+      return res.status(409).json({ message: `This vendor is already ${vendor.approvalStatus}.` });
+    }
+    const missing = validateForSubmission(vendor);
+    if (missing.length) {
+      return res.status(400).json({ message: 'Complete these before submitting for approval.', missing });
+    }
+    const request = await VendorApprovalRequest.create({
+      companyId: vendor.companyId,
+      vendor: vendor._id,
+      type: 'NewVendor',
+      requestedBy: req.user._id,
+    });
+    vendor.approvalStatus = 'Pending Approval';
+    vendor.updatedBy = req.user._id;
+    vendor.activity.push(activityEntry('Submitted for approval', req.user));
+    await vendor.save();
+    await notifyCompanyAdminOfRequest(request, vendor, req.user);
+    res.json({ message: 'Sent to the Company Admin for approval.', supplier: vendor });
+  } catch (error) {
+    console.error('Error submitting vendor for approval:', error);
+    res.status(500).json({ message: 'Error submitting vendor for approval' });
+  }
+};
+
+// POST /api/suppliers/:id/withdraw — Pending Approval → Draft, so Purchase
+// can edit again.
+export const withdrawApproval = async (req, res) => {
+  try {
+    const vendor = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
+    if (!vendor) return res.status(404).json({ message: 'Supplier not found' });
+    if (vendor.approvalStatus !== 'Pending Approval') {
+      return res.status(409).json({ message: 'This vendor is not waiting for approval.' });
+    }
+    await VendorApprovalRequest.updateMany(
+      { vendor: vendor._id, type: 'NewVendor', status: 'Pending' },
+      { status: 'Cancelled' }
+    );
+    vendor.approvalStatus = 'Draft';
+    vendor.updatedBy = req.user._id;
+    vendor.activity.push(activityEntry('Submission withdrawn', req.user));
+    await vendor.save();
+    res.json({ message: 'Submission withdrawn — the vendor is a Draft again.', supplier: vendor });
+  } catch (error) {
+    console.error('Error withdrawing vendor submission:', error);
+    res.status(500).json({ message: 'Error withdrawing submission' });
+  }
+};
+
+const DOC_TYPES = Supplier.schema.path('documents').schema.path('docType').enumValues;
+
+// POST /api/suppliers/:id/documents — multipart: file, docType, docNumber,
+// expiryDate. Closed while the vendor is under review (same rule as editing).
+// The file is already on disk by the time this runs (multer), so every
+// refusal/failure below discards it — no orphaned files.
+export const uploadVendorDocument = async (req, res) => {
+  const fail = async (status, message) => {
+    await discardRequestUploads(req);
+    return res.status(status).json({ message });
+  };
+  try {
+    const vendor = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
+    if (!vendor) return fail(404, 'Supplier not found');
+    if (vendor.approvalStatus === 'Pending Approval') {
+      return fail(409, 'This vendor is waiting for Company Admin approval — withdraw the submission to change its documents.');
+    }
+    if (!req.file) return fail(400, 'Choose a file to upload.');
+    const { docType, docNumber, expiryDate } = req.body;
+    if (!DOC_TYPES.includes(docType)) return fail(400, 'Choose a valid document type.');
+    // A date-only value ('YYYY-MM-DD'), stored as that day's UTC midnight;
+    // the UI compares it by day, so a document is valid through its date.
+    const expiry = expiryDate ? new Date(expiryDate) : null;
+    if (expiry && isNaN(expiry.getTime())) return fail(400, 'Invalid expiry date.');
+
+    vendor.documents.push({
+      docType,
+      docNumber: docNumber || '',
+      fileUrl: `/uploads/vendor-documents/${req.file.filename}`,
+      fileName: req.file.originalname,
+      expiryDate: expiry,
+      uploadedBy: req.user._id,
+    });
+    vendor.updatedBy = req.user._id;
+    vendor.activity.push(activityEntry(`Document added: ${docType}`, req.user));
+    await vendor.save();
+    res.status(201).json({ message: 'Document uploaded', supplier: vendor });
+  } catch (error) {
+    console.error('Error uploading vendor document:', error);
+    await discardRequestUploads(req);
+    res.status(500).json({ message: error.message || 'Error uploading document' });
+  }
+};
+
+// DELETE /api/suppliers/:id/documents/:docId — removes the record AND its
+// file on disk (after the record is gone, so a failed save never leaves a
+// record pointing at a deleted file).
+export const deleteVendorDocument = async (req, res) => {
+  try {
+    const vendor = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
+    if (!vendor) return res.status(404).json({ message: 'Supplier not found' });
+    if (vendor.approvalStatus === 'Pending Approval') {
+      return res.status(409).json({ message: 'This vendor is waiting for Company Admin approval — withdraw the submission to change its documents.' });
+    }
+    const doc = vendor.documents.id(req.params.docId);
+    if (!doc) return res.status(404).json({ message: 'Document not found' });
+    const { docType, fileUrl } = doc;
+    doc.deleteOne();
+    vendor.updatedBy = req.user._id;
+    vendor.activity.push(activityEntry(`Document removed: ${docType}`, req.user));
+    await vendor.save();
+    await removeVendorUpload(fileUrl);
+    res.json({ message: 'Document removed', supplier: vendor });
+  } catch (error) {
+    console.error('Error deleting vendor document:', error);
+    res.status(500).json({ message: 'Error removing document' });
+  }
+};
+
+// POST /api/suppliers/:id/status-requests — multipart: type
+// (Suspend|Blacklist|Reinstate), reason, reviewDate, evidence files.
+// Suspend/Blacklist need an approved vendor, a reason and at least one
+// evidence file (blueprint §25); Reinstate needs a suspended/blacklisted
+// vendor and a reason. Nothing changes until the Company Admin approves.
+// Evidence files are already on disk when this runs (multer) — every refusal
+// or failure discards them, so a rejected request leaves no orphaned files.
+// (Evidence of a request that WAS created stays with it even if it's later
+// rejected — it's part of that request's record.)
+export const requestStatusChange = async (req, res) => {
+  const fail = async (status, message) => {
+    await discardRequestUploads(req);
+    return res.status(status).json({ message });
+  };
+  // Set once the request record exists — from then on the files belong to
+  // it and must never be discarded.
+  let request = null;
+  try {
+    const vendor = await Supplier.findOne({ _id: req.params.id, companyId: req.user.companyId });
+    if (!vendor) return fail(404, 'Supplier not found');
+    const { type, reason, reviewDate } = req.body;
+    if (!['Suspend', 'Blacklist', 'Reinstate'].includes(type)) return fail(400, 'Unknown request type.');
+    if (!String(reason || '').trim()) return fail(400, 'A reason is required.');
+    if (type === 'Reinstate' && !['Suspended', 'Blacklisted'].includes(vendor.approvalStatus)) {
+      return fail(409, 'Only a suspended or blacklisted vendor can be reinstated.');
+    }
+    if (type === 'Suspend' && vendor.approvalStatus !== 'Approved') {
+      return fail(409, 'Only an approved vendor can be suspended.');
+    }
+    if (type === 'Blacklist' && !['Approved', 'Suspended'].includes(vendor.approvalStatus)) {
+      return fail(409, 'Only an approved or suspended vendor can be blacklisted.');
+    }
+    const files = req.files || [];
+    if (type !== 'Reinstate' && files.length === 0) return fail(400, 'Attach at least one evidence file.');
+    // Reinstate takes no evidence — drop anything sent with it.
+    if (type === 'Reinstate' && files.length) await discardRequestUploads(req);
+    const existing = await VendorApprovalRequest.findOne({ vendor: vendor._id, type, status: 'Pending' });
+    if (existing) return fail(409, `A ${type.toLowerCase()} request for this vendor is already waiting for approval.`);
+
+    request = await VendorApprovalRequest.create({
+      companyId: vendor.companyId,
+      vendor: vendor._id,
+      type,
+      payload: { reason: String(reason).trim(), reviewDate: reviewDate || null },
+      previousValue: { approvalStatus: vendor.approvalStatus },
+      evidence: type === 'Reinstate' ? [] : files.map(f => ({ fileUrl: `/uploads/vendor-documents/${f.filename}`, fileName: f.originalname })),
+      requestedBy: req.user._id,
+    });
+    await Supplier.updateOne(
+      { _id: vendor._id },
+      { $push: { activity: activityEntry(`${type} requested`, req.user, String(reason).trim()) } }
+    );
+    await notifyCompanyAdminOfRequest(request, vendor, req.user);
+    res.status(201).json({ message: 'Sent to the Company Admin for approval.', request });
+  } catch (error) {
+    console.error('Error requesting vendor status change:', error);
+    if (!request) await discardRequestUploads(req);
+    res.status(500).json({ message: request ? 'Request sent, but a follow-up step failed — refresh to check it.' : 'Error sending request' });
+  }
+};
+
 export const getSupplierStats = async (req, res) => {
   try {
     const unit = req.user.unit;
-    const totalSuppliers = await Supplier.countDocuments({ unit: { $in: [unit, 'Main'] } });
+    const companyId = req.user.companyId;
+    const totalSuppliers = await Supplier.countDocuments({ companyId, unit: { $in: [unit, 'Main'] } });
     const activeSuppliers = await Supplier.countDocuments({
+      companyId,
       unit: { $in: [unit, 'Main'] },
       status: 'active'
     });
@@ -242,7 +608,7 @@ export const exportSuppliersToExcel = async (req, res) => {
   try {
     const unit = req.user.unit;
     const suppliers = await Supplier.find({
-      unit: { $in: [unit, 'Main'] }
+      companyId: req.user.companyId, unit: { $in: [unit, 'Main'] }
     }).sort({ createdAt: -1 });
 
     const excelData = suppliers.map(supplier => ({
@@ -337,7 +703,8 @@ export const importSuppliersFromExcel = [upload.single('file'), async (req, res)
           taxId: row['Tax ID'] || '',
           paymentTerms: row['Payment Terms'] || '',
           status: row['Status'] || 'active',
-          unit: req.user.unit // Important: Assign to current user's unit
+          unit: req.user.unit, // Important: Assign to current user's unit
+          companyId: req.user.companyId,
         };
 
         if (!supplierData.supplierName) {
@@ -346,10 +713,17 @@ export const importSuppliersFromExcel = [upload.single('file'), async (req, res)
           continue;
         }
 
-        // Check if supplier with same email exists
+        // Check if supplier with same email exists — scoped to this company,
+        // so a different company's vendor with the same email never gets
+        // silently overwritten by this import.
         if (supplierData.email) {
-          const existingSupplier = await Supplier.findOne({ email: supplierData.email });
+          const existingSupplier = await Supplier.findOne({ email: supplierData.email, companyId: req.user.companyId });
           if (existingSupplier) {
+            // An import must never bypass the Company Admin's approval of a
+            // legal-name change on an already-approved vendor (procurement-v2).
+            if (!['Draft', 'Rejected'].includes(existingSupplier.approvalStatus)) {
+              for (const field of SENSITIVE_FIELDS) delete supplierData[field];
+            }
             await Supplier.findByIdAndUpdate(existingSupplier._id, supplierData);
           } else {
             await Supplier.create(supplierData);
@@ -381,3 +755,72 @@ export const importSuppliersFromExcel = [upload.single('file'), async (req, res)
     });
   }
 }];
+
+// GET /api/suppliers/vendor-ratings — overall (computed) rating per vendor,
+// for the new "Vendor Ratings" tab's top-level list. See
+// services/vendorRatingService.js for how the rating itself is computed —
+// deliberately separate from the old manual Supplier.rating field.
+export const getVendorRatingsOverview = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const unit = req.user.unit;
+    const vendors = await Supplier.find({ companyId, unit: { $in: [unit, 'Main'] } })
+      .select('supplierName suppliedItems approvalStatus riskClass')
+      .lean();
+
+    // Vendor context on the RFQ/PO vendor card (2026-10-10): the rating's
+    // parts (on-time, QC pass) and the vendor's standing (Probationary /
+    // Watchlist), worked out once — getVendorStanding already computes the
+    // rating for approved vendors.
+    const standing = await getVendorStanding(companyId, vendors);
+    const data = await Promise.all(vendors.map(async (v) => {
+      const s = standing.get(String(v._id));
+      const r = s && 'eventCount' in s ? s : await computeVendorRating({ companyId, vendorId: v._id });
+      return {
+        _id: v._id,
+        supplierName: v.supplierName,
+        itemCount: (v.suppliedItems || []).length,
+        rating: r.rating ?? null,
+        eventCount: r.eventCount || 0,
+        onTime: r.onTime || { on: 0, total: 0 },
+        qc: r.qc || { pass: 0, total: 0 },
+        stage: s?.stage || null,
+        receivedPOCount: s?.receivedPOCount ?? null,
+        riskClass: v.riskClass || null,
+      };
+    }));
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('getVendorRatingsOverview error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/suppliers/:id/item-breakdown — item-wise rating + pricing
+// (avg/last/lowest, from real invoice history) for one vendor's Products
+// list — the expanded row of the Vendor Ratings tab.
+export const getVendorItemBreakdown = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const companyId = req.user.companyId;
+    const unit = req.user.unit;
+
+    const vendor = await Supplier.findOne({ _id: id, companyId, unit: { $in: [unit, 'Main'] } }).lean();
+    if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found' });
+
+    const items = await Item.find({ _id: { $in: vendor.suppliedItems || [] } }).select('name code').lean();
+    const overall = await computeVendorRating({ companyId, vendorId: vendor._id });
+
+    const data = await Promise.all(items.map(async (item) => {
+      const { rating } = await computeVendorRating({ companyId, vendorId: vendor._id, itemCode: item.code, itemName: item.name });
+      const pricing = await computeVendorItemPricing({ companyId, vendorId: vendor._id, itemObjectId: item._id });
+      return { itemId: item._id, itemName: item.name, itemCode: item.code, rating, ...pricing };
+    }));
+
+    res.json({ success: true, data: { overallRating: overall.rating, eventCount: overall.eventCount, items: data } });
+  } catch (error) {
+    console.error('getVendorItemBreakdown error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

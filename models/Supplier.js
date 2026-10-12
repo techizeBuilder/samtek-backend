@@ -1,6 +1,20 @@
 import mongoose from 'mongoose';
 
 const supplierSchema = new mongoose.Schema({
+  // Added 2026-10-06 — this model had NO company-level scoping at all before
+  // this, only `unit` (a branch-name string, see below). Confirmed via a
+  // real cross-tenant collision in the live DB (two different companies
+  // both using the branch name "Test Unit") that `unit`-only scoping is a
+  // genuine data-isolation gap, not a theoretical one. `unit` stays exactly
+  // as-is and keeps meaning "which branch within this company" — companyId
+  // is the actual tenant boundary, layered on top everywhere this model is
+  // queried. Existing documents were backfilled by
+  // scripts/backfillSupplierPurchaseCompanyId.js, not left to a default.
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    required: true
+  },
   supplierCode: {
     type: String,
     required: true,
@@ -57,10 +71,14 @@ const supplierSchema = new mongoose.Schema({
     branchName: String,
     ifscCode: String
   },
-  paymentTerms: {
-    type: String,
-    default: 'Net 30'
-  },
+  // Payment terms (Advance/Balance %, Credit Days, Notes), GST Rate and the
+  // automatic Charges list used to live here. All removed (procurement-v2,
+  // 2026-10-08): they're decided per order, so they're entered on the PO
+  // (Purchase.paymentTerms / items[].gstRate / charges); the old data was
+  // dropped (scripts/dropVendorCommercialFields.js).
+  // Maximum amount this vendor can be owed at once across all orders — a
+  // vendor-wide cap, so it stays here (credit-exposure warning at PO time).
+  creditLimit: { type: Number, min: 0, default: null },
   unit: {
     type: String,
     required: true
@@ -82,10 +100,6 @@ const supplierSchema = new mongoose.Schema({
   },
   notes: {
     type: String
-  },
-  openingBalance: {
-    type: Number,
-    default: 0
   },
   status: {
     type: String,
@@ -122,7 +136,114 @@ const supplierSchema = new mongoose.Schema({
   services: {
     type: [String],
     default: []
-  }
+  },
+
+  // ── Vendor Master v2 (procurement-v2, 2026-10-08) ─────────────────────────
+  // Client blueprint §8 profile fields. Commercial terms (payment terms, GST,
+  // charges, freight terms, Incoterm, quote validity, MOQ/lead time/warranty)
+  // are deliberately NOT here — the quote or the PO decides them.
+  tradeName: { type: String, trim: true, default: '' },
+  businessTypes: {
+    type: [{ type: String, enum: ['Manufacturer', 'Trader', 'Service Provider'] }],
+    default: []
+  },
+  oemStatus: { type: String, enum: ['None', 'OEM', 'Authorized Distributor'], default: 'None' },
+  cinNumber: { type: String, trim: true, default: '' },
+  msmeNumber: { type: String, trim: true, default: '' },
+  iecNumber: { type: String, trim: true, default: '' },
+  contactDesignation: { type: String, trim: true, default: '' },
+  whatsappNumber: { type: String, trim: true, default: '' },
+  alternateContactPerson: { type: String, trim: true, default: '' },
+  // `address` above is the Registered Address. Billing/Dispatch either copy it
+  // (the *SameAsRegistered flag) or carry their own.
+  billingSameAsRegistered: { type: Boolean, default: true },
+  billingAddress: {
+    street: String, city: String, state: String, zipCode: String,
+    country: { type: String, default: 'India' }
+  },
+  dispatchSameAsRegistered: { type: Boolean, default: true },
+  dispatchAddress: {
+    street: String, city: String, state: String, zipCode: String,
+    country: { type: String, default: 'India' }
+  },
+  capacity: { type: String, trim: true, default: '' },
+  locationsServed: { type: String, trim: true, default: '' },
+  qualitySystem: { type: String, trim: true, default: '' },
+  providesInspectionCertificate: { type: Boolean, default: false },
+  providesMaterialTestCertificate: { type: Boolean, default: false },
+  riskClass: { type: String, enum: ['Low', 'Medium', 'High', null], default: null },
+  // Blueprint §14 — does this vendor have any relationship with a company
+  // employee? `declared: null` = not answered yet (required before submitting
+  // for approval), true/false = answered.
+  conflictOfInterest: {
+    declared: { type: Boolean, default: null },
+    details: { type: String, default: '' }
+  },
+
+  // Compliance documents (blueprint §8). Files live under
+  // uploads/vendor-documents/ (middleware/vendorDocumentUpload.js). The two
+  // reminded* flags de-duplicate the daily expiry reminder
+  // (vendorApprovalService.js runVendorDocumentExpirySweep).
+  documents: [{
+    docType: {
+      type: String,
+      enum: ['GST Certificate', 'PAN Card', 'MSME/Udyam Certificate', 'Company Registration',
+        'ISO/Quality Certificate', 'Authorization/Dealership Certificate', 'Product Certificate',
+        'Cancelled Cheque/Bank Proof', 'Other'],
+      required: true
+    },
+    docNumber: { type: String, trim: true, default: '' },
+    fileUrl: { type: String, required: true },
+    fileName: { type: String, default: '' },
+    expiryDate: { type: Date, default: null },
+    uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    uploadedAt: { type: Date, default: Date.now },
+    remindedBeforeExpiry: { type: Boolean, default: false },
+    remindedOnExpiry: { type: Boolean, default: false }
+  }],
+
+  // Approval lifecycle (blueprint §9, §25, §29) — every approval goes to the
+  // Company Admin ("Purchase & Vendor Approval" page). Only an Approved +
+  // status:'active' vendor can be quoted or given a PO
+  // (vendorApprovalService.js ELIGIBLE_VENDOR_FILTER). Probationary/Watchlist
+  // are NOT stored here — they're derived live from the vendor rating
+  // (getVendorStanding). Server-controlled: never accepted from a request
+  // body (see supplierController.js stripServerControlled).
+  approvalStatus: {
+    type: String,
+    enum: ['Draft', 'Pending Approval', 'Approved', 'Rejected', 'Suspended', 'Blacklisted'],
+    default: 'Draft'
+  },
+  approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  approvedAt: { type: Date, default: null },
+  // Last rejection reason, shown to Purchase so they know what to fix.
+  rejectionReason: { type: String, default: '' },
+  // Set while Suspended/Blacklisted.
+  restriction: {
+    reason: { type: String, default: '' },
+    effectiveDate: { type: Date, default: null },
+    reviewDate: { type: Date, default: null }
+  },
+  // Filled by the Company Admin when approving a new vendor.
+  verification: {
+    gstVerified: { type: Boolean, default: false },
+    panVerified: { type: Boolean, default: false },
+    bankVerified: { type: Boolean, default: false },
+    documentsVerified: { type: Boolean, default: false },
+    remarks: { type: String, default: '' },
+    verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    verifiedAt: { type: Date, default: null }
+  },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  // This vendor's own history timeline (blueprint §8 "audit history").
+  activity: [{
+    action: { type: String, required: true },
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    byName: { type: String, default: '' },
+    at: { type: Date, default: Date.now },
+    remarks: { type: String, default: '' }
+  }]
 }, {
   timestamps: true
 });

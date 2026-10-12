@@ -13,6 +13,13 @@ Date: 2026-09-25 (current-flow research, first decisions, Vendor Master built)
   wrong against the code**; see "Corrections to the proposal artifact" below. It has not been
   updated yet.
 
+**Update (2026-10-03):** the client meeting never produced usable Purchase detail and the
+client declined to even look at the static preview
+(`/accounts/purchases/vendor-batching-preview`). Decided: stop waiting on the client, keep
+building modularly off our own judgment, and get feedback once there's something real to
+react to. Vendor Master round 2 built on this basis — see "Confirmed decisions" and "Built
+so far" below.
+
 Related earlier work:
 - `process-inhouse-outsource-redesign-discussion-2026-09.md`, section "Logistics / vendor
   requirement". The vendor system and a Logistics department were explicitly deferred out of
@@ -209,7 +216,21 @@ no approval by value.
 - Manual invoices also exist.
 - There is **no 3-way match** anywhere.
 
+**Update (2026-10-05, Fifteenth pass — `procurement-purchase-restructure-changes-2026-10.md`):**
+the auto-invoice is now created at **PO-creation time**, not receive, and GST is real (computed
+once at PO creation from the vendor's rate + each quote's inclusive/exclusive flag, copied
+verbatim into the invoice) — "GST is always 0" no longer holds. Due date is now the vendor's own
+Credit Days (Vendor Master), falling back to 30 only when a vendor has none set. **No 3-way
+match still holds** — not touched.
+
 **Vendor Payment:** applied oldest-invoice-first, and posted to the ledger.
+
+**Update (2026-10-05, Fifteenth/Sixteenth pass):** no longer oldest-first-only — a payment can
+now target one specific invoice (paid partially or fully) or several at once (must cover their
+full balance, no partial split across a multi-select — see the Sixteenth pass for why), with
+any remainder still falling through to the old oldest-first behavior. Every payment now records
+which invoice(s) it actually paid down (`VendorPayment.allocations[]`), which didn't exist
+before even for plain oldest-first payments.
 
 **Payable Ageing:** buckets by **invoice date**, not due date.
 
@@ -286,10 +307,10 @@ The first draft of this research said the trigger ignores reservations. That's o
 | Past purchase price for negotiation | **Partial**: last price only |
 | Quotes by email / WhatsApp / manual (call) | **Partial**: email link only |
 | Landed cost, negotiation history | Missing |
-| Full PO fields (payment terms, advance %, credit days, freight, transport) | **Partial**: delivery date + free-text terms |
+| Full PO fields (payment terms, advance %, credit days, freight, transport) | **Have most of it now (2026-10-05)**: structured Payment Terms/Credit Limit/GST Rate on Vendor Master, real GST computed at PO creation, PO-scoped Charges (freight etc.), `transportBy` (Vendor/Company). Still missing: per-PO override of vendor-level payment terms |
 | PO approval by value | Missing: flag exists, unused |
-| Payment schedule + reminders to Accounts | Missing: customer-side reminder cron is reusable |
-| Credit limit / credit days per vendor | Missing: free-text `paymentTerms` only |
+| Payment schedule + reminders to Accounts | **Partial (2026-10-05)**: invoice due date now derives from vendor Credit Days, and a payment can target a specific invoice with Advance % shown as a reference. No automated reminder cron yet — customer-side one is reusable |
+| Credit limit / credit days per vendor | **Built 2026-10-03**: Credit Limit, Credit Days, Advance/Balance % on Vendor Master |
 | Delivery tracking, vendor delay record | **Partial**: promised date on PO + received date on PR, never compared |
 | GRN with short / excess / damaged, batch, vehicle, photos | Missing |
 | QC before stock; return on reject | **Have**, including vendor exchange + replacement PR |
@@ -322,14 +343,18 @@ The first draft of this research said the trigger ignores reservations. That's o
   - The PO already has an expected delivery date, a delivery address and free-text terms.
   - The approval flag exists but is unwired.
   - One line per PO.
-- **§06:** no schedule exists; the invoice due date is a fixed 30 days.
+- **§06:** no schedule exists; the invoice due date is a fixed 30 days. — **Partially resolved
+  2026-10-05 (Fifteenth pass):** due date is now the vendor's own Credit Days, falling back to
+  30 only when unset. A real Payment Schedule + Accounts reminders (the rest of §06) still
+  doesn't exist.
 - **§07:** Dispatch already has the vehicle/driver/transporter fields a pickup flow would need.
 - **§08:**
   - Receiving is on the PR, one-shot, with serial/warranty mandatory. The PO's partial-receive
     code is unused.
   - The artifact **understated** the reject side: the vendor exchange email and replacement PR
     already exist.
-- **§09:** confirmed, no 3-way match; also, auto-invoices carry GST 0.
+- **§09:** confirmed, no 3-way match (still true, not touched); auto-invoices carrying GST 0 —
+  **resolved 2026-10-05, Fifteenth pass**, see §7's own update above.
 - **§10:** nothing per vendor exists; lead time is per item.
 - **§11:** confirmed as written.
 
@@ -348,7 +373,7 @@ The first draft of this research said the trigger ignores reservations. That's o
 3. The old free-text Categories tags and the manual 1–5 rating **stay visible for now**. RFQ
    still scores vendors against the tags.
 4. Payment Terms vs Credit Days / credit limit: **parked**. The user said "it should be
-   dynamic"; the meaning was never clarified.
+   dynamic"; the meaning was never clarified. **Resolved 2026-10-03, see below.**
 
 **2026-09-25, quotes:**
 
@@ -361,6 +386,41 @@ The first draft of this research said the trigger ignores reservations. That's o
    - **Manual entry:** Purchase fills the `VendorBid` on the vendor's behalf, marked as entered
      by Purchase.
 
+**2026-10-03, Vendor Master round 2 — resolving what round 1 parked:**
+
+6. **Payment Terms, unparked.** "It should be dynamic" = real structured fields, not a
+   richer free-text string: Advance %, Balance %, Credit Days, Payment Notes. The old
+   free-text `paymentTerms` is removed outright (confirmed it was never shown anywhere in
+   `VendorMaster.jsx` in the first place, so nothing downstream broke).
+7. **Credit Limit, built as its own field** — separate from Credit Days, confirmed as "max
+   ₹ this vendor can be owed at once" vs. Credit Days' "payment window." Warning-vs-hard-block
+   behavior is still open (§"Open questions" item 6) — only the field exists so far, no
+   enforcement anywhere yet (there's nowhere to enforce it until a PO/Payment Schedule screen
+   exists).
+8. **GST — vendor-level rate now, inclusive/exclusive toggle later.** No single rule for
+   whether a vendor's quoted price includes GST — depends on the vendor. Decided: store a
+   **GST Rate** on the vendor (new field, separate from `gstNumber`); the actual
+   inclusive/exclusive choice is a **per-quote toggle**, deferred to whenever the Quotation
+   screen (§04 of the original proposal) gets built. Confirmed the same GST Rate applies to
+   **both Products and Job Work** — job work is a taxable service under GST, not exempt, so
+   there's no reason for a separate mechanism.
+9. **Purchase Charges — Products only, confirmed explicitly.** Job Work gets GST only, no
+   charges list. A dynamic "+"-addable list (name, Flat ₹ / % of order, value) stored per
+   vendor as defaults, applied/edited per quote later.
+10. **Opening Balance (Dr/Cr) — removed.** Audited against the actual code (not assumed):
+    `Supplier.openingBalance` was written on every save but read by nothing, anywhere,
+    including the Vendor Payments page's own Outstanding Summary
+    (`getVendorOutstanding`, `purchaseInvoiceController.js`), which sums
+    `PurchaseInvoice.balanceAmount` only. Confirmed dead by the user ("just remove it as is
+    not wired up and we dont know the purpose"). If real pre-ERP vendor debt ever needs to
+    count toward Outstanding, that's new work on `getVendorOutstanding` itself, not this
+    field.
+11. **Rating, PAN, Alternate Phone, Bank Details — surfaced, not new.** All four already
+    existed on `Supplier.js` from before this redesign touched it, but were never wired into
+    `VendorMaster.jsx` at all (confirmed by grep — zero occurrences in the form). Added as
+    real inputs now; Bank Details in particular was a genuine operational gap (no way to
+    actually pay a vendor by NEFT/RTGS without it).
+
 ## Built so far
 
 **Vendor Master: Products / Services (2026-09-25, not yet live-tested).**
@@ -371,18 +431,52 @@ The first draft of this research said the trigger ignores reservations. That's o
   cards.
 - Details: `procurement-vendor-master-changes-2026-09.md`.
 
+**Vendor Master round 2 (2026-10-03, not yet live-tested).**
+- Structured Payment Terms, Credit Limit, GST Rate, Purchase-only Charges — all new fields
+  on `Supplier.js`.
+- Rating/PAN/Alternate Phone/Bank Details wired into `VendorMaster.jsx` (existed on the
+  model, had no UI before).
+- Dead `openingBalance` field removed from schema, form and card.
+- Details: `procurement-vendor-master-changes-2026-09.md` §2.
+
+**Purchase department restructure (2026-10, not yet live-tested) — PR → Quote → Batched PO.**
+The big next phase: Purchase split from Job Work into tabs on one page (sidebar now "Purchase
+& Outsource"), PRs/By Item/By Vendor built for real, RFQ+VendorBid's self-service bidding
+flow superseded by direct Email/Manual quoting (WhatsApp has no inbound capture, so it's
+covered by Manual), and `Purchase` genuinely batches several PRs into one PO now
+(`purchaseRequests[]`, reusing the dormant `createPurchase`). RFQ Management/Vendor Bids/the
+static preview are NOT removed yet — staying until this is live-verified. Since then (still not
+live-tested): real Vendor Charges (Item/PO-scoped, transport-charge exclusion), Active POs/Order
+History split with per-item receive tracking, the receive redesign (conditional warranty,
+unit-conversion fix, batch context) wired into a computed Vendor Rating system, and — most
+recently (2026-10-05) — the Purchase Invoice moved to PO-creation time with real GST, and
+targeted (single or multi-invoice-full) payment allocation replacing oldest-first-only — and, most recently (2026-10-06, Eighteenth
+pass), the item-wise PR consolidation described in the section below: By Item now combines by
+ITEM (one card summing every open PR's need for it, explicit selection, a new `ItemQuoteGroup`
+model), not by individual PR. Full plan and build report: `procurement-purchase-restructure-changes-2026-10.md`.
+
 ## Open questions for the client
 
 1. **Quote fields:** is price / delivery days / warranty enough, or do they want freight, GST,
-   payment terms and validity per quote (landed-cost comparison)?
+   payment terms and validity per quote (landed-cost comparison)? GST specifically now has a
+   vendor-level rate to pull from (2026-10-03) — the open part is just the quote-level
+   inclusive/exclusive toggle's exact UI, not built yet.
 2. **Vendor-wise buying:** may one PO cover several items / PRs from the same vendor? Is a
    vendor-wise view of pending PRs wanted (their brief says yes)?
 3. **PO approval:** needed, and at what ₹ thresholds?
-4. **Payment terms:** advance / balance / credit days per PO, with reminders to Accounts. This
-   is likely where "it should be dynamic" belongs.
+4. **Payment terms at the PO level:** the vendor-level Advance %/Balance %/Credit Days built
+   2026-10-03 are *defaults* — whether a PO can override them per order is still open and
+   unbuilt. **Partially connected since 2026-10-05 (Fifteenth pass):** Credit Days now drives
+   the auto-invoice's real due date, and Advance % now shows as a reference hint (not enforced)
+   when recording a payment against a PO-linked invoice — first real uses of either field. The
+   actual Payment Schedule + Accounts reminders (§06 of the original proposal) are still unbuilt.
 5. **Minimum stock vs reservations:** protect Min Stock against reserved quantity, or keep
    today's raw-qty behaviour?
-6. **Credit limit:** warning or hard block?
+6. **Credit limit:** warning or hard block? The field exists (2026-10-03) and a **soft warning**
+   already exists — By Vendor's own credit-exposure insight badge, shown while batching a PO,
+   since that tab was first built. That exposure figure got more accurate on 2026-10-05 (it now
+   includes in-flight, not-yet-received POs too, since invoices exist from PO-creation time, not
+   just receive). Still open: whether to ever make it a hard block instead of just a warning.
 7. **Vendor performance score:** advisory only, or ever restrictive?
 8. **Logistics:** does Packaging & Dispatch take over vendor pickups and job-work movement?
    (Already raised and deferred in the in-house/outsource discussion.)
@@ -397,8 +491,12 @@ The first draft of this research said the trigger ignores reservations. That's o
 - **Process Templates typo:** "pre panting" (Child Part) vs "pre painting" (Machine). Services
   match by name, so these are two different services.
 - **Serial number / warranty mandatory at receive** for every item, including raw material.
-  Confirm this is intended.
-- **Auto-created purchase invoices carry GST 0.**
+  Confirm this is intended. — **Resolved 2026-10-05 (Fourteenth pass):** warranty is now
+  conditional on whether the vendor actually quoted one (`VendorBid.warrantyMonths`, carried
+  through to the receive step); Serial Number stays mandatory (asset tracking, not a warranty
+  concern).
+- **Auto-created purchase invoices carry GST 0.** — **Resolved 2026-10-05 (Fifteenth pass):**
+  GST is now computed for real at PO creation and copied verbatim into the invoice.
 - **Unused code paths:** manual multi-line `createPurchase` (no button) and the PO-level
   partial `receivePurchase` (no caller). Both are candidates for reuse rather than rebuild.
 
@@ -413,3 +511,72 @@ The first draft of this research said the trigger ignores reservations. That's o
 4. **Accounts payment schedule + reminders**, modelled on the customer reminder cron.
 5. **Logistics and job-work vendor / scrap reconciliation**: the largest piece, last, once the
    client confirms the department split.
+
+## Item-wise consolidation — a real gap in By Item, clarified 2026-10-05
+
+**This is a clarification of original intent, not something written down anywhere before now.**
+The discussion doc above and the client brief only ever describe **vendor-wise** consolidation
+("everything due from one vendor bought in one go," line 39/306 above) — which By Vendor tab
+does correctly. The user's actual reasoning for this whole redesign also includes a second,
+separate kind of consolidation that was never written down until this conversation:
+
+> "a PR and PO are different things — this is the whole reason we're redesigning Purchase. In
+> the old system we bought per-PR: 3 PRs for the same item meant 3 separate purchases. In real
+> life, if your brother, mother and dad all ask you to buy the same thing, you don't go to the
+> market three times — you combine the requests and go once." (paraphrased from the live
+> conversation, 2026-10-05)
+
+So **By Item is supposed to show one combined entry per item**, summing every open PR's need for
+that item into one computed total, before Purchase ever quotes anyone — not one card per PR (what
+got built). Purchase can then deliberately quote/order **less** than that combined total — this
+is intentional, not a bug: Purchase has a budget across many items, not infinite money for one.
+
+**Confirmed wrong in the current build, checked directly against the code (not assumed):**
+1. `ByItemTab.jsx` groups nothing — `pageRequests.map(pr => <ItemComparisonCard pr={pr} />)` is
+   one card per `PurchaseRequest._id`. Three PRs for "ms round bar" show as three separate
+   cards, each quoted independently, with no combined total anywhere.
+2. **The data model can't represent it even if grouping were fixed.** `VendorBid.purchaseRequest`
+   and `Purchase.items[].purchaseRequest` are both singular refs — one quote/one PO line can only
+   ever point at exactly one PR. There's nowhere to record "this one combined quote covers PR-A +
+   PR-B + part of PR-C."
+3. **No allocation rule exists for under-covering.** If three PRs need 2+1+3 = 6 combined and
+   Purchase deliberately orders enough for only 4, something has to decide which PR(s) count as
+   now covered (→ `Ordered`) and which stay open for a future round — nothing like this exists.
+   Today a PR is a hard binary: `Ordered`/`Received` means "fully resolved," full stop. If a
+   single PR's own quote quantity is under-typed today (already possible — the Order Quantity
+   field has zero validation against the PR's own resolved need), the shortfall is **silently
+   lost**: the PR still flips straight to `Ordered` then `Received`, nothing re-raises a request
+   for the difference, and no future view (PRs tab, By Item, the auto-reorder sweep) ever shows
+   that this item is still actually short.
+
+**Not yet designed — three things that need solving together, not separately:**
+- **Grouping:** how PRs get grouped into one combined item view (presumably the same
+  name/code match `resolveMasterItemId` already uses elsewhere in this redesign).
+- **Data model:** how a quote/order line references *several* PRs at once — `VendorBid`/
+  `Purchase.items[]`'s `purchaseRequest` singular ref needs to become plural, or some other
+  shape, and `Purchase.purchaseRequests[]` (the PO-level list, already plural) would need to stay
+  consistent with whatever a single line now means.
+- **Allocation rule for under-covering:** candidate directions discussed, none chosen yet —
+  (a) FIFO-style, oldest/smallest PR first, cleanly closing whichever PRs the ordered quantity
+  reaches and leaving the rest untouched; (b) explicit PR-selection checkboxes within the
+  combined item view (same UI pattern By Vendor's own batching already uses), so Purchase
+  directly picks which PRs this round covers rather than the system inferring it from a number;
+  (c) a real "Partially Ordered"/"Partially Received" status added to `PurchaseRequest` with an
+  explicit remaining-quantity field, instead of either (a) or (b) inferring coverage from
+  PR boundaries.
+
+**Built 2026-10-06 (Eighteenth pass).** Resolved by the user across several rounds of discussion
+into the design actually built: explicit PR selection (option (b) from the three candidates
+above) via a new `ItemQuoteGroup` model — one per item, holding the current selection and a
+quantity that's always a free, manually-overridable sum, refreshed whenever the selection changes
+and frozen only once a PO is created. Selection is a binary commitment (every selected PR counts
+as processed the moment a PO is created, regardless of how much was actually ordered — the
+candidate allocation rules (a) FIFO and (c) a new PR status were both superseded by this, not
+combined with it). Full design and build detail: `procurement-purchase-restructure-changes-2026-10.md`'s
+Eighteenth pass — this is the fullest write-up, read that first for anything touching By Item,
+quoting, or batching going forward.
+
+Full build history for everything else (Vendor Charges, By Vendor batching + Active POs/Order
+History, the receive redesign + computed Vendor Rating system, Invoice-at-PO-creation + targeted
+payment allocation, and now this item-wise consolidation) is in
+`procurement-purchase-restructure-changes-2026-10.md` (eighteen dated passes as of 2026-10-06).

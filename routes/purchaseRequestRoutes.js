@@ -10,8 +10,13 @@ import {
   getStagedPurchaseRequests,
   previewFabricationTotal,
   editFabricationLines,
-  receiveFabricationPurchase
+  receiveFabricationPurchase,
+  getBatchSiblings,
+  getPurchaseOrdersForStore,
+  receiveLineItems,
+  receiveLineFabrication
 } from '../controllers/purchaseRequestController.js';
+import { getQuotesForPR, createQuote, getEligibleVendorsForPR } from '../controllers/purchaseQuoteController.js';
 import { authenticateToken as authenticateUser } from '../middleware/auth.js';
 import { warrantyUpload } from '../middleware/warrantyUpload.js';
 import { checkAnyPermission } from '../middleware/permissions.js';
@@ -36,12 +41,26 @@ router.post('/', purchasesAdd, createPurchaseRequest);
 router.post('/bulk-purchase', purchasesAdd, createBulkPurchaseRequests);
 router.post('/preview-fabrication-total', purchasesAdd, previewFabricationTotal);
 
-// Receive endpoint uses multipart/form-data so file (warrantyCard) can be uploaded
-router.patch('/:id/status', purchasesEdit, warrantyUpload.single('warrantyCard'), updatePurchaseRequestStatus);
+// Store's own way to list POs, grouped the same way Active POs/Order
+// History already are (2026-10) — see getPurchaseOrdersForStore's own
+// comment for why this isn't just GET /api/accounts/purchases/orders.
+router.get('/orders', purchasesView, getPurchaseOrdersForStore);
 
-// Store-only: records the actual per-dimension breakdown of a fabrication
-// purchase as it's received — no Serial Number/Warranty fields, see
-// receiveFabricationPurchase's own comment.
+// One receive action per PO line (2026-10), not per PurchaseRequest — see
+// receiveLineItems/receiveLineFabrication's own comments. Registered before
+// the legacy per-PR routes below only for readability; the literal `orders`
+// prefix makes these unambiguous from `/:id/...` regardless of order.
+router.patch('/orders/:purchaseId/lines/:lineId/receive', purchasesEdit, warrantyUpload.single('warrantyCard'), receiveLineItems);
+router.patch('/orders/:purchaseId/lines/:lineId/receive-fabrication', purchasesEdit, receiveLineFabrication);
+
+// Per-PR receive — superseded by the per-line routes above for Store's own
+// UI (2026-10), left registered (not deleted) since applyReceiveSideEffects/
+// applyFabricationReceiveSideEffects are now shared by both, and this is
+// safe to remove later once the new flow is confirmed live, same pattern as
+// RFQ Management/Vendor Bids' own removal once their replacement was
+// verified. Receive endpoint uses multipart/form-data so file (warrantyCard)
+// can be uploaded.
+router.patch('/:id/status', purchasesEdit, warrantyUpload.single('warrantyCard'), updatePurchaseRequestStatus);
 router.patch('/:id/receive-fabrication', purchasesEdit, receiveFabricationPurchase);
 
 // Purchase-dept-only: re-target which catalog dimensions/quantities make up
@@ -56,5 +75,14 @@ router.patch('/:id/store-reject', purchasesEdit, storeRejectRequest);
 
 // Check inventory availability for a purchase request item
 router.get('/:id/check-inventory', purchasesView, checkInventoryForPR);
+
+// Read-only batch context for the receive modal — see getBatchSiblings.
+router.get('/:id/batch-siblings', purchasesView, getBatchSiblings);
+
+// Quote history + creation (Purchase redesign) — Email or Manual, see
+// purchaseQuoteController.js.
+router.get('/:id/quotes', purchasesView, getQuotesForPR);
+router.post('/:id/quotes', purchasesAdd, createQuote);
+router.get('/:id/eligible-vendors', purchasesView, getEligibleVendorsForPR);
 
 export default router;

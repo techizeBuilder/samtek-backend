@@ -1,3 +1,4 @@
+import { requestPoCancellation } from '../controllers/poCancellationController.js';
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
@@ -79,7 +80,8 @@ import {
   updatePurchase,
   deletePurchase,
   receivePurchase,
-  sendPOToVendor
+  sendPOToVendor,
+  reviseLineExpectedDate
 } from '../controllers/purchaseController.js';
 import {
   getPurchaseExpenseCategories,
@@ -320,6 +322,7 @@ import {
   createPurchaseInvoice,
   getPurchaseInvoices,
   createVendorPayment,
+  getVendorPayments,
   getVendorOutstanding,
   createPurchaseReturn,
   getPurchaseReturns,
@@ -336,15 +339,35 @@ accountsRouter.get('/purchases/invoices', authorizeRoles('Accounts', 'Accounts H
 accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createVendorPayment);
 accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorOutstanding);
 accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPaymentStats);
+accountsRouter.get('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorPayments);
 
 // Purchase Orders
 accountsRouter.post('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchase);
 accountsRouter.get('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchases);
 accountsRouter.get('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseById);
 accountsRouter.put('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, updatePurchase);
-accountsRouter.delete('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesDelete, deletePurchase);
+// Disabled 2026-10-05 — no frontend caller anywhere (confirmed by grep), and
+// deletePurchase doesn't clean up the PurchaseInvoice that's now auto-created
+// at PO-creation time (Fifteenth pass) — a pre-Fifteenth-pass Draft PO had
+// nothing to orphan, so this was harmless when written. Re-enable only once
+// it also voids/deletes the linked invoice (see createAutoPurchaseInvoice /
+// Purchase.purchaseOrder) — otherwise a deleted PO leaves a permanent,
+// uncollectible balance inflating that vendor's credit exposure forever.
+// accountsRouter.delete('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesDelete, deletePurchase);
 accountsRouter.post('/purchases/orders/:id/receive', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, receivePurchase);
 accountsRouter.post('/purchases/orders/:id/send-email', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, sendPOToVendor);
+// Gap 13 (2026-10-09): Purchase asks to cancel a PO (the Company Admin decides — /api/po-approvals/:id/cancel-review).
+accountsRouter.post('/purchases/orders/:id/cancel-request', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, requestPoCancellation);
+// Delivery follow-up (2026-10-10): Purchase records the vendor's new date for a line.
+accountsRouter.patch('/purchases/orders/:id/lines/:lineId/expected-date', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, reviseLineExpectedDate);
+
+// QC rejections of purchased material + money the vendor holds of ours (accounts Slice 3, 2026-10-12)
+import { listRejections, answerRejection, listMoneyBack, refundReceived, decideLeftover } from '../controllers/purchaseRejectionController.js';
+accountsRouter.get('/purchases/rejections', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, listRejections);
+accountsRouter.put('/purchases/rejections/:id/answer', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, answerRejection);
+accountsRouter.get('/purchases/money-back', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, listMoneyBack);
+accountsRouter.put('/purchases/money-back/:id/refund', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, refundReceived);
+accountsRouter.put('/purchases/money-back/:id/decide', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, decideLeftover);
 
 // Purchase Returns
 accountsRouter.post('/purchases/returns', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchaseReturn);

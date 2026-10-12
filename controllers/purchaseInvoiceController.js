@@ -6,6 +6,8 @@ import { Item } from '../models/Inventory.js';
 import { Transaction, Account } from '../models/Account.js';
 import mongoose from 'mongoose';
 import { recalculateItemPricing } from '../services/itemPricingService.js';
+import { postEntry, gstLines } from '../services/purchaseLedgerService.js';
+import { payBill, payableNow } from '../services/purchaseBillService.js';
 
 // Recalculates purchase-derived cost/MRP/Sale Price for every Item referenced
 // on a newly recorded Purchase Invoice — the most reliable "price actually
@@ -25,45 +27,61 @@ async function recalcPricingForInvoiceItems(invoice) {
 }
 
 /**
- * Create a new Purchase Invoice and auto-post to ledger
+ * Record a manual bill ("Record New Bill") — for a purchase with no PO
+ * (bills with no PO are revisited with the outsource flow). Posted to the
+ * company + unit's own purchase accounts (2026-10-12): before, it looked
+ * for accounts that existed nowhere and never posted. No TDS on the
+ * purchase side (client, 2026-10-12).
  */
 export const createPurchaseInvoice = async (req, res) => {
     try {
-        const {
-            vendorId, invoiceNo, invoiceDate, dueDate, items,
-            subtotal, gstAmount, totalAmount, tdsAmount, tdsPercent, notes
-        } = req.body;
+        const { vendorId, invoiceNo, invoiceDate, dueDate, items, notes } = req.body;
         const companyId = req.user.companyId;
         const unit = req.user.unit;
+        const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
         if (!companyId || !unit) {
             throw new Error('Your account is missing mandatory Company or Unit assignment. Please contact admin.');
         }
+        if (!String(invoiceNo || '').trim()) throw new Error('Enter the vendor\'s invoice number.');
+        if (!Array.isArray(items) || !items.length) throw new Error('Add at least one item.');
 
         // 1. Check for duplicate invoice
-        const existing = await PurchaseInvoice.findOne({ vendor: vendorId, invoiceNo });
+        const existing = await PurchaseInvoice.findOne({ vendor: vendorId, invoiceNo, companyId });
         if (existing) {
             throw new Error(`Duplicate invoice number "${invoiceNo}" already exists for this vendor.`);
         }
 
         // 2. Check if vendor is active
-        const vendor = await Supplier.findById(vendorId);
+        const vendor = await Supplier.findOne({ _id: vendorId, companyId });
         if (!vendor || vendor.status === 'inactive') {
             throw new Error('Vendor is inactive or not found');
         }
 
-        // 3. Create Invoice
+        // 3. The figures — worked out here from the lines, not trusted.
+        const lines = items.map(it => {
+            const qty = Number(it.quantity) || 0;
+            const price = Number(it.unitPrice) || 0;
+            const pct = Math.min(100, Math.max(0, Number(it.gstPercent) || 0));
+            const net = r2(qty * price);
+            const gst = r2(net * pct / 100);
+            return { item: it.item, itemName: it.itemName, quantity: qty, unitPrice: price, gstPercent: pct, gstAmount: gst, totalPrice: r2(net + gst) };
+        });
+        const subtotal = r2(lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0));
+        const gstAmount = r2(lines.reduce((s, l) => s + l.gstAmount, 0));
+        const totalAmount = r2(subtotal + gstAmount);
+        const gstType = req.body.gstType === 'IGST' ? 'IGST' : 'CGST_SGST';
+
         const invoice = new PurchaseInvoice({
             vendor: vendorId,
             invoiceNo,
             invoiceDate,
             dueDate,
-            items,
+            items: lines,
             subtotal,
             gstAmount,
             totalAmount,
-            tdsAmount: tdsAmount || 0,
-            tdsPercent: tdsPercent || 0,
+            gstType,
             balanceAmount: totalAmount,
             unit,
             companyId,
@@ -73,49 +91,23 @@ export const createPurchaseInvoice = async (req, res) => {
         await invoice.save();
         recalcPricingForInvoiceItems(invoice).catch(e => console.error('❌ Pricing recalc error (createPurchaseInvoice):', e));
 
-        // 4. Auto Journal Posting
-        const purchaseAccount = await Account.findOne({ accountName: 'Purchase Account', unit });
-        const gstAccount = await Account.findOne({ accountName: 'Input GST', unit });
-        const payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
-        const tdsPayableAccount = await Account.findOne({ accountName: 'TDS Payable', unit });
-
-        if (purchaseAccount && gstAccount && payableAccount) {
-            const entries = [
-                { account: purchaseAccount._id, debit: subtotal, credit: 0 },
-                { account: gstAccount._id, debit: gstAmount, credit: 0 },
-                { account: payableAccount._id, debit: 0, credit: totalAmount }
-            ];
-
-            if (tdsAmount > 0 && tdsPayableAccount) {
-                entries.push({ account: tdsPayableAccount._id, debit: 0, credit: tdsAmount });
-            }
-
-            const txn = new Transaction({
-                transactionNumber: `TXN-PUR-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
-                description: `Purchase Invoice: ${invoiceNo} from ${vendor.supplierName}${tdsAmount > 0 ? ' (Includes TDS Payable)' : ''}`,
+        // 4. Ledger: Dr Purchase + Input GST / Cr Accounts Payable.
+        try {
+            await postEntry({
+                companyId, unit,
+                lines: [
+                    { key: 'purchase', debit: subtotal },
+                    ...gstLines(gstAmount, gstType),
+                    { key: 'accounts_payable', credit: totalAmount },
+                ],
+                description: `Purchase bill ${invoiceNo} from ${vendor.supplierName}`,
                 reference: invoiceNo,
-                totalAmount: subtotal + gstAmount,
-                unit,
                 relatedDocument: 'Purchase',
                 relatedDocumentId: invoice._id,
-                createdBy: req.user._id,
-                entries
+                user: req.user,
             });
-            await txn.save();
-
-            // Update account balances
-            purchaseAccount.balance += subtotal;
-            gstAccount.balance += gstAmount;
-            payableAccount.balance += totalAmount;
-            
-            if (tdsAmount > 0 && tdsPayableAccount) {
-                tdsPayableAccount.balance += tdsAmount;
-                await tdsPayableAccount.save();
-            }
-
-            await purchaseAccount.save();
-            await gstAccount.save();
-            await payableAccount.save();
+        } catch (postErr) {
+            console.error('❌ Ledger posting for a manual bill failed:', postErr.message);
         }
 
         res.status(201).json({ success: true, data: invoice });
@@ -130,18 +122,26 @@ export const createPurchaseInvoice = async (req, res) => {
  */
 export const getPurchaseInvoices = async (req, res) => {
     try {
-        const { page = 1, limit = 20, status, search } = req.query;
+        const { page = 1, limit = 20, status, search, stage } = req.query;
         const query = { companyId: req.user.companyId };
 
         if (status && status !== 'All') query.status = status;
+        // A PO bill's stage (2026-10-12): Advance due / Awaiting material / Payable / Paid / Cancelled.
+        if (stage && stage !== 'All') query.stage = stage;
         if (search) {
             query.$or = [
-                { invoiceNo: { $regex: search, $options: 'i' } }
+                { invoiceNo: { $regex: search, $options: 'i' } },
+                { notes: { $regex: search, $options: 'i' } }
             ];
         }
 
         const invoices = await PurchaseInvoice.find(query)
             .populate('vendor', 'supplierName gstNumber')
+            // Lets the Billed Items table show each line's real purchase
+            // unit next to its qty (2026-10) — previously a bare number,
+            // ambiguous (20 what? pieces, kg, sheets?).
+            .populate('items.item', 'purchaseUnit unit')
+            .populate('purchaseOrder', 'purchaseOrderNumber status paymentTerms deliveryClock')
             .sort({ invoiceDate: -1 })
             .skip((page - 1) * limit)
             .limit(parseInt(limit));
@@ -151,7 +151,7 @@ export const getPurchaseInvoices = async (req, res) => {
         res.json({
             success: true,
             data: {
-                invoices,
+                invoices: invoices.map(inv => ({ ...inv.toObject(), payableNow: inv.purchaseOrder ? payableNow(inv) : null })),
                 pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) }
             }
         });
@@ -161,40 +161,117 @@ export const getPurchaseInvoices = async (req, res) => {
 };
 
 /**
- * Record Vendor Payment
+ * Record Vendor Payment.
+ *  - A PO bill (billId + kind 'Advance' | 'Payment'): services/purchaseBillService.js
+ *    — the advance, or material that has passed QC (2026-10-12).
+ *  - A manual bill (no PO): as before — one bill paid partly or fully,
+ *    several paid in full, anything left oldest-first across the vendor's
+ *    other manual bills. PO bills are never touched by this path.
  */
 export const createVendorPayment = async (req, res) => {
     try {
+        if (req.body.billId) {
+            const result = await payBill({ billId: req.body.billId, body: req.body, user: req.user, req });
+            if (result.status) return res.status(result.status).json({ success: false, message: result.message });
+            return res.json({ success: true, data: result.payment, bill: result.bill, clockStarted: result.clockStarted });
+        }
+
         const { vendorId, paymentDate, amount, paymentMode, referenceNo, notes } = req.body;
         const companyId = req.user.companyId;
         const unit = req.user.unit;
+        const manualOnly = { companyId, purchaseOrder: null };
+        const invoiceIds = Array.isArray(req.body.invoiceIds)
+            ? req.body.invoiceIds.filter(Boolean)
+            : (req.body.invoiceIds ? [req.body.invoiceIds] : []);
 
         if (!amount || amount <= 0) {
             throw new Error('Payment amount must be greater than zero.');
         }
 
-        // 0. Resolve bank/cash account and verify sufficient balance BEFORE
-        // creating any payment/invoice records, so an insufficient-balance
-        // rejection never leaves a partial payment behind.
-        const bankAccount = req.body.accountId
-            ? await Account.findById(req.body.accountId)
-            : await Account.findOne({ isBankOrCash: true, unit });
+        // Multiple bills targeted at once must be paid in FULL — splitting a
+        // part amount across several is ambiguous.
+        let targetedInvoices = [];
+        if (invoiceIds.length > 1) {
+            targetedInvoices = await PurchaseInvoice.find({ ...manualOnly, _id: { $in: invoiceIds }, vendor: vendorId, status: { $nin: ['Paid', 'Cancelled'] } });
+            const targetedTotal = targetedInvoices.reduce((sum, inv) => sum + inv.balanceAmount, 0);
+            if (amount < targetedTotal) {
+                throw new Error(`Paying ${invoiceIds.length} bills at once requires the full balance of all of them: ₹${targetedTotal.toLocaleString('en-IN')}. Enter that amount, or select just one bill to pay it partially.`);
+            }
+        }
 
+        // Never more than this vendor's manual bills still owe (2026-10-12) —
+        // money with nothing to settle used to push Accounts Payable negative.
+        const owedRows = await PurchaseInvoice.find({ ...manualOnly, vendor: vendorId, status: { $nin: ['Paid', 'Cancelled'] } }).select('balanceAmount').lean();
+        const owed = Math.round(owedRows.reduce((sum, inv) => sum + (Number(inv.balanceAmount) || 0), 0) * 100) / 100;
+        if (amount > owed + 0.005) {
+            throw new Error(owed > 0
+                ? `Only ₹${owed.toLocaleString('en-IN')} is owed on this vendor's bills without a PO. A PO's advance or payment is paid against that PO's bill.`
+                : 'This vendor has no unpaid bills without a PO. A PO\'s advance or payment is paid against that PO\'s bill.');
+        }
+
+        // The bank / cash account, checked BEFORE anything is written.
+        const bankAccount = req.body.accountId
+            ? await Account.findOne({ _id: req.body.accountId, isBankOrCash: true })
+            : await Account.findOne({ isBankOrCash: true, unit });
         if (!bankAccount) {
             throw new Error('Bank or Cash account not found for payment. Please create one in Bank & Cash module.');
         }
-
         if (bankAccount.balance < amount) {
             throw new Error(`Insufficient funds in ${bankAccount.accountName}. Available: ₹${bankAccount.balance}`);
         }
 
-        // 1. Create Payment record
+        let remainingAmount = amount;
+        const allocations = [];
+
+        if (invoiceIds.length === 1) {
+            const targeted = await PurchaseInvoice.findOne({ ...manualOnly, _id: invoiceIds[0], vendor: vendorId, status: { $nin: ['Paid', 'Cancelled'] } });
+            if (targeted) {
+                const payToThis = Math.min(targeted.balanceAmount, remainingAmount);
+                if (payToThis > 0) {
+                    targeted.paidAmount += payToThis;
+                    remainingAmount -= payToThis;
+                    await targeted.save();
+                    allocations.push({ invoice: targeted._id, amount: payToThis });
+                }
+            }
+        } else if (invoiceIds.length > 1) {
+            for (const targeted of targetedInvoices) {
+                const payToThis = targeted.balanceAmount;
+                if (payToThis <= 0) continue;
+                targeted.paidAmount += payToThis;
+                remainingAmount -= payToThis;
+                await targeted.save();
+                allocations.push({ invoice: targeted._id, amount: payToThis });
+            }
+        }
+
+        if (remainingAmount > 0) {
+            const unpaidInvoices = await PurchaseInvoice.find({
+                ...manualOnly,
+                vendor: vendorId,
+                status: { $nin: ['Paid', 'Cancelled'] },
+                ...(invoiceIds.length ? { _id: { $nin: invoiceIds } } : {}),
+            }).sort({ invoiceDate: 1 });
+
+            for (const inv of unpaidInvoices) {
+                if (remainingAmount <= 0) break;
+                const payToThis = Math.min(inv.balanceAmount, remainingAmount);
+                if (payToThis <= 0) continue;
+                inv.paidAmount += payToThis;
+                remainingAmount -= payToThis;
+                await inv.save();
+                allocations.push({ invoice: inv._id, amount: payToThis });
+            }
+        }
+
         const payment = new VendorPayment({
             vendor: vendorId,
             paymentDate,
             amount,
             paymentMode,
             referenceNo,
+            bankAccount: bankAccount._id,
+            allocations,
             unit,
             companyId,
             createdBy: req.user._id,
@@ -202,65 +279,60 @@ export const createVendorPayment = async (req, res) => {
         });
         await payment.save();
 
-        // 2. Update Invoices (FIFO logic)
-        let remainingAmount = amount;
-        const unpaidInvoices = await PurchaseInvoice.find({
-            vendor: vendorId,
-            status: { $ne: 'Paid' }
-        }).sort({ invoiceDate: 1 });
-
-        for (const inv of unpaidInvoices) {
-            if (remainingAmount <= 0) break;
-            const payToThis = Math.min(inv.balanceAmount, remainingAmount);
-            inv.paidAmount += payToThis;
-            inv.balanceAmount -= payToThis;
-            remainingAmount -= payToThis;
-            await inv.save();
-        }
-
-        // 3. Ledger Posting
-        let payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
-        if (!payableAccount) {
-            payableAccount = new Account({
-                accountNumber: `AP-${unit.replace(/\s+/g, '-')}-${Date.now()}`,
-                accountName: 'Accounts Payable',
-                accountType: 'Liability',
-                balance: 0,
-                unit,
-                companyId,
-                description: 'Auto-generated account for vendor payables'
-            });
-            await payableAccount.save();
-        }
-
-        if (payableAccount && bankAccount) {
-            const txn = new Transaction({
-                transactionNumber: `TXN-PAY-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
+        // Ledger: Dr Accounts Payable / Cr Bank, on the company + unit's own
+        // Payable account (the bill posted the other side).
+        try {
+            await postEntry({
+                companyId, unit,
+                lines: [
+                    { key: 'accounts_payable', debit: amount },
+                    { account: bankAccount, credit: amount },
+                ],
                 description: `Payment to Vendor - Ref: ${referenceNo || 'N/A'}`,
-                totalAmount: amount,
-                unit,
-                mode: paymentMode,
+                reference: referenceNo || '',
                 relatedDocument: 'Payment',
                 relatedDocumentId: payment._id,
-                createdBy: req.user._id,
-                entries: [
-                    { account: payableAccount._id, debit: amount, credit: 0 },
-                    { account: bankAccount._id, debit: 0, credit: amount }
-                ]
+                mode: paymentMode,
+                date: paymentDate ? new Date(paymentDate) : new Date(),
+                user: req.user,
+                prefix: 'PAY',
             });
-            await txn.save();
-
-            payableAccount.balance -= amount;
-            bankAccount.balance -= amount;
-
-            await payableAccount.save();
-            await bankAccount.save();
+        } catch (postErr) {
+            console.error('❌ Ledger posting for a vendor payment failed:', postErr.message);
         }
 
         res.json({ success: true, data: payment });
     } catch (error) {
         console.error('❌ Error in createVendorPayment:', error);
         res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+/**
+ * Payment history (2026-10-12 — there was no list before).
+ */
+export const getVendorPayments = async (req, res) => {
+    try {
+        const { page = 1, limit = 20, vendorId, kind } = req.query;
+        const query = { companyId: req.user.companyId };
+        if (vendorId) query.vendor = vendorId;
+        if (kind && kind !== 'All') query.kind = kind;
+        const [payments, total] = await Promise.all([
+            VendorPayment.find(query)
+                .populate('vendor', 'supplierName supplierCode')
+                .populate('purchaseOrder', 'purchaseOrderNumber')
+                .populate('bankAccount', 'accountName')
+                .populate('allocations.invoice', 'invoiceNo')
+                .populate('createdBy', 'fullName')
+                .sort({ paymentDate: -1, createdAt: -1 })
+                .skip((Number(page) - 1) * Number(limit))
+                .limit(Number(limit))
+                .lean(),
+            VendorPayment.countDocuments(query),
+        ]);
+        res.json({ success: true, data: { payments, pagination: { total, page: Number(page), limit: Number(limit), pages: Math.ceil(total / Number(limit)) } } });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
     }
 };
 
@@ -274,7 +346,8 @@ export const getVendorOutstanding = async (req, res) => {
 
         let matchQuery = {
             companyId: new mongoose.Types.ObjectId(companyId),
-            balanceAmount: { $gt: 0 }
+            balanceAmount: { $gt: 0 },
+            status: { $ne: 'Cancelled' }
         };
 
         if (vendorId) {
@@ -283,6 +356,16 @@ export const getVendorOutstanding = async (req, res) => {
 
         const outstandingData = await PurchaseInvoice.aggregate([
             { $match: matchQuery },
+            // Each invoice's own PO, for that PO's Advance % (payment terms
+            // are set per PO now, procurement-v2 — not a vendor default).
+            {
+                $lookup: {
+                    from: 'purchases',
+                    localField: 'purchaseOrder',
+                    foreignField: '_id',
+                    as: 'poInfo'
+                }
+            },
             {
                 $group: {
                     _id: '$vendor',
@@ -295,7 +378,24 @@ export const getVendorOutstanding = async (req, res) => {
                             date: '$invoiceDate',
                             totalAmount: '$totalAmount',
                             balance: '$balanceAmount',
-                            dueDate: '$dueDate'
+                            dueDate: '$dueDate',
+                            // Lets the payment UI target this specific
+                            // invoice and show it's a PO advance/settlement
+                            // (2026-10) — see createVendorPayment's invoiceIds.
+                            purchaseOrder: '$purchaseOrder',
+                            poNumber: { $arrayElemAt: ['$poInfo.purchaseOrderNumber', 0] },
+                            // The PO bill (2026-10-12): where it stands and
+                            // what can be paid now (filled in below).
+                            advancePercent: '$advancePercent',
+                            advanceAmount: '$advanceAmount',
+                            advancePaid: '$advancePaid',
+                            acceptedValue: '$acceptedValue',
+                            fullyAcceptedAt: '$fullyAcceptedAt',
+                            creditDays: '$creditDays',
+                            paidAmount: '$paidAmount',
+                            status: '$status',
+                            stage: '$stage',
+                            deliveryClock: { $arrayElemAt: ['$poInfo.deliveryClock', 0] }
                         }
                     }
                 }
@@ -321,6 +421,11 @@ export const getVendorOutstanding = async (req, res) => {
             },
             { $sort: { totalOutstanding: -1 } }
         ]);
+        for (const v of outstandingData) {
+            v.invoices = v.invoices
+                .map(inv => ({ ...inv, payableNow: inv.purchaseOrder ? payableNow({ ...inv, totalAmount: inv.totalAmount }) : null }))
+                .sort((a, b) => new Date(a.date) - new Date(b.date));
+        }
 
         res.json({ success: true, data: outstandingData });
     } catch (error) {
@@ -732,6 +837,7 @@ export const getSuppliersForAccounts = async (req, res) => {
 
         // Allow suppliers from specific unit OR 'Main' unit (common suppliers)
         const suppliers = await Supplier.find({
+            companyId: req.user.companyId,
             unit: { $in: [unit, 'Main'] },
             status: 'active'
         }).sort({ supplierName: 1 });
@@ -759,10 +865,11 @@ export const resolveVendorAndPOForQCRejectedPurchase = async (qcJob) => {
 
     let po = null;
     let pr = null;
+    const companyId = qcJob.company;
 
     // Strategy 1 (most reliable): direct reference set when the QC job was created.
     if (qcJob.purchaseRequestId) {
-        pr = await PurchaseRequest.findById(qcJob.purchaseRequestId).populate({
+        pr = await PurchaseRequest.findOne({ _id: qcJob.purchaseRequestId, companyId }).populate({
             path: 'purchaseOrder',
             populate: { path: 'supplier' }
         });
@@ -771,12 +878,13 @@ export const resolveVendorAndPOForQCRejectedPurchase = async (qcJob) => {
 
     // Strategy 2: match the PO number against sourceRefId.
     if (!po && qcJob.sourceRefId) {
-        po = await Purchase.findOne({ purchaseOrderNumber: qcJob.sourceRefId }).populate('supplier');
+        po = await Purchase.findOne({ purchaseOrderNumber: qcJob.sourceRefId, companyId }).populate('supplier');
     }
 
     // Strategy 3: match requestId/itemCode against PurchaseRequest.
     if (!po) {
         pr = await PurchaseRequest.findOne({
+            companyId,
             $or: [
                 { requestId: qcJob.sourceRefId },
                 { requestId: qcJob.itemCode }
@@ -957,35 +1065,47 @@ export const createQCRejectedPurchaseReturn = async (qcJob, user, qty) => {
 };
 
 /**
- * Auto-creates a Purchase Invoice when a purchase request is received.
+ * Auto-creates a Purchase Invoice for a Purchase Order (PO) — once per PO,
+ * covering every line in `purchase.items[]`. Re-keyed from "once per PR" to
+ * "once per PO" (2026-10): a PO can now batch several independently-raised
+ * PurchaseRequests (`Purchase.purchaseRequests[]`), and the old PR-keyed
+ * version, called once per PR in a batch, would have copied the WHOLE PO's
+ * items into every one of those PRs' own invoices — duplicating every line
+ * N times for an N-PR batch. Callers now pass the Purchase (PO) document
+ * (or its id) instead of a PurchaseRequest.
  */
-export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
+export const createAutoPurchaseInvoice = async (purchaseOrder, user) => {
     try {
-        const companyId = purchaseRequest.companyId;
-        const unit = user.unit || 'Main';
+        const PurchaseModel = mongoose.model('Purchase');
+        // Defensive scoping on the id-only branch — confirmed dead today (every
+        // current caller passes an already-fetched/populated PO), but cheap and
+        // correct to fix alongside everything else found in this audit.
+        let po = purchaseOrder?.items
+            ? purchaseOrder
+            : await PurchaseModel.findOne({ _id: purchaseOrder?._id || purchaseOrder, companyId: user.companyId });
 
-        // 1. Populate purchase order if not populated
-        const PurchaseRequestModel = mongoose.model('PurchaseRequest');
-        let request = purchaseRequest;
-        
-        request = await PurchaseRequestModel.findById(purchaseRequest._id).populate({
-            path: 'purchaseOrder',
-            populate: { path: 'supplier' }
-        });
-
-        if (!request) {
-            console.error('❌ [Auto Invoice] Purchase Request not found.');
+        if (!po) {
+            console.error('❌ [Auto Invoice] Purchase Order not found.');
             return null;
         }
+        if (!po.populated('purchaseRequests')) {
+            po = await po.populate('purchaseRequests');
+        }
 
-        // 2. Determine vendor/supplier
-        let vendorId = null;
-        if (request.purchaseOrder && request.purchaseOrder.supplier) {
-            vendorId = request.purchaseOrder.supplier._id || request.purchaseOrder.supplier;
-        } else {
-            // Fallback: search for active supplier
+        const companyId = po.companyId || user.companyId;
+        // The PO's own unit (2026-10-12) — before, whoever finalized or
+        // approved the PO (e.g. a Company Admin in another unit) decided it.
+        const unit = po.unit || user.unit || 'Main';
+
+        // 1. Determine vendor/supplier
+        let vendorId = po.supplier?._id || po.supplier || null;
+        if (!vendorId) {
+            // Fallback: search for an active supplier — scoped to this PO's own
+            // company (2026-10-06 fix). Previously unscoped ("any active
+            // supplier in the whole database"), a real cross-tenant exposure
+            // found while auditing the item-wise PR consolidation rework.
             const Supplier = mongoose.model('Supplier');
-            const fallbackSupplier = await Supplier.findOne({ status: 'active' });
+            const fallbackSupplier = await Supplier.findOne({ status: 'active', companyId });
             if (fallbackSupplier) {
                 vendorId = fallbackSupplier._id;
             }
@@ -996,19 +1116,22 @@ export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
             return null;
         }
 
-        // 3. Generate invoice number
-        const poNumber = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
+        // 2. Generate invoice number
+        const poNumber = po.purchaseOrderNumber;
         const invoiceNo = `INV-PO-${poNumber}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
 
-        // 4. Duplicate invoice check — by invoiceNo (existing) AND by requestId in notes (new guard)
-        // This prevents double-invoice when PO creates it AND Received also tries to create it
+        // 3. Duplicate invoice check — by invoiceNo (existing) AND by PO
+        // number in notes (new guard). One invoice per PO regardless of how
+        // many PRs it batches or how many receive events fire across them.
+        const existingByPO = await PurchaseInvoice.findOne({ purchaseOrder: po._id, companyId });
+        if (existingByPO) return existingByPO;
         const existingByNotes = await PurchaseInvoice.findOne({
             vendor: vendorId,
             companyId,
-            notes: { $regex: request.requestId, $options: 'i' }
+            notes: { $regex: poNumber, $options: 'i' }
         });
         if (existingByNotes) {
-            console.log(`ℹ️ [Auto Invoice] Invoice already exists for PR ${request.requestId} — returning existing, no duplicate.`);
+            console.log(`ℹ️ [Auto Invoice] Invoice already exists for PO ${poNumber} — returning existing, no duplicate.`);
             return existingByNotes;
         }
 
@@ -1018,100 +1141,79 @@ export const createAutoPurchaseInvoice = async (purchaseRequest, user) => {
             return existing;
         }
 
-        // 5. Gather items
-        let items = [];
+        // 4. Copy the PO's own already-computed figures verbatim (2026-10)
+        // — this invoice does NOT recalculate anything (confirmed design):
+        // GST, item charges and PO-scoped charges were all decided once,
+        // at PO creation (createPurchase), including the gstInclusive
+        // double-count guard. Each line's own gstAmount/gstRate come
+        // straight from Purchase.items[], and its totalPrice folds in that
+        // line's own itemChargesTotal (loading/packing/etc. specific to
+        // this item), same as the By Vendor tab already displays it.
         let subtotal = 0;
+        let gstAmount = 0;
+        const items = (po.items || []).map(item => {
+            const lineGross = (item.quantity || 1) * (item.unitPrice || 0);
+            const lineTotal = lineGross + (item.itemChargesTotal || 0);
+            subtotal += lineTotal;
+            gstAmount += item.gstAmount || 0;
+            return {
+                item: item.item,
+                itemName: item.itemName,
+                quantity: item.quantity || 1,
+                unitPrice: item.unitPrice || 0,
+                gstPercent: item.gstRate || 0,
+                gstAmount: item.gstAmount || 0,
+                totalPrice: lineTotal
+            };
+        });
+        // Whole-PO charges (freight, packing… typed on the PO, procurement-v2)
+        // folded into the subtotal, since the invoice has no separate charges
+        // field; their own GST joins the lines' GST. Old POs may instead carry
+        // the retired automatic vendor charges (poChargesTotal) — still counted.
+        subtotal += (po.chargesTotal || 0) + (po.poChargesTotal || 0);
+        gstAmount += po.chargesGstTotal || 0;
+        const totalAmount = po.grandTotal != null ? po.grandTotal : (subtotal + gstAmount);
 
-        if (request.purchaseOrder && request.purchaseOrder.items && request.purchaseOrder.items.length > 0) {
-            // Copy items from Purchase Order
-            items = request.purchaseOrder.items.map(item => {
-                const itemTotal = (item.quantity || 1) * (item.unitPrice || 100);
-                subtotal += itemTotal;
-                return {
-                    item: item.item,
-                    itemName: item.itemName,
-                    quantity: item.quantity || 1,
-                    unitPrice: item.unitPrice || 100,
-                    totalPrice: itemTotal
-                };
-            });
-        } else {
-            // Build single item from request
-            const itemTotal = (request.quantity || 1) * 100;
-            subtotal += itemTotal;
-            items = [{
-                item: request.itemId && /^[0-9a-fA-F]{24}$/.test(request.itemId) 
-                    ? new mongoose.Types.ObjectId(request.itemId) 
-                    : new mongoose.Types.ObjectId(),
-                itemName: request.productName,
-                quantity: request.quantity || 1,
-                unitPrice: 100,
-                totalPrice: itemTotal
-            }];
-        }
+        const prList = (po.purchaseRequests || []).map(pr => pr.requestId || pr).join(', ') || 'N/A';
 
-        // Vendor's bid price (copied verbatim from the PO items above) is used
-        // as-is — GST is never added on top of it internally.
-        const gstAmount = 0;
-        const totalAmount = subtotal;
+        // The PO bill (client, 2026-10-12): the advance is fixed now from the
+        // PO's Advance %; the due date is only known once everything is
+        // received and QC-passed (that day + the PO's Credit Days) — see
+        // services/purchaseBillService.js.
+        const advancePercent = Math.min(100, Math.max(0, Number(po.paymentTerms?.advancePercent) || 0));
+        const creditDays = po.paymentTerms?.creditDays != null ? Number(po.paymentTerms.creditDays) : null;
+        const { advanceAmountOf } = await import('../services/purchaseBillService.js');
 
-        // 6. Create Invoice
+        // 5. Create Invoice
         const invoice = new PurchaseInvoice({
             vendor: vendorId,
+            purchaseOrder: po._id,
             invoiceNo,
             invoiceDate: new Date(),
-            dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // Net 30 default
+            dueDate: null,
             items,
             subtotal,
             gstAmount,
+            // The PO's own CGST + SGST / IGST (point 15, 2026-10-10).
+            gstType: po.gstSplit?.type === 'IGST' ? 'IGST' : 'CGST_SGST',
             totalAmount,
             balanceAmount: totalAmount,
+            advancePercent,
+            advanceAmount: advanceAmountOf(totalAmount, advancePercent),
+            creditDays,
             unit,
             companyId,
             createdBy: user._id,
-            notes: `Auto-generated on PO creation. Purchase Request: ${request.requestId}. PO: ${request.purchaseOrder?.purchaseOrderNumber || 'N/A'}`
+            notes: `Auto-generated for PO: ${poNumber}. Purchase Request(s): ${prList}`
         });
 
         await invoice.save();
         console.log(`✅ [Auto Invoice] Purchase Invoice ${invoiceNo} recorded successfully.`);
         recalcPricingForInvoiceItems(invoice).catch(e => console.error('❌ Pricing recalc error (createAutoPurchaseInvoice):', e));
 
-        // 7. Auto Journal Posting to General Ledger
-        const purchaseAccount = await Account.findOne({ accountName: 'Purchase Account', unit });
-        const gstAccount = await Account.findOne({ accountName: 'Input GST', unit });
-        const payableAccount = await Account.findOne({ accountName: 'Accounts Payable', unit });
-
-        if (purchaseAccount && gstAccount && payableAccount) {
-            const entries = [
-                { account: purchaseAccount._id, debit: subtotal, credit: 0 },
-                { account: gstAccount._id, debit: gstAmount, credit: 0 },
-                { account: payableAccount._id, debit: 0, credit: totalAmount }
-            ];
-
-            const txn = new Transaction({
-                transactionNumber: `TXN-PUR-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
-                description: `Auto Invoice: ${invoiceNo} for Purchase Request ${request.requestId}`,
-                reference: invoiceNo,
-                totalAmount: subtotal + gstAmount,
-                unit,
-                relatedDocument: 'Purchase',
-                relatedDocumentId: invoice._id,
-                createdBy: user._id,
-                companyId,
-                entries
-            });
-            await txn.save();
-
-            // Update account balances
-            purchaseAccount.balance += subtotal;
-            gstAccount.balance += gstAmount;
-            payableAccount.balance += totalAmount;
-
-            await purchaseAccount.save();
-            await gstAccount.save();
-            await payableAccount.save();
-            console.log(`✅ [Auto Invoice] Posted transaction to ledger successfully`);
-        }
+        // No ledger entry here (2026-10-12): a PO is a promise to buy, not
+        // money owed. The material is posted when it passes QC, the advance
+        // when it's paid (services/purchaseLedgerService.js).
 
         return invoice;
     } catch (error) {

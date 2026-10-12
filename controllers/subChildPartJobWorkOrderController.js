@@ -7,6 +7,7 @@ import { Item } from '../models/Inventory.js';
 import SubChildPartSheetPlan from '../models/SubChildPartSheetPlan.js';
 import QCJob from '../models/QCJob.js';
 import { computeSubChildPartRawMaterialAvailabilityLive } from '../services/subChildPartOrderService.js';
+import { markOrderFullyIssued } from '../services/materialReservationService.js';
 import { dimensionSignature } from '../services/fabricationDemandService.js';
 import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
@@ -491,6 +492,13 @@ export const sendSubChildPartJobWorkRound = async (req, res) => {
       // (see computeSubChildPartRawMaterialAvailabilityLive's own comment).
       const availability = await computeSubChildPartRawMaterialAvailabilityLive(item, sourceItem, order);
       await applyFirstRoundMaterial(order, item, sourceItem, availability, req.body.material, req.user);
+      // Reservation (2026-10-09): the whole raw-material need has left Store
+      // with this first send — the order's claim is fully issued.
+      try {
+        await markOrderFullyIssued(order._id);
+      } catch (e) {
+        console.error(`markOrderFullyIssued failed for ${order.orderId}:`, e);
+      }
     }
 
     order.rounds.push({

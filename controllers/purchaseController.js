@@ -2,30 +2,102 @@ import Purchase from '../models/Purchase.js';
 import Supplier from '../models/Supplier.js';
 import { Item } from '../models/Inventory.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
+import ItemQuoteGroup from '../models/ItemQuoteGroup.js';
+import VendorBid from '../models/VendorBid.js';
 import { Company } from '../models/Company.js';
 import { sendPurchaseOrderEmail } from '../services/emailService.js';
 import { USER_ROLES } from '../shared/schema.js';
 import { applyPricingToItem, cascadeRecalculateToConsumers } from '../services/itemPricingService.js';
+import notificationService from '../services/notificationService.js';
+import { getOrCreateSettings } from './purchaseSettingsController.js';
+import { eligibleVendorError } from '../services/vendorApprovalService.js';
+import { isQuoteExpired, quoteValidUntil, DEFAULT_QUOTE_VALIDITY_DAYS } from '../services/quoteChecksService.js';
+import { checkVendorSelection, readSelectionException } from '../services/vendorSelectionCheckService.js';
+import { logPoEvent } from '../services/purchaseAuditService.js';
+import { notifyStoreOfIncomingPO, reviseLineDate, poDueSummary, clockDates } from '../services/deliveryFollowUpService.js';
+import { gstSplitFor } from '../services/gstStateService.js';
+
+// Normalize-to-array helper (2026-10, item-wise PR consolidation) — a line
+// can now carry EITHER the original singular `purchaseRequest` (still
+// written by the legacy RFQ-to-PO path and the single-item "Create PO"
+// modal, both permanently one-PR-per-line) OR the new plural
+// `purchaseRequests` (a line built from an ItemQuoteGroup, covering
+// whichever PRs that group's selection combined). Every reader of either
+// field should go through this instead of reimplementing the fallback —
+// used by computeHealedStatus below, createPurchase/updatePurchase's PR-
+// sync loops, and (Slice E) getBatchSiblings/vendorRatingService.js.
+// Accepts either raw ObjectIds or populated PR docs in the array.
+export function prIdsOf(line) {
+  if (Array.isArray(line?.purchaseRequests) && line.purchaseRequests.length) return line.purchaseRequests;
+  if (line?.purchaseRequest) return [line.purchaseRequest];
+  return [];
+}
+
+// Self-healing status sync (2026-10) — same pattern getPurchaseRequests
+// already uses for its own stale-status drift. Purchase.status never
+// actually transitions for the new quote->batch flow: only the old
+// RFQ-era receivePurchase endpoint ever wrote 'Received'/'Partially
+// Received', so every PO made through By Vendor batching would otherwise
+// sit at its creation-time default ('Draft') forever — permanently stuck
+// in the Active POs tab, never reaching Order History no matter how much
+// of it actually gets received. Recomputes from every PR linked across
+// every line (prIdsOf, flattened — NOT one count per line, since a line
+// can now carry several PRs at once and "all PRs Received" has to be
+// counted at the PR level to stay accurate). Leaves `status` alone when
+// there's no new-flow signal to go on (no linked PRs at all — a legacy/
+// non-PR-based PO) or it's already Cancelled (a manual terminal state
+// this sync never overrides).
+function computeHealedStatus(purchase) {
+  // A PO that is waiting for / was refused Company Admin approval never
+  // became a real order — its lines still reference PRs that may later be
+  // received on a DIFFERENT PO, which must not flip this one to Received.
+  if (['Cancelled', 'Pending Approval', 'Rejected'].includes(purchase.status)) return purchase.status;
+  const allPRs = [];
+  for (const it of purchase.items || []) {
+    // A short-closed (cancelled) line's requests went back to RFQ/PO — they
+    // no longer say anything about this PO (gap 13, 2026-10-09).
+    if (it.cancelled?.at) continue;
+    for (const prRef of prIdsOf(it)) {
+      // Only a populated doc (has .status) counts — a raw ObjectId with no
+      // populate means this call site didn't ask for PR status, not that
+      // the PR doesn't exist.
+      if (prRef && typeof prRef === 'object' && prRef.status) allPRs.push(prRef);
+    }
+  }
+  if (!allPRs.length) return purchase.status;
+  const receivedCount = allPRs.filter(pr => pr.status === 'Received').length;
+  if (receivedCount === allPRs.length) return 'Received';
+  if (receivedCount > 0) return 'Partially Received';
+  return purchase.status;
+}
 
 export const getPurchases = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, paymentStatus, unit, search } = req.query;
-    const skip = (page - 1) * limit;
+    const { page = 1, limit = 10, status, paymentStatus, unit, search, transportBy } = req.query;
 
     let query = {};
 
+    // companyId added 2026-10-06 — real cross-tenant isolation fix (Purchase
+    // had no company scoping at all before this, only the unit string,
+    // which two different companies in this DB were confirmed to share).
+    // SUPER_USER keeps its existing cross-company visibility, unchanged.
     if (req.user.role !== USER_ROLES.SUPER_USER) {
+      query.companyId = req.user.companyId;
       query.unit = req.user.unit;
     } else if (unit) {
       query.unit = unit;
     }
 
-    if (status) {
-      query.status = status;
-    }
-
     if (paymentStatus) {
       query.paymentStatus = paymentStatus;
+    }
+
+    // Unlike status (see computeHealedStatus below), transportBy is a
+    // plain stored field — never stale — so it can be filtered at the
+    // query level directly. Powers the Dispatch stub page's "pickups this
+    // department needs to arrange" list (?transportBy=Company).
+    if (transportBy === 'Vendor' || transportBy === 'Company') {
+      query.transportBy = transportBy;
     }
 
     if (search) {
@@ -34,18 +106,76 @@ export const getPurchases = async (req, res) => {
       ];
     }
 
-    const purchases = await Purchase.find(query)
+    // Status itself can't be filtered at the query level here — it may be
+    // stale (see computeHealedStatus above) until self-healed below, so
+    // every matching Purchase is fetched first, same tradeoff
+    // getPurchaseRequests already makes for its own self-healing sync.
+    const allMatching = await Purchase.find(query)
       .populate('supplier', 'supplierName contactPerson email phone')
       .populate('createdBy', 'fullName')
       .populate('approvedBy', 'fullName')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
+      // Real per-line receive status for the By Vendor tab's Active POs
+      // view (the old receivedQuantity on the line itself is dead for any
+      // PO created through the new quote->batch flow — see Purchase.js).
+      // Both the original singular ref and the new plural one (2026-10,
+      // item-wise PR consolidation) are populated — a line only ever has
+      // one of the two meaningfully set (see prIdsOf above).
+      // purchaseUnit also included — a line itself has no purchase-unit
+      // field of its own (only quantity/unitPrice), so the By Vendor tab
+      // reads it off the linked PR(s), which do (synced back onto the PR
+      // at batch time — see createPurchase's own PR-sync loop).
+      // purchaseQuantity/warrantyMonths/fabricationDimensionLines/quantity
+      // added (2026-10) — Store's line-level receive dialogs (PurchaseRequest.jsx)
+      // read this same endpoint (via getPurchaseOrdersForStore) and need
+      // these to pre-fill a combined receive form per line; the By Vendor
+      // tab's Active POs view (the original consumer) just ignores them.
+      .populate('items.purchaseRequest', 'requestId status receivedAt purchaseUnit purchaseQuantity warrantyMonths fabricationDimensionLines quantity')
+      .populate('items.purchaseRequests', 'requestId status receivedAt purchaseUnit purchaseQuantity warrantyMonths fabricationDimensionLines quantity')
+      // A PO line's own item ref (unlike PurchaseRequest, which has no real
+      // `item` field) — lets the combined-receive dialog compare this
+      // item's real stock unit against the line's purchaseUnit to decide
+      // whether to show the unit-conversion fields at all, same UX the old
+      // per-PR dialog had via getPurchaseRequests' own item enrichment.
+      .populate('items.item', 'name code unit purchaseUnit purchaseUnitType')
+      .sort({ createdAt: -1 });
 
-    const total = await Purchase.countDocuments(query);
+    for (const purchase of allMatching) {
+      const healed = computeHealedStatus(purchase);
+      if (healed !== purchase.status) {
+        purchase.status = healed;
+        await purchase.save();
+      }
+    }
+
+    let filtered = allMatching;
+    if (status) {
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length) filtered = filtered.filter(p => statuses.includes(p.status));
+    }
+
+    // Expected receipts (2026-10-10): how many POs have a late / due-today /
+    // due-soon line (counted before this filter, for the chips), then the
+    // optional ?due= filter. Uses the requests' real receive status.
+    const now = new Date();
+    const dueCounts = { overdue: 0, today: 0, soon: 0 };
+    const worstById = new Map();
+    for (const p of filtered) {
+      const { counts, worst } = poDueSummary(p, undefined, now);
+      worstById.set(String(p._id), { worst, counts });
+      for (const k of Object.keys(dueCounts)) if (counts[k] > 0) dueCounts[k] += 1;
+    }
+    const { due } = req.query;
+    if (['overdue', 'today', 'soon'].includes(due)) {
+      filtered = filtered.filter(p => (worstById.get(String(p._id))?.counts?.[due] || 0) > 0);
+    }
+
+    const total = filtered.length;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const purchases = filtered.slice(skip, skip + parseInt(limit));
 
     res.json({
       purchases,
+      dueCounts,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -56,6 +186,22 @@ export const getPurchases = async (req, res) => {
   } catch (error) {
     console.error('Get purchases error:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// PATCH /api/accounts/purchases/orders/:id/lines/:lineId/expected-date
+// body: { date: 'YYYY-MM-DD', reason } — Purchase records the vendor's new
+// date for one line (blueprint §17 step 13; services/deliveryFollowUpService.js).
+export const reviseLineExpectedDate = async (req, res) => {
+  try {
+    const po = await Purchase.findOne({ _id: req.params.id, companyId: req.user.companyId });
+    if (!po) return res.status(404).json({ message: 'Purchase order not found' });
+    const result = await reviseLineDate({ po, lineId: req.params.lineId, body: req.body, user: req.user, req });
+    if (result.status) return res.status(result.status).json({ message: result.message });
+    res.json({ message: `${result.line.itemName} is now expected on ${result.to.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}. Store has been told.` });
+  } catch (error) {
+    console.error('reviseLineExpectedDate error:', error);
+    res.status(500).json({ message: 'Could not change the date.' });
   }
 };
 
@@ -72,7 +218,7 @@ export const getPurchaseById = async (req, res) => {
       return res.status(404).json({ message: 'Purchase not found' });
     }
 
-    if (req.user.role !== USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+    if (req.user.role !== USER_ROLES.SUPER_USER && (purchase.unit !== req.user.unit || String(purchase.companyId) !== String(req.user.companyId))) {
       return res.status(403).json({ message: 'Access denied' });
     }
 
@@ -83,34 +229,293 @@ export const getPurchaseById = async (req, res) => {
   }
 };
 
+// ── PO creation (procurement-v2, 2026-10-08) ──────────────────────────────
+// GST, charges and payment terms are typed at PO time (they left Vendor
+// Master): GST is a % per item line (one PO can mix rates), charges and
+// payment terms are whole-PO, named from the Purchase master template
+// (PurchaseSettings). If the final total is ABOVE the Company Admin's
+// poApprovalThreshold, the PO is saved as 'Pending Approval' with NO side
+// effects at all, and only finalizePurchase (on approval) turns it into a
+// real order. Otherwise it's finalized straight away, as before.
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const pctOrZero = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 0;
+};
+
+// Whole-PO charges typed on the PO: label + flat ₹ + that charge's own GST %.
+export function cleanPoCharges(list) {
+  return (Array.isArray(list) ? list : [])
+    .map(c => ({
+      label: String(c?.label || '').trim(),
+      amount: Math.max(0, Number(c?.amount) || 0),
+      gstPercent: pctOrZero(c?.gstPercent),
+    }))
+    .filter(c => c.label && c.amount > 0)
+    .map(c => ({ ...c, amount: round2(c.amount), gstAmount: round2(c.amount * c.gstPercent / 100) }));
+}
+
+// Built-in Advance % / Credit Days (the system uses them) + the template's
+// free-text terms (printed on the PO). Blank built-ins stay null.
+export function cleanPaymentTerms(t) {
+  const adv = t?.advancePercent;
+  const days = t?.creditDays;
+  return {
+    advancePercent: adv === '' || adv == null || !Number.isFinite(Number(adv)) ? null : Math.min(100, Math.max(0, Number(adv))),
+    creditDays: days === '' || days == null || !Number.isFinite(Number(days)) ? null : Math.max(0, Math.round(Number(days))),
+    others: (Array.isArray(t?.others) ? t.others : [])
+      .map(o => ({ label: String(o?.label || '').trim(), value: String(o?.value || '').trim() }))
+      .filter(o => o.label && o.value),
+  };
+}
+
+// ItemQuoteGroups that are on a PO still waiting for Company Admin approval
+// — locked: no selection/quantity/quote changes, and no second PO, until the
+// pending one is approved or rejected. Map groupId -> PO number.
+export async function groupsHeldByPendingPO(companyId, groupIds, excludePurchaseId = null) {
+  const ids = (groupIds || []).filter(Boolean).map(String);
+  if (!ids.length) return new Map();
+  const query = { companyId, status: 'Pending Approval', 'items.itemQuoteGroup': { $in: ids } };
+  if (excludePurchaseId) query._id = { $ne: excludePurchaseId };
+  const pending = await Purchase.find(query).select('purchaseOrderNumber items.itemQuoteGroup').lean();
+  const held = new Map();
+  for (const po of pending) {
+    for (const line of po.items || []) {
+      const gid = line.itemQuoteGroup ? String(line.itemQuoteGroup) : null;
+      if (gid && ids.includes(gid)) held.set(gid, po.purchaseOrderNumber);
+    }
+  }
+  return held;
+}
+
+// Everything that makes a saved PO a REAL order — runs straight away for a
+// PO that needs no approval, or when the Company Admin approves a pending
+// one. Driven entirely by the stored PO (not the original request body), so
+// it works the same either way:
+//   - each PR the PO covers → linked + 'Ordered', with that line's purchase
+//     quantity/unit and quoted warranty (read at receive time)
+//   - each ItemQuoteGroup it came from → 'Batched' (frees the item for a new
+//     Open group) and every OTHER still-Submitted bid on it → 'Rejected'
+//   - the Purchase Invoice is created now (advance payments need something
+//     to pay against from the moment the PO exists)
+export async function finalizePurchase(purchase, user, req = null) {
+  const companyId = purchase.companyId;
+
+  for (const prId of purchase.purchaseRequests || []) {
+    const prUpdate = { purchaseOrder: purchase._id, status: 'Ordered' };
+    // Each PR is matched to its OWN line — no `|| items[0]` guessing (a
+    // line can carry several PRs; matching an unrelated line would be wrong).
+    const line = (purchase.items || []).find(it => prIdsOf(it).some(id => String(id) === String(prId)));
+    if (line) {
+      if (line.purchaseUnit && Number(line.quantity) > 0) {
+        prUpdate.purchaseQuantity = Number(line.quantity);
+        prUpdate.purchaseUnit = line.purchaseUnit;
+        const unitType = line.purchaseUnitType
+          || (line.item ? (await Item.findById(line.item).select('purchaseUnitType').lean())?.purchaseUnitType : null);
+        if (unitType) prUpdate.purchaseUnitType = unitType;
+      }
+      prUpdate.warrantyMonths = Number(line.warrantyMonths) || 0;
+    }
+    await PurchaseRequest.findOneAndUpdate({ _id: prId, companyId }, prUpdate);
+  }
+
+  const groupIds = [...new Set((purchase.items || []).map(it => it.itemQuoteGroup).filter(Boolean).map(String))];
+  if (groupIds.length) {
+    await ItemQuoteGroup.updateMany({ _id: { $in: groupIds }, companyId }, { status: 'Batched' });
+    const winningBidIds = (purchase.items || []).map(it => it.vendorBid).filter(Boolean).map(String);
+    // Losing quotes — and requests still waiting for a reply, which close
+    // (the vendor's link shows the item as no longer needed).
+    await VendorBid.updateMany(
+      { group: { $in: groupIds }, status: { $in: ['Submitted', 'Invited'] }, _id: { $nin: winningBidIds } },
+      { status: 'Rejected' }
+    );
+    // The quotes this PO was made from — "Chosen" in the quote history.
+    if (winningBidIds.length) {
+      await VendorBid.updateMany({ _id: { $in: winningBidIds } }, { status: 'Selected' });
+    }
+  }
+
+  if (purchase.status === 'Pending Approval') {
+    purchase.status = 'Draft';
+    // No advance: the vendor's days count from when the order is really
+    // placed — approval day, not the day it was sent for approval.
+    if (purchase.deliveryClock?.startsOn === 'order') {
+      const now = new Date();
+      for (const { line, date } of clockDates(purchase, now)) line.expectedDeliveryDate = date;
+      const live = (purchase.items || []).filter(l => !l.cancelled?.at).map(l => l.expectedDeliveryDate).filter(Boolean).map(d => new Date(d).getTime());
+      if (live.length) purchase.expectedDeliveryDate = new Date(Math.max(...live));
+      purchase.deliveryClock = { startsOn: 'order', startedAt: now };
+    }
+    await purchase.save();
+  }
+
+  // Wrapped so an invoice failure never undoes the PO — the receive-time
+  // createAutoPurchaseInvoice calls remain a harmless dedup fallback.
+  try {
+    const { createAutoPurchaseInvoice } = await import('./purchaseInvoiceController.js');
+    await createAutoPurchaseInvoice(purchase, user);
+  } catch (invoiceError) {
+    console.error('❌ Error creating purchase invoice for PO:', invoiceError);
+  }
+
+  // The PO is a real order now — email it to the vendor (procurement-v2).
+  // A failed / unconfigured email leaves it as Draft; Purchase can resend.
+  let sent;
+  try {
+    sent = await sendPurchaseOrderToVendor(purchase);
+    if (sent.success) purchase.status = sent.status;
+    else console.warn(`PO ${purchase.purchaseOrderNumber} not emailed to the vendor: ${sent.error}`);
+  } catch (emailError) {
+    console.error('❌ Error emailing PO to the vendor:', emailError);
+    sent = { success: false, error: emailError.message };
+  }
+  // Audit log (gap 17): the automatic email, sent or not.
+  await logPoEvent({
+    po: purchase, user: null, req,
+    action: sent?.success ? 'emailed' : 'email_failed',
+    summary: sent?.success ? 'Emailed to the vendor automatically.' : `Not emailed to the vendor: ${sent?.error || 'unknown error'}`,
+    details: { manual: false, error: sent?.success ? null : (sent?.error || null) },
+  });
+  // Store expected receipts (2026-10-10): Store hears about it now.
+  await notifyStoreOfIncomingPO(purchase);
+}
+
+// Emails the full PO to its vendor (procurement-v2, 2026-10-08) — items with
+// GST and due dates, charges, payment terms, totals, delivery address. Used
+// automatically by finalizePurchase (a PO created directly, or approved by
+// the Company Admin) and by the "Send / Resend PO email" button. Only a real
+// send moves a Draft PO to 'Sent'; nothing else about the PO changes, and a
+// failure never undoes the PO — Purchase can resend from Purchase Orders.
+export async function sendPurchaseOrderToVendor(purchase) {
+  const po = await Purchase.findById(purchase._id)
+    .populate('supplier', 'supplierName email')
+    .populate('items.item', 'code name');
+  if (!po) return { success: false, error: 'Purchase order not found' };
+  if (!po.supplier?.email) return { success: false, error: 'The vendor has no email address in Vendor Master.' };
+  const company = await Company.findById(po.companyId).select('name').lean();
+  const result = await sendPurchaseOrderEmail({
+    to: po.supplier.email,
+    vendorName: po.supplier.supplierName || 'Vendor',
+    companyName: company?.name || 'Samtek',
+    purchase: po,
+  });
+  if (result.success && po.status === 'Draft') {
+    po.status = 'Sent';
+    await po.save();
+  }
+  return { ...result, status: po.status };
+}
+
+// Checks a (pending) PO can still become a real order — used on approval,
+// since things may have moved while it waited.
+export async function checkPurchaseStillValid(purchase) {
+  const companyId = purchase.companyId;
+  const vendor = await Supplier.findOne({ _id: purchase.supplier, companyId });
+  const notEligible = eligibleVendorError(vendor);
+  if (notEligible) return notEligible;
+
+  const groupIds = [...new Set((purchase.items || []).map(it => it.itemQuoteGroup).filter(Boolean).map(String))];
+  if (groupIds.length) {
+    const groups = await ItemQuoteGroup.find({ _id: { $in: groupIds }, companyId }).select('status quantity').lean();
+    const byId = new Map(groups.map(g => [String(g._id), g]));
+    for (const line of purchase.items || []) {
+      if (!line.itemQuoteGroup) continue;
+      const g = byId.get(String(line.itemQuoteGroup));
+      if (!g || g.status !== 'Open') return `"${line.itemName}" is no longer open for ordering.`;
+      if (Number(g.quantity) !== Number(line.quantity)) return `"${line.itemName}"'s quantity changed since this PO was made.`;
+    }
+  }
+  const prIds = purchase.purchaseRequests || [];
+  if (prIds.length) {
+    const alreadyOrdered = await PurchaseRequest.find({ _id: { $in: prIds }, companyId, purchaseOrder: { $ne: null } }).select('requestId').lean();
+    if (alreadyOrdered.length) return `${alreadyOrdered.map(p => p.requestId).join(', ')} already on another PO.`;
+  }
+  return null;
+}
+
 export const createPurchase = async (req, res) => {
   try {
     const {
       supplier,
       items,
       expectedDeliveryDate,
-      taxAmount,
       deliveryAddress,
       terms,
       notes,
+      // Plural — a PO batches several independently-raised PRs for the same
+      // vendor. `purchaseRequest` (singular) still accepted for any caller
+      // that only ever sends one.
+      purchaseRequests: purchaseRequestsBody,
       purchaseRequest,
-      // When the item is ordered in a different unit than it's stored in
-      // (e.g. bought by the kg, stocked by the piece), `items[0].quantity`
-      // above is already the purchase-unit quantity (set by the frontend) —
-      // these two are only carried through so the linked PurchaseRequest
-      // shows "Ordered: 2 kg" at receiving time, same as the RFQ flow.
-      purchaseQuantity,
-      purchaseUnit
+      // Who physically brings the goods — 'Company' puts the PO on
+      // Dispatch's pickup list. No automatic charge rule any more: charges
+      // are typed on the PO, so a company pickup simply has no freight line.
+      transportBy,
+      // PO-time terms (procurement-v2)
+      charges: chargesBody,
+      paymentTerms: paymentTermsBody,
     } = req.body;
+    const companyId = req.user.role === USER_ROLES.SUPER_USER ? (req.body.companyId || req.user.companyId) : req.user.companyId;
+    const finalTransportBy = transportBy === 'Company' ? 'Company' : 'Vendor';
 
     if (!supplier || !items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Supplier and items are required' });
     }
 
+    // A group-based line's bid was priced against a frozen snapshot of the
+    // group's quantity. If the group's quantity has since changed without
+    // the bid being re-synced, it can't be ordered — re-checked here, not
+    // trusted from what the page last loaded.
+    const groupLineChecks = items.filter(it => it.itemQuoteGroup && it.vendorBidId);
+    // Live groups by id — also gives each fabrication line its size × pieces (2026-10-09).
+    let liveGroupById = new Map();
+    // The quotes behind the lines — also each line's quoted delivery days.
+    let bidById = new Map();
+    if (groupLineChecks.length) {
+      const groupIds = [...new Set(groupLineChecks.map(it => String(it.itemQuoteGroup)))];
+      const liveGroups = await ItemQuoteGroup.find({ _id: { $in: groupIds }, companyId }).select('quantity status sizeKey sizeValues pieces requestedPieces').lean();
+      liveGroupById = new Map(liveGroups.map(g => [String(g._id), g]));
+      for (const it of groupLineChecks) {
+        const liveGroup = liveGroupById.get(String(it.itemQuoteGroup));
+        if (!liveGroup || liveGroup.status !== 'Open' || Number(liveGroup.quantity) !== Number(it.quantity)) {
+          return res.status(409).json({
+            message: `"${it.itemName || 'This item'}"'s quote no longer matches its item group's current quantity — refresh and sync it before creating this PO.`,
+          });
+        }
+      }
+      // An item already on a PO that's waiting for Company Admin approval is
+      // locked until that one is approved or rejected.
+      const held = await groupsHeldByPendingPO(companyId, groupIds);
+      if (held.size) {
+        return res.status(409).json({ message: `Already on ${[...new Set(held.values())].join(', ')}, waiting for Company Admin approval.` });
+      }
+
+      // The quote itself must still be this vendor's current, valid quote —
+      // not replaced / declined since the page loaded, and not past the
+      // company's quote validity (Purchase Settings, 2026-10-09).
+      const bids = await VendorBid.find({ _id: { $in: groupLineChecks.map(it => it.vendorBidId) }, companyId })
+        .select('status vendor submittedAt createdAt deliveryDays').lean();
+      bidById = new Map(bids.map(b => [String(b._id), b]));
+      const validityDays = (await getOrCreateSettings(companyId)).quoteValidityDays || DEFAULT_QUOTE_VALIDITY_DAYS;
+      for (const it of groupLineChecks) {
+        const bid = bidById.get(String(it.vendorBidId));
+        if (!bid || bid.status !== 'Submitted' || String(bid.vendor) !== String(supplier)) {
+          return res.status(409).json({ message: `"${it.itemName || 'This item'}"'s quote isn't current any more — refresh the page.` });
+        }
+        if (isQuoteExpired(bid, validityDays)) {
+          const until = quoteValidUntil(bid, validityDays);
+          return res.status(409).json({
+            message: `"${it.itemName || 'This item'}"'s quote expired on ${until.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })} (quotes are valid for ${validityDays} days) — get a fresh quote first.`,
+          });
+        }
+      }
+    }
+
     // Resolve delivery address from company profile if not supplied
     let finalDeliveryAddress = deliveryAddress;
-    if (!finalDeliveryAddress && req.user?.companyId) {
-      const company = await Company.findById(req.user.companyId);
+    if (!finalDeliveryAddress && companyId) {
+      const company = await Company.findById(companyId);
       if (company) {
         finalDeliveryAddress = `${company.address || ''}, ${company.city || ''}, ${company.state || ''} - ${company.locationPin || ''}`
           .trim()
@@ -122,15 +527,66 @@ export const createPurchase = async (req, res) => {
       finalDeliveryAddress = 'Main Warehouse, Samtek Factory';
     }
 
-    // Validate supplier exists
-    const supplierDoc = await Supplier.findById(supplier);
+    const supplierDoc = await Supplier.findOne({ _id: supplier, companyId });
     if (!supplierDoc) {
       return res.status(400).json({ message: 'Supplier not found' });
     }
+    // Only a Company-Admin-approved, active vendor can get a PO.
+    const notEligible = eligibleVendorError(supplierDoc);
+    if (notEligible) {
+      return res.status(400).json({ message: notEligible });
+    }
 
-    // Validate items and calculate totals
+    // CGST + SGST vs IGST (point 15, 2026-10-10): fixed now, from the
+    // company's and the vendor's GSTIN (or state), so a later address change
+    // never rewrites an order's tax.
+    const ourCompany = await Company.findById(companyId).select('gst state').lean();
+    const gstSplit = gstSplitFor({
+      ourGstin: ourCompany?.gst, ourState: ourCompany?.state,
+      theirGstin: supplierDoc.gstNumber, theirState: supplierDoc.address?.state,
+    });
+
+    // Vendor selection check (gap 12, 2026-10-09) — re-run here, never
+    // trusted from the page. Enough vendors asked per item, and no other
+    // vendor quoted this whole PO for less (landed: price + GST + charges).
+    // A failed check needs Purchase's reason, and the PO goes to the Company
+    // Admin whatever its value (approval reasons below).
+    const settings = await getOrCreateSettings(companyId);
+    let selectionCheck = null;
+    if (groupLineChecks.length) {
+      const check = await checkVendorSelection({
+        companyId, vendorId: supplier, settings,
+        groupIds: groupLineChecks.map(it => String(it.itemQuoteGroup)),
+      });
+      if (check) {
+        let exception = null;
+        if (!check.passed) {
+          exception = readSelectionException(req.body.selectionException);
+          if (exception.error) {
+            return res.status(400).json({ message: `This vendor choice didn't pass the selection check — ${exception.error}`, selectionCheck: check });
+          }
+        }
+        selectionCheck = {
+          ...check,
+          exceptionReasons: exception?.reasons || [],
+          exceptionNote: exception?.note || '',
+          checkedAt: new Date(),
+        };
+      }
+    }
+
+    // Lines — GST is the % typed for each line on the PO. An inclusive line
+    // (the quoted rate already contains GST) adds nothing on top, so it's
+    // never counted twice in grandTotal.
     let totalAmount = 0;
+    let lineGstTotal = 0;
     const purchaseItems = [];
+    const orderDate = new Date();
+    // With an advance, the vendor's delivery days count from the day the
+    // advance is paid (client, 2026-10-12) — the lines get no date yet.
+    // Without one, they count from the order, as before.
+    const poPaymentTerms = cleanPaymentTerms(paymentTermsBody);
+    const clockOnAdvance = Number(poPaymentTerms.advancePercent) > 0;
 
     for (const item of items) {
       const inventoryItem = await Item.findById(item.item);
@@ -138,8 +594,22 @@ export const createPurchase = async (req, res) => {
         return res.status(400).json({ message: `Inventory item ${item.item} not found` });
       }
 
-      const itemTotal = item.quantity * item.unitPrice;
+      const itemTotal = round2(Number(item.quantity) * Number(item.unitPrice));
       totalAmount += itemTotal;
+
+      const gstInclusive = !!item.gstInclusive;
+      const gstRate = pctOrZero(item.gstPercent ?? item.gstRate);
+      const gstAmount = gstInclusive ? 0 : round2(itemTotal * gstRate / 100);
+      lineGstTotal += gstAmount;
+
+      // This line's quoted delivery days — from its quote when there is one
+      // (not trusted from the page), else what was sent — and its date: the
+      // order date + those days, or none yet when the PO has an advance.
+      const quotedDays = Number(bidById.get(String(item.vendorBidId || ''))?.deliveryDays ?? item.deliveryDays);
+      const itemDeliveryDays = quotedDays > 0 ? Math.round(quotedDays) : null;
+      const itemExpectedDeliveryDate = itemDeliveryDays && !clockOnAdvance
+        ? new Date(orderDate.getTime() + itemDeliveryDays * 24 * 60 * 60 * 1000)
+        : null;
 
       purchaseItems.push({
         item: item.item,
@@ -147,48 +617,139 @@ export const createPurchase = async (req, res) => {
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         totalPrice: itemTotal,
+        purchaseRequest: item.purchaseRequest || null,
+        purchaseRequests: Array.isArray(item.purchaseRequests) ? item.purchaseRequests : [],
+        itemQuoteGroup: item.itemQuoteGroup || null,
+        vendorBid: item.vendorBidId || null,
+        purchaseUnit: item.purchaseUnit || null,
+        purchaseUnitType: item.purchaseUnitType || null,
+        expectedDeliveryDate: itemExpectedDeliveryDate,
+        deliveryDays: itemDeliveryDays,
+        warrantyMonths: Number(item.warrantyMonths) || 0,
+        gstInclusive,
+        gstRate,
+        gstAmount,
         receivedQuantity: 0,
-        pendingQuantity: item.quantity
+        pendingQuantity: item.quantity,
+        // A fabrication size card: the ordered size × pieces (can be more
+        // than the requests asked for) — the PO email and Store's receive
+        // form read this (2026-10-09).
+        fabricationDimensionLines: (() => {
+          const g = item.itemQuoteGroup ? liveGroupById.get(String(item.itemQuoteGroup)) : null;
+          return g?.sizeKey ? [{ values: g.sizeValues, quantity: g.pieces ?? g.requestedPieces ?? 0, lineWeightKg: null }] : [];
+        })(),
       });
     }
 
-    const taxAmt = taxAmount || 0;
-    const grandTotal = totalAmount + taxAmt;
+    const charges = cleanPoCharges(chargesBody);
+    const chargesTotal = round2(charges.reduce((s, c) => s + c.amount, 0));
+    const chargesGstTotal = round2(charges.reduce((s, c) => s + c.gstAmount, 0));
+    totalAmount = round2(totalAmount);
+    const taxAmount = round2(lineGstTotal);
+    const grandTotal = round2(totalAmount + taxAmount + chargesTotal + chargesGstTotal);
 
-    const purchaseData = {
+    // The PO's own single expectedDeliveryDate — the latest of its lines'
+    // own dates (the order is only complete once everything arrives).
+    const itemDates = purchaseItems.map(it => it.expectedDeliveryDate).filter(Boolean);
+    const latestItemDate = itemDates.length ? new Date(Math.max(...itemDates.map(d => d.getTime()))) : null;
+
+    // The batch's whole PR list — flattened across every line's own PRs.
+    const purchaseRequests = Array.isArray(purchaseRequestsBody) && purchaseRequestsBody.length
+      ? purchaseRequestsBody.filter(Boolean)
+      : (purchaseRequest ? [purchaseRequest] : [...new Set(purchaseItems.flatMap(it => prIdsOf(it).map(String)))]);
+
+    // Company Admin approval — over the ₹ threshold (on the final total)
+    // and/or a failed vendor selection check (gap 12).
+    const threshold = settings.poApprovalThreshold;
+    const overThreshold = threshold != null && grandTotal > Number(threshold);
+    const selectionFailed = !!selectionCheck && !selectionCheck.passed;
+    const approvalReasons = [...(overThreshold ? ['threshold'] : []), ...(selectionFailed ? ['selection'] : [])];
+    const needsApproval = approvalReasons.length > 0;
+    const inr = (n) => `₹${Number(n).toLocaleString('en-IN')}`;
+    const approvalWhy = [
+      overThreshold ? `above the ${inr(threshold)} limit` : null,
+      selectionFailed ? 'vendor selection exception' : null,
+    ].filter(Boolean).join(' + ');
+
+    const purchase = await Purchase.create({
       supplier,
       items: purchaseItems,
       totalAmount,
-      taxAmount: taxAmt,
+      taxAmount,
+      charges,
+      chargesTotal,
+      chargesGstTotal,
+      paymentTerms: poPaymentTerms,
       grandTotal,
-      expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      transportBy: finalTransportBy,
+      expectedDeliveryDate: clockOnAdvance ? null
+        : expectedDeliveryDate ? new Date(expectedDeliveryDate)
+          : (latestItemDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+      deliveryClock: clockOnAdvance ? { startsOn: 'advance', startedAt: null } : { startsOn: 'order', startedAt: orderDate },
       unit: req.user.role === USER_ROLES.SUPER_USER ? req.body.unit : req.user.unit,
+      companyId,
       createdBy: req.user._id,
       deliveryAddress: finalDeliveryAddress,
       terms,
       notes,
-      purchaseRequest: purchaseRequest || null
-    };
+      purchaseRequests,
+      selectionCheck,
+      gstSplit,
+      status: needsApproval ? 'Pending Approval' : 'Draft',
+      approval: needsApproval
+        ? { required: true, threshold: threshold != null ? Number(threshold) : null, decision: 'Pending', requestedBy: req.user._id, requestedAt: new Date(), reasons: approvalReasons }
+        // Records the limit that applied (null = none set) so the Company
+        // Admin's Approved list can say "within the ₹X limit".
+        : { required: false, threshold: threshold != null ? Number(threshold) : null },
+    });
 
-    const purchase = await Purchase.create(purchaseData);
-    
-    // Link the created PO back to the PurchaseRequest and sync status to Ordered
-    if (purchaseRequest) {
-      const prUpdate = {
-        purchaseOrder: purchase._id,
-        status: 'Ordered'
-      };
-      // Persist the purchase-unit quantity so the Receive screen can show
-      // "Ordered: X kg" and prompt for the base-unit conversion, exactly
-      // like a request that went through the RFQ flow.
-      if (Number(purchaseQuantity) > 0 && purchaseUnit) {
-        prUpdate.purchaseQuantity = Number(purchaseQuantity);
-        prUpdate.purchaseUnit = purchaseUnit;
-        const firstInventoryItem = await Item.findById(items[0]?.item).select('purchaseUnitType').lean();
-        if (firstInventoryItem?.purchaseUnitType) prUpdate.purchaseUnitType = firstInventoryItem.purchaseUnitType;
+    // Audit log (gap 17) — the PO's first line, written before anything it
+    // triggers (the automatic email is logged inside finalizePurchase).
+    await logPoEvent({
+      po: purchase, user: req.user, req,
+      action: needsApproval ? 'sent_for_approval' : 'created',
+      summary: needsApproval
+        ? `Sent for Company Admin approval — ${inr(grandTotal)} (${approvalWhy}).`
+        : `Created directly — ${inr(grandTotal)}, ${threshold != null ? `within the ${inr(threshold)} limit` : 'no approval limit set'}.`,
+      details: {
+        grandTotal,
+        lines: purchaseItems.length,
+        approvalReasons,
+        threshold: threshold != null ? Number(threshold) : null,
+        selectionPassed: selectionCheck ? !!selectionCheck.passed : null,
+        selectionException: selectionCheck && !selectionCheck.passed ? { reasons: selectionCheck.exceptionReasons, note: selectionCheck.exceptionNote } : null,
+      },
+    });
+
+    if (needsApproval) {
+      try {
+        await notificationService.createNotification({
+          title: 'Purchase order needs your approval',
+          message: `${purchase.purchaseOrderNumber} — ${supplierDoc.supplierName} — ${inr(grandTotal)} (${approvalWhy})`,
+          type: 'purchase',
+          targetRole: 'Company Admin',
+          targetCompanyId: companyId,
+          data: { purchaseId: String(purchase._id), poApproval: true },
+        });
+      } catch (notifyErr) {
+        console.error('Notify Company Admin of PO approval failed:', notifyErr);
       }
-      await PurchaseRequest.findByIdAndUpdate(purchaseRequest, prUpdate);
-      console.log(`Linked Purchase Order ${purchase.purchaseOrderNumber} to Purchase Request ${purchaseRequest} — status set to Ordered`);
+    } else {
+      await finalizePurchase(purchase, req.user, req);
+      // The Company Admin hears about EVERY PO (procurement-v2): this one
+      // needed no approval, so it lands straight in their Approved list.
+      try {
+        await notificationService.createNotification({
+          title: 'Purchase order created',
+          message: `${purchase.purchaseOrderNumber} — ${supplierDoc.supplierName} — ₹${grandTotal.toLocaleString('en-IN')} (${threshold != null ? `within the ₹${Number(threshold).toLocaleString('en-IN')} limit` : 'no approval limit set'})`,
+          type: 'purchase',
+          targetRole: 'Company Admin',
+          targetCompanyId: companyId,
+          data: { purchaseId: String(purchase._id), poApproval: true },
+        });
+      } catch (notifyErr) {
+        console.error('Notify Company Admin of direct PO failed:', notifyErr);
+      }
     }
 
     await purchase.populate([
@@ -197,7 +758,16 @@ export const createPurchase = async (req, res) => {
     ]);
 
     res.status(201).json({
-      message: 'Purchase order created successfully',
+      message: needsApproval
+        ? overThreshold && selectionFailed
+          ? `Total ${inr(grandTotal)} is above the ${inr(threshold)} limit and the vendor choice is an exception — sent to the Company Admin for approval.`
+          : overThreshold
+            ? `Total ${inr(grandTotal)} is above the ${inr(threshold)} limit — sent to the Company Admin for approval.`
+            : 'This vendor choice is an exception to the selection check — sent to the Company Admin for approval with your reason.'
+        : purchase.status === 'Sent'
+          ? 'Purchase order created and emailed to the vendor.'
+          : 'Purchase order created — but the email to the vendor didn\'t go out. Use "Send PO email" on the Purchase Orders tab.',
+      pendingApproval: needsApproval,
       purchase
     });
   } catch (error) {
@@ -231,27 +801,44 @@ export const updatePurchase = async (req, res) => {
       return res.status(404).json({ message: 'Purchase not found' });
     }
 
-    if (req.user.role !== USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+    if (req.user.role !== USER_ROLES.SUPER_USER && (purchase.unit !== req.user.unit || String(purchase.companyId) !== String(req.user.companyId))) {
       return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Company Admin approval (procurement-v2): a PO waiting for approval must
+    // stay exactly what the Company Admin is looking at, and a rejected one
+    // never became an order — neither can be edited.
+    if (['Pending Approval', 'Rejected'].includes(purchase.status)) {
+      return res.status(409).json({ message: `This PO is ${purchase.status} and can't be changed.` });
     }
 
     const updateData = {};
 
-    if (status) {
-      updateData.status = status;
-      if (status === 'Received') {
-        updateData.actualDeliveryDate = actualDeliveryDate ? new Date(actualDeliveryDate) : new Date();
-      }
-    }
+    // Disabled 2026-10-05 — setting status here (e.g. to 'Cancelled') never
+    // cleans up the PurchaseInvoice that's now auto-created at PO-creation
+    // time (Fifteenth pass), which would leave a permanent, uncollectible
+    // balance inflating that vendor's credit exposure forever. Confirmed
+    // this endpoint's one live caller (PurchaseRequest.jsx's "Modify PO")
+    // never actually sends `status` — it's only used to edit
+    // vendor/items/price/delivery/terms, all of which still work below.
+    // `status` itself is now silently ignored until a real Cancel/Delete PO
+    // flow is built that also voids the invoice — uncomment and fix then.
+    // if (status) {
+    //   updateData.status = status;
+    //   if (status === 'Received') {
+    //     updateData.actualDeliveryDate = actualDeliveryDate ? new Date(actualDeliveryDate) : new Date();
+    //   }
+    // }
 
-    if (paymentStatus) updateData.paymentStatus = paymentStatus;
+    // paymentStatus is no longer set by hand — it follows the PO's bill
+    // (services/purchaseBillService.js, 2026-10-12).
     if (expectedDeliveryDate) updateData.expectedDeliveryDate = new Date(expectedDeliveryDate);
     if (deliveryAddress) updateData.deliveryAddress = deliveryAddress;
     if (terms) updateData.terms = terms;
     if (notes) updateData.notes = notes;
 
     if (supplier) {
-      const supplierDoc = await Supplier.findById(supplier);
+      const supplierDoc = await Supplier.findOne({ _id: supplier, companyId: req.user.companyId });
       if (supplierDoc) {
         updateData.supplier = supplier;
       }
@@ -260,29 +847,72 @@ export const updatePurchase = async (req, res) => {
     if (items && Array.isArray(items)) {
       let totalAmt = 0;
       const purchaseItems = [];
-      for (const item of items) {
+      const existingItems = purchase.items || [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
         const inventoryItem = await Item.findById(item.item);
         const itemName = inventoryItem ? (inventoryItem.name || inventoryItem.itemName) : item.itemName;
         const itemTotal = item.quantity * item.unitPrice;
         totalAmt += itemTotal;
+        // Preserve every field this endpoint doesn't actually let Purchase
+        // edit — PR link(s)/group, item charges, GST, expected delivery
+        // date, warranty, fabrication breakdown — from the existing line
+        // it corresponds to. Pre-existing bug, found while building this
+        // pass: rebuilding items[] from only the fields this flow's one
+        // live caller (PurchaseRequest.jsx's "Modify PO") actually sends
+        // (item/itemName/quantity/unitPrice/totalPrice) was silently
+        // wiping all of these on every save — which would have broken
+        // computeHealedStatus, the By Vendor receive badges, and group-
+        // staleness detection on any PO ever modified here, the moment the
+        // new purchaseRequests/itemQuoteGroup fields started being relied
+        // on. Matched by Inventory item id first (stable across an edit
+        // that only changes quantity/price), falling back to position when
+        // that's not given.
+        const existing = (item.item && existingItems.find(ex => String(ex.item) === String(item.item)))
+          || existingItems[i]
+          || {};
         purchaseItems.push({
           item: item.item,
           itemName,
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           totalPrice: itemTotal,
-          receivedQuantity: item.receivedQuantity || 0,
-          pendingQuantity: item.quantity - (item.receivedQuantity || 0)
+          receivedQuantity: item.receivedQuantity ?? existing.receivedQuantity ?? 0,
+          pendingQuantity: item.quantity - (item.receivedQuantity ?? existing.receivedQuantity ?? 0),
+          purchaseRequest: existing.purchaseRequest || null,
+          purchaseRequests: existing.purchaseRequests || [],
+          itemQuoteGroup: existing.itemQuoteGroup || null,
+          itemCharges: existing.itemCharges || [],
+          itemChargesTotal: existing.itemChargesTotal || 0,
+          gstInclusive: existing.gstInclusive || false,
+          gstRate: existing.gstRate || 0,
+          gstAmount: existing.gstAmount || 0,
+          vendorBid: existing.vendorBid || null,
+          purchaseUnit: existing.purchaseUnit || null,
+          purchaseUnitType: existing.purchaseUnitType || null,
+          expectedDeliveryDate: existing.expectedDeliveryDate || null,
+          deliveryDays: existing.deliveryDays ?? null,
+          warrantyMonths: existing.warrantyMonths || 0,
+          fabricationDimensionLines: existing.fabricationDimensionLines || [],
+          // Also never edited here (2026-10-12 — these were being dropped).
+          deliveryDateHistory: existing.deliveryDateHistory || [],
+          overdueNotifiedFor: existing.overdueNotifiedFor || null,
+          cancelled: existing.cancelled || null,
         });
       }
       updateData.items = purchaseItems;
       updateData.totalAmount = totalAmt;
       const taxAmt = taxAmount !== undefined ? taxAmount : (purchase.taxAmount || 0);
       updateData.taxAmount = taxAmt;
-      updateData.grandTotal = totalAmt + taxAmt;
+      // Same formula as createPurchase: goods + tax + the PO's own charges
+      // and their GST (procurement-v2), plus any OLD automatic vendor
+      // charges a legacy PO still carries (poCharges / itemCharges).
+      const itemChargesSum = purchaseItems.reduce((sum, it) => sum + (it.itemChargesTotal || 0), 0);
+      updateData.grandTotal = totalAmt + taxAmt + (purchase.chargesTotal || 0) + (purchase.chargesGstTotal || 0)
+        + (purchase.poChargesTotal || 0) + itemChargesSum;
     } else if (taxAmount !== undefined) {
       updateData.taxAmount = taxAmount;
-      updateData.grandTotal = (purchase.totalAmount || 0) + taxAmount;
+      updateData.grandTotal = (purchase.totalAmount || 0) + taxAmount + (purchase.chargesTotal || 0) + (purchase.chargesGstTotal || 0);
     }
 
     // Handle approval
@@ -292,17 +922,26 @@ export const updatePurchase = async (req, res) => {
       updateData.status = 'Sent';
     }
 
-    // Keep the linked PurchaseRequest's purchase-unit quantity in sync when
+    // Keep every linked PurchaseRequest's purchase-unit quantity in sync when
     // the PO is modified (e.g. accounts corrects "2 kg" to "3 kg" before
     // sending) — same fields set at creation time, see createPurchase above.
-    if (purchase.purchaseRequest && Number(purchaseQuantity) > 0 && purchaseUnit) {
-      const prUpdate = { purchaseQuantity: Number(purchaseQuantity), purchaseUnit };
-      const firstItemId = items?.[0]?.item;
-      if (firstItemId) {
-        const firstInventoryItem = await Item.findById(firstItemId).select('purchaseUnitType').lean();
-        if (firstInventoryItem?.purchaseUnitType) prUpdate.purchaseUnitType = firstInventoryItem.purchaseUnitType;
+    // Each PR matched to its own line the same way createPurchase does.
+    if (purchase.purchaseRequests?.length && Number(purchaseQuantity) > 0 && purchaseUnit) {
+      for (const prId of purchase.purchaseRequests) {
+        const prUpdate = { purchaseQuantity: Number(purchaseQuantity), purchaseUnit };
+        // No `|| items[0]` fallback (2026-10) — same reasoning as
+        // createPurchase's own PR-sync loop above: better to skip the
+        // purchaseUnitType lookup than guess it from an unrelated line.
+        const matchedItemId = items?.find(it =>
+          String(it.purchaseRequest || '') === String(prId)
+          || (Array.isArray(it.purchaseRequests) && it.purchaseRequests.some(id => String(id) === String(prId)))
+        )?.item || null;
+        if (matchedItemId) {
+          const matchedInventoryItem = await Item.findById(matchedItemId).select('purchaseUnitType').lean();
+          if (matchedInventoryItem?.purchaseUnitType) prUpdate.purchaseUnitType = matchedInventoryItem.purchaseUnitType;
+        }
+        await PurchaseRequest.findByIdAndUpdate(prId, prUpdate);
       }
-      await PurchaseRequest.findByIdAndUpdate(purchase.purchaseRequest, prUpdate);
     }
 
     const updatedPurchase = await Purchase.findByIdAndUpdate(
@@ -325,6 +964,11 @@ export const updatePurchase = async (req, res) => {
   }
 };
 
+// Route disabled 2026-10-05 (accountsRoutes.js) — this never cleans up the
+// PurchaseInvoice auto-created at PO-creation time (Fifteenth pass), so
+// deleting a PO would orphan its invoice's balance forever. Had zero
+// frontend callers anyway (confirmed by grep). Fix the invoice cleanup and
+// re-enable the route before wiring this up to any UI.
 export const deletePurchase = async (req, res) => {
   try {
     const { id } = req.params;
@@ -335,7 +979,7 @@ export const deletePurchase = async (req, res) => {
       return res.status(404).json({ message: 'Purchase not found' });
     }
 
-    if (req.user.role !== USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+    if (req.user.role !== USER_ROLES.SUPER_USER && (purchase.unit !== req.user.unit || String(purchase.companyId) !== String(req.user.companyId))) {
       return res.status(403).json({ message: 'Access denied' });
     }
 
@@ -367,14 +1011,18 @@ export const receivePurchase = async (req, res) => {
       return res.status(404).json({ message: 'Purchase not found' });
     }
 
-    if (req.user.role !== USER_ROLES.SUPER_USER && purchase.unit !== req.user.unit) {
+    if (req.user.role !== USER_ROLES.SUPER_USER && (purchase.unit !== req.user.unit || String(purchase.companyId) !== String(req.user.companyId))) {
       return res.status(403).json({ message: 'Access denied' });
+    }
+    // Cancelled (gap 13, 2026-10-09) — nothing can be received on it.
+    if (purchase.status === 'Cancelled') {
+      return res.status(409).json({ message: 'This PO is cancelled — nothing can be received on it.' });
     }
 
     // Update received quantities and inventory
     for (const receivedItem of receivedItems) {
       const purchaseItem = purchase.items.find(item =>
-        item.item._id.toString() === receivedItem.itemId
+        !item.cancelled?.at && item.item._id.toString() === receivedItem.itemId
       );
 
       if (purchaseItem && receivedItem.receivedQuantity > 0) {
@@ -429,6 +1077,19 @@ export const receivePurchase = async (req, res) => {
 
     await purchase.save();
 
+    // Audit log (gap 17) — the old whole-PO receive screen.
+    const receivedNow = receivedItems.filter(r => Number(r.receivedQuantity) > 0)
+      .map(r => {
+        const line = purchase.items.find(it => !it.cancelled?.at && String(it.item?._id || it.item) === String(r.itemId));
+        return line ? `${line.itemName} ${r.receivedQuantity} ${line.purchaseUnit || ''}`.trim() : null;
+      }).filter(Boolean);
+    if (receivedNow.length) {
+      await logPoEvent({ po: purchase, user: req.user, req, action: 'line_received', summary: `Received: ${receivedNow.join(', ')}.`, details: { items: receivedNow } });
+    }
+    if (allReceived) {
+      await logPoEvent({ po: purchase, user: req.user, req, action: 'fully_received', summary: 'Everything on this PO has been received.' });
+    }
+
     await purchase.populate([
       { path: 'supplier', select: 'supplierName contactPerson' },
       { path: 'items.item', select: 'itemName itemCode' }
@@ -450,6 +1111,7 @@ export const getPurchaseStats = async (req, res) => {
     let query = {};
 
     if (req.user.role !== USER_ROLES.SUPER_USER) {
+      query.companyId = req.user.companyId;
       query.unit = req.user.unit;
     } else if (unit) {
       query.unit = unit;
@@ -801,50 +1463,71 @@ export const updateWeightUnitPrice = async (req, res) => {
 export const sendPOToVendor = async (req, res) => {
   try {
     const { id } = req.params;
-    const purchase = await Purchase.findById(id).populate('supplier').populate('purchaseRequest');
+    const purchase = await Purchase.findById(id).populate('supplier').populate('purchaseRequests');
     if (!purchase) {
       return res.status(404).json({ success: false, message: 'Purchase Order not found' });
+    }
+
+    // This handler had NO ownership check of any kind before 2026-10-06 —
+    // any authenticated user who knew/guessed a PO id could email it to the
+    // vendor and flip its status, regardless of which company it belonged
+    // to. Same fetch-then-403 pattern every other handler in this file uses.
+    if (req.user.role !== USER_ROLES.SUPER_USER && (purchase.unit !== req.user.unit || String(purchase.companyId) !== String(req.user.companyId))) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    // Not a real order yet / never became one / called off (procurement-v2).
+    if (['Pending Approval', 'Rejected', 'Cancelled'].includes(purchase.status)) {
+      return res.status(409).json({ success: false, message: `This PO is ${purchase.status} — it can't be sent to the vendor.` });
     }
 
     if (!purchase.supplier || !purchase.supplier.email) {
       return res.status(400).json({ success: false, message: 'Supplier has no valid email address configured.' });
     }
 
-    const company = await Company.findById(req.user.companyId);
-    const companyName = company?.name || 'Samtek ERP';
-
-    // Send email
-    const emailResult = await sendPurchaseOrderEmail({
-      companyId: req.user.companyId,
-      to: purchase.supplier.email,
-      vendorName: purchase.supplier.supplierName || 'Vendor',
-      poNumber: purchase.purchaseOrderNumber,
-      items: purchase.items,
-      grandTotal: purchase.grandTotal,
-      companyName
+    // The "Send / Resend PO email" button (procurement-v2) — same full email
+    // a PO gets automatically when it becomes a real order.
+    const emailResult = await sendPurchaseOrderToVendor(purchase);
+    // Audit log (gap 17): who pressed Send / Resend, and whether it went.
+    await logPoEvent({
+      po: purchase, user: req.user, req,
+      action: emailResult.success ? 'emailed' : 'email_failed',
+      summary: emailResult.success ? `Emailed to the vendor (${purchase.supplier.email}) — sent by hand.` : `Email to the vendor failed when sent by hand: ${emailResult.error}`,
+      details: { manual: true, to: purchase.supplier.email, error: emailResult.success ? null : emailResult.error },
     });
-
     if (emailResult.success) {
-      // Update PO status to "Sent"
-      purchase.status = 'Sent';
-      await purchase.save();
-
-      // Update originating Purchase Request status to "Ordered"
-      if (purchase.purchaseRequest) {
-        const pr = await PurchaseRequest.findById(purchase.purchaseRequest);
-        if (pr) {
-          pr.status = 'Ordered';
-          await pr.save();
-          console.log(`Auto-updated Purchase Request ${pr.requestId} status to Ordered`);
-        }
-      }
-
-      return res.json({ success: true, message: 'Purchase Order successfully sent to Vendor by email' });
-    } else {
-      return res.status(500).json({ success: false, message: 'Failed to send email to vendor: ' + emailResult.error });
+      return res.json({ success: true, message: 'Purchase order emailed to the vendor.' });
     }
+    return res.status(emailResult.notConfigured ? 400 : 500).json({ success: false, message: `Couldn't email the vendor: ${emailResult.error}` });
   } catch (error) {
     console.error('Error sending PO to Vendor:', error);
     res.status(500).json({ success: false, message: 'Internal Server Error', error: error.message });
+  }
+};
+
+// GET /api/dispatches/vendor-pickups — Dispatch stub (2026-10). Transport
+// decision (Purchase.transportBy) is made by Purchase at batch time (By
+// Vendor tab); when it's 'Company', Logistics/Dispatch needs to arrange
+// the pickup themselves instead of the vendor delivering. "Just show the
+// request" — purely read-only visibility (PO, vendor, items, expected
+// date) for now, no assign-vehicle/driver/status workflow yet; that's
+// explicitly deferred to a later pass once this proves out.
+export const getVendorPickupsForDispatch = async (req, res) => {
+  try {
+    // Real orders only — a PO waiting for / refused Company Admin approval
+    // (procurement-v2) isn't something Dispatch should go and collect.
+    const query = { transportBy: 'Company', status: { $nin: ['Pending Approval', 'Rejected', 'Cancelled'] } };
+    if (req.user.role !== USER_ROLES.SUPER_USER) {
+      query.companyId = req.user.companyId;
+      query.unit = req.user.unit;
+    }
+    const purchases = await Purchase.find(query)
+      .populate('supplier', 'supplierName contactPerson email phone address')
+      .select('purchaseOrderNumber supplier items orderDate expectedDeliveryDate deliveryClock status grandTotal')
+      .sort({ expectedDeliveryDate: 1 });
+    res.json({ success: true, data: purchases });
+  } catch (error) {
+    console.error('getVendorPickupsForDispatch error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };

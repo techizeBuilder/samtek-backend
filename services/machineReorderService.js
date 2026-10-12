@@ -22,7 +22,7 @@ import MachineBOM from '../models/MachineBOM.js';
 import Sale from '../models/Sale.js';
 import { plainMaterialGroupsFromBOM, lengthFabricationGroupsFromBOM, sheetMetalCutGroupsFromBOM } from './bomMaterialGroupsService.js';
 import { raisePlainPurchaseRequest, raiseFabricationPurchaseRequest } from './materialAvailabilityService.js';
-import { checkAndReserve } from './materialReservationService.js';
+import { checkAndReserve, getFreeQtyExcludingOrder } from './materialReservationService.js';
 import { dimensionSignature } from './fabricationDemandService.js';
 import { sheetAreaFromItem } from '../controllers/sheetMetalPlanController.js';
 import { createChildPartOrderForItem } from './childPartReorderService.js';
@@ -142,7 +142,7 @@ export async function checkMachineAssemblyMaterialAvailability(productionOrder, 
     const cpItem = await Item.findOne({ _id: line.childPart, companyId });
     if (!cpItem) continue;
     const neededQty = (Number(line.quantity) || 0) * buildQty;
-    const { freeQty, shortfallQty } = await checkAndReserve({ item: cpItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId });
+    const { freeQty, shortfallQty } = await checkAndReserve({ item: cpItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `cp:${cpItem.code}` });
     if (shortfallQty === 0) continue;
     const result = await createChildPartOrderForItem(cpItem, companyId, { demandSource: 'MachineCascade', buildQtyOverride: neededQty, demandRefId: productionOrder._id });
     childParts.push({
@@ -156,7 +156,7 @@ export async function checkMachineAssemblyMaterialAvailability(productionOrder, 
     const matItem = await Item.findOne({ code: g.itemCode, companyId });
     if (!matItem) continue;
     const neededQty = g.perUnitQty * buildQty;
-    const { freeQty, shortfallQty } = await checkAndReserve({ item: matItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId });
+    const { freeQty, shortfallQty } = await checkAndReserve({ item: matItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `plain:${matItem.code}` });
     if (shortfallQty === 0) {
       available.push({ code: g.itemCode, name: matItem.name, neededQty, availableQty: freeQty, unit: matItem.unit });
     } else {
@@ -179,7 +179,7 @@ export async function checkMachineAssemblyMaterialAvailability(productionOrder, 
     const sheetsNeeded = Math.ceil(totalAreaNeededMm2 / catalogSheet.areaMm2);
     // availableQty: this variant's own subStock, NOT matItem.qty (always 0
     // for a fabrication item — confirmed bug, 2026-09-18).
-    const { freeQty: freeSheets, shortfallQty: sheetsShort } = await checkAndReserve({ item: matItem, neededQty: sheetsNeeded, availableQty: variant.subStock || 0, order: productionOrder, orderModel: 'ProductionOrder', companyId });
+    const { freeQty: freeSheets, shortfallQty: sheetsShort } = await checkAndReserve({ item: matItem, neededQty: sheetsNeeded, availableQty: variant.subStock || 0, order: productionOrder, orderModel: 'ProductionOrder', companyId, variantId: variant._id, lineKey: `sheet:${line.key}` });
     if (sheetsShort === 0) {
       available.push({ code: line.key, name: line.itemName, neededQty: sheetsNeeded, availableQty: freeSheets, unit: 'Pieces' });
     } else {
@@ -203,7 +203,7 @@ export async function checkMachineAssemblyMaterialAvailability(productionOrder, 
     const key = `${g.itemCode}#${g.dimensionVariantId}`;
     // availableQty: this variant's own subStock, NOT matItem.qty (always 0
     // for a fabrication item — confirmed bug, 2026-09-18).
-    const { freeQty, shortfallQty } = await checkAndReserve({ item: matItem, neededQty: piecesNeeded, availableQty: variant.subStock || 0, order: productionOrder, orderModel: 'ProductionOrder', companyId });
+    const { freeQty, shortfallQty } = await checkAndReserve({ item: matItem, neededQty: piecesNeeded, availableQty: variant.subStock || 0, order: productionOrder, orderModel: 'ProductionOrder', companyId, variantId: variant._id, lineKey: `length:${g.itemCode}#${g.dimensionVariantId}` });
     if (shortfallQty === 0) {
       available.push({ code: key, name: g.itemName, neededQty: piecesNeeded, availableQty: freeQty, unit: 'Pieces' });
     } else {
@@ -300,7 +300,7 @@ export async function computeMachineMaterialRows(order, companyId) {
     const cpItem = await Item.findOne({ _id: line.childPart, companyId }).lean();
     if (!cpItem) continue;
     const issueTotal = (Number(line.quantity) || 0) * buildQty;
-    const available = (cpItem.qty || 0) >= issueTotal;
+    const available = (await getFreeQtyExcludingOrder(cpItem._id, cpItem.qty || 0, companyId, order._id)) + (demandByKey.get(cpItem.code)?.transferredQuantity || 0) >= issueTotal;
     rows.push({
       category: 'Child Part', demandKey: cpItem.code, sourceItemCode: cpItem.code,
       code: cpItem.code, name: cpItem.name,
@@ -333,7 +333,9 @@ export async function computeMachineMaterialRows(order, companyId) {
     for (const m of lines) {
       const { item, processType, subProcessType } = await resolveMeta(m.code);
       const issueTotal = totalsByCode.get(m.code) ?? (Number(m.quantity) || 0) * buildQty;
-      const available = item ? (item.qty || 0) >= issueTotal : null;
+      // Available to THIS order (2026-10-09): free after earlier orders' claims
+      // (own claim excluded) plus what Store already transferred to it.
+      const available = item ? (await getFreeQtyExcludingOrder(item._id, item.qty || 0, companyId, order._id)) + (demandByKey.get(m.code)?.transferredQuantity || 0) >= issueTotal : null;
       rows.push({
         category, demandKey: m.code, sourceItemCode: m.code, code: m.code, name: m.item,
         processType, subProcessType,
@@ -363,7 +365,7 @@ export async function computeMachineMaterialRows(order, companyId) {
       const catalogSheet = sheetAreaFromItem(item, line.dimensionVariantId);
       if (variant && catalogSheet?.areaMm2) {
         issueTotal = Math.ceil((line.areaMm2PerPiece * line.quantity * buildQty) / catalogSheet.areaMm2);
-        available = (variant.subStock || 0) >= issueTotal;
+        available = (await getFreeQtyExcludingOrder(item._id, variant.subStock || 0, companyId, order._id, { variantId: variant._id })) + (demandByKey.get(line.key)?.transferredQuantity || 0) >= issueTotal;
       }
     }
     rows.push({
@@ -396,7 +398,9 @@ export async function computeMachineMaterialRows(order, companyId) {
       const catalogPieceLengthMm = Number(variant?.values?.length) || 0;
       issueTotal = Math.round((g.totalLengthMmPerUnit / perPieceLengthMm) * buildQty);
       if (variant && catalogPieceLengthMm) {
-        available = (variant.subStock || 0) * catalogPieceLengthMm >= g.totalLengthMmPerUnit * buildQty;
+        const freePieces = await getFreeQtyExcludingOrder(item._id, variant.subStock || 0, companyId, order._id, { variantId: variant._id });
+        const transferredCuts = demandByKey.get(`${g.itemCode}#${g.dimensionVariantId}#${dimSig(sampleLine?.bomDimensions)}`)?.transferredQuantity || 0;
+        available = freePieces * catalogPieceLengthMm + transferredCuts * perPieceLengthMm >= g.totalLengthMmPerUnit * buildQty;
       }
     }
     const key = `${g.itemCode}#${g.dimensionVariantId}#${dimSig(sampleLine?.bomDimensions)}`;

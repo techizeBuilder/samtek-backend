@@ -35,7 +35,7 @@ import { generateOrderId } from '../controllers/productionMfgController.js';
 import { buildFabricationBomDimensions, dimensionSignature } from '../services/fabricationDemandService.js';
 import { sheetAreaFromItem } from '../controllers/sheetMetalPlanController.js';
 import { raisePlainPurchaseRequest, raiseFabricationPurchaseRequest } from './materialAvailabilityService.js';
-import { checkAndReserve, getFreeQtyExcludingOrder } from './materialReservationService.js';
+import { checkAndReserve, getFreeQtyExcludingOrder, getFreeQty } from './materialReservationService.js';
 import { flattenProcessDefinition, classifyProcessDefinition, buildOrderStepsFromProcessDefinition } from './processStepBuilderService.js';
 import { isReleased } from './productApprovalService.js';
 import notificationService from './notificationService.js';
@@ -246,6 +246,16 @@ export async function buildSubChildPartRawMaterialList(order, companyId) {
   const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
   const computed = await computeSubChildPartRawMaterialAvailability(item, sourceItem, buildQty);
   if (!computed.demandSeed) return { categories: [] };
+  // "Available" for THIS order (2026-10-09): free after earlier orders'
+  // claims (its own excluded) plus what Store already transferred to it.
+  if (computed.neededQty != null) {
+    const freeQty = await getFreeQtyExcludingOrder(sourceItem._id, computed.availableQty, companyId, order._id, {
+      variantId: computed.kind === 'plain' ? null : (computed.variant?._id || null),
+    });
+    const transferred = (order.materialDemands || []).find(d => d.materialCode === computed.demandSeed.materialCode)?.transferredQuantity || 0;
+    const still = Math.max(0, computed.neededQty - transferred);
+    computed.shortfallQty = Math.min(still, Math.max(0, still - freeQty));
+  }
 
   const { sourceQty, sourceUnit } = item.subChildPartDetails;
   const isFabrication = computed.kind === 'sheet' || computed.kind === 'length';
@@ -372,6 +382,9 @@ async function resolveSubChildPartRawMaterialNeed(item, sourceItem, buildQty, or
   const { freeQty, shortfallQty } = await checkAndReserve({
     item: sourceItem, neededQty: computed.neededQty, availableQty: computed.availableQty, order,
     orderModel: order.constructor.modelName, companyId: item.companyId,
+    // Per size + line since 2026-10-09 (fabrication stock is per size).
+    variantId: computed.kind === 'plain' ? null : (computed.variant?._id || null),
+    lineKey: `raw:${computed.compositeCode || sourceItem.code}`,
   });
 
   let purchaseRequestId = null;
@@ -407,7 +420,9 @@ async function resolveSubChildPartRawMaterialNeed(item, sourceItem, buildQty, or
 export async function computeSubChildPartRawMaterialAvailabilityLive(item, sourceItem, order) {
   const computed = await computeSubChildPartRawMaterialAvailability(item, sourceItem, order.orderQuantity);
   if (computed.neededQty == null) return computed;
-  const freeQty = await getFreeQtyExcludingOrder(sourceItem._id, computed.availableQty, item.companyId, order._id);
+  const freeQty = await getFreeQtyExcludingOrder(sourceItem._id, computed.availableQty, item.companyId, order._id, {
+    variantId: computed.kind === 'plain' ? null : (computed.variant?._id || null),
+  });
   const shortfallQty = Math.min(computed.neededQty, Math.max(0, computed.neededQty - freeQty));
   return { ...computed, availableQty: freeQty, shortfallQty };
 }
@@ -646,7 +661,9 @@ export async function runSubChildPartOrderSweep() {
   for (const item of items) {
     stats.scanned++;
     try {
-      if ((item.qty || 0) > (item.minStock || 0)) continue;
+      // Free stock (2026-10-09, user decision): stock still reserved for
+      // orders doesn't count toward the minimum.
+      if ((await getFreeQty(item._id, item.qty || 0, item.companyId)) > (item.minStock || 0)) continue;
       const result = await createSubChildPartOrderForItem(item, item.companyId);
       if (result.created) stats.created++;
     } catch (err) {

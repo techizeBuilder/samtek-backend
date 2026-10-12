@@ -106,8 +106,22 @@ export async function getMachineBillingBOMCost(code, companyId) {
 async function findPurchaseToBaseFactor(item, invoiceNotes) {
   try {
     let pr = null;
+    // Tolerates both "Purchase Request:" and "Purchase Request(s):" — the
+    // real notes string createAutoPurchaseInvoice writes has always said
+    // "(s)" (a batch can cover several PRs, including before item-wise
+    // consolidation — any PO already could batch several different items'
+    // PRs for one vendor), so this never actually matched before. Found
+    // while checking that automatic pricing still works after item-wise PR
+    // consolidation — pre-existing, not introduced by that work. Only ever
+    // extracts the FIRST PR in a multi-PR batch, which is still not
+    // correct for every item in a multi-item batch — see
+    // resolvePurchaseItemCost's knownConversionFactor param, which is what
+    // the receive-time call sites now use instead of this at all (they
+    // already know exactly which PR they're receiving); this regex path
+    // only still matters for the early recalc at PO/invoice-creation time,
+    // before anything has a conversion factor to know yet.
     const m = typeof invoiceNotes === 'string'
-      ? invoiceNotes.match(/Purchase Request:\s*([A-Za-z0-9_-]+)/i)
+      ? invoiceNotes.match(/Purchase Request\(?s?\)?:\s*([A-Za-z0-9_-]+)/i)
       : null;
     if (m) {
       pr = await PurchaseRequest.findOne({ requestId: m[1], companyId: item.companyId })
@@ -148,8 +162,19 @@ function priceToPerKg(pricePerUnit, unit) {
  * through the same conversion the received quantity did. `rawPurchaseUnitPrice`
  * is that pre-conversion figure, kept around for fabrication items' ₹/kg
  * weightUnitPrice — see applyPricingToItem.
+ *
+ * `knownConversionFactor`: pass this when the caller already knows exactly
+ * which receive produced this recalc (both receive-time call sites in
+ * purchaseRequestController.js do — they just set and saved this exact
+ * value onto the PurchaseRequest/Inventory item moments earlier in the
+ * same request) — skips findPurchaseToBaseFactor's fragile reverse-lookup
+ * through invoice notes text entirely, which only ever had a real shot at
+ * being right by the coincidence of item.receivedFromPurchaseRequest
+ * already being overwritten to the correct PR just before. Omit it (the
+ * early recalc right after invoice/PO creation, before anything has been
+ * received) to fall back to that lookup, best-effort.
  */
-export async function resolvePurchaseItemCost(item) {
+export async function resolvePurchaseItemCost(item, knownConversionFactor = null) {
   const rows = await PurchaseInvoice.aggregate([
     { $match: { companyId: item.companyId } },
     { $unwind: '$items' },
@@ -162,7 +187,7 @@ export async function resolvePurchaseItemCost(item) {
   const rawPurchaseUnitPrice = rows[0]?.unitPrice;
   if (!(rawPurchaseUnitPrice > 0)) return { cost: null, rawPurchaseUnitPrice: null };
 
-  const factor = await findPurchaseToBaseFactor(item, rows[0].notes);
+  const factor = knownConversionFactor > 0 ? knownConversionFactor : await findPurchaseToBaseFactor(item, rows[0].notes);
   const cost = factor > 0 ? rawPurchaseUnitPrice * factor : rawPurchaseUnitPrice;
   return { cost, rawPurchaseUnitPrice };
 }
@@ -215,8 +240,12 @@ export async function applyPricingToItem(item, cost, source, rawPurchaseUnitPric
  * a controller. They exist so a successful update here can cascade "upward"
  * (see cascadeRecalculateToConsumers below) without ever revisiting the same
  * item twice or looping forever on a cyclical/very deep BOM graph.
+ *
+ * `knownConversionFactor` — pass this from a receive-time caller that
+ * already knows exactly which purchase-to-base-unit factor applies (see
+ * resolvePurchaseItemCost's own comment on it). Omit it everywhere else.
  */
-export async function recalculateItemPricing(item, visiting = new Set(), depth = 0) {
+export async function recalculateItemPricing(item, { visiting = new Set(), depth = 0, knownConversionFactor = null } = {}) {
   if (!item.internalManufacturing && !item.purchase) return { updated: false };
   if (depth > MAX_BOM_DEPTH) return { updated: false };
   const key = item._id.toString();
@@ -238,7 +267,7 @@ export async function recalculateItemPricing(item, visiting = new Set(), depth =
     }
     updated = await applyPricingToItem(item, resolved.cost, 'BOM');
   } else {
-    const { cost, rawPurchaseUnitPrice } = await resolvePurchaseItemCost(item);
+    const { cost, rawPurchaseUnitPrice } = await resolvePurchaseItemCost(item, knownConversionFactor);
     if (cost == null) return { updated: false };
     updated = await applyPricingToItem(item, cost, 'Purchase', rawPurchaseUnitPrice);
   }

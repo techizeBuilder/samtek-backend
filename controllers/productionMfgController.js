@@ -28,7 +28,6 @@ import SheetMetalPlan from '../models/SheetMetalPlan.js';
 import { sheetMetalGroupsFromBOM } from './sheetMetalPlanController.js';
 import { plainMaterialGroupsFromBOM, lengthFabricationGroupsFromBOM } from '../services/bomMaterialGroupsService.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
-import RFQ from '../models/RFQ.js';
 import Purchase from '../models/Purchase.js';
 import RDChildPart from '../models/RDChildPart.js';
 import { ensurePartChecksStructure, resolvePartChecklistRows, resolveChildPartUnitChecklistRows, attachPartReference, MANUFACTURING_SOURCE_TYPES } from '../services/qcChecklistPullService.js';
@@ -56,10 +55,32 @@ const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNI
 const today = () => new Date().toISOString().split('T')[0];
 
 // ─── ORDER ID GENERATOR ───────────────────────────────────────────────────────
+// orderId is globally unique (ProductionOrder.js: `unique: true`, no company
+// scoping), so this reads the real highest existing number across the whole
+// collection instead of counting — a plain count breaks the moment any order
+// anywhere is deleted (the next count+1 lands on a number already in use) and
+// was also wrong on top of that: it only counted this one company's orders
+// against a field that has to be unique company-wide. The existence-check
+// retry loop (same pattern generateUniqueRequestId/generateQCJobId already
+// use elsewhere in this codebase) covers the remaining same-instant race.
+// companyId is accepted but unused now — kept so every existing call site
+// stays unchanged.
 export async function generateOrderId(companyId) {
   const year = new Date().getFullYear();
-  const count = await ProductionOrder.countDocuments({ company: companyId });
-  return `ORD-${year}-${String(count + 1).padStart(3, '0')}`;
+  const prefix = `ORD-${year}-`;
+  let attempts = 0;
+  while (attempts < 20) {
+    const last = await ProductionOrder.findOne({ orderId: new RegExp(`^${prefix}\\d+$`) })
+      .sort({ orderId: -1 })
+      .select('orderId')
+      .lean();
+    const lastNumber = last ? (parseInt(last.orderId.slice(prefix.length), 10) || 0) : 0;
+    const candidate = `${prefix}${String(lastNumber + 1 + attempts).padStart(3, '0')}`;
+    const exists = await ProductionOrder.findOne({ orderId: candidate }).select('_id').lean();
+    if (!exists) return candidate;
+    attempts++;
+  }
+  return `${prefix}${Date.now().toString().slice(-6)}`;
 }
 
 // Auto-creates (or reuses) the ONE central QC job for a Production Order's
@@ -1551,14 +1572,17 @@ async function computeLiveMaterialAvailability(materialList, order, companyId) {
       continue;
     }
 
-    const pr = await PurchaseRequest.findOne({ requestId: np.purchaseRequestId, companyId }).select('_id').lean();
-    const rfq = pr ? await RFQ.findOne({ purchaseRequest: pr._id, companyId }).select('status purchaseOrder').lean() : null;
-    if (!rfq || rfq.status !== 'Awarded' || !rfq.purchaseOrder) {
+    // "On a PO" is read straight off the PR's own purchaseOrder link now,
+    // not an RFQ's Awarded status — both the legacy RFQ flow and the new
+    // batched-PO flow (createPurchase) set PurchaseRequest.purchaseOrder
+    // the same way, so this needs no awareness of which one created it.
+    const pr = await PurchaseRequest.findOne({ requestId: np.purchaseRequestId, companyId }).select('_id purchaseOrder').lean();
+    if (!pr?.purchaseOrder) {
       result.set(row.key, { state: 'short_pr_pending', availableQty, purchaseRequestId: np.purchaseRequestId });
       continue;
     }
 
-    const po = await Purchase.findById(rfq.purchaseOrder).select('expectedDeliveryDate').lean();
+    const po = await Purchase.findOne({ _id: pr.purchaseOrder, companyId }).select('expectedDeliveryDate').lean();
     result.set(row.key, {
       state: 'short_eta', availableQty,
       purchaseRequestId: np.purchaseRequestId, expectedDeliveryDate: po?.expectedDeliveryDate || null,

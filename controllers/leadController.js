@@ -38,6 +38,28 @@ async function getDisqualifyReasons() {
   return (reasons && reasons.length) ? reasons : DEFAULT_LEAD_REJECT_REASONS;
 }
 
+// Generate a unique leadCode safely (avoids E11000 duplicate key errors) —
+// reads the real highest existing code for this company instead of a plain
+// count, since a deleted lead drops the count and the next save can land on
+// a code that's still in use. Scoped by companyId, matching the schema's own
+// compound unique index ({ companyId, leadCode } — Lead.js). The existence-
+// check retry loop covers a same-instant race between two creates.
+async function generateLeadCode(companyId) {
+  let attempts = 0;
+  while (attempts < 20) {
+    const last = await Lead.findOne({ companyId, leadCode: /^LD-\d+$/ })
+      .sort({ leadCode: -1 })
+      .select('leadCode')
+      .lean();
+    const lastNumber = last ? (parseInt(last.leadCode.slice(3), 10) || 0) : 0;
+    const candidate = `LD-${String(lastNumber + 1 + attempts).padStart(4, '0')}`;
+    const exists = await Lead.findOne({ companyId, leadCode: candidate }).select('_id').lean();
+    if (!exists) return candidate;
+    attempts++;
+  }
+  return `LD-${Date.now().toString().slice(-6)}`;
+}
+
 // Create new lead
 export const createLead = async (req, res) => {
   try {
@@ -105,8 +127,7 @@ export const createLead = async (req, res) => {
     // ─────────────────────────────────────────────────────────────
 
     // Auto-generate lead code (e.g., LD-0001)
-    const count = await Lead.countDocuments({ companyId: req.user.companyId });
-    const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+    const leadCode = await generateLeadCode(req.user.companyId);
 
     const newLead = new Lead({
       ...leadData,
@@ -1271,8 +1292,7 @@ export const syncIndiamartLeads = async (req, res) => {
             // Cruncher will review and manually assign to Sales Employees
             const assignedTo = null;
 
-            const count = await Lead.countDocuments({ companyId: req.user.companyId });
-            const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+            const leadCode = await generateLeadCode(req.user.companyId);
 
             const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
             const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
@@ -1387,8 +1407,7 @@ export const syncIvrLeads = async (req, res) => {
         }
       }
 
-      const count = await Lead.countDocuments({ companyId: req.user.companyId });
-      const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+      const leadCode = await generateLeadCode(req.user.companyId);
 
       const newLead = new Lead({
         leadCode,
@@ -1534,8 +1553,7 @@ export const receiveWebsiteWebhook = async (req, res) => {
       ? users[Math.floor(Math.random() * users.length)]._id
       : null;
 
-    const count = await Lead.countDocuments({ companyId: settings.companyId });
-    const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+    const leadCode = await generateLeadCode(settings.companyId);
 
     const newLead = new Lead({
       leadCode,
@@ -1620,8 +1638,7 @@ export const receiveIndiamartWebhook = async (req, res) => {
       const senderName = item.SENDER_NAME || item.SUBJECT || 'IndiaMART Lead';
       const senderMobile = cleanNum(item.SENDER_MOBILE) || cleanNum(item.SENDER_MOBILE_ALT) || '0000000000';
 
-      const count = await Lead.countDocuments({ companyId });
-      const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+      const leadCode = await generateLeadCode(companyId);
 
       const newLead = new Lead({
         leadCode,
@@ -1735,8 +1752,7 @@ export const receiveGoogleAdsWebhook = async (req, res) => {
       ? users[Math.floor(Math.random() * users.length)]._id
       : null;
 
-    const count = await Lead.countDocuments({ companyId: settings.companyId });
-    const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+    const leadCode = await generateLeadCode(settings.companyId);
 
     const newLead = new Lead({
       leadCode,
@@ -1899,8 +1915,7 @@ async function processFacebookLead(pageId, leadgenId, changeValue) {
     ? users[Math.floor(Math.random() * users.length)]
     : null;
 
-  const count = await Lead.countDocuments({ companyId });
-  const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+  const leadCode = await generateLeadCode(companyId);
 
   const newLead = new Lead({
     leadCode,
@@ -2098,8 +2113,7 @@ export const runBackgroundApiSync = async () => {
                 // 🎯 CRUNCHER FLOW: IndiaMART leads always UNASSIGNED — Cruncher will assign manually
                 const assignedTo = null;
 
-                const count = await Lead.countDocuments({ companyId });
-                const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+                const leadCode = await generateLeadCode(companyId);
                 const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
                 const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
                 const senderEmail = lead.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`;
@@ -2189,8 +2203,7 @@ export const runBackgroundApiSync = async () => {
               }
             }
 
-            const count = await Lead.countDocuments({ companyId });
-            const leadCode = `LD-${String(count + 1).padStart(4, '0')}`;
+            const leadCode = await generateLeadCode(companyId);
 
             const newLead = new Lead({
               leadCode,
