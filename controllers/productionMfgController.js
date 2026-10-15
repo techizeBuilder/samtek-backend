@@ -63,18 +63,23 @@ const today = () => new Date().toISOString().split('T')[0];
 // against a field that has to be unique company-wide. The existence-check
 // retry loop (same pattern generateUniqueRequestId/generateQCJobId already
 // use elsewhere in this codebase) covers the remaining same-instant race.
+// The highest number is taken numerically (see below), so it also keeps
+// working past ORD-<year>-999.
 // companyId is accepted but unused now — kept so every existing call site
 // stays unchanged.
 export async function generateOrderId(companyId) {
   const year = new Date().getFullYear();
   const prefix = `ORD-${year}-`;
+  // Highest existing number compared as a NUMBER, not as text: sorting the
+  // strings puts "ORD-2026-999" after "ORD-2026-1000", so past 999 orders a
+  // year the generator would keep proposing a number already in use.
+  const [agg] = await ProductionOrder.aggregate([
+    { $match: { orderId: new RegExp(`^${prefix}\\d+$`) } },
+    { $group: { _id: null, max: { $max: { $toLong: { $substrCP: ['$orderId', prefix.length, 20] } } } } },
+  ]);
+  const lastNumber = agg?.max || 0;
   let attempts = 0;
   while (attempts < 20) {
-    const last = await ProductionOrder.findOne({ orderId: new RegExp(`^${prefix}\\d+$`) })
-      .sort({ orderId: -1 })
-      .select('orderId')
-      .lean();
-    const lastNumber = last ? (parseInt(last.orderId.slice(prefix.length), 10) || 0) : 0;
     const candidate = `${prefix}${String(lastNumber + 1 + attempts).padStart(3, '0')}`;
     const exists = await ProductionOrder.findOne({ orderId: candidate }).select('_id').lean();
     if (!exists) return candidate;
