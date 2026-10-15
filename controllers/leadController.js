@@ -42,16 +42,21 @@ async function getDisqualifyReasons() {
 // reads the real highest existing code for this company instead of a plain
 // count, since a deleted lead drops the count and the next save can land on
 // a code that's still in use. Scoped by companyId, matching the schema's own
-// compound unique index ({ companyId, leadCode } — Lead.js). The existence-
-// check retry loop covers a same-instant race between two creates.
+// compound unique index ({ companyId, leadCode } — Lead.js). The highest
+// number is compared NUMERICALLY (sorting the codes as text would rank
+// "LD-9999" above "LD-10000" and keep proposing a code already in use). The
+// existence-check retry loop covers a same-instant race between two creates.
 async function generateLeadCode(companyId) {
+  // Aggregation $match isn't auto-cast like find() is, so an id that arrives
+  // as a string must be converted to an ObjectId here.
+  const companyObjectId = new mongoose.Types.ObjectId(String(companyId));
+  const [agg] = await Lead.aggregate([
+    { $match: { companyId: companyObjectId, leadCode: /^LD-\d+$/ } },
+    { $group: { _id: null, max: { $max: { $toLong: { $substrCP: ['$leadCode', 3, 20] } } } } },
+  ]);
+  const lastNumber = agg?.max || 0;
   let attempts = 0;
   while (attempts < 20) {
-    const last = await Lead.findOne({ companyId, leadCode: /^LD-\d+$/ })
-      .sort({ leadCode: -1 })
-      .select('leadCode')
-      .lean();
-    const lastNumber = last ? (parseInt(last.leadCode.slice(3), 10) || 0) : 0;
     const candidate = `LD-${String(lastNumber + 1 + attempts).padStart(4, '0')}`;
     const exists = await Lead.findOne({ companyId, leadCode: candidate }).select('_id').lean();
     if (!exists) return candidate;
