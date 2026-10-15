@@ -67,6 +67,18 @@ Company Admin can't create POs (no RFQ/PO page; the create route allows the Acco
 that browser step was dropped. Nothing to fix in the code, unless you want a role that can both buy
 and approve (then the rule would matter).
 
+### B2c 🟡 Refunds & credits (Vendor Payment) has no pagination or "open only" view
+Found 2026-10-15 while testing slice 6 (2e / 2f).
+- The list is per selected vendor. The server returns the newest 200 (`listMoneyBack`:
+  `.sort({ createdAt: -1 }).limit(200)`), and the page shows only the **first 30**
+  (`VendorMoneyBackList.jsx`: `items.slice(0, 30)`), with no "show more" and no status filter,
+  although the server already accepts `?status=`.
+- Refunded / Used / Written off rows stay forever, so the list only grows. With many rows, an old
+  open item (a **Refund due** or **Credit available**) can fall out of the newest 30 and become
+  invisible, while the "N open" count still includes it (up to the 200 fetched).
+- Fix idea: open items always on top; the history behind a "Show history" toggle with pagination;
+  optional status chips (Open / All). Server side: page the list and count open items separately.
+
 ### B3 🟡 Old single-request PO edit still sets one quantity on every request
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
