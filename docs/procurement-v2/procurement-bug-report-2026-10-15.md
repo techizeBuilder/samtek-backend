@@ -102,6 +102,7 @@ pages were retired. Remove when the old RFQ backend is cleaned up.
 | F6 | Fabrication QC cards showed no size, so three Angle cards looked identical | §41 (size on the card) |
 | F7 | PRs tab had no date column (the date was stored as `requestDate` / `createdAt`) | Date column added, frontend commit `e792ad0` |
 | F8 | "Rejected" on a request read like a QC rejection | §41 ("Closed — reason") |
+| F11 | Receiving a QC **replacement** on a line received earlier: the Receive dialog counted the already-received requests too (a 1-piece Bairing replacement asked for 6 serials). The dialog was given every request on the line; the server already used only the unreceived ones. Fixed in the page (`openReceiveDialog` in `pages/accounts/PurchaseRequest.jsx`). Same input feeds the fabrication receive dialog. | slice 6, step 3b; frontend commit |
 | F9 | Production order id could collide after any order was deleted (`ORD-year-NNN` from a count) | now the highest number + 1 (numeric), commit `d685c92` |
 | F10 | Lead code could collide after a lead was deleted (`LD-NNNN` from a count) | now the highest number + 1 (numeric), commit `c8febb5` |
 
