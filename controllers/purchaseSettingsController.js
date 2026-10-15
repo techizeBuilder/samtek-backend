@@ -136,6 +136,44 @@ export const updateQuoteRules = async (req, res) => {
   }
 };
 
+// PUT /api/purchase-settings/vendor-score — Company Admin (2026-10-13).
+// body: { weights: { price, quality, delivery, credit, warranty, response }, watchlistBelow }
+export const updateVendorScoreSettings = async (req, res) => {
+  try {
+    if (!requireCompany(req, res)) return;
+    const { readScoreSettings } = await import('../services/vendorScoreService.js');
+    const read = readScoreSettings(req.body);
+    if (read.error) return res.status(400).json({ message: read.error });
+    const settings = await getOrCreateSettings(req.user.companyId);
+    settings.vendorScore = { weights: read.weights, watchlistBelow: read.watchlistBelow };
+    settings.updatedBy = req.user._id;
+    await settings.save();
+    res.json({ message: 'Saved', settings });
+  } catch (error) {
+    console.error('Error saving vendor score settings:', error);
+    res.status(500).json({ message: 'Error saving settings' });
+  }
+};
+
+// PUT /api/purchase-settings/purchaser-score — Company Admin (2026-10-13).
+// body: { weights: { coverage, completeness, savings, followUp, quality, documentation, poAccuracy, relationship, policy } }
+export const updatePurchaserScoreSettings = async (req, res) => {
+  try {
+    if (!requireCompany(req, res)) return;
+    const { readPurchaserWeights } = await import('../services/purchaserScoreService.js');
+    const read = readPurchaserWeights(req.body);
+    if (read.error) return res.status(400).json({ message: read.error });
+    const settings = await getOrCreateSettings(req.user.companyId);
+    settings.purchaserScore = { weights: read.weights };
+    settings.updatedBy = req.user._id;
+    await settings.save();
+    res.json({ message: 'Saved', settings });
+  } catch (error) {
+    console.error('Error saving purchaser score settings:', error);
+    res.status(500).json({ message: 'Error saving settings' });
+  }
+};
+
 const sourceOf = (it) => it.productKind === 'Machine' ? 'Product Master' : it.productKind === 'Motor' ? 'Motor Master' : 'Inventory';
 
 // GET /api/purchase-settings/low-coverage-items?page&limit&search —

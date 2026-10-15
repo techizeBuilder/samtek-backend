@@ -9,8 +9,10 @@
 //     "Asked" = an email request or a manual quote, even if the vendor didn't
 //     reply or declined (the effort is on record in All quotes).
 //  2. Cheapest — compared PER PO (user decision), on LANDED cost: price + GST
-//     + the vendor's quoted charges (and their GST), counted once per quotation
-//     (email request or manual quotation). Only vendors with a valid quote on
+//     + the vendor's quoted charges (and their GST) from their NEWEST quotation
+//     behind the PO's lines (email request or manual quotation) — charges are
+//     whole-order and carry over to each new quotation (2026-10-14), so older
+//     ones are never added on top. Only vendors with a valid quote on
 //     EVERY item of the PO take part; this PO's own vendor is priced the same
 //     way, from its quotes, at this PO's quantities. A cheaper full-basket
 //     vendor fails the check.
@@ -24,6 +26,7 @@ import VendorBid from '../models/VendorBid.js';
 import Supplier from '../models/Supplier.js';
 import { ELIGIBLE_VENDOR_FILTER } from './vendorApprovalService.js';
 import { isQuoteExpired, DEFAULT_QUOTE_VALIDITY_DAYS } from './quoteChecksService.js';
+import { quotationMadeAt } from './quotationCarryOverService.js';
 
 export const SELECTION_EXCEPTION_REASONS = [
   'Only vendor that can supply',
@@ -54,7 +57,7 @@ export function lineLanded(quote, quantity) {
  *   vendorId, minVendorsPerItem,
  *   lines: [{ groupId, itemName, quantity, availableVendorIds[], askedVendorIds[],
  *             quotes: [{ vendorId, vendorName, unitPrice, gstInclusive, gstPercent, quotationKey }] }],  // VALID quotes, one per vendor
- *   chargesByQuotation: { [quotationKey]: total incl. GST },
+ *   chargesByQuotation: { [quotationKey]: { amount: total incl. GST, at: quotation date } },
  * }
  */
 export function evaluateSelection({ vendorId, minVendorsPerItem = 3, lines = [], chargesByQuotation = {} }) {
@@ -90,7 +93,16 @@ export function evaluateSelection({ vendorId, minVendorsPerItem = 3, lines = [],
       if (q.quotationKey) keys.add(String(q.quotationKey));
     }
     if (!complete) continue;
-    const charges = [...keys].reduce((s, k) => s + (Number(chargesByQuotation[k]) || 0), 0);
+    // Charges belong to the whole order: only the NEWEST quotation behind
+    // these lines counts — the same one PO review pre-fills from — never the
+    // sum of every quotation, which counted freight twice (2026-10-14).
+    // A value is { amount, at } (or a plain amount).
+    const quotationCharges = [...keys]
+      .map(k => chargesByQuotation[k])
+      .filter(v => v != null)
+      .map(v => (typeof v === 'object' ? v : { amount: v, at: null }))
+      .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+    const charges = Number(quotationCharges[0]?.amount) || 0;
     basket.push({ vendorId: vid, vendorName: name, goodsAndGst: round2(total), charges: round2(charges), landed: round2(total + charges), gstUnknown, isThisVendor: vid === me });
   }
   basket.sort((a, b) => a.landed - b.landed);
@@ -136,8 +148,8 @@ export async function checkVendorSelection({ companyId, vendorId, groupIds, sett
   const vendors = await Supplier.find({ companyId, ...ELIGIBLE_VENDOR_FILTER, suppliedItems: { $in: itemIds } }).select('suppliedItems').lean();
   const bids = await VendorBid.find({ group: { $in: ids }, companyId })
     .select('group vendor vendorName status unitPrice gstInclusive gstPercent submittedAt createdAt quotationRequest manualQuotation')
-    .populate('quotationRequest', 'charges')
-    .populate('manualQuotation', 'charges')
+    .populate('quotationRequest', 'charges submittedAt')
+    .populate('manualQuotation', 'charges createdAt quoteDate')
     .sort({ createdAt: -1 })
     .lean();
 
@@ -150,7 +162,10 @@ export async function checkVendorSelection({ companyId, vendorId, groupIds, sett
       if (latestValid.has(String(b.vendor))) continue; // sorted newest first
       const quotation = b.quotationRequest || b.manualQuotation || null;
       if (quotation?._id) {
-        chargesByQuotation[String(quotation._id)] = round2((quotation.charges || []).reduce((s, c) => s + (Number(c.amount) || 0) + (Number(c.gstAmount) || 0), 0));
+        chargesByQuotation[String(quotation._id)] = {
+          amount: round2((quotation.charges || []).reduce((s, c) => s + (Number(c.amount) || 0) + (Number(c.gstAmount) || 0), 0)),
+          at: quotationMadeAt(quotation, !!b.manualQuotation?._id),
+        };
       }
       latestValid.set(String(b.vendor), {
         vendorId: b.vendor, vendorName: b.vendorName, unitPrice: b.unitPrice,

@@ -1,3 +1,4 @@
+import { readVendorInvoice } from '../middleware/receiveUpload.js';
 import { logLineReceived } from '../services/purchaseAuditService.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import StagedPurchase from '../models/StagedPurchase.js';
@@ -7,7 +8,7 @@ import QCJob from '../models/QCJob.js';
 import RFQ from '../models/RFQ.js';
 import VendorBid from '../models/VendorBid.js';
 import ItemQuoteGroup from '../models/ItemQuoteGroup.js';
-
+import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import notificationService from '../services/notificationService.js';
@@ -15,6 +16,7 @@ import { Item } from '../models/Inventory.js';
 import { dimensionSignature, resolveFabricationWeight } from '../services/fabricationDemandService.js';
 import { MASS_UNIT_TO_KG_MULTIPLIER } from '../services/itemPricingService.js';
 import { resolveMasterItemId } from './purchaseQuoteController.js';
+import { isSerialised, wholePieces, splitWhole, planReceive, saveReceive, discardReceive, linkQcJob, recordLegacyReceive } from '../services/purchasedUnitService.js';
 
 // Validates + weight-resolves a set of fabrication dimension lines against an
 // Item's actual catalog dimensionVariants (never a leftover cut — Purchase
@@ -108,7 +110,11 @@ export async function splitFabricationLinesPerSize(masterItem, rawLines, { requi
 // fallback (which doesn't apply — a fabrication request's own `quantity` is
 // the aggregate purchase-unit weight, not a piece count).
 // Shared by updatePurchaseRequestStatus and receiveFabricationPurchase.
-async function createPurchaseQCJob(request, req, quantityOverride = null) {
+// QC by PO line (2026-10-15): `ctx` = { receiptKey, groupMember, purchase,
+// line, receivedSizes } — the jobs of one line receive share a receiptKey and
+// QC decides them together (qcController decideLine); the first is the lead.
+// No ctx (an old single-request path) = a one-job receipt of its own.
+async function createPurchaseQCJob(request, req, quantityOverride = null, ctx = {}) {
   try {
     const sourceRefId = request.purchaseOrder?.purchaseOrderNumber || request.requestId;
 
@@ -123,11 +129,16 @@ async function createPurchaseQCJob(request, req, quantityOverride = null) {
 
     let qcCategory = 'Raw Material';
     let qcBaseUnit = request.unit || 'pcs';
+    let inventoryItem = null;
     try {
-      const inventoryItem = await Item.findOne({
-        name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
-        companyId: request.companyId
-      });
+      // The PO line's own item link first (2026-10-15) — the name is only a fallback.
+      if (ctx.line?.item) inventoryItem = await Item.findById(ctx.line.item);
+      if (!inventoryItem) {
+        inventoryItem = await Item.findOne({
+          name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
+          companyId: request.companyId
+        });
+      }
       if (inventoryItem && inventoryItem.category) {
         qcCategory = inventoryItem.category;
       }
@@ -182,7 +193,18 @@ async function createPurchaseQCJob(request, req, quantityOverride = null) {
       status: 'Pending',
       company: request.companyId,
       createdBy: req.user._id,
-      notes: `Automatically created from Store Purchase Requisition: ${request.requestId}`
+      notes: `Automatically created from Store Purchase Requisition: ${request.requestId}`,
+      // QC by PO line (2026-10-15).
+      item: inventoryItem?._id || null,
+      purchaseOrder: ctx.purchase?._id || request.purchaseOrder?._id || request.purchaseOrder || null,
+      poLineId: ctx.line?._id || null,
+      receiptKey: ctx.receiptKey || String(new mongoose.Types.ObjectId()),
+      groupMember: !!ctx.groupMember,
+      lineStatus: 'Pending',
+      // Decided once from the item master (on the PO line); an old line
+      // without the flag reads the same item master here.
+      isFabrication: ctx.line?.isFabrication ?? !!inventoryItem?.fabricationRef,
+      receivedSizes: ctx.receivedSizes || [],
     });
     console.log(`✅ QC Job ${qcJobId} automatically created for Purchase Request ${request.requestId} with category ${qcCategory}`);
 
@@ -222,7 +244,7 @@ function prIdsOf(line) {
 // aggregation + a document save) that gives the identical answer no matter
 // which PR in the loop triggers it, so running it N times for one physical
 // receipt is pure redundant work.
-async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false } = {}) {
+async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false, qcCtx = {} } = {}) {
   // ── Update matching Inventory item with serial + warranty info ───────────
   try {
     const { Item } = await import('../models/Inventory.js');
@@ -245,26 +267,12 @@ async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false
     }
 
     if (inventoryItem) {
-      inventoryItem.serialNumber = request.serialNumber;
-      inventoryItem.warranty.period = request.warrantyPeriod;
-      if (request.warrantyCardUrl) {
-        // Replace the old warranty card with the newly uploaded one —
-        // delete the previous file so it doesn't linger orphaned on disk.
-        const oldCardUrl = inventoryItem.warranty.cardUrl;
-        if (oldCardUrl && oldCardUrl !== request.warrantyCardUrl) {
-          try {
-            const oldCardPath = path.join(process.cwd(), oldCardUrl.replace(/^\//, ''));
-            if (fs.existsSync(oldCardPath)) fs.unlinkSync(oldCardPath);
-          } catch (unlinkErr) {
-            console.error('Failed to delete old warranty card:', oldCardUrl, unlinkErr.message);
-          }
-        }
-        inventoryItem.warranty.cardUrl = request.warrantyCardUrl;
-        inventoryItem.warranty.cardUploadedAt = new Date();
-      }
-      inventoryItem.receivedFromPurchaseRequest = request._id;
-      await inventoryItem.save();
-      console.log(`✅ Inventory item "${inventoryItem.name}" updated with serial & warranty info`);
+      // Serial numbers / warranty are no longer written onto the Item master
+      // (2026-10-13): every receipt overwrote the last one — and the item's
+      // own warranty is what Samtek gives its customers. They're kept per
+      // unit / lot in PurchasedUnit instead (services/purchasedUnitService.js).
+      // Only the link the unit-conversion lookup needs is still set.
+      await Item.updateOne({ _id: inventoryItem._id }, { $set: { receivedFromPurchaseRequest: request._id } });
     } else {
       console.warn(`⚠️  No matching inventory item found for "${request.productName}" – skipping inventory update`);
     }
@@ -292,7 +300,7 @@ async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false
   // ─────────────────────────────────────────────────────────────────────────
 
   // 1. Generate QC Job
-  await createPurchaseQCJob(request, req);
+  await createPurchaseQCJob(request, req, null, qcCtx);
 
   // 2. Generate Purchase Invoice ONLY if one doesn't already exist for this PO
   //    (Invoice is now created at PO generation time via RFQ flow — avoid duplicate)
@@ -374,7 +382,7 @@ async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false
 // recordLeadTimeSample at all (only updatePurchaseRequestStatus did), so
 // fabrication PRs contributed zero samples to the vendor lead-time
 // estimator — fixed here since this helper is now shared by both.
-async function applyFabricationReceiveSideEffects(request, masterItem, req, { quantityOverride = null, skipPricingRecalc = false } = {}) {
+async function applyFabricationReceiveSideEffects(request, masterItem, req, { quantityOverride = null, skipPricingRecalc = false, qcCtx = {} } = {}) {
   // Needed by findPurchaseToBaseFactor's fallback lookup (same field the
   // generic receive flow sets) — serial/warranty are skipped entirely,
   // they don't apply to raw fabrication stock.
@@ -396,7 +404,7 @@ async function applyFabricationReceiveSideEffects(request, masterItem, req, { qu
     console.error('❌ Error recording fabrication purchase lead-time sample:', statsErr.message);
   }
 
-  await createPurchaseQCJob(request, req, quantityOverride);
+  await createPurchaseQCJob(request, req, quantityOverride, qcCtx);
 
   try {
     const { createAutoPurchaseInvoice } = await import('./purchaseInvoiceController.js');
@@ -470,7 +478,7 @@ async function generateUniqueRequestId() {
 //     storeOrderId/saleItemId from the original PR it's replacing, so its
 //     own explicit source:'QC' is checked FIRST to avoid being
 //     misclassified as whatever the original PR was.
-function classifyRaisedBy(pr) {
+export function classifyRaisedBy(pr) {
   if (pr.source === 'QC') return 'qcExchange';
   if (pr.autoGenerated && pr.reorderItemId) return 'autoReorder';
   if (pr.autoGenerated && pr.storeOrderId) return 'cascade';
@@ -1484,6 +1492,7 @@ export const updatePurchaseRequestStatus = async (req, res) => {
     // Trigger QC Job & Purchase Invoice creation on 'Received' status transition
     if (status === 'Received' && oldStatus !== 'Received') {
       await applyReceiveSideEffects(request, req);
+      await recordLegacyReceive(request, req.user);
       await logRequestReceived(request, req, `${request.receivedQuantity ?? request.quantity} ${request.purchaseUnit || request.unit || ''}`.trim());
     }
 
@@ -1584,7 +1593,10 @@ export const receiveFabricationPurchase = async (req, res) => {
     request.conversionFactor = totalPieces > 0 ? Math.round((totalWeightKg / totalPieces) * 1000000) / 1000000 : null;
     await request.save();
 
-    await applyFabricationReceiveSideEffects(request, masterItem, req, { quantityOverride: totalPieces });
+    await applyFabricationReceiveSideEffects(request, masterItem, req, {
+      quantityOverride: totalPieces,
+      qcCtx: { receivedSizes: resolved.lines.map(l => ({ values: l.values, quantity: l.quantity })) },
+    });
     await logRequestReceived(request, req, `${totalPieces} pcs`);
 
     res.status(200).json({ success: true, data: request });
@@ -1729,37 +1741,37 @@ export const receiveLineItems = async (req, res) => {
     }
 
     // ── Validate mandatory receive fields, once for the whole line ────────────
-    const serialNumber = req.body.serialNumber?.trim();
+    // (Every upload of a refused receive is deleted again by receiveUpload.)
     const warrantyPeriod = req.body.warrantyPeriod;
-    const warrantyCard = req.file; // uploaded via multer
+    const warrantyCards = req.warrantyCards || (req.file ? [req.file] : []);
     // Every PR on a line was synced the same warrantyMonths at batch time
     // (createPurchase/updatePurchase's PR-sync loop) — any one of them is
     // representative of the whole line's quote.
     const quotedWarranty = Number(prs[0].warrantyMonths) || 0;
 
-    const missing = [];
-    if (!serialNumber) missing.push('Serial Number');
-    if (quotedWarranty > 0) {
-      if (warrantyPeriod === undefined || warrantyPeriod === '' || Number(warrantyPeriod) < 0) missing.push('Warranty Period (months)');
-      if (Number(warrantyPeriod) > 0 && !warrantyCard) missing.push('Warranty Card (image or PDF)');
+    if (quotedWarranty > 0 && (warrantyPeriod === undefined || warrantyPeriod === '' || !(Number(warrantyPeriod) >= 0))) {
+      return res.status(400).json({ success: false, message: 'Cannot mark as Received. The following are required: Warranty Period (months)' });
     }
-    if (missing.length > 0) {
-      if (warrantyCard) { try { fs.unlinkSync(warrantyCard.path); } catch (_) { } }
-      return res.status(400).json({
-        success: false,
-        message: `Cannot mark as Received. The following are required: ${missing.join(', ')}`
-      });
+    const resolvedWarrantyPeriod = quotedWarranty > 0 ? Number(warrantyPeriod) : 0;
+    if (resolvedWarrantyPeriod > 0 && !warrantyCards.length) {
+      return res.status(400).json({ success: false, message: 'Cannot mark as Received. The following are required: Warranty Card (image or PDF)' });
     }
+    // The vendor's own invoice — optional (2026-10-12, client Q4).
+    const vendorInv = readVendorInvoice(req.body, req.vendorInvoiceFile);
+    if (vendorInv.error) return res.status(400).json({ success: false, message: vendorInv.error });
 
     const samplePr = prs[0];
+    const masterItemId = await resolveMasterItemId(samplePr, companyId);
+    const masterItem = masterItemId ? await Item.findById(masterItemId).select('unit receiveUnit').lean() : null;
     let sameUnitAsStock = false;
-    if (samplePr.purchaseUnit) {
-      const masterItemId = await resolveMasterItemId(samplePr, companyId);
-      const masterItemForUnit = masterItemId ? await Item.findById(masterItemId).select('unit').lean() : null;
-      if (masterItemForUnit?.unit && masterItemForUnit.unit.trim().toLowerCase() === samplePr.purchaseUnit.trim().toLowerCase()) {
-        sameUnitAsStock = true;
-      }
+    if (samplePr.purchaseUnit && masterItem?.unit && masterItem.unit.trim().toLowerCase() === samplePr.purchaseUnit.trim().toLowerCase()) {
+      sameUnitAsStock = true;
     }
+    // Serial numbers (2026-10-13): one per piece when the vendor gave a
+    // warranty and the item is counted in pieces; otherwise one serial / lot
+    // number for the receipt (services/purchasedUnitService.js).
+    const stockUnit = masterItem?.receiveUnit || masterItem?.unit || samplePr.unit || '';
+    const serialised = isSerialised({ warrantyMonths: resolvedWarrantyPeriod, stockUnit });
 
     const totalOrdered = prs.reduce((sum, pr) => sum + (Number(pr.purchaseQuantity) || Number(pr.quantity) || 0), 0);
 
@@ -1769,7 +1781,6 @@ export const receiveLineItems = async (req, res) => {
       combinedReceivedQuantity = Number(req.body.receivedQuantity);
       conversionFactor = Number(req.body.conversionFactor);
       if (!(combinedReceivedQuantity > 0) || !(conversionFactor > 0)) {
-        if (warrantyCard) { try { fs.unlinkSync(warrantyCard.path); } catch (_) { } }
         return res.status(400).json({
           success: false,
           message: `Cannot mark as Received. Unit conversion is required: enter the Received Quantity (in ${samplePr.purchaseUnit}) and how many ${samplePr.purchaseUnit} equal 1 storage unit.`
@@ -1781,27 +1792,85 @@ export const receiveLineItems = async (req, res) => {
       conversionFactor = 1;
     }
 
-    const warrantyCardUrl = warrantyCard ? `/uploads/warranty-cards/${warrantyCard.filename}` : null;
-    const resolvedWarrantyPeriod = quotedWarranty > 0 ? Number(warrantyPeriod) : 0;
-
-    for (const pr of prs) {
-      const ownOrdered = Number(pr.purchaseQuantity) || Number(pr.quantity) || 0;
-      const share = totalOrdered > 0 ? ownOrdered / totalOrdered : 1 / prs.length;
-
-      pr.serialNumber = serialNumber;
-      pr.warrantyPeriod = resolvedWarrantyPeriod;
-      if (warrantyCardUrl) pr.warrantyCardUrl = warrantyCardUrl;
+    // Each request's share of the combined receipt (its ordered quantity as a
+    // fraction of the line's), worked out before anything is written.
+    const round3 = (n) => Math.round(n * 1000) / 1000;
+    const ownOrderedOf = (pr) => Number(pr.purchaseQuantity) || Number(pr.quantity) || 0;
+    const shares = prs.map(pr => {
+      const own = ownOrderedOf(pr);
+      const share = totalOrdered > 0 ? own / totalOrdered : 1 / prs.length;
+      const s = { pr, receivedQuantity: null, convertedQuantity: null };
       if (combinedReceivedQuantity != null && conversionFactor != null) {
-        pr.receivedQuantity = Math.round(combinedReceivedQuantity * share * 1000) / 1000;
-        pr.conversionFactor = conversionFactor;
-        pr.convertedQuantity = Math.round((pr.receivedQuantity / conversionFactor) * 1000) / 1000;
+        s.receivedQuantity = round3(combinedReceivedQuantity * share);
+        s.convertedQuantity = round3(s.receivedQuantity / conversionFactor);
       }
-      pr.receivedAt = new Date();
-      pr.status = 'Received';
-      await pr.save();
-
-      await applyReceiveSideEffects(pr, req, { skipPricingRecalc: true });
+      // What its QC job will hold (createPurchaseQCJob's own fallback order).
+      s.qty = s.convertedQuantity || Number(pr.quantity) || 0;
+      return s;
+    });
+    if (serialised) {
+      // Serials go per piece, so each request gets whole pieces.
+      if (combinedReceivedQuantity != null && conversionFactor != null) {
+        const pieces = wholePieces(combinedReceivedQuantity / conversionFactor);
+        if (!pieces) {
+          return res.status(400).json({ success: false, message: `${combinedReceivedQuantity} ${samplePr.purchaseUnit} ÷ ${conversionFactor} isn't a whole number of ${stockUnit} — each piece gets its own serial number. Check the quantity and the conversion.` });
+        }
+        const split = splitWhole(pieces, prs.map(ownOrderedOf));
+        if (split.some(n => n < 1)) {
+          return res.status(400).json({ success: false, message: `${pieces} ${stockUnit} can't be shared across the ${prs.length} requests on this line — each needs at least one piece.` });
+        }
+        shares.forEach((s, i) => {
+          s.convertedQuantity = split[i];
+          s.receivedQuantity = round3(split[i] * conversionFactor);
+          s.qty = split[i];
+        });
+      } else if (shares.some(s => !wholePieces(s.qty))) {
+        return res.status(400).json({ success: false, message: `The ordered quantity isn't a whole number of ${stockUnit} — each piece gets its own serial number.` });
+      }
     }
+
+    const Supplier = (await import('../models/Supplier.js')).default;
+    const vendor = purchase.supplier ? await Supplier.findById(purchase.supplier).select('supplierName').lean() : null;
+    const plan = await planReceive({
+      companyId, po: purchase, line, vendorName: vendor?.supplierName || '',
+      item: masterItemId, itemName: line.itemName || samplePr.productName,
+      prs: shares.map(s => ({ _id: s.pr._id, qty: s.qty, qtyUnit: stockUnit })),
+      serialised, warrantyMonths: resolvedWarrantyPeriod, body: req.body, files: warrantyCards, user: req.user,
+    });
+    if (plan.status) return res.status(plan.status).json({ success: false, message: plan.message });
+    const saved = await saveReceive(plan.docs);
+    if (!saved.ok) return res.status(saved.status).json({ success: false, message: saved.message });
+
+    let receivedAny = false;
+    // QC by PO line (2026-10-15): this receive is ONE QC card — every
+    // request's job shares this key; the first is the lead.
+    const receiptKey = String(new mongoose.Types.ObjectId());
+    try {
+      for (const [si, s] of shares.entries()) {
+        const { pr } = s;
+        const own = plan.perPr.get(String(pr._id));
+        pr.serialNumber = own.serialNumber;
+        pr.warrantyPeriod = resolvedWarrantyPeriod;
+        if (own.warrantyCardUrl) pr.warrantyCardUrl = own.warrantyCardUrl;
+        if (s.receivedQuantity != null) {
+          pr.receivedQuantity = s.receivedQuantity;
+          pr.conversionFactor = conversionFactor;
+          pr.convertedQuantity = s.convertedQuantity;
+        }
+        pr.receivedAt = new Date();
+        pr.status = 'Received';
+        if (vendorInv.invoice) pr.vendorInvoice = vendorInv.invoice;
+        await pr.save();
+        receivedAny = true;
+
+        await applyReceiveSideEffects(pr, req, { skipPricingRecalc: true, qcCtx: { receiptKey, groupMember: si > 0, purchase, line } });
+        await linkQcJob(pr._id);
+      }
+    } catch (err) {
+      if (!receivedAny) await discardReceive(plan.docs);
+      throw err;
+    }
+    const serialCount = plan.docs.filter(d => !d.isLot).length;
 
     // Pricing recalculated once for the whole line, not once per PR — see
     // applyReceiveSideEffects's own comment on why this is hoisted out.
@@ -1827,8 +1896,8 @@ export const receiveLineItems = async (req, res) => {
     }
 
     // Audit log (gap 17).
-    await logLineReceived({ po: purchase, line, user: req.user, req, text: combinedReceivedQuantity != null ? `${combinedReceivedQuantity} ${samplePr.purchaseUnit || ''}`.trim() : `${totalOrdered} ${samplePr.unit || ''}`.trim() });
-    res.status(200).json({ success: true, data: { received: prs.map(pr => pr._id) } });
+    await logLineReceived({ po: purchase, line, user: req.user, req, text: (combinedReceivedQuantity != null ? `${combinedReceivedQuantity} ${samplePr.purchaseUnit || ''}`.trim() : `${totalOrdered} ${samplePr.unit || ''}`.trim()) + (serialCount ? ` — ${serialCount} serial numbers` : '') + (vendorInv.invoice ? ` — vendor invoice ${vendorInv.invoice.number}` : '') });
+    res.status(200).json({ success: true, data: { received: prs.map(pr => pr._id), serials: serialCount } });
   } catch (error) {
     console.error('Error receiving purchase line:', error);
     res.status(500).json({ success: false, message: 'Server Error' });
@@ -1850,7 +1919,13 @@ export const receiveLineFabrication = async (req, res) => {
   try {
     const { purchaseId, lineId } = req.params;
     const companyId = req.user.companyId;
-    const { lines } = req.body;
+    let { lines } = req.body;
+    // Multipart (with a vendor invoice scan, 2026-10-12): lines arrive as JSON text.
+    if (typeof lines === 'string') {
+      try { lines = JSON.parse(lines); } catch { return res.status(400).json({ success: false, message: 'The received sizes could not be read — refresh the page.' }); }
+    }
+    const vendorInv = readVendorInvoice(req.body, req.vendorInvoiceFile);
+    if (vendorInv.error) return res.status(400).json({ success: false, message: vendorInv.error });
 
     const isStoreUser = req.user.role === 'Store Head' || req.user.role === 'Store Employee';
     if (!isStoreUser) {
@@ -1911,23 +1986,44 @@ export const receiveLineFabrication = async (req, res) => {
     const originalTotalPieces = prs.reduce((sum, pr) =>
       sum + (pr.fabricationDimensionLines || []).reduce((s, l) => s + (l.quantity || 0), 0), 0);
 
-    for (const pr of prs) {
-      const ownOriginal = (pr.fabricationDimensionLines || []).reduce((s, l) => s + (l.quantity || 0), 0);
-      const share = originalTotalPieces > 0 ? ownOriginal / originalTotalPieces : 1 / prs.length;
-      const ownPieces = Math.round(totalPieces * share);
+    // Each received SIZE shared across the requests in whole pieces, by what
+    // each asked for (2026-10-15). Every request — and its QC job — holds
+    // only ITS OWN pieces per size. It used to be given the whole shipment,
+    // and QC Pass credits stock from it, so a line of N requests put N× the
+    // pieces into stock.
+    const weights = prs.map(pr => (pr.fabricationDimensionLines || []).reduce((s, l) => s + (l.quantity || 0), 0));
+    const ownLines = prs.map(() => []);
+    for (const rl of resolved.lines) {
+      const split = splitWhole(rl.quantity, originalTotalPieces > 0 ? weights : prs.map(() => 1));
+      split.forEach((qty, i) => {
+        if (qty > 0) {
+          ownLines[i].push({
+            values: rl.values, quantity: qty, weightPerPieceKg: rl.weightPerPieceKg,
+            lineWeightKg: rl.weightPerPieceKg != null ? Math.round(rl.weightPerPieceKg * qty * 1000) / 1000 : null,
+          });
+        }
+      });
+    }
+    // QC by PO line (2026-10-15): this receive is ONE QC card.
+    const receiptKey = String(new mongoose.Types.ObjectId());
 
-      // Combined resolved lines, same for every PR on this line — a
-      // reference snapshot of what the whole shipment looked like, not
-      // load-bearing for stock (ownPieces, passed to the QC job below, is
-      // what actually drives crediting).
-      pr.receivedFabricationLines = resolved.lines;
-      pr.receivedQuantity = Math.round(totalWeightKg * share * 1000) / 1000;
+    for (const [pi, pr] of prs.entries()) {
+      const own = ownLines[pi];
+      const ownPieces = own.reduce((s, l) => s + l.quantity, 0);
+      const ownKg = own.reduce((s, l) => s + (l.lineWeightKg || 0), 0);
+
+      pr.receivedFabricationLines = own;
+      pr.receivedQuantity = Math.round(ownKg * 1000) / 1000;
       pr.conversionFactor = conversionFactor;
       pr.status = 'Received';
       pr.receivedAt = new Date();
+      if (vendorInv.invoice) pr.vendorInvoice = vendorInv.invoice;
       await pr.save();
 
-      await applyFabricationReceiveSideEffects(pr, masterItem, req, { quantityOverride: ownPieces, skipPricingRecalc: true });
+      await applyFabricationReceiveSideEffects(pr, masterItem, req, {
+        quantityOverride: ownPieces, skipPricingRecalc: true,
+        qcCtx: { receiptKey, groupMember: pi > 0, purchase, line, receivedSizes: own.map(l => ({ values: l.values, quantity: l.quantity })) },
+      });
     }
 
     try {
@@ -1938,7 +2034,7 @@ export const receiveLineFabrication = async (req, res) => {
     }
 
     // Audit log (gap 17).
-    await logLineReceived({ po: purchase, line, user: req.user, req, text: `${totalPieces} pcs` });
+    await logLineReceived({ po: purchase, line, user: req.user, req, text: `${totalPieces} pcs${vendorInv.invoice ? ` — vendor invoice ${vendorInv.invoice.number}` : ''}` });
     res.status(200).json({ success: true, data: { received: prs.map(pr => pr._id) } });
   } catch (error) {
     console.error('Error receiving fabrication purchase line:', error);

@@ -114,6 +114,7 @@ export async function onMaterialRejected(job, qty, user = null, req = null) {
       rejectedQty,
       qtyUnit: job.unit || '',
       reason: job.failReason || '',
+      severity: ['Minor', 'Major', 'Critical'].includes(job.failSeverity) ? job.failSeverity : 'Major',
       value: money.value,
       net: money.net,
       gst: money.gst,

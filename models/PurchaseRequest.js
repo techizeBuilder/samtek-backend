@@ -202,6 +202,15 @@ const purchaseRequestSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'PurchaseRejection',
     default: null
+  },
+  // The vendor's own tax invoice for this delivery, recorded by Store at
+  // receive (optional, 2026-10-12 — client Q4): their number + date (+ a
+  // scan), so their GST filing can be matched to our PO. No amounts — the
+  // money comes from the PO.
+  vendorInvoice: {
+    number: { type: String, default: null },
+    date: { type: Date, default: null },
+    fileUrl: { type: String, default: null }
   }
 }, { timestamps: true });
 

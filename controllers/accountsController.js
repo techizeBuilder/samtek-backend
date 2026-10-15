@@ -13,6 +13,9 @@ import LeadPayment from '../models/LeadPayment.js';
 import { USER_ROLES } from '../shared/schema.js';
 import Expense from '../models/Expense.js';
 import PurchaseInvoice from '../models/PurchaseInvoice.js';
+import PurchaseRejection from '../models/PurchaseRejection.js';
+import VendorMoneyBack from '../models/VendorMoneyBack.js';
+import PurchaseReturn from '../models/PurchaseReturn.js';
 import LedgerEntry from '../models/LedgerEntry.js';
 import BankAccount from '../models/BankAccount.js';
 
@@ -1305,6 +1308,9 @@ export const getAccounts = async (req, res) => {
 
     if (req.user.role !== USER_ROLES.SUPER_USER) {
       query.unit = req.user.unit;
+      // Accounts made per company (the purchase ledger's own, 2026-10-12)
+      // only show to that company; older accounts have no company.
+      query.companyId = { $in: [null, req.user.companyId] };
     } else if (unit) {
       query.unit = unit;
     }
@@ -1751,6 +1757,9 @@ export const getLedgerRecords = async (req, res) => {
     if (!account) {
       return res.status(404).json({ success: false, message: 'Account not found' });
     }
+    if (account.companyId && req.user.role !== USER_ROLES.SUPER_USER && String(account.companyId) !== String(req.user.companyId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
 
     // Base query for transactions involving this account
     let query = {
@@ -1909,6 +1918,11 @@ export const getLedgerRecords = async (req, res) => {
           // If found salesman, skip further checks. If not, follow other types.
           if (entityType === 'Salesman') {
             // continue
+          } else if (txn.relatedDocument === 'Receipt' && txn.transactionNumber && txn.transactionNumber.startsWith('TXN-RFR-')) {
+            // A refund a vendor paid back (purchase ledger, 2026-10-12).
+            entityType = 'Vendor';
+            const mb = await VendorMoneyBack.findById(txn.relatedDocumentId).select('vendorName');
+            if (mb) entityName = mb.vendorName;
           } else if (txn.relatedDocument === 'Receipt') {
             // Check if this is a Lead Payment transaction
             if (txn.transactionNumber && txn.transactionNumber.startsWith('TXN-LDP-')) {
@@ -1932,6 +1946,20 @@ export const getLedgerRecords = async (req, res) => {
             entityType = 'Customer';
             const sl = await Sale.findById(txn.relatedDocumentId).populate('customer', 'name');
             if (sl && sl.customer) entityName = sl.customer.name;
+          } else if (txn.relatedDocument === 'Purchase') {
+            // A PO bill's QC-passed material / charges / advance set-off, or a
+            // bill without a PO (purchase ledger, 2026-10-12).
+            entityType = 'Vendor';
+            const inv = await PurchaseInvoice.findById(txn.relatedDocumentId).populate('vendor', 'supplierName');
+            if (inv && inv.vendor) entityName = inv.vendor.supplierName;
+          } else if (txn.relatedDocument === 'PurchaseReturn') {
+            // A QC rejection's advance (refund due / written off), a cancelled
+            // PO's leftover advance, or an old purchase return.
+            entityType = 'Vendor';
+            const rej = await PurchaseRejection.findById(txn.relatedDocumentId).select('vendorName');
+            const mb = rej ? null : await VendorMoneyBack.findById(txn.relatedDocumentId).select('vendorName');
+            const pret = rej || mb ? null : await PurchaseReturn.findById(txn.relatedDocumentId).populate('vendor', 'supplierName');
+            entityName = rej?.vendorName || mb?.vendorName || pret?.vendor?.supplierName || '';
           }
         }
       } catch (err) {

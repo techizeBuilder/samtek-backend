@@ -1,7 +1,8 @@
 # Procurement v2 — Build Workflow
 
 Date: 2026-10-08
-Status: **Build plan for the rebuild. 49 open questions (§9), 41 resolved (§10).**
+Status: **Build plan for the rebuild. 27 open questions (§9), 63 resolved (§10). The purchase flow is complete (change report §32); the
+open questions left are optional or belong to the outsource flow.**
 
 Built so far (2026-10-08 / 09) — see `procurement-v2-changes-2026-10.md`:
 - Payment Terms + GST off Vendor Master.
@@ -464,7 +465,16 @@ Open: P1–P4, C1–C5.
 
 ### 6.8 Accounts — payment requests, vendor bill, 3-way match (§16)
 
-**On hold 2026-10-10 — waiting for the client.** The findings, the proposed model (the PO is the bill; advance at the PO, the rest on receipt; one vendor balance with a clear sign) and 9 questions are in `accounts-bill-ledger-payments-2026-10.md`. Build from that once it is answered.
+**Built 2026-10-12** (change report §22–§25), from the client's answers in
+`accounts-bill-ledger-payments-2026-10.md`:
+- the PO is the bill
+- the advance, with delivery days counting from it
+- QC pass → payable; an optional mid payment
+- full acceptance → due by credit days
+- QC rejections settled by the vendor's answer
+- a real ledger per company + unit
+
+(It was on hold from 2026-10-10 until the client answered.)
 
 **Bug found 2026-10-09 — to fix first in the next session (with the invoice timing):**
 - **The intent:** `createAutoPurchaseInvoice` runs when a PO is ordered and is meant to post
@@ -502,7 +512,15 @@ Open: P1–P4, C1–C5.
 Already built and reusable: payments targeted at specific invoices (`VendorPayment.allocations[]`)
 and `getVendorOutstanding`.
 
-Open: AC1–AC8.
+**Built 2026-10-12** from the client's answers (change report §22–§25;
+`accounts-bill-ledger-payments-2026-10.md`). The model differs from the plan above:
+- **The PO is the bill.** There's no separately typed vendor bill and no 3-way match.
+- **Payment:** the advance when the PO is placed, then the full payment Credit Days after
+  everything is received and QC-passed, with an optional part payment for accepted material.
+- **QC rejections** are settled by the vendor's answer (replace / refund / credit / refused).
+- **The vendor's own invoice number** is recorded at receive.
+
+Open: AC6 only (credit limit: today a warning at PO time).
 
 ### 6.9 Store — expected receipts and follow-up (§17)
 
@@ -565,6 +583,17 @@ Open: ST1–ST3, ST7.
 Open: QC1–QC4.
 
 ### 6.12 Return / replacement (§19)
+
+**Built 2026-10-12** (change report §24) in a simpler form than the plan below:
+- A QC rejection waits for the vendor's answer, recorded by Purchase: **replace / refund / credit /
+  refused**.
+- A replacement comes on the same PO line, with a new receive and a new QC.
+- Refund and credit settle the advance paid on the rejected part.
+- No automatic vendor email.
+
+**Not built:** return freight (**RT2**) and a return challan / gate pass (**RT4**).
+
+The original plan, for reference:
 
 1. **Return request** — created from the QC rejection: qty, defect, evidence, reason.
 2. **Vendor notified** — the existing one-click exchange email can be reused (**RT3**).
@@ -790,10 +819,14 @@ can never be the same person. Built.
 **V4. Score thresholds for Watchlist / Probation / Suspension suggestions?**
 **Default:** below 60 → Watchlist suggestion; below 45 → Suspension review. Suggestions only,
 never automatic.
-Status: **Resolved 2026-10-08** — for now, use the **existing** 1–5 vendor rating. Watchlist = rating < 3.0
-over ≥ 5 events; Probationary = fewer than 3 received POs. These are constants in
-`vendorApprovalService.js`, to move to config. Nothing happens automatically; the Company Admin
-can suspend from the Watchlist tab. Rework the rating to the client formula later (§6.13).
+Status: **Resolved 2026-10-08, updated 2026-10-13 (§30):**
+- **Watchlist:** the **vendor score** (out of 100) **below 60** (editable by the Company Admin) with
+  at least 5 deliveries / QC checks, or a vendor that refused to settle a QC rejection in the last
+  90 days. The Company Admin is notified once.
+- **Probationary:** fewer than 3 received POs.
+- Nothing happens automatically: the Company Admin can suspend from the Watchlist tab.
+
+(Until 2026-10-13 this used the old 1–5 rating below 3.0.)
 
 **V5. Drop the old fields — manual 1–5 rating, free-text Categories tags, `supplierType`?**
 **Default:** yes. The computed score replaces the rating; the item mapping replaces the tags.
@@ -1046,30 +1079,52 @@ Status: **Resolved 2026-10-08** — keep the "Vendor delivers / We pick up" choi
 **S1. Confirm the blueprint's default score weights.**
 25 / 25 / 15 / 10 / 10 / 10 / 5, editable by Master Admin.
 **Default:** yes.
-Status: Open
+Status: **Resolved 2026-10-13 (built — change report §30):**
+- **Technical is dropped**, and its 10 points go to Quality and Delivery.
+- **Weights:** Price 25 · Quality 30 · Delivery 20 · Credit 10 · Warranty 10 · Response 5, editable
+  by the Company Admin (Settings → Vendor score).
+- **Watchlist line:** below 60.
 
 **S2. What score does a new vendor with no history get?**
 **Default:** quality and delivery 70/100, marked "no history". Price and technical come from the
 current quote.
-Status: Open
+Status: **Resolved 2026-10-13 (§30):**
+- no made-up score: a part with no data is left out, and the score is worked out over the rest
+- with fewer than 5 deliveries + QC decisions, "Limited history"; no Watchlist from the score until
+  then
 
 **S3. Who marks technical pass/fail on a quote?**
 **Default:** Purchase. R&D for items with a drawing or spec revision.
-Status: Open
+Status: **Resolved 2026-10-13 — dropped** (user): no technical pass/fail and no technical part in
+the vendor score.
 
 **S4. How should recent history count more?**
 **Default:** rolling 12 months, linear decay (the latest month counts most).
-Status: Open
+Status: **Resolved 2026-10-13 (§30):**
+- **Score window:** rolling 12 months; each event is weighted 1.0 (today) falling to 0.5 (a year
+  ago).
+- **Lifetime score:** shown alongside, unweighted.
 
 **S5. Purchaser score — period, who can see it, who enters the manual parts?**
 **Default:** monthly. Visible to the Company Admin, who also enters "relationship" and "policy
 compliance".
-Status: Open
+Status: **Resolved 2026-10-13 (built — change report §31, `purchaser-score-logic-2026-10.md`):**
+- **Periods:** monthly + the last 12 months + a 6-month trend.
+- **Who sees it:** the Company Admin sees everyone; each purchaser sees their own.
+- **All 9 parts automatic:** "relationship" = recording the vendor's answer on QC rejections on
+  time; "policy" = vendor selection exceptions. Nothing entered by hand.
 
 **S6. Warranty/after-sales is 10% of the score, but no vendor warranty-claim module exists.**
 Build one, or move the weight elsewhere until it exists?
 **Default:** split those 10 points between quality and delivery until a claims module exists.
-Status: Open
+Status: **Resolved 2026-10-13 (built — change report §28–§30):**
+- **The claims record:**
+  - a serial record per unit at receive
+  - "Vendor Warranty Claims" on Complaints → Support, recording the claim, the vendor's response and
+    resolution, and our satisfaction
+- **Warranty 10 in the vendor score, in two halves:**
+  - warranty months quoted vs the best quoted for the item
+  - the claims: ★ satisfaction, resolved or not, response speed
 
 ### Approval
 
@@ -1146,33 +1201,36 @@ Status: **Resolved 2026-10-08** — typed on the PO per item line — nothing to
 Today the invoice is created automatically at PO time as a copy of the PO. For a real 3-way match,
 Accounts enters the vendor's actual bill instead.
 **Default:** yes. Commitments and advances are tracked on the PO itself.
-Status: Open
+Status: **Resolved 2026-10-12** — no separate bill: the PO is the bill (client). The vendor's own invoice number + date (+ scan) are recorded at Store receive for GST matching (change report §22, §25).
 
 **AC2. Advances paid before the bill — recorded against the PO and adjusted later?**
 **Default:** yes.
-Status: Open
+Status: **Resolved 2026-10-12** — yes — the advance is paid against the PO's bill (Advance % × PO total), set off at full acceptance; the vendor's delivery days start when it's fully paid (§22, §23).
 
 **AC3. "Against Dispatch" payment term — how do we learn the vendor has dispatched?**
 **Default:** the purchaser marks it with evidence (LR / e-way bill number).
-Status: Open
+Status: **Resolved 2026-10-12** — not needed — the client's payment stages are advance → (optional part payment) → full payment after QC; there is no "against dispatch" stage.
 
 **AC4. Pay only for QC-accepted quantity on items that need QC?**
 **Default:** yes.
-Status: Open
+Status: **Resolved 2026-10-12** — yes — material becomes payable only when QC passes it; rejected material follows the vendor's answer (§23, §24).
 
 **AC5. 3-way match tolerances, and who can override?**
 **Default:** 0% on price; quantity must equal accepted quantity. Accounts Head can override with a
 reason.
-Status: Open
+Status: **Resolved 2026-10-12** — not needed — with the PO as the bill there is nothing to match; changes come only from QC rejections and cancel / short close, each recorded on the bill (§24).
 
 **AC6. Credit limit — warn or block at PO time?**
 This was open question 6 in the 2026-09 discussion doc.
 **Default:** warn. Going above 100% of the limit needs Company Admin approval.
+**2026-10-12 (user):** the warning compares the credit limit with what we already owe the vendor and
+haven't paid (QC-passed material, advances due, bills without a PO) — not the PO being created
+(change report §26). Still open: should going over the limit block or need approval?
 Status: Open
 
 **AC7. Payment reminders — how many days before the due date, and to whom?**
 **Default:** 2 days before (the client's original brief), to Accounts, in-app + email.
-Status: Open
+Status: **Resolved 2026-10-12** — Accounts is told when a PO is fully accepted ("ready for full payment, due …") and again when it goes overdue (daily 9:40) (§23).
 
 **AC8. Work out CGST+SGST vs IGST from vendor state vs company state?**
 **Default:** yes.
@@ -1189,11 +1247,16 @@ Status: Open
 
 **ST2. Serial numbers — still mandatory on every receive?**
 **Default:** no. Add a "serial tracked" item flag; only those items require one.
-Status: Open
+Status: **Resolved 2026-10-13 (built — change report §28):**
+- A serial / lot number stays mandatory on every receive.
+- An item with a vendor warranty, counted in pieces, needs **one serial per piece**.
+- The serials are kept per unit (`PurchasedUnit`), not on the item master.
 
 **ST3. Batch/lot recorded on the GRN only, with no traceability into machines (see §2)?**
 **Default:** yes.
-Status: Open
+Status: **Resolved 2026-10-13 (built — §28):** a lot record per receipt (vendor, PO, QC result).
+There's no traceability into machines; linking at Packaging / Production is left for later, if the
+client asks.
 
 **ST4. Who decides a delivery is "Not Received"?**
 **Default:** the system flags it overdue on the due date, Store confirms, and the purchaser gets a
@@ -1228,7 +1291,9 @@ Status: Open
 
 **QC3. Defect categories and severity levels?**
 **Default:** Minor / Major / Critical. Category list editable by QC.
-Status: Open
+Status: **Resolved 2026-10-13 (built — §30):** QC picks **Minor / Major / Critical** on a purchase
+Fail. It's saved on the rejection and weighs the vendor and purchaser scores. Defect categories are
+on warranty claims (§29); at QC the fail reason stays free text.
 
 **QC4. Is the existing item QC checklist (`QCItemChecklist`) the incoming checklist, or is a separate incoming stage needed?**
 **Default:** reuse it.
@@ -1238,7 +1303,8 @@ Status: Open
 
 **RT1. Replacement or credit note — who decides, and which is the default?**
 **Default:** Purchase decides after the vendor responds. Replacement by default.
-Status: Open
+Status: **Resolved 2026-10-12 (built — change report §24):** Purchase records the vendor's answer
+(replace / refund / credit / refused). There's no default; the answer is whatever the vendor agreed.
 
 **RT2. Who pays return freight?**
 **Default:** the vendor.
@@ -1246,7 +1312,8 @@ Status: Open
 
 **RT3. Keep the vendor exchange email (one-click accept) as the "vendor notified" step?**
 **Default:** yes.
-Status: Open
+Status: **Resolved 2026-10-12 — dropped:** nothing is sent to the vendor automatically. Purchase
+contacts the vendor and records their answer (change report §24).
 
 **RT4. Does a return need a return challan / gate pass document?**
 **Default:** yes, generated by the system.
@@ -1256,19 +1323,21 @@ Status: Open
 
 **X1. Does Samtek keep budgets by department or project?**
 **Default:** no budget check unless budgets are provided.
-Status: Open
+Status: **Resolved 2026-10-13 — not built** (user: the purchase flow ends with the dashboard). No
+budget check.
 
 **X2. Cost centres / project tags?**
 **Default:** tag automatically from the linked sales order or production order. A manual
 cost-centre list is optional.
-Status: Open
+Status: **Resolved 2026-10-13 — not built** (user).
 
 **X3. How strict should separation of duties be, given the team size?**
 **Default:**
 - Must be different people: PO approver ≠ selection maker; payment approver ≠ bank-detail editor.
 - Warning only: every other pair in §23.
 
-Status: Open
+Status: **Resolved 2026-10-13 — no separate rules built** (user). What's already enforced: nobody
+approves their own PO, vendor request or cancellation (§2, §5, §14).
 
 **X4. Hash-chained audit log, and how long to keep it?**
 **Default:** yes, hash-chained; kept forever.
@@ -1292,11 +1361,18 @@ Status: Open
 
 **X8. Conflict-of-interest declarations — for whom, and how often?**
 **Default:** a declaration at vendor onboarding, and a yearly one for purchasers.
-Status: Open
+Status: **Partly built:** the vendor's conflict-of-interest answer is required before approval
+(change report §2). A yearly declaration for purchasers isn't built; only if the client asks.
 
 **X9. Which dashboards come first?**
 **Default:** Purchase and Store first; Vendor, Purchaser and Management after.
-Status: Open
+Status: **Resolved 2026-10-13 (built — change report §32, `purchase-dashboard-design-2026-10.md`):**
+one Purchase Dashboard with three views by role:
+- **My work:** purchase employee
+- **Team:** purchase head
+- **Management:** Company Admin
+
+The blueprint's Store / Vendor / Purchaser / Management contents are folded into these views.
 
 ---
 
@@ -1317,6 +1393,9 @@ Add one line per question as it gets answered (and update its Status in §9).
 | X6 | Blacklisting / suspension / reinstatement approved by the Company Admin | User | 2026-10-08 |
 | — | Merged page named **RFQ/PO**; the Quote button is **"Vendor Quotation"** (D4 changed) | Client via user | 2026-10-08 |
 | W1–W3, W5–W8, W10, W11 | RFQ/PO as built: real quote logic kept, one PO per vendor, coverage ranking even on fresh load, search/filters pull to top, auto-select only for items without a group, min-vendor warning with a company-wide N | User | 2026-10-08 |
+| — (QC by PO line) | QC decides a **received PO line** as one card / one decision (each request keeps its own job underneath). A rejection goes to requests: fabrication **per size first**, then **fill one before the next**, in the order **stock → production → sales order, newest first**; serial items by the ticked serials. "Fabrication" is decided once from the item master and carried PO line → receive → QC. A request closed without being bought shows as "Closed — reason" (change report §41) | User | 2026-10-14/15 |
+| — (receive before the advance) | **Store's Receive is NOT blocked** while a PO waits for its advance. The advance only starts the delivery-date count; a vendor may ship early, and conditions change on the go. A line received with no promised date yet counts as an **early delivery (100)** in the vendor score (change report §38). New dates are recorded by Purchase ("Change date", with a reason; Store is notified) | User | 2026-10-14 |
+| — (lock during approval) | An item card on a PO waiting for Company Admin approval stays **locked for every vendor** (no PO, quote, selection or quantity change). A **new PR for that item waits too** (shown as "N new — not selected" on the locked card) until the Admin approves or rejects; then it's ordered normally. A separate "waiting for approval" card state that would let new PRs be bought meanwhile was **declined as extra complexity** (user, 2026-10-14) | User | 2026-10-14 |
 | A1, A2 | One PO approval threshold (Company Admin); a PO above it waits as "Pending Approval" with no effect until approved | User | 2026-10-08 |
 | C1–C5, P5 | Charges and payment terms typed at PO time, whole-PO, names from a Purchase-maintained template (new permission); charges flat ₹ + own GST %; GST % per item line; transport toggle kept, no auto rule | User | 2026-10-08 |
 | QT5 | Email quotations: ONE email per vendor for several items; a new multi-item page (price + GST % per item, charges + payment terms from the template names plus the vendor's own lines, which never change the template); one submission only; manual quotes stay per item | User | 2026-10-08 |

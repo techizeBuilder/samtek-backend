@@ -1,8 +1,10 @@
 # What changed — Procurement v2 rebuild
 
 Changes made while rebuilding Purchase against the client's blueprint (plan:
-`procurement-workflow-2026-10.md`, in this folder). 5 changes so far, built and checked; see each
-change's status in the table at the end.
+`procurement-workflow-2026-10.md`, in this folder). 41 changes, built and checked (2026-10-08 →
+2026-10-14); see each change's status in the table at the end. **The purchase flow is complete**
+with §32; browser testing (test plan T1–T40, via `purchase-flow-test-roadmap-2026-10.md`) started
+2026-10-14, and fixes found there start at §33. Then the outsource flow.
 
 ---
 
@@ -2053,6 +2055,1222 @@ Nobody recorded what the vendor actually agreed to.
 
 ---
 
+## 25. Vendor invoice no. at receive, the Ledger page, TDS hidden (accounts Slice 4) (2026-10-12)
+
+**Why:** this finishes the accounts work.
+- **Vendor invoice:** the client agreed (Q4) that the vendor's own invoice number and date are
+  recorded, so their GST filing can be matched to our PO.
+- **Ledger page:** it has to show the new purchase entries properly.
+- **TDS:** none on the purchase side.
+
+**How it works now:**
+
+1. **Store's receive step** (normal and fabrication) has an optional **"Vendor's invoice"** block:
+   number, date, and a scan or photo (JPG / PNG / PDF, up to 10 MB).
+   - A date or scan without a number is refused. The date can't be in the future.
+   - **Where it's kept:** on the line's requests. No amounts are typed; the money comes from the PO.
+   - **Where it shows:**
+     - on the PO line in Purchase Orders and To Receive ("Vendor invoice SS/… (date)", linked to
+       the scan)
+     - in the PO's History ("Received … — vendor invoice …")
+     - in the bill's view on Purchase Invoice ("Vendor's invoices", with the items each covers)
+   - **No leftover files:** if a receive is refused, the files it uploaded are deleted.
+   - **Replacements:** a PO line waiting for a replacement says so ("Replacement for QC-rejected
+     material expected on this line").
+2. **The Ledger page:**
+   - **Who the entry is with.** Every purchase entry now shows the vendor:
+     - QC-passed material, charges and advance set-off (by the PO's bill)
+     - advances and payments
+     - refunds due and written-off amounts (by the rejection / cancellation)
+     - refunds received
+
+     Before, only vendor payments named the vendor. A refund received would have been looked up as
+     a customer receipt.
+   - **The account list** shows a company's own purchase accounts only to that company, even if
+     another company uses the same unit name. Opening another company's account is refused.
+     Older accounts (banks, cash…) are unchanged.
+3. **Vendor Master:** the **TDS Section** field is gone. A value already stored is kept, not
+   blanked.
+4. **Docs:**
+   - The workflow doc's accounts questions are settled:
+     - AC1, AC2, AC4 and AC7 are resolved by the build
+     - AC3 and AC5 aren't needed (no separate bill, no 3-way match)
+     - AC6 (credit limit) stays open
+     - the totals are now 43 open, 47 resolved
+   - The test plan gets **Stage 8 (T27–T34)**: the whole money flow end to end.
+
+**Technical notes:**
+- **New `middleware/receiveUpload.js`:**
+  - multer `.fields` for `warrantyCard` + `vendorInvoiceFile`, each in its own folder
+    (`uploads/vendor-invoices/`)
+  - sets `req.file` (the warranty card, as before) and `req.vendorInvoiceFile`
+  - deletes uploads on a 4xx / 5xx
+  - `readVendorInvoice`
+  - used on both line-receive routes
+- **`PurchaseRequest.vendorInvoice {number, date, fileUrl}`.**
+- **Receive handlers:**
+  - `receiveLineItems` / `receiveLineFabrication` save it
+  - the fabrication route accepts `lines` as JSON text when sent as multipart
+- **`getPurchases`** loads `vendorInvoice` + `replacementFor` on the line requests;
+  `getPurchaseInvoices` adds `vendorInvoices` per PO bill.
+- **`accountsController`:**
+  - `getAccounts`: `companyId ∈ {null, mine}`
+  - `getLedgerRecords`: company check, plus entity names for `Purchase` / `PurchaseReturn` /
+    `TXN-RFR-` receipts
+- **Frontend:** new `VendorInvoiceFields.jsx`; changes in `LineReceiveDialog`,
+  `LineFabricationReceiveDialog`, `PurchaseOrderList`, `PurchaseInvoices` and `VendorMaster`.
+- **Checks:**
+  - a real-DB scenario passes, 4/4 with 0 leftovers: invoice rules; receive with the invoice → on
+    the request, the audit log and the bill; Ledger vendor names for every new entry type across 5
+    accounts + the bank; account scoping between companies
+  - the Slice 3 scenario re-run passes (11/11)
+  - the whole app builds; undefined-name check passes
+  - **not yet clicked through in the browser** (Stage 8 of the test plan)
+
+---
+
+## 26. The credit-limit warning at PO time shows what we owe the vendor now (2026-10-12)
+
+**What you said:**
+- The credit limit is in Vendor Master.
+- The warning at PO time should show how much we haven't paid this vendor (old bills).
+- It has nothing to do with the PO being created.
+
+**How it worked before:**
+- The PO review added the new PO's total to the vendor's "outstanding" and warned at 70% of the
+  limit.
+- That outstanding also counted whole PO bills for material that hadn't even arrived. Those are
+  orders, not debts.
+
+**How it works now** (PO review, under the total): **"Unpaid to {vendor}: ₹X of ₹Y credit limit
+(n%)"**.
+
+- **X counts only what's already payable and not paid:**
+  - material received and QC-passed but not paid for (the whole balance once a PO is fully
+    accepted)
+  - advances due but not paid
+  - bills without a PO
+- **X leaves out** material still on order, and **the PO being created**.
+- **A breakdown** sits underneath: received + QC-passed ₹… · advances due ₹… · bills without a PO
+  ₹… · ₹… overdue.
+- **Colours:**
+  - grey normally
+  - amber at 70% of the limit
+  - red at or over the limit ("over the limit"), or when anything is overdue
+- It's a **warning only**, as before. Whether going over the limit should block is still open
+  (AC6).
+
+**Technical notes:**
+- **`purchaseBillService.owedNow(bill)`:** `{ owed, advance, material, overdue }`. For a PO bill
+  before full acceptance: max(QC-passed value, advance) − paid. After: the balance.
+- **`getVendorOutstanding`:** adds `owedNow` per bill and `pending {total, advance, material, noPo,
+  overdue, onOrder}` per vendor.
+- **`PoReviewDialog`:** uses `pending.total`, not outstanding + this PO.
+- **Checks:** 9 no-DB tests on `owedNow`; the Slice 1 real-DB scenario now also checks it through
+  the real endpoint (advance paid, nothing received → nothing unpaid, all on order); the build
+  passes.
+
+---
+
+## 27. Price History: average, last and lowest over 7 days / 30 days / 1 year / custom (2026-10-12)
+
+**Why:** the client wants to see an item's price history:
+- from one vendor or all
+- over the last 7 days, 30 days, 1 year, or a custom date range
+- average, last and lowest
+- for both Purchase and the Company Admin
+
+**Decided (2026-10-12):**
+- it extends the existing "Bought before" feature (same data and sums)
+- by the **delivery date**
+- **QC-rejected deliveries count** (the rate is what the vendor charged)
+- on the Company Admin page under **Vendors**
+- no new permission
+
+**Where:**
+- **Purchase → Price History** (new tab)
+- **Company Admin → Vendors → Price History** (new tab)
+- the existing **"Bought before" pop-up** (RFQ/PO, PO review, Company Admin PO cards)
+
+**How it works:**
+
+1. **The Price History page:**
+   - pick an item we've ordered (search by name or code)
+   - optionally one vendor
+   - a period: **7 days · 30 days · 1 year · All · Custom (from – to)**
+   - It shows:
+     - **Average, Last and Lowest**, with vendor and date
+     - with all vendors, a per-vendor table (average / last / lowest / deliveries; click a vendor
+       to narrow to them)
+     - every delivery in the period: date, vendor, PO, quantity, price
+   - **Units:** prices in different units are never mixed. If an item was bought in more than one
+     unit (₹/piece and ₹/kg), a unit picker appears.
+2. **The "Bought before" pop-up** gets the same period chips. It re-works its numbers from the
+   deliveries it already has, with no extra request.
+3. **Same numbers everywhere:**
+   - delivered purchases only, each at its PO line's rate, dated when Store received it
+   - before GST (an "incl. GST" rate is taken back)
+   - one unit at a time
+   - the same rules as RFQ/PO, the PO review, the PO cards and Vendor Ratings
+
+**Technical notes:**
+- **`quoteChecksService`:**
+  - `summarizePrices` takes `from` / `to` (inclusive by day) and `vendorId`
+  - it returns `samples` (newest first, up to 300) unless `withSamples: false`
+  - `loadPriceSamples` adds each delivery's `quantity`
+- **New `controllers/priceHistoryController.js`:**
+  - `listPricedItems`: items ever ordered, searchable
+  - `getPriceHistory`: units, vendors, summary, deliveries; validates dates
+- **New `routes/priceHistoryRoutes.js`** at `/api/price-history`: Company Admin / Super Admin, or
+  anyone with `accounts.purchases` view.
+- **Frontend:**
+  - new `components/accounts/purchase/PriceHistory.jsx`
+  - `PriceCheck.jsx`: `PERIODS`, `periodRange`, `summarizeSamples`, `PeriodChips`, and the
+    pop-up's chips
+  - tabs in `PurchaseTab.jsx` and `PurchaseVendorApprovals.jsx` (Vendors group)
+- **Checks:**
+  - real-DB check 8/8 with 0 leftovers: periods 7d / 30d / 1y / all, one vendor, a custom range,
+    an incl.-GST rate taken back, Kilogram never mixed into Pieces, bad dates refused (it found and
+    fixed an impossible date like 2026-13-40 being accepted)
+  - the whole app builds
+  - **not yet clicked through in the browser**
+
+---
+
+## 28. Serial numbers at receive: one per piece for warranty items; QC ticks rejected serials; Store "Serial Numbers" tab (2026-10-13)
+
+**Why:** the vendor score gives 10% to warranty claims (blueprint §11). Claims need to know
+which physical unit came from which vendor. Two problems with how receive worked:
+- **One serial for the whole PO line,** however many pieces arrived.
+- **It was written onto the item master** (`Item.serialNumber`, `Item.warranty`). Every new
+  receipt overwrote the last one and deleted the previous warranty card. The item's warranty months
+  are also what Samtek gives its customers, so a receive silently changed the customer warranty.
+
+Discussion and decisions: `serial-numbers-and-warranty-discussion-2026-10.md`. This is Part 1;
+the "Vendor Warranty Claim" button in Complaints is Part 2.
+
+**Where:**
+- Store → Purchases → To Receive → **Receive** (`/store/purchases/requests`)
+- QC → the inspection page's **Final Decision**
+- Store → Purchases → **Serial Numbers** (new tab)
+
+**How it works:**
+
+1. **One serial per piece** for an item that:
+   - the vendor gave a warranty on (Store enters more than 0 months), **and**
+   - is counted in pieces (Pieces / pcs / nos / units / set)
+
+   Store types or pastes them, one per line, or uses **Fill a range** (prefix + from–to, e.g.
+   `GEN-` 0101 to 0110). A live count shows "8 of 10 entered" and flags repeats.
+
+   **Refused:**
+   - the count doesn't match what arrived
+   - a serial is repeated
+   - a serial was already received for this item
+   - the received quantity isn't a whole number of pieces
+2. **Everything else** (no warranty, or kg / m / litre) keeps **one serial / lot number for the
+   receipt**, as before.
+3. **Warranty cards (user's rule):** **one card for all the pieces, or one for each.** Uploading 2
+   or more means every piece needs its own. With "A card for each piece", each serial gets its own
+   file picker.
+4. **Several requests on one line:** the pieces are split as whole numbers by each request's ordered
+   quantity. Each request's QC job holds exactly its own serials.
+5. **The item master is no longer written to** (no serial, warranty months or card), and old cards
+   are no longer deleted. The request keeps a short summary for the existing screens, e.g.
+   "GEN-0101 … GEN-0110 (10)".
+6. **QC:**
+   - **For a serialised job,** Fail shows **tick boxes with the serials** instead of a quantity
+     ("Tick all" for a full fail). The ticked serials become **QC rejected** and are linked to the
+     REJ-… rejection (§24).
+   - **Pass** marks the rest **Accepted**.
+   - **Lots** behave as before (a quantity). The lot record notes how much was rejected
+     (**Part rejected** / **QC rejected**).
+   - **A replacement** comes on the same line with its own new serials.
+7. **Store → Serial Numbers:** every serial and lot received.
+   - **Search:** by serial, item, vendor or PO.
+   - **Filter:** by status (In QC / Accepted / Part rejected / QC rejected) and by serials or lots.
+   - **Each row:** received date and by whom, the vendor's warranty months, the card, and any REJ
+     with its status.
+
+**Not changed:**
+- **Fabrication receive** (sheets / bars by size), which has no serial.
+- **The customer warranty:** it still starts at "Reached Safely" with the item's months.
+- **Old receipts:** they keep their single serial on the request. No migration.
+
+**Technical notes:**
+- **New `models/PurchasedUnit.js`:**
+  - one record per piece, or per request for a lot
+  - unique on company + item + serial (case-insensitive), lots exempt
+- **New `services/purchasedUnitService.js`:**
+  - pure: `isCountableUnit`, `isSerialised`, `wholePieces`, `splitWhole`, `readSerialList`,
+    `matchCards`, `serialSummary`
+  - `planReceive` checks and builds the records, writing nothing
+  - `saveReceive` inserts them; if a serial was taken a moment ago, it removes the batch and
+    refuses with 409
+  - also: `linkQcJob`, `readRejectedSerials`, `markRejected`, `markAccepted`, `listUnits`
+- **`receiveLineItems`:**
+  - works out each request's share before writing anything
+  - the records go in **before** the requests are marked Received (no transactions on this
+    database)
+- **`applyReceiveSideEffects`:** now only sets `receivedFromPurchaseRequest` on the item.
+- **`updatePurchaseRequestStatus`:** the old single-request route (no screen uses it) records a lot.
+- **`qcController.submitDecision`:** reads `rejectSerials` (the ticked serials' count is the reject
+  quantity), then calls `markRejected` / `markAccepted` after the money hooks.
+- **`receiveUpload`:** up to 500 warranty cards (`req.warrantyCards`). Uploads are still deleted on
+  any refusal.
+- **New routes at `/api/serial-numbers`:**
+  - `GET /` (the list)
+  - `GET /qc-job/:id` (one job's serials)
+  - who can use them: Store purchase orders, accounts purchases, QC inspection view, or the Company
+    Admin
+- **Frontend:**
+  - new `SerialNumbersInput.jsx` and `SerialNumbersTab.jsx`
+  - `LineReceiveDialog.jsx` (serials, card mode)
+  - `QCInspection.jsx` (serial ticks, rejected serials in the result)
+  - `PurchaseRequest.jsx` (the third tab)
+  - `getPurchases` populates the item's `receiveUnit`
+- **Checks:**
+  - 7 no-DB tests on the rules
+  - a real-DB scenario 15/15 with 0 leftovers:
+    - refusals: wrong count, repeat, already received, 2 cards for 5 pieces, no card — with
+      nothing written
+    - 5 serials with a card each, split 3 / 2, linked to their QC jobs
+    - the item master untouched
+    - a lot receive
+    - QC: partial fail needs ticks, one ticked serial rejected and linked to its REJ, a serial
+      from another job refused, pass → the rest accepted, full fail with no ticks → all rejected,
+      lot part rejected then passed
+    - the list's search and filters
+  - the whole app builds; no undefined names
+  - **not yet clicked through in the browser**
+
+---
+
+## 29. Vendor warranty claims on Complaints → Support (2026-10-13)
+
+**Why:** the vendor score's **Warranty / After-Sales 10%** should use *"warranty duration, claim
+response time and claim resolution history"* (blueprint §11). Nothing recorded a claim to a
+vendor. This is Part 2 of `serial-numbers-and-warranty-discussion-2026-10.md`.
+
+**Decided (user, 2026-10-13):**
+- **The button:** beside "+ Create Ticket". Claims are entered by hand.
+- **The serial** comes from the customer.
+- **The satisfaction rating:** our satisfaction with the vendor's handling is recorded.
+- **No link to Packaging / dispatch.**
+
+**Where:** Complaints → Support (`/complaints/support`) → **Vendor Warranty Claims** (a button
+beside "+ Create Ticket").
+
+**How it works:**
+1. **The list:**
+   - **Filters:** Open (with a count), Waiting for vendor, Vendor responded, Closed, All.
+   - **Search:** claim number, serial, vendor, item, customer or ticket number.
+   - **Each row:** "Waiting N d" or "Responded in N d", the outcome, and the ★ rating.
+2. **New claim:** type the serial → **Find**.
+   - **In our serial records** (Store's receive, §28): shows the item, vendor, PO, received date,
+     the **vendor's warranty months**, the warranty card, and **any earlier claims on that serial**.
+     If the same serial was received for two items, you pick which.
+   - **Not found:** pick the vendor and the item. The months come from the **item's own
+     warranty**.
+   - **Then:**
+     - "Under the vendor's warranty?" Yes / No / Unsure, marked from the vendor's answer
+     - customer, ticket number (optional text)
+     - **problem**, defect type, severity
+     - photos / PDFs (up to 5)
+     - **the date the vendor was told**
+   - **Numbered** `VWC-0001`. Whoever placed that PO is notified (Purchase deals with the vendor),
+     or Accounts / Purchase when there's no PO.
+3. **Working the claim:**
+   - Record the **vendor's response** (date + what they said).
+   - Then **close it**: outcome (Repaired / Replaced / Credit note / Refused / Not covered), the
+     date resolved, the cost to us, notes, and **how satisfied we are with their handling (1–5 ★,
+     required)** plus a comment.
+   - More evidence can be added.
+   - A closed claim can't be changed. Every step is kept in the claim's history.
+4. **Elsewhere:**
+   - **Store → Serial Numbers:** shows "N warranty claims · VWC-… outcome" on the unit.
+   - **Purchase → Vendor Ratings:** each vendor shows "Warranty claims: N (open) · responds in X d ·
+     Y% resolved · Z★ handling". This isn't in the rating number yet; the weighted vendor score
+     (next task) uses it.
+
+**Technical notes:**
+- **New `models/VendorWarrantyClaim.js`:**
+  - holds: unit link or by-hand vendor / item, a snapshot of the warranty months +
+    `monthsSource`, the complaint, the vendor dates, the outcome, satisfaction, status, history
+  - unique number per company; indexes on status / vendor / serial
+- **New `services/vendorWarrantyClaimService.js`:**
+  - pure: `parseDay`, `readClaimInput`, `claimStatus`, `checkClaim`, `claimStats`
+  - `checkClaim`: dates are real and not in the future; responded / resolved not before the vendor
+    was told; closing needs the resolved date + 1–5 ★; a rating without an outcome is refused
+  - DB: `lookupSerial`, `createClaim` (numbered with retry, company-checked vendor / item,
+    notification), `updateClaim`, `listClaims`, `vendorClaimSummary`, `claimsByUnit`
+- **New `controllers/vendorWarrantyClaimController.js` + `routes/vendorWarrantyClaimRoutes.js`** at
+  `/api/vendor-warranty-claims`:
+  - `GET /`, `GET /:id`, `GET /lookup`, `GET /vendors`, `GET /items`, `POST /`, `PUT /:id`
+  - who can use them: Complaints Support Management view / add / edit, or the Company Admin
+- **New `middleware/claimEvidenceUpload.js`:**
+  - saves to `uploads/warranty-claims/`
+  - images / PDF, 10 MB, up to 5
+  - deletes the uploads on any refused request
+- **Also changed:**
+  - `purchasedUnitService.listUnits` adds the claims per unit
+  - `supplierController.getVendorRatingsOverview` adds `claims` per vendor
+- **Frontend:**
+  - new `components/support/VendorWarrantyClaims.jsx` (list / new / detail)
+  - `TicketWorkspace.tsx` (the button)
+  - `SerialNumbersTab.jsx`
+  - `VendorRatingsTab.jsx`
+- **Checks:**
+  - **real-DB + pure scenario, 15/15 with 0 leftovers and no stray files:**
+    - dates, input, status and close rules, stats
+    - lookup of a known / unknown serial
+    - creating from a unit (months from the serial, PO creator notified)
+    - creating by hand (months from the item)
+    - refusals: another company's vendor, no serial, no problem, a future date
+    - vendor responded → close refused without ★ → closed
+    - reading one claim
+    - a closed claim locked
+    - lookup shows the earlier claim
+    - list filters / search
+    - vendor summary and the Serial Numbers count
+    - **a real multipart upload:** files deleted on a refused request, kept on success, a wrong
+      file type refused
+  - the whole app builds; no undefined names; no type errors on the Complaints page
+  - **not yet clicked through in the browser**
+
+---
+
+## 30. The vendor score — the blueprint's weighted score, out of 100 (2026-10-13)
+
+**Why:** the blueprint asks for a weighted vendor score (§11, §12, Appendix A). The old "rating"
+on Vendor Ratings predated the blueprint:
+- a plain 1–5 star average: on time = 5 / late = 1, QC pass = 5 / fail = 1, a refused rejection = 1
+- no weights, no prices, terms, warranty or replies
+- it counted QC per job, not by quantity
+- it judged a replacement against the original date, so the vendor was penalised twice
+
+You asked for it to be built new.
+
+**Decided (user, 2026-10-13):**
+- **Technical / specification compliance dropped entirely.** Its 10 points go to Quality (+5) and
+  Delivery (+5).
+- **QC records severity** on purchase rejections.
+- **Watchlist below 60 / 100** (editable), and the Company Admin is notified.
+- The 90-day "refused to settle a rejection" rule stays.
+
+**Where:**
+- **Purchase → Vendor Ratings** (rebuilt)
+- **the RFQ/PO vendor card, Vendor Master, Company Admin → Vendors → Watchlist:** these now use
+  the score
+- **Company Admin → Settings:** new "Vendor score" card
+- **QC inspection:** severity on Fail
+
+**How it works:**
+
+1. **The score** is out of 100, from what actually happened in the **last 12 months**. Recent
+   events count more: today in full, a year ago half. A **lifetime** score is shown alongside.
+
+   | Part (default weight) | Each event | Score |
+   |---|---|---|
+   | **Price (25)** | each delivered price, before GST | vs the **lowest price any vendor charged or quoted** for that item in the same unit within a year: lowest = 100, otherwise lowest ÷ theirs. An item no other vendor priced isn't counted. |
+   | **Quality (30)** | each QC'd delivery (decided jobs) | share QC accepted. Rejected pieces count **1× Minor, 1.5× Major, 2× Critical**, and **twice** if the vendor refused to replace or refund. Weighted by the delivery's value. |
+   | **Delivery (20)** | each line delivery | against the date **first promised**; a **replacement** against the date given for it. On time = 100, **−10 per day late**. Lines still waiting for the advance aren't counted. |
+   | **Credit terms (10)** | each PO | half for credit days (full at 30+), half for the advance (0% = full). Weighted by PO value. |
+   | **Warranty (10)** | quotes + claims | half: warranty months quoted vs the best quoted for the item; half: warranty claims (§29), with ★ satisfaction 50%, resolved 25%, response speed 25% (full within 3 days). A claim refused while under warranty = 0; a claim ignored 15+ days = 0. |
+   | **Response (5)** | each emailed quotation request | answered (70) + how fast (30, full within a day). No reply before the link ran out = 0. |
+
+2. **No data:** a part with nothing to go on shows "—", and the score is worked out over the other
+   parts. With fewer than 5 deliveries + QC decisions, the vendor shows **"Limited history"**.
+3. **Watchlist** (Company Admin), when either:
+   - the score is below the line (60) with enough history, or
+   - the vendor refused to settle a QC rejection in the last 90 days
+
+   The reason shows ("Vendor score 54 / 100 (below 60)"). **Probationary** (fewer than 3 received
+   POs) is unchanged.
+4. **Every night (9:45),** each approved vendor's score is saved for the month (the trend). The
+   first time a vendor drops below the line, the Company Admin and Accounts Head are told once.
+5. **Vendor Ratings tab:**
+   - **each vendor:** the score (green 80+, amber at or above the line, red below), its status,
+     "Limited history", on time x/y, QC accepted %, lifetime, and **six small bars**, one per part
+   - **expand a vendor to see every event behind each part:**
+     - each price vs the lowest
+     - each QC result with accepted / rejected + severity
+     - each delivery with its promised date and days late
+     - each PO's terms
+     - warranty quotes and claims
+     - each quotation request and when it was answered
+   - the "Bought before" prices per item stay
+   - sort by score or name; "Scored vendors only"; a "How the score is worked out" panel showing
+     the current weights, with an **English / Hinglish** switch (remembered in the browser)
+   - **the full logic** is in `vendor-score-logic-2026-10.md`
+6. **RFQ/PO vendor card:** "72/100 · On time 4/5 (80%) · QC accepted 96% · Probationary". The
+   "Best vendor score" sort uses it.
+7. **Company Admin → Settings → Vendor score:**
+   - the six weights (must total 100, shown live)
+   - the Watchlist line
+   - a "Blueprint defaults" button
+8. **QC Fail on purchased material:** **Minor / Major / Critical** (default Major). It's saved on
+   the job and on the REJ, and shown on QC Rejections and the result banner.
+
+**On real data (read-only, 2026-10-13):**
+- **rahul vendor:** 68 / 100 (Price 35, Quality 86, Delivery 84, Credit 50, Response 100,
+  Warranty —; lifetime 69).
+- **The other vendors:** no history yet.
+
+**Technical notes:**
+- **New `services/vendorScoreService.js`** (replaces `vendorRatingService.js`, which was removed):
+  - pure: `recencyWeight`, `qualityEvent`, `daysLate` / `deliveryEvent`, `priceEvent`,
+    `creditEvent`, `warrantyDurationEvent`, `claimEvent`, `responseEvent`, `weightedMean`,
+    `summarizePart`, `combineWarranty`, `combineParts`, `readScoreSettings`, `scoreSettingsOf`
+  - `computeVendorScores({ companyId, vendorIds, withEvidence })`: one load for all vendors
+  - `computeVendorItemPricing` (moved across, unchanged)
+  - `runVendorScoreSweep`
+- **New `models/VendorScore.js`:** monthly snapshot, unique company + vendor + period.
+- **Existing models:**
+  - `PurchaseSettings.vendorScore { weights, watchlistBelow }`
+  - `QCJob.failSeverity` + `partialRejections[].severity`
+  - `PurchaseRejection.severity`
+- **`qcController.submitDecision`:** reads `severity`. `onMaterialRejected` copies it onto the
+  rejection.
+- **`vendorApprovalService.getVendorStanding`:**
+  - uses the score and the Company Admin's line
+  - can be handed precomputed scores
+  - the old `WATCHLIST_RATING_BELOW` is gone
+- **`supplierController`:**
+  - `getVendorRatingsOverview` returns `score`, `lifetime`, `parts`, `counts`, `limitedHistory`,
+    `watchReason`, plus `weights` / `watchlistBelow`
+  - `getVendorItemBreakdown` returns the score with evidence + item prices
+- **`vendorApprovalController`:** the Watchlist is sorted by score; `thresholds.scoreBelow`; the
+  suspend payload carries `score` / `watchReason`.
+- **New `PUT /api/purchase-settings/vendor-score`** (Company Admin) →
+  `updateVendorScoreSettings`.
+- **`index.js`:** cron 9:45.
+- **`scripts/demoVendorRatingData.mjs`:** prints the new score.
+- **Frontend:**
+  - `VendorRatingsTab.jsx` (rebuilt)
+  - `VendorContext.jsx`
+  - `RfqPoTab` / `RfqVendorList` (score sort)
+  - `VendorMaster.jsx`
+  - `PurchaseVendorApprovals.jsx` (Watchlist text + part breakdown)
+  - `PurchaseRulesSettingsTab.jsx` (the Vendor score card)
+  - `QCInspection.jsx` (severity)
+  - `QcRejections.jsx`
+- **Checks:**
+  - **18/18 with 0 leftovers.** The real-DB part ran on a **made-up company**, so the sweep and
+    settings couldn't touch real vendors.
+    - **pure:** recency, severity + refused double, days-late curve, price / credit / warranty
+      duration, claims and response, rescaling over parts with data, settings validation
+    - **real-DB:**
+      - on time / 3 days late / a replacement judged against its own date
+      - quality 60 / 60 / 100 (Critical, Minor refused, replacement)
+      - price vs a cheaper vendor's delivery (90 / 90 / 75)
+      - credit 100 / 65 and 25
+      - warranty 50 + claim 90 = 70
+      - response 100 + 0
+      - the total and limited history
+      - Watchlist by dispute, by a low score, and not with limited history
+      - **severity through the real QC decision** onto the REJ
+      - the nightly sweep: snapshot, one alert, silent the second time
+  - a read-only run on the real company
+  - the whole app builds; no undefined names
+  - **not yet clicked through in the browser**
+
+---
+
+## 31. The purchaser score — blueprint §13, out of 100 (2026-10-13)
+
+**Why:** the blueprint asks for a purchaser performance score that measures **process quality,
+not just buying cheap**, with evidence behind every number. The full logic is in
+**`purchaser-score-logic-2026-10.md`**, written first.
+
+**Decided (user, 2026-10-13):**
+- **all 9 parts automatic,** with nothing typed in
+- **who sees what:** the Company Admin sees everyone; each purchaser sees only their own
+- **periods:** a month + the last 12 months + a trend
+
+**Where:**
+- **Company Admin → Purchase & Vendor Approval → Purchasers → Purchaser Score**
+- **Purchase → My Score** (each purchaser, not the Company Admin)
+- **Company Admin → Settings → "Purchaser score"** (the weights)
+
+**How it works:**
+- **A purchaser** is whoever created the PO / email quotation request / manual quotation. QC results
+  and rejections count for the PO's creator.
+- **The 9 parts** (blueprint weights, editable):
+
+  | Part (weight) | Each event | Score |
+  |---|---|---|
+  | RFQ coverage (15) | each PO from quotes | per item, vendors asked ÷ needed (the saved selection check) |
+  | Quotation completeness (10) | each manual quotation; each answered email request | MQ: evidence / GST / delivery days / terms, 25 each; answered QR = 100 |
+  | Savings / landed cost (15) | each PO with competing full quotes | cheapest landed ÷ chosen |
+  | Delivery follow-up (15) | each missed due date | days to a new date or the goods: ≤2 = 100, −20 a day, still overdue keeps losing |
+  | Quality outcome (15) | each QC-decided delivery | accepted share by severity (no vendor-refusal doubling) |
+  | Documentation (10) | each PO | emailed (50) + lines backed by a quote with evidence (50) |
+  | PO accuracy (10) | each PO | 0 if the Company Admin rejected it or it was cancelled as our mistake |
+  | Relationship (5) | each QC rejection | days to record the vendor's answer: ≤3 = 100, 0 at 15 |
+  | Policy (5) | each PO | a selection exception = 50 |
+
+- **Periods:**
+  - **Month:** events in the month, all equal.
+  - **12 months:** recent counting more.
+  - **Trend:** the last 6 months.
+- **Missing data:** a part with no events is left out and the rest are scaled up. Fewer than 3 POs in
+  the period → "Limited history".
+- **The screens:**
+  - **The list** (Company Admin): a month picker; each purchaser with the month and 12-month scores
+    and nine bars.
+  - **The detail** (also My Score):
+    - both scores and the 6-month trend
+    - a Month / 12-months switch
+    - the nine part bars
+    - **every event behind each part** (POs, quotes, missed dates, QC results, rejections)
+    - an explanation panel with **English / Hinglish**
+
+**Technical notes:**
+- **New `services/purchaserScoreService.js`:**
+  - pure: `coverageEvent`, `completenessEvent`, `savingsEvent`, `followUpScore` /
+    `followUpEvents`, `docEvent`, `poAccuracyEvent`, `relationshipEvent`, `policyEvent`,
+    `monthRange`, `combinePurchaserParts`, `readPurchaserWeights`, `purchaserWeightsOf`
+  - `computePurchaserScores`: one load of POs, PRs, QC jobs, rejections, bids, QRs, MQs and
+    "emailed" audit rows
+  - reuses `qualityEvent`, `recencyWeight`, `weightedMean`, `daysLate` from `vendorScoreService`
+- **New `controllers/purchaserScoreController.js` + `routes/purchaserScoreRoutes.js`**
+  (`/api/purchaser-scores`):
+  - `GET /`: the Company Admin gets everyone, anyone else only themselves
+  - `GET /:userId` (or `me`): with evidence; another person's → 403
+- **`PurchaseSettings.purchaserScore.weights`** + `PUT /api/purchase-settings/purchaser-score`
+  (Company Admin).
+- **Frontend:**
+  - new `components/accounts/purchase/PurchaserScore.jsx` (`PurchaserScoreList`,
+    `PurchaserScoreDetail`, `HowPurchaserScoreWorks`)
+  - `PurchaseTab.jsx` (My Score)
+  - `PurchaseVendorApprovals.jsx` (Purchasers group)
+  - `PurchaseRulesSettingsTab.jsx` (the weights card)
+- **Checks:**
+  - **11/11 with 0 leftovers** (pure + real-DB on a made-up company):
+    - every event rule
+    - both purchasers' nine parts and the total, worked out by hand (66.6 → 67)
+    - a still-overdue line, a lone quote not compared, limited history
+    - month vs 12 months; the trend; an empty month
+    - access: a purchaser asking for someone else → 403, "me" works, the list is self-only;
+      the Company Admin sees both
+  - **A bug found and fixed:** the real-company run showed alex g with completeness 100 but no
+    total. The total was being added up with the vendor score's six part names, so most purchaser
+    parts were dropped. It now has its own nine-part total, with a hand-worked test.
+  - **On real data:** alex g (Accounts Head) 100 for October (2 answered quotation requests).
+  - the whole app builds; no undefined names
+  - **not yet clicked through in the browser**
+
+---
+
+## 32. Purchase Dashboard — three role views (blueprint §21) (2026-10-13)
+
+**Why:** the last build of the purchase flow. The blueprint's dashboards (§21: Purchase / Vendor /
+Purchaser / Store / Management) are folded into three views, one per person who buys (user
+decision). The design is in **`purchase-dashboard-design-2026-10.md`**, written first.
+
+**Where:**
+- **Accounts → Purchases → Purchase Dashboard** (new, the first menu item): the purchase employee
+  and the purchase head
+- **Company Admin → Purchase & Vendor Approval → Dashboard** (new first parent tab; the page now
+  opens on it)
+
+**Who sees what** (the server picks the view from the role; asking above it is refused):
+
+| Person (role) | View |
+|---|---|
+| Purchase employee (Account Employee) | **My work** |
+| Purchase head (Accounts Head) | **Team**, with a switch to **My work** |
+| Company Admin | **Management** |
+
+**My work:**
+- **items to buy:** the open RFQ/PO cards (team-wide)
+- **my quote requests waiting:** how many with no reply after 3 days, and links that ran out
+- **quotes expiring** within 2 days
+- **my POs:** waiting for approval, rejected in the last 30 days, not emailed
+- **my deliveries:** overdue / due today / due in 3 days (lines waiting for the advance aren't
+  counted)
+- **QC rejections:** waiting for the vendor's answer (and those over 3 days), and replacements
+  expected
+- **my score:** month + 12 months + the weakest part
+
+**Team** (the same for everyone, plus):
+- POs and cancellations waiting for the Company Admin
+- Store & QC: deliveries received and waiting for QC, due today, overdue
+- 3-vendor compliance this month
+- open warranty claims, and those waiting over 7 days
+- payments: advances due, payable now, overdue
+- refunds due from vendors
+- vendors to watch: Watchlist, probationary, high risk, suspended, the 3 lowest scores
+- every purchaser's score
+
+**Management:**
+- **Waiting for you:**
+  - PO approvals (over the ₹ limit / selection exception)
+  - cancellation requests
+  - vendor requests by type
+- **Payables:** owed now, overdue, refunds due.
+- **The period** (This month / Last 3 months / Last 12 months):
+  - purchase value + a 6-month trend
+  - **savings:** vs the next-best quote where the cheapest was chosen, and paid above the cheapest
+    otherwise
+  - **price rises:** lines above that vendor's last delivered price by the warning %, with the ₹
+    extra
+  - **top 3 vendors' share**
+  - 3-vendor compliance
+  - exceptions / urgent by reason
+- **Vendor risk.**
+- **Purchaser scores.**
+
+**Tiles link to where you act:**
+- RFQ/PO, Purchase Orders, Vendor Ratings and My Score: the Purchase page now opens a tab from
+  `?tab=`
+- QC Rejections, Vendor Payment
+- the Company Admin's own tabs: PO Approvals, Vendor requests, Watchlist
+
+**Left out:**
+- fraud alerts (X5)
+- stock-outs (not recorded)
+- PO acknowledgement (none: the email is the PO)
+- budgets, cost centres and separation of duties (not built, user)
+
+**Technical notes:**
+- **New `services/purchaseDashboardService.js`:**
+  - pure: `periodRange`, `savingsOf`, `complianceOf`, `concentration`, `exceptionsByReason`
+  - `buildDashboard({ view: mine|head|admin, period })`
+  - **reuses:**
+    - `lineDueBucket` / `lineIsReceived` / `OPEN_PO_STATUSES`
+    - `NO_REPLY_DAYS` / `EXPIRY_WARN_DAYS`
+    - `quoteValidUntil`, `owedNow`
+    - `loadPriceSamples` / `exGstPrice` / `priceChangePercent`
+    - `getVendorStanding`, `computePurchaserScores`
+- **New `controllers/purchaseDashboardController.js`** (`viewFor(role, asked)`) +
+  **`routes/purchaseDashboardRoutes.js`**: `GET /api/purchase-dashboard?view=&period=`, for the
+  Company Admin or anyone with Purchases view.
+- **Frontend:**
+  - new `pages/accounts/purchase/PurchaseDashboard.jsx` (`onOpenTab` for the Company Admin page)
+  - the route in `App.jsx` + the menu entry in `moduleRoutes.js`
+  - `PurchaseVendorApprovals.jsx`: a Dashboard group first; custom tabs get `{ openTab }`
+  - `PurchaseTab.jsx` reads `?tab=`
+- **Checks:**
+  - **7/7 with 0 leftovers** (pure + real-DB on a made-up company):
+    - period ranges, savings, compliance, concentration, exceptions, role → view (incl. the 403
+      cases)
+    - **every tile** of My work, Team and Management, asserted against fixtures:
+      - waiting / no-reply / ran-out requests; an expiring quote
+      - pending / rejected / not-emailed POs
+      - overdue / today / soon lines, and an advance-waiting line **not** counted
+      - rejections and a replacement
+      - bills: advance due ₹200, payable ₹2,000, overdue ₹2,000; a refund ₹150
+      - vendor requests
+      - 12-month value ₹6,500 with the trend adding up
+      - saved ₹100 / paid above ₹100
+      - a 20% price rise worth ₹200
+      - the top vendor at 61.5%
+      - compliance 67%
+      - one "Urgent need"
+  - a read-only run of all three views on the real company: about 2.5 s each over the remote
+    database
+  - the whole app builds; no undefined names
+  - **not yet clicked through in the browser**
+
+---
+
+## 33. Found in browser testing, slice 2: vendor-page charges by choice; quoted rows start ticked (2026-10-14)
+
+**What you saw:**
+1. **The vendor's quotation page** (from the email) listed every charge from our template (e.g.
+   "loading") with a blank amount. The page said to leave unused ones blank, but a vendor who
+   doesn't read that may think they're expected to charge it.
+2. **The vendor card on RFQ/PO:** after sujeet's and mahesh's manual quotations, their quoted rows
+   were ticked, ready for a PO. After rahul answered the **email** request, his priced rows sat at
+   the top but **nothing was ticked**.
+   - **Why:** nothing ever ticked quoted rows. The manual-quotation rows only stayed ticked from
+     opening the dialog; an email reply arrives from the vendor's page, and the card loads fresh.
+
+**Now:**
+1. **Charges on the vendor page are added by choice, like payment terms.** The section starts
+   empty, with a "**+ Add a charge…**" list: our charge names, plus "Other (type your own)". Each
+   added charge can be removed. A charge added without an amount, or with no name, is refused with
+   a message.
+2. **A vendor card ticks its rows with a valid price** (not expired, not for an old quantity, not
+   locked by a PO waiting for approval):
+   - when the page loads
+   - whenever a row gets a new valid price
+   - email and manual quotes alike
+   - **Unchanged:**
+     - a vendor never asked starts with everything ticked (§21)
+     - waiting, "can't supply" and expired rows aren't pre-ticked
+     - a row you untick stays unticked until its price changes
+
+**Technical notes:**
+- `VendorQuotationForm.jsx`: `charges` starts `[]`; `addCharge` / `chargeChoices` (with the
+  label's default GST %); submit checks name + amount.
+- `RfqVendorList.jsx` `VendorCard`: `isPriced` (= `rowRank` 0), `startTicked`; the tick effect
+  keys rows by card + priced, so a newly priced row counts as changed.
+- **Checks:** the whole frontend builds.
+
+---
+
+## 34. "Can't supply" on every item can be submitted; charges and terms carry over to each new quotation (2026-10-14)
+
+**What you saw:**
+1. **The vendor page refused "Can't supply" on every item.** mahesh was emailed about a single
+   item and ticked "Can't supply"; the page refused with "Enter a price for at least one item".
+2. **Re-pricing dropped the vendor's charges and terms.** A manual re-quote of sujeet's Tool-A
+   (430, with a reason) starts with empty charges and terms. Charges and payment terms belong to
+   the whole order, but they're kept on each quotation, and PO review fills them in from the
+   **newest** quotation behind the PO's lines. So a quick re-price quietly left sujeet's PO
+   without his loading charge and terms. The vendor check, meanwhile, **added up** the charges of
+   every quotation behind the lines, which could count freight twice.
+
+**Now:**
+1. **A vendor can answer with "Can't supply" only.** A submission needs at least one price **or**
+   one "Can't supply"; an all-blank page is still refused. When nothing is priced, no charges or
+   terms are kept.
+2. **Charges and terms carry over** (your decision):
+   - every new quotation starts from the vendor's last one:
+     - the vendor's email page shows the vendor's own figures
+     - the manual quotation dialog shows the same, with the quotation number
+   - **the note:**
+     - vendor page: "carried over from your last quotation to us ({date}) — if anything is
+       different for this order, change or remove it, otherwise they carry on"
+     - manual dialog: "carried over from MQ-0001, {vendor}'s last quotation…"
+   - **"Last quotation"** = the vendor's newest quotation (email or manual) that still has at
+     least one price within the quote validity (a price already on a PO counts).
+   - **When nothing is carried:**
+     - the vendor's first quotation
+     - all of the vendor's prices have expired (an old freight figure is likely stale)
+     - their newest quotation had none (removing something on purpose is respected; it never
+       falls back to an older one)
+   - The vendor page shows the vendor's **own** figures only, never our template list (§33 stays).
+3. **The vendor check counts one set of charges.** Only the **newest** quotation behind the PO's
+   lines counts, the same one PO review fills in from. PO review is unchanged.
+
+**Technical notes:**
+- **New `services/quotationCarryOverService.js`:**
+  - `quotationMadeAt`, `pickCarryOver` (pure), `vendorCarryOver`
+- **`quotationRequestController`:**
+  - `readVendorSubmission` accepts `cantSupply: true` entries
+  - `submitQuotationByToken` keeps no charges / terms when nothing is priced
+  - `getQuotationByToken` returns `carryOver` (date, charges, terms; no quotation number)
+- **`manualQuotationController.getCarryOver`** + `GET /api/manual-quotations/carry-over?vendor=`
+  (purchase add permission).
+- **`vendorSelectionCheckService`:** `chargesByQuotation` values are `{ amount, at }`;
+  `evaluateSelection` takes the newest (plain numbers still read).
+- **Frontend:**
+  - `VendorQuotationForm.jsx`: sends `cantSupply`, pre-fills from `carryOver`, the note
+  - `rfqShared.jsx` `ManualQuotationDialog`: fetches carry-over on open, the note
+- **Checks:**
+  - 6 no-DB tests of the submission rule
+  - 10 tests of the carry-over rule and the newest-only charges
+  - a read-only run on test-1's real vendors (rahul → QR-0001, sujeet → MQ-0001, mahesh →
+    MQ-0002)
+  - import checks; the whole frontend builds
+  - **Restart the backend.**
+
+---
+
+## 35. PO review: GST is the quote's; changing the quotation's charges / terms needs a reason (2026-10-14)
+
+**What you saw** (before slice 3):
+1. **A "GST % for all lines" box** on PO review, though the vendor already gives GST per item on
+   the quote.
+2. **Charges and payment terms from the quotation were freely editable** at PO review, with no
+   reason asked.
+
+**What was behind them:**
+1. **GST:**
+   - The box was left over from §5 (8 Oct), when GST was typed at PO time. Typing in it, or in
+     each line's GST box, overwrote the vendor's quoted GST without trace.
+   - **Worse:** the server built the PO from the rate, GST and "includes GST" **the page sent**.
+     The page never let anyone edit the rate, but a crafted request could have put a different
+     price on the PO than the vendor quoted.
+2. **Charges and terms:**
+   - Changes were silent.
+   - **A loophole:** the vendor check compares vendors on the **quotation's** charges. A purchaser
+     could pass the check, then add charges on the PO.
+3. **Template terms:** PO review listed every one of our template terms blank ("Leave blank to
+   skip"). It was the same pattern removed from the vendor page in §33, and the second open UX
+   point in the test plan.
+
+**Now:**
+1. **GST and price come from the quote.**
+   - **PO review:** each line shows the quoted GST read-only ("GST 18% (quoted) = ₹…" or "GST
+     included in rate"). The "all lines" box is gone.
+   - **A wrong rate or GST** is fixed by a new quotation (with a reason, as always).
+   - **The server** takes each quoted line's **rate, GST %, "includes GST" and warranty from the
+     quote**, never from the page.
+   - **Manual quotations** now need a GST % (0 if none) or "Rate already includes GST", as the
+     vendor's email page already did.
+2. **A change to the quotation's charges or terms needs a reason.**
+   - **The baseline:** PO review compares the PO with the **newest quotation behind its lines**
+     (the one it pre-fills from). Any difference is listed under "Changed from the quotation
+     MQ-…":
+     - a charge added, removed or changed (amount or GST)
+     - advance / credit days changed
+     - a term added, changed or removed
+   - **The reason:** at least one chip, plus a note ("Other" needs the note). The chips are:
+     - We pick up (no freight)
+     - Negotiated at order time
+     - Vendor confirmed new terms
+     - Smaller order than quoted
+     - Other
+   - **Saved on the PO and shown:**
+     - on the Company Admin's PO card (a line in the header + the full list with the reason)
+     - on Purchase's PO view
+     - in the audit log
+   - **Charges above the quotation** (amount + GST) send the PO to the **Company Admin**, even
+     under the ₹ limit, with a new badge, **"Charges above quotation"**. Lower charges or changed
+     terms need only the reason.
+   - **The server re-runs the comparison**, never trusting the page.
+3. **Template terms by choice:** PO review shows only the vendor's own terms, plus "**+ Add a
+   term…**" (our template names, or "Other").
+4. **The pre-fill note** no longer says "only the latest one's charges and terms are filled in"
+   when the lines span quotations. Since §34 the newest quotation carries the earlier ones, so it
+   now says so.
+
+**Example (from the test):**
+- **The quote:** ₹100 + 18% × 10 pcs; Freight ₹500 + 18%; 20% advance.
+- **A tampered page** sending ₹1, GST included: the PO still says ₹100 + 18% (₹1,770 total).
+- **Removing freight and the advance:**
+  - without a reason → refused, nothing created
+  - with "We pick up (no freight)" → created, no extra approval, total ₹1,180
+- **Freight raised to ₹800:** "Charges above quotation" (₹944 vs ₹590 quoted) → Company Admin.
+
+**Technical notes:**
+- **New `services/poQuoteTermsService.js`:**
+  - `newestQuotation`, `compareWithQuotation` (pure), `readTermsChangeReason`,
+    `TERMS_CHANGE_REASONS`
+  - the frontend copy is **`client/src/lib/poQuoteTerms.js`**: keep them in step
+- **`purchaseController.createPurchase`:**
+  - bids loaded with rate / GST / warranty and their quotations
+  - line values from the bid
+  - `quoteTermsCheck` saved
+  - approval reason `charges`
+  - audit `details.quoteTermsChange`
+- **`Purchase`:** `quoteTermsCheck` (Mixed); `approval.reasons` may hold `charges`.
+- **`manualQuotationController.readManualItems`:** GST required.
+- **`purchaseDashboardService`:** `approvals.charges`.
+- **Frontend:**
+  - `PoReviewDialog.jsx`: GST read-only, terms by choice, the change panel + reasons, approval
+    text
+  - `SelectionCheck.jsx`: `charges` badge + `QuoteTermsChangeDetails`
+  - `PoApprovalsTab.jsx`, `PurchaseOrderList.jsx`: show it
+  - `rfqShared.jsx`: manual GST required
+  - `PurchaseDashboard.jsx`: the count
+- **Checks:**
+  - 14 no-DB tests (the comparison, reasons, newest quotation, manual GST)
+  - 10 real-handler tests on a made-up company (every PO held for approval, so nothing was
+    emailed): the tampered page, refused without a reason, saved with a reason + audit, charges
+    above → approval, "Other" without a note; 0 left
+  - import checks; the frontend builds; no undefined names
+  - **Restart the backend.**
+
+---
+
+## 36. A PO with a fabrication line under 1 kg failed with "Internal server error" (2026-10-14)
+
+**What you saw:**
+- PO-2 (rahul, all 5 Angle sizes, "We pick up") gave **"Internal server error"**, and no PO was
+  made. "We pick up" wasn't the cause.
+
+**Why:** the PO line's quantity had a **minimum of 1**. A fabrication line is ordered in pieces
+but stored in kg, and 11 pcs of Angle 20×4×10 = **0.125 kg**. So the save was refused, and the
+error came back as a bare 500.
+
+- **Found on dev data:** the angle size in Inventory is unrealistically small.
+- **The fix stays anyway:** a real order can be under 1 kg too (a few short pieces, or any item
+  bought by weight).
+
+**Now:**
+- **A PO line's quantity can be anything above 0.** The bill already allowed down to 0.001.
+- **If a PO ever breaks one of its own rules again,** Purchase sees the reason ("The PO couldn't
+  be saved — …") instead of "Internal server error".
+- **`purchaseController`** imports the quotation models it now populates (a gap that only showed
+  in scripts).
+
+**Checked:**
+- PO-2's exact request, re-run through the real handler and stopped just before saving: it now
+  passes the PO's rules (nothing was written)
+- 6 tests of the quantity rule (0.125 / 0.068 / 12 allowed; 0 / −1 refused with a readable
+  message)
+
+**Noted (user, 2026-10-14):** a "We pick up" PO shows on **Dispatch → Vendor Pickups** for now;
+only the data is shown. The pickup flow there is to be built later (ST6). It doesn't block the
+purchase flow: Purchase only chooses the transport, and the PO is sent to the vendor.
+
+---
+
+## 37. A PO that isn't a real order shows nothing due (2026-10-14)
+
+**What you saw:** the **rejected** PO-3 (Purchase Orders → History) still showed:
+- "After advance"
+- Payment "Pending · **Advance due**"
+- on each line, "Waiting for advance · 6 days after" and "Awaiting receipt" / "0/2 PRs received"
+
+PO-1 had shown the same while it was **waiting for approval**.
+
+**Why:** the list built those badges from the PO's advance setting and line dates, without
+checking whether the PO had ever become a real order.
+
+**Now:** a PO **waiting for approval** or **rejected** is "not ordered":
+- **Expected:**
+  - waiting for approval → **"After approval"**
+  - rejected → **"—"**
+- **Payment:** "—", with no "Advance due".
+- **Lines:**
+  - no due or advance chip
+  - waiting for approval → **"Not ordered yet"**
+  - rejected → **"Not ordered"**
+  - no line actions
+- **No Overdue badge.** On the server, `poDueSummary` counts only open orders (Draft / Sent /
+  Acknowledged / Partially Received), so the **Overdue / Due today / Due in 3 days** chips never
+  count a waiting, rejected or cancelled PO.
+
+**Checks:**
+- 5 tests of the due summary by status
+- the frontend builds
+
+---
+
+## 38. Vendor score: a delivery received before the advance counts as early (2026-10-14)
+
+**Why:** Store's Receive isn't blocked by an unpaid advance (user decision). A vendor may ship
+before the advance arrives. Such a line has **no promised date yet**, because the count starts at
+the advance, so the score **left it out**. That threw away a good delivery.
+
+**Now:**
+- **On a PO whose dates count from the advance,** a line received with no promised date is an
+  **early delivery: 100**.
+  - Vendor Ratings shows it as Promised **"Before the advance"**, Late **"Early"**.
+  - It counts as on time in the vendor's on-time figure.
+- **The advance paid after the receipt:** the line's date lands after the receipt, so it's still
+  on time (100). This was already the case.
+- **Any other line with no date at all** (old records) is still left out.
+- **Updated:**
+  - the logic doc `vendor-score-logic-2026-10.md` §4.3, written first
+  - the in-app explanation (English + Hinglish)
+  - the Delivery evidence table's note
+
+**Technical notes:** `vendorScoreService.computeVendorScores` loads `deliveryClock` and marks
+`kind: 'Before advance'` (`daysLate` 0); `VendorRatingsTab.jsx` shows it.
+
+**Checks:**
+- 7 tests on a made-up company: before the advance → 100; advance paid after → 100; 2 days late
+  → 80; an old undated record excluded; the Delivery part = 93.3 (hand-worked
+  (100 + 100 + 80) / 3); 0 left
+- the frontend builds
+
+---
+
+## 39. Purchase Orders / To Receive: refresh in place; fabrication lines show their size (2026-10-14)
+
+**What you saw** (slice 4, receiving PO-2):
+1. **Each receive reloaded the whole list.** The expanded PO closed, and the page jumped back to
+   the top. Purchase's "Change date" did the same.
+2. **Fabrication lines showed no size.** PO-2 had five lines all called "Angle" with only a kg
+   figure, so Store couldn't tell which size to receive.
+
+**Why:**
+1. The pages refreshed the list by **remounting** it, which threw away the open PO, page, filters
+   and search. The list also swapped the table for "Loading…" while fetching, so the page height
+   collapsed.
+2. The size was on the PO line but never shown in the list. The receive dialog did show it.
+
+**Now:**
+1. **After a receive or a date change, the list refetches in place,** keeping the open PO, page,
+   filters, search and scroll position.
+   - "Loading…" shows only on the first load and on the **Refresh** button.
+   - Actions inside a PO (Send PO email, Cancel) refresh in place too.
+2. **Each fabrication line shows its size × pieces** under the item name, e.g. "legLength: 50mm,
+   thickness: 5mm, length: 6000mm × 5 pcs". This is on Store's To Receive / Received and on
+   Purchase's Purchase Orders.
+
+**Technical notes:**
+- **`PurchaseOrderList`:**
+  - a `reloadSignal` prop → `load({ quiet: true })`
+  - `renderPoActions` gets the quiet reload
+  - the size from `items[].fabricationDimensionLines[0]` via `formatDims`
+- **`PurchaseRequest.jsx` (Store) and `PurchaseOrdersTab.jsx`:** pass `reloadSignal` instead of
+  remounting with `key`.
+- **Checks:** the frontend builds.
+
+---
+
+## 40. Each request on a PO line gets its own share of the line (it got the whole line) (2026-10-14)
+
+**Found while checking your receive rule** (same unit → no conversion; different unit → received
+quantity + conversion factor). That rule **is present and used**:
+- **the server:** `receiveLineItems` compares the item's stock unit with the request's purchase
+  unit. **Same:** 1:1, nothing asked. **Different:** received quantity + factor required, or
+  refused.
+- **Store's receive dialog:** the same comparison decides whether the conversion fields show.
+- For non-fabrication items, the item's Receive Unit is enforced equal to its unit, so `unit` is
+  the right one to compare.
+
+**But the numbers it works from were wrong.** When a PO became real, **every request on a line was
+given the whole line's quantity** as its own `purchaseQuantity`. On your POs:
+
+| Line | Requests | Each got | What the receive would have done |
+|---|---|---|---|
+| PO-4 Tool-A (Pieces = Pieces) | 10 + 5 + 10 | 25 | pre-fill **75**; 3 QC jobs of 25 → **stock +75 for 25 pieces** |
+| PO-3b Bairing (serials) | 3 + 2 | 5 | ask for **10 serials** for 5 pieces |
+| PO-1 NUT Bolts (kg → Pieces) | 20 + 30 + 20 kg | 70 | pre-fill **210 kg**; split in equal thirds |
+| PO-1 ss sheet, PO-2 Angle 20×4×10 (fabrication) | by pieces | the whole line | the receive splits by pieces (fine); only the stored number was wrong |
+
+The QC-pass money split (`purchaseAcceptanceService.prShareWeight`) used the same field, so each
+Tool-A request would have been valued at ⅓ of the line.
+
+**Now:**
+- **When a PO becomes real** (`finalizePurchase`), each request gets **its own share** of the line,
+  in proportion to what it asked for:
+  - fabrication by its pieces; anything else by its quantity when that's in the line's purchase
+    unit
+  - ordering more than requested shares the extra the same way
+  - a request in another unit → equal shares
+  - the shares always add up to the line
+- **The 13 requests on your open POs** (none received) were corrected:
+  - PO-1: ss sheet 114.75 / 76.5 / 191.25; NUT Bolts 20 / 30 / 20
+  - PO-2: Angle 20×4×10 0.068 / 0.057
+  - PO-4: Tool-A 10 / 5 / 10
+  - PO-3b: Bairing 3 / 2
+  - Received requests were not touched (all were single-request lines).
+- **Not changed:** `updatePurchase` (the old PO edit route of the single-request flow) still sets
+  one quantity on every request. A PO is never edited in v2, and no page calls it.
+
+**Technical notes:** `purchaseController.splitLineQuantity(line, prs)` (pure, exported);
+`finalizePurchase` loads each line's requests and uses it.
+
+**Checks:**
+- 8 tests of the split:
+  - Tool-A 10 / 5 / 10
+  - NUT Bolts 20 / 30 / 20
+  - Bairing 3 / 2
+  - ss sheet by pieces
+  - ordering more
+  - the rounding adds up
+  - a request in another unit
+  - one request
+- the correction: a dry run, then the real run, then a re-check (0 left)
+- the import check
+- **end to end, on a made-up company** (13/13, 0 left), through the real PO creation (direct →
+  `finalizePurchase`) and Store's real receive:
+  - same unit: shares 10 / 5 / 10 → received with no conversion asked → QC jobs 10 / 5 / 10
+  - kg → Pieces: shares 20 / 30 / 20 → refused without the conversion → with 70 kg ÷ 0.5 kg per
+    piece: 40 / 60 / 40 pieces, QC jobs to match
+  - no stock before QC
+
+---
+
+## 41. QC by PO line (2026-10-15)
+
+**Why (you, during slice 4):**
+- Store receives **one PO line** at a time, but QC got **one job per request** on that line.
+- Tool-A (25 pcs from 3 requests) showed as **3 QC jobs** (10 / 5 / 10), so QC had to pick
+  through 3 jobs for one delivery.
+- QC should work the way Store does.
+
+**Now:**
+
+1. **One card, one decision per received line.**
+   - **QC Jobs:** one card per line, e.g. "Tool-A · **25 Pieces in QC · 3 requests**"
+     (+ "Fabrication").
+   - **The card follows the line's status:** it stays open while any request on it is in QC.
+   - **The QC dashboard and the Purchase Dashboard** count lines.
+   - **Start Inspection** on the card starts the whole line.
+   - **The checklist** is filled once, for the line.
+   - **Each request still keeps its own record underneath**, so stock, money, REJ, serials, sales
+     orders / production and the scores work as before. One decision is applied to each.
+2. **A rejection is counted against requests by your rule.**
+   - **Fabrication:** per size first. Only requests that received that size take its rejected
+     pieces. A line with several sizes asks for the rejected pieces per size.
+   - **Fill:** if one request has at least the rejected quantity left, it all goes on that one.
+     Otherwise one request is filled completely, then the next.
+   - **Pick order:** stock requests (auto reorder, Store's manual, a replacement) → production
+     (BOM shortfall) → sales order; the newest first within a kind.
+   - **Serial items:** the ticked serials decide, since each belongs to its request.
+   - **The page shows it before you submit:** "Counted against: PR031 (stock) 2" (a server dry
+     run).
+   - **After the decision:** "This delivery" lists each request: received, rejected, in QC,
+     status.
+   - **Example:** Tool-A 10 / 5 / 10 with 2 rejected → all 2 on PR031 (auto reorder, newest).
+     PR006 and PR007 pass whole, and there is one REJ instead of two.
+3. **"Fabrication" is decided once, from the item master** (its Fabrication Master link), when
+   the PO is made.
+   - **Where it shows:** a badge on the PO line (Purchase Orders, Store's To Receive) and on the
+     QC card.
+   - **It's never guessed** from units or names.
+   - **QC also uses the PO line's own item link**, not a name lookup.
+4. **Two fabrication stock bugs fixed** (found while planning; nothing affected yet):
+   - **N× stock on a shared line:** a fabrication line with several requests gave **each** request
+     the **whole** shipment, and QC Pass credited stock from it once per request. PO-1's ss sheet
+     (3 requests) would have gone in 3×. Now each received size is shared across the requests in
+     whole pieces, and each holds only its own.
+   - **Rejected pieces credited:** a fabrication Pass credited every received piece, rejected
+     ones too. Now it's each size's received pieces less what QC rejected of that size.
+   **Size on the card (found in the browser, 2026-10-15):** a fabrication QC card shows its
+   **size × pieces** on the QC list and under the title on the inspection page, so three Angle
+   cards can be told apart.
+5. **A request's status "Rejected" shows as "Closed"** on Purchase → PRs, with its reason
+   ("No longer needed…", "Rejected by Store…", "Replacement not sent…"). A closed request has no
+   "Vendor Quotation" button.
+6. **Your existing data:**
+   - **PO lines:** the fabrication flag was filled in from their items.
+   - **Slice 4's 6 waiting QC jobs:** grouped into receipts. PO-4 Tool-A = **one** line of 3
+     jobs; PO-2's 3 Angle lines = 3 single-request cards.
+
+**Technical notes:**
+- **New `services/qcLineAllocation.js`** (pure): `allocateRejection`, `fillRejection`,
+  `pickOrder`, `kindOfRaisedBy`.
+- **`QCJob`:** `item`, `purchaseOrder`, `poLineId`, `receiptKey`, `groupMember`, `lineStatus`,
+  `isFabrication`, `receivedSizes`, `partialRejections[].sizeValues`.
+- **`Purchase.items[].isFabrication`** (set in `createPurchase`).
+- **`qcController`:**
+  - `submitDecision` split into `decideJob` (unchanged behaviour) + the wrapper → `decideLine` for
+    a line; `dryRun` returns the share-out
+  - `receiptContext` / `receiptSummary`, `lineStatusOf`, `passedSizesOf`
+  - `startInspection` starts the line
+  - `getQCJobs` / `getDashboard`: line cards and statuses (`withLineSummaries`)
+  - `getQCJob` returns `receiptGroup`
+- **`purchaseRequestController`:**
+  - `createPurchaseQCJob(…, ctx)`
+  - `receiveLineItems` / `receiveLineFabrication` stamp the receipt
+  - each request's own sizes via `splitWhole`
+  - `classifyRaisedBy` exported
+- **Also changed:** `purchasedUnitController.getQcJobSerials` (the whole line's serials) and
+  `purchaseDashboardService` (lines awaiting QC).
+- **Frontend:**
+  - `QCJobs.jsx`: the line card
+  - `QCInspection.jsx`: "This delivery", line quantity, per-size boxes, preview, per-request
+    results
+  - `PurchaseOrderList.jsx`: the Fabrication badge
+  - `PurchaseRequestsTab.jsx`: "Closed"
+
+**Checks:**
+- **15 tests of the rule**, hand-worked:
+  - 10 / 5 / 10 with 2 → all on the newest
+  - 12 → 10 + 2
+  - stock before production before sales order
+  - kg decimals
+  - per size; several sizes need per-size numbers
+  - refusals
+- **34 end to end** on a made-up company, through the real PO creation → Store's receive → QC:
+  - one card per line; status counts count lines
+  - "start first" refused; Start starts all
+  - the preview
+  - an over-quantity refused with nothing changed
+  - Fail 2 → only TQL-3 touched, **one REJ**, one notification set
+  - Pass the rest → **stock +23 exactly**; money per request **₹1,180 / ₹590 / ₹944**
+    (hand-worked)
+  - **fabrication:** 3 rejected → the newer request; **stock +8, not 22**
+  - **serials:** the ticked serial's request rejected
+  - cleanup 0
+- **Builds:** import checks; the frontend builds; no undefined names.
+- **The data correction:** a dry run, then for real, then a re-check (0 left).
+
+---
+
 ## Quick summary
 
 | # | Change | Status |
@@ -2081,3 +3299,20 @@ Nobody recorded what the vendor actually agreed to.
 | 22 | Accounts Slice 1: the PO bill (advance fixed when the PO is placed; due date only after full acceptance + credit days; stage), advance payment on Vendor Payment (capped), delivery days start when the whole advance is paid (Waiting for advance until then; PO email says days after advance), purchase ledger accounts per company + unit (advance, manual bills and their payments post), payment history list, TDS removed from manual bills, manual-bill payments capped at what is owed | Done; 49 + 9 real-DB tests pass; not yet clicked through in the browser |
 | 23 | Accounts Slice 2: a QC pass makes purchased material payable on the PO bill (its share of the line × the part passed) and posts it to the ledger, once per job; optional mid payment up to what passed less its advance share; full acceptance (every live line received + QC-passed) sets the due date (credit days), posts the charges, sets off the advance, tells Accounts; full payment → Paid; daily 9:40 overdue sweep; Payable Ageing by due date | Done; 22 + 8 real-DB tests pass; not yet clicked through in the browser |
 | 24 | Accounts Slice 3: a QC rejection of purchased material becomes a REJ record waiting for the vendor's answer (no automatic return / exchange email); replace (replacement on the same PO line, received + QC'd there), refund (Refund due → received), credit (used on a later payment), refused (written off, dispute, Watchlist 90 days); full payment waits for open rejections; cancel / short close on the PO bill (no reversal, leftover advance "To decide" → refund or credit); Refunds & credits + pay from credit on Vendor Payment; QC Rejections pages | Done; 16 + 11 real-DB tests pass (Slices 1–2 re-run green); not yet clicked through in the browser |
+| 25 | Accounts Slice 4: optional vendor invoice no. + date + scan at Store receive (normal + fabrication), shown on the PO line, History and the bill; Ledger page names the vendor on every purchase entry and shows a company only its own purchase accounts; Vendor Master TDS Section hidden; workflow doc accounts questions settled (43 open / 47 resolved); test plan Stage 8 (T27–T34) | Done; 4 real-DB tests pass (+ Slice 3 re-run); not yet clicked through in the browser |
+| 26 | Credit-limit warning at PO time = what we already owe the vendor and haven't paid (QC-passed material, advances due, bills without a PO; not material on order, not the new PO) vs the Vendor Master credit limit, with a breakdown and overdue; amber at 70%, red at/over the limit or overdue; warning only | Done; 9 tests + real-endpoint check pass; not yet clicked through in the browser |
+| 27 | Price History: an item's average / last / lowest price (all vendors or one) over 7 days / 30 days / 1 year / all / custom, per vendor and every delivery behind it — Purchase → Price History and Company Admin → Vendors → Price History; the Bought-before pop-up gets the same period chips; same data and sums as Bought before (delivered, by delivery date, before GST, one unit at a time) | Done; 8 real-DB tests pass; not yet clicked through in the browser |
+| 28 | Serial numbers at receive: one per piece for an item with a vendor warranty counted in pieces (paste / fill a range; count, repeats and already-received checked), one serial / lot number otherwise; warranty card one for all or one for each; kept per unit / lot (new PurchasedUnit), no longer written onto the item master; QC ticks the rejected serials (linked to the REJ); Store → Serial Numbers tab | Done; 7 + 15 real-DB tests pass; not yet clicked through in the browser |
+| 29 | Vendor warranty claims: a "Vendor Warranty Claims" button beside "+ Create Ticket" on Complaints → Support; find the unit by the customer's serial (vendor / PO / warranty months / earlier claims) or pick vendor + item (months from the item); problem, defect type, severity, evidence, date told; vendor's response; close with outcome + resolved date + cost + our satisfaction 1–5 ★ (required); PO creator notified; claims shown on Serial Numbers and Vendor Ratings (not in the rating number yet) | Done; 15 real-DB + pure tests pass; not yet clicked through in the browser |
+| 30 | Vendor score out of 100 (blueprint §11–§12), built new: Price 25 · Quality 30 · Delivery 20 · Credit 10 · Warranty 10 · Response 5 (Technical dropped, its 10 to Quality + Delivery), last 12 months with recent counting more + lifetime; QC severity Minor / Major / Critical; Watchlist below 60 (editable) + notification; Vendor Ratings rebuilt with every event behind each part; RFQ/PO card, Vendor Master, Company Admin Watchlist and a new Vendor score settings card | Done; 18 tests (pure + real-DB on a made-up company) pass; not yet clicked through in the browser |
+| 31 | Purchaser score out of 100 (blueprint §13), all automatic: RFQ coverage 15 · quotation completeness 10 · savings 15 · delivery follow-up 15 · quality outcome 15 · documentation 10 · PO accuracy 10 · relationship 5 · policy 5; month + 12 months + 6-month trend; every event behind each part; Company Admin sees everyone (Purchasers → Purchaser Score), each purchaser their own (Purchase → My Score); weights in Settings; logic doc `purchaser-score-logic-2026-10.md` | Done; 11 tests pass (one real bug caught and fixed); not yet clicked through in the browser |
+| 32 | Purchase Dashboard (blueprint §21), three views by role: My work (Account Employee), Team + My work (Accounts Head), Management (Company Admin, first tab of Purchase & Vendor Approval); live tiles that link to where you act — quotes, POs, deliveries, QC rejections, payments, Store/QC, vendors, scores, approvals, purchase value + trend, savings, price rises, top-vendor share, compliance, exceptions; design doc `purchase-dashboard-design-2026-10.md` | Done; 7 tests pass (every tile asserted); not yet clicked through in the browser |
+| 33 | Browser testing slice 2 fixes: the vendor's quotation page adds charges by choice ("+ Add a charge…", like payment terms) instead of listing every template charge; vendor cards on RFQ/PO tick rows with a valid price on load and when a new price arrives (email or manual) | Done; builds; re-check in the browser |
+| 34 | Vendor page accepts "Can't supply" on every item (needs a price or a can't-supply); a vendor's charges + payment terms carry over from their last quotation (with valid prices) into each new one — email page and manual dialog, with a note to change / remove what's different; the vendor check counts only the newest quotation's charges (no double freight) | Done; 16 tests + real read-only run; builds; re-check in the browser |
+| 35 | PO review: GST read-only from the quote (the "all lines" box gone) and the server takes rate / GST / warranty from the quote, never the page; manual quotations need GST; any change to the quotation's charges / terms needs a reason (saved, shown to the Company Admin, audit log); charges above the quotation → Company Admin approval ("Charges above quotation"); our template terms added by choice | Done; 14 + 10 real-handler tests pass; builds; check in the browser (slice 3) |
+| 41 | QC by PO line: one QC card + one decision per received line (each request keeps its own record underneath); a rejection is counted against requests by size first (fabrication), then fill one before the next — stock → production → sales order, newest first; serials by tick; "Fabrication" decided from the item master and carried PO line → receive → QC; two fabrication stock bugs fixed (N× on a shared line; rejected pieces credited); "Rejected" requests shown as "Closed — reason" | Done; 15 + 34 end-to-end tests; data grouped; builds; check in the browser (slice 4 QC) |
+| 40 | Each request on a multi-request PO line now gets its own share of the line (it got the whole line → Store's receive would have tripled Tool-A's stock, asked 10 serials for 5 Bairings, pre-filled 210 kg for 70); the 13 requests on the open POs corrected. The unit-conversion rule itself (same unit → none; different → required) was present and correct | Done; 8 tests + data fix re-checked |
+| 39 | Purchase Orders / Store's To Receive refetch in place after a receive / date change (the open PO, filters and scroll stay); fabrication lines show size × pieces | Done; builds; re-check in the browser |
+| 38 | Vendor score: a line received before its advance was paid (no date promised yet) counts as an early delivery (100) instead of being left out; logic doc + in-app EN/Hinglish text updated | Done; 7 tests; builds |
+| 37 | Purchase Orders: a PO waiting for approval or rejected shows nothing due — "After approval" / "—", no Advance due, no line due chips, "Not ordered (yet)"; the due chips never count it | Done; 5 tests; builds |
+| 36 | A PO line can be under 1 (a small fabrication size in kg, e.g. 0.125) — it failed with "Internal server error"; a PO that breaks one of its own rules now says why | Done; PO-2's request re-checked (not saved) + 6 tests; re-try in the browser |

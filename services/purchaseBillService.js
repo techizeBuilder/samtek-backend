@@ -49,6 +49,30 @@ export function payableNow(bill) {
   return { advance, material };
 }
 
+// What we owe on a bill RIGHT NOW and haven't paid (2026-10-12 — the credit
+// warning at PO time, user): a PO bill counts only what's actually due — an
+// advance not yet paid, and material received + QC-passed but not paid for
+// (the whole balance once everything is accepted). Material still on order
+// isn't owed yet. A bill without a PO: its balance.
+//   { owed, advance, material, overdue }
+export function owedNow(bill, now = new Date()) {
+  if (!bill || bill.status === 'Cancelled') return { owed: 0, advance: 0, material: 0, overdue: 0 };
+  const paid = Number(bill.paidAmount) || 0;
+  if (!bill.purchaseOrder) {
+    const owed = Math.max(0, round2((Number(bill.totalAmount) || 0) - paid));
+    const overdue = bill.dueDate && new Date(bill.dueDate) < now ? owed : 0;
+    return { owed, advance: 0, material: owed, overdue };
+  }
+  if (bill.fullyAcceptedAt) {
+    const owed = Math.max(0, round2((Number(bill.totalAmount) || 0) - paid));
+    const overdue = bill.dueDate && new Date(bill.dueDate) < now ? owed : 0;
+    return { owed, advance: 0, material: owed, overdue };
+  }
+  const advance = Math.max(0, round2((Number(bill.advanceAmount) || 0) - (Number(bill.advancePaid) || 0)));
+  const owed = Math.max(0, round2(Math.max(Number(bill.acceptedValue) || 0, Number(bill.advanceAmount) || 0) - paid));
+  return { owed, advance: Math.min(advance, owed), material: Math.max(0, round2(owed - Math.min(advance, owed))), overdue: 0 };
+}
+
 // The PO's own payment status, from its bill.
 export function poPaymentStatus(bill, now = new Date()) {
   if (!bill) return 'Pending';

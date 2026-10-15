@@ -38,6 +38,7 @@ const purchaseRejectionSchema = new mongoose.Schema({
   rejectedQty: { type: Number, required: true },
   qtyUnit: { type: String, default: '' },
   reason: { type: String, default: '' },                          // QC's fail reason
+  severity: { type: String, enum: ['Minor', 'Major', 'Critical'], default: 'Major' }, // QC's call (vendor score)
   // Its money on the bill (incl. GST), and the split for the ledger.
   value: { type: Number, default: 0 },
   net: { type: Number, default: 0 },

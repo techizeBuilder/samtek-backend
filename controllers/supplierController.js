@@ -7,7 +7,8 @@ import ChildPartBOM from '../models/ChildPartBOM.js';
 import MachineBOM from '../models/MachineBOM.js';
 import * as XLSX from 'xlsx';
 import multer from 'multer';
-import { computeVendorRating, computeVendorItemPricing } from '../services/vendorRatingService.js';
+import { computeVendorScores, computeVendorItemPricing, scoreSettingsOf } from '../services/vendorScoreService.js';
+import { getOrCreateSettings } from './purchaseSettingsController.js';
 import Purchase from '../models/Purchase.js';
 import VendorApprovalRequest from '../models/VendorApprovalRequest.js';
 import { removeVendorUpload, discardRequestUploads } from '../middleware/vendorDocumentUpload.js';
@@ -756,10 +757,9 @@ export const importSuppliersFromExcel = [upload.single('file'), async (req, res)
   }
 }];
 
-// GET /api/suppliers/vendor-ratings — overall (computed) rating per vendor,
-// for the new "Vendor Ratings" tab's top-level list. See
-// services/vendorRatingService.js for how the rating itself is computed —
-// deliberately separate from the old manual Supplier.rating field.
+// GET /api/suppliers/vendor-ratings — the vendor score (0–100, blueprint
+// §11–§12; services/vendorScoreService.js) per vendor, with its parts and
+// standing — for the Vendor Ratings tab and the RFQ/PO vendor cards.
 export const getVendorRatingsOverview = async (req, res) => {
   try {
     const companyId = req.user.companyId;
@@ -768,38 +768,44 @@ export const getVendorRatingsOverview = async (req, res) => {
       .select('supplierName suppliedItems approvalStatus riskClass')
       .lean();
 
-    // Vendor context on the RFQ/PO vendor card (2026-10-10): the rating's
-    // parts (on-time, QC pass) and the vendor's standing (Probationary /
-    // Watchlist), worked out once — getVendorStanding already computes the
-    // rating for approved vendors.
-    const standing = await getVendorStanding(companyId, vendors);
-    const data = await Promise.all(vendors.map(async (v) => {
+    // Scores for every vendor (a suspended one still has its history),
+    // worked out once; the standing reuses them.
+    const settings = await getOrCreateSettings(companyId);
+    const scores = await computeVendorScores({ companyId, vendorIds: vendors.map(v => v._id), settings });
+    const standing = await getVendorStanding(companyId, vendors, { scores });
+    const { vendorClaimSummary } = await import('../services/vendorWarrantyClaimService.js');
+    const claimsByVendor = await vendorClaimSummary(companyId, vendors.map(v => v._id));
+    const data = vendors.map((v) => {
       const s = standing.get(String(v._id));
-      const r = s && 'eventCount' in s ? s : await computeVendorRating({ companyId, vendorId: v._id });
+      const r = scores.get(String(v._id)) || {};
       return {
         _id: v._id,
         supplierName: v.supplierName,
         itemCount: (v.suppliedItems || []).length,
-        rating: r.rating ?? null,
-        eventCount: r.eventCount || 0,
-        onTime: r.onTime || { on: 0, total: 0 },
-        qc: r.qc || { pass: 0, total: 0 },
+        score: r.score ?? null,
+        lifetime: r.lifetime ?? null,
+        parts: r.parts || null,
+        limitedHistory: !!r.limitedHistory,
+        historyEvents: r.historyEvents || 0,
+        counts: r.counts || null,
         stage: s?.stage || null,
+        watchReason: s?.watchReason || null,
         receivedPOCount: s?.receivedPOCount ?? null,
         riskClass: v.riskClass || null,
+        claims: claimsByVendor.get(String(v._id)) || null,
       };
-    }));
+    });
 
-    res.json({ success: true, data });
+    res.json({ success: true, data, weights: scoreSettingsOf(settings).weights, watchlistBelow: scoreSettingsOf(settings).watchlistBelow });
   } catch (error) {
     console.error('getVendorRatingsOverview error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// GET /api/suppliers/:id/item-breakdown — item-wise rating + pricing
-// (avg/last/lowest, from real invoice history) for one vendor's Products
-// list — the expanded row of the Vendor Ratings tab.
+// GET /api/suppliers/:id/item-breakdown — the expanded row of the Vendor
+// Ratings tab: the evidence behind each part of the vendor score, and the
+// vendor's delivered prices per item (avg / last / lowest).
 export const getVendorItemBreakdown = async (req, res) => {
   try {
     const { id } = req.params;
@@ -810,15 +816,14 @@ export const getVendorItemBreakdown = async (req, res) => {
     if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found' });
 
     const items = await Item.find({ _id: { $in: vendor.suppliedItems || [] } }).select('name code').lean();
-    const overall = await computeVendorRating({ companyId, vendorId: vendor._id });
+    const score = (await computeVendorScores({ companyId, vendorIds: [vendor._id], withEvidence: true })).get(String(vendor._id)) || null;
 
     const data = await Promise.all(items.map(async (item) => {
-      const { rating } = await computeVendorRating({ companyId, vendorId: vendor._id, itemCode: item.code, itemName: item.name });
       const pricing = await computeVendorItemPricing({ companyId, vendorId: vendor._id, itemObjectId: item._id });
-      return { itemId: item._id, itemName: item.name, itemCode: item.code, rating, ...pricing };
+      return { itemId: item._id, itemName: item.name, itemCode: item.code, ...pricing };
     }));
 
-    res.json({ success: true, data: { overallRating: overall.rating, eventCount: overall.eventCount, items: data } });
+    res.json({ success: true, data: { score, items: data } });
   } catch (error) {
     console.error('getVendorItemBreakdown error:', error);
     res.status(500).json({ success: false, message: error.message });

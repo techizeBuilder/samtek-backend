@@ -17,6 +17,7 @@ import { groupsHeldByPendingPO, cleanPoCharges, cleanPaymentTerms } from './purc
 import { getOrCreateSettings } from './purchaseSettingsController.js';
 import { groupFabricationLines } from './itemQuoteGroupController.js';
 import { DEFAULT_QUOTE_VALIDITY_DAYS } from '../services/quoteChecksService.js';
+import { vendorCarryOver } from '../services/quotationCarryOverService.js';
 
 const LINK_VALID_DAYS = 7;
 const pctOrNull = (v) => {
@@ -178,6 +179,11 @@ export const getQuotationByToken = async (req, res) => {
     const bids = await VendorBid.find({ _id: { $in: qr.items.map(i => i.vendorBid) } }).lean();
     const bidById = new Map(bids.map(b => [String(b._id), b]));
     const submitted = qr.status === 'Submitted';
+    const validityDays = settings.quoteValidityDays || DEFAULT_QUOTE_VALIDITY_DAYS;
+    // Their own charges + terms from their last quotation, pre-filled
+    // (2026-10-14, services/quotationCarryOverService.js). Only their own
+    // figures — never our template list.
+    const carry = submitted ? null : await vendorCarryOver({ companyId: qr.companyId, vendorId: qr.vendor, validityDays });
 
     res.json({
       success: true,
@@ -188,7 +194,9 @@ export const getQuotationByToken = async (req, res) => {
         status: qr.status,
         tokenExpiry: qr.tokenExpiry,
         // How long we treat their prices as valid (Purchase Settings).
-        quoteValidityDays: settings.quoteValidityDays || DEFAULT_QUOTE_VALIDITY_DAYS,
+        quoteValidityDays: validityDays,
+        // No quotation numbers here: an MQ number means nothing to the vendor.
+        carryOver: carry ? { at: carry.at, charges: carry.charges, paymentTerms: carry.paymentTerms } : null,
         offeredChargeLabels: qr.offeredChargeLabels,
         offeredTermLabels: qr.offeredTermLabels,
         items: qr.items.map(it => {
@@ -231,16 +239,20 @@ export const getQuotationByToken = async (req, res) => {
 
 // Pure check of what the vendor sent — which items are priced, which are left
 // blank (declined), and any problem to show them. Exported for testing.
+// A submission needs at least one price OR one item ticked "Can't supply"
+// (2026-10-14): a vendor who can supply nothing on the request still answers.
 export function readVendorSubmission(requestItems, bidById, bodyItems) {
   const byBid = new Map((Array.isArray(bodyItems) ? bodyItems : []).map(e => [String(e?.vendorBidId), e]));
   const priced = [];
   const declined = [];
+  let saidCantSupply = false;
   for (const it of requestItems) {
     const bid = bidById.get(String(it.vendorBid));
     if (!bid || bid.status !== 'Invited') continue; // replaced by a newer request
     const entry = byBid.get(String(it.vendorBid));
     const price = Number(entry?.unitPrice);
-    if (!entry || !(price > 0)) {
+    if (!entry || entry.cantSupply === true || !(price > 0)) {
+      if (entry?.cantSupply === true) saidCantSupply = true;
       declined.push(bid);
       continue;
     }
@@ -248,7 +260,7 @@ export function readVendorSubmission(requestItems, bidById, bodyItems) {
     if (!(days >= 1)) return { error: `Enter the delivery time (days) for "${it.itemName}".` };
     priced.push({ bid, entry, price, days: Math.round(days) });
   }
-  if (!priced.length) return { error: 'Enter a price for at least one item (leave an item blank only if you can\'t supply it).' };
+  if (!priced.length && !saidCantSupply) return { error: 'Enter a price for at least one item, or tick "Can\'t supply" on the items you can\'t supply.' };
   return { priced, declined };
 }
 
@@ -299,8 +311,10 @@ export const submitQuotationByToken = async (req, res) => {
       await bid.save();
     }
 
-    const terms = cleanPaymentTerms(req.body.paymentTerms);
-    qr.charges = markCustom(cleanPoCharges(req.body.charges), qr.offeredChargeLabels.map(c => c.name));
+    // Nothing priced (every item "can't supply") → no charges / terms to keep.
+    const anyPriced = result.priced.length > 0;
+    const terms = cleanPaymentTerms(anyPriced ? req.body.paymentTerms : {});
+    qr.charges = anyPriced ? markCustom(cleanPoCharges(req.body.charges), qr.offeredChargeLabels.map(c => c.name)) : [];
     qr.paymentTerms = { ...terms, others: markCustom(terms.others, qr.offeredTermLabels.map(t => t.name)) };
     qr.vendorRemarks = String(req.body.remarks || '').trim();
     qr.status = 'Submitted';

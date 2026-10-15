@@ -37,30 +37,73 @@ async function generateQCJobId() {
   return `QC-${year}-${String(nextNumber).padStart(4, '0')}`;
 }
 
+// QC by PO line (2026-10-15): a received line's card (its lead job) carries
+// the line — its status, how many requests, how much is still in QC.
+async function withLineSummaries(jobs) {
+  const keys = [...new Set(jobs.filter(j => j.source === 'Purchase' && j.receiptKey).map(j => j.receiptKey))];
+  if (!keys.length) return jobs;
+  const all = await QCJob.find({ receiptKey: { $in: keys } }).select('receiptKey status quantity acceptedQty partialRejections isFabrication receivedSizes').lean();
+  const byKey = new Map();
+  for (const j of all) { if (!byKey.has(j.receiptKey)) byKey.set(j.receiptKey, []); byKey.get(j.receiptKey).push(j); }
+  return jobs.map(j => {
+    const group = j.receiptKey ? byKey.get(j.receiptKey) : null;
+    if (!group) return j;
+    const round = (n) => Math.round(n * 1000) / 1000;
+    const rejectedOf = (g) => (g.partialRejections || []).reduce((s, r) => s + (Number(r.qty) || 0), 0) + (g.status === 'Rejected' ? Number(g.quantity) || 0 : 0);
+    return {
+      ...j,
+      ownStatus: j.status,
+      status: j.lineStatus || j.status,
+      line: {
+        requests: group.length,
+        inQc: round(group.filter(g => OPEN.includes(g.status)).reduce((s, g) => s + (Number(g.quantity) || 0), 0)),
+        received: round(group.reduce((s, g) => s + (g.status === 'Rejected' ? 0 : Number(g.acceptedQty ?? g.quantity) || 0) + rejectedOf(g), 0)),
+        rejected: round(group.reduce((s, g) => s + rejectedOf(g), 0)),
+        isFabrication: group.some(g => g.isFabrication),
+        // The size(s) of this delivery, so cards of one item can be told apart.
+        sizes: (() => {
+          const m = new Map();
+          for (const g of group) for (const s of g.receivedSizes || []) {
+            const k = dimensionSignature(s.values);
+            const cur = m.get(k) || { values: s.values, quantity: 0 };
+            cur.quantity += Number(s.quantity) || 0;
+            m.set(k, cur);
+          }
+          return [...m.values()];
+        })(),
+      },
+    };
+  });
+}
+
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 export const getDashboard = async (req, res) => {
   try {
     const cid = req.user.companyId;
     const todayStr = today();
 
+    // One received PO line = one job here (2026-10-15): its other requests'
+    // jobs aren't counted, and the line's status is the one that counts.
+    const cards = { company: cid, groupMember: { $ne: true } };
+    const byStatus = (s) => ({ ...cards, $or: [{ lineStatus: s }, { lineStatus: null, status: s }] });
     const [total, pending, inProgress, approved, rejected, todayCount] = await Promise.all([
-      QCJob.countDocuments({ company: cid }),
-      QCJob.countDocuments({ company: cid, status: 'Pending' }),
-      QCJob.countDocuments({ company: cid, status: 'In Progress' }),
-      QCJob.countDocuments({ company: cid, status: 'Approved' }),
-      QCJob.countDocuments({ company: cid, status: 'Rejected' }),
-      QCJob.countDocuments({ company: cid, receivedDate: todayStr }),
+      QCJob.countDocuments(cards),
+      QCJob.countDocuments(byStatus('Pending')),
+      QCJob.countDocuments(byStatus('In Progress')),
+      QCJob.countDocuments(byStatus('Approved')),
+      QCJob.countDocuments(byStatus('Rejected')),
+      QCJob.countDocuments({ ...cards, receivedDate: todayStr }),
     ]);
 
     // Source-wise breakdown
     const sourceBreakdown = await QCJob.aggregate([
-      { $match: { company: cid } },
+      { $match: cards },
       { $group: { _id: '$source', count: { $sum: 1 } } },
     ]);
 
     // Category breakdown
     const categoryBreakdown = await QCJob.aggregate([
-      { $match: { company: cid } },
+      { $match: cards },
       { $group: { _id: '$category', count: { $sum: 1 } } },
     ]);
 
@@ -73,7 +116,7 @@ export const getDashboard = async (req, res) => {
     ]);
 
     // Recent 5 jobs
-    const recentJobs = await QCJob.find({ company: cid })
+    const recentJobs = await QCJob.find(cards)
       .sort({ createdAt: -1 })
       .limit(5)
       .lean();
@@ -97,8 +140,10 @@ export const getDashboard = async (req, res) => {
 export const getQCJobs = async (req, res) => {
   try {
     const { status, source, excludeSource, category, search, page, limit, withStatusCounts } = req.query;
-    const filter = { company: req.user.companyId, status: { $ne: 'Draft' } };
-    if (status) filter.status = status;
+    // QC by PO line (2026-10-15): one card per received line — the line's
+    // other jobs are hidden, and the card shows / filters by the LINE's status.
+    const filter = { company: req.user.companyId, status: { $ne: 'Draft' }, groupMember: { $ne: true } };
+    if (status) filter.$or = [{ lineStatus: status }, { lineStatus: null, status }];
     // Comma-separated (same convention as excludeSource below) so one pill
     // can cover more than one real `source` value at once — needed for
     // "Sub Child Part QC", which spans two structurally different routes to
@@ -123,8 +168,8 @@ export const getQCJobs = async (req, res) => {
     let statusCounts;
     if (withStatusCounts === 'true') {
       const countsAgg = await QCJob.aggregate([
-        { $match: { company: req.user.companyId, status: { $ne: 'Draft' } } },
-        { $group: { _id: '$status', count: { $sum: 1 } } },
+        { $match: { company: req.user.companyId, status: { $ne: 'Draft' }, groupMember: { $ne: true } } },
+        { $group: { _id: { $ifNull: ['$lineStatus', '$status'] }, count: { $sum: 1 } } },
       ]);
       statusCounts = countsAgg.reduce((acc, c) => { acc[c._id] = c.count; return acc; }, {});
       statusCounts.all = countsAgg.reduce((sum, c) => sum + c.count, 0);
@@ -152,14 +197,14 @@ export const getQCJobs = async (req, res) => {
 
       if (isPaginated) {
         const total = matched.length;
-        const data = matched.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+        const data = await withLineSummaries(matched.slice((pageNum - 1) * limitNum, pageNum * limitNum));
         return res.json({
           success: true, data,
           pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
           ...(statusCounts ? { statusCounts } : {}),
         });
       }
-      return res.json({ success: true, data: matched, ...(statusCounts ? { statusCounts } : {}) });
+      return res.json({ success: true, data: await withLineSummaries(matched), ...(statusCounts ? { statusCounts } : {}) });
     }
 
     if (isPaginated) {
@@ -174,7 +219,7 @@ export const getQCJobs = async (req, res) => {
         orderCode: await resolveSalesOrderCodeForQCJob(job, req.user.companyId),
       })));
       return res.json({
-        success: true, data: jobsWithOrderCode,
+        success: true, data: await withLineSummaries(jobsWithOrderCode),
         pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) },
         ...(statusCounts ? { statusCounts } : {}),
       });
@@ -186,7 +231,7 @@ export const getQCJobs = async (req, res) => {
       ...job,
       orderCode: await resolveSalesOrderCodeForQCJob(job, req.user.companyId),
     })));
-    res.json({ success: true, data: jobsWithOrderCode, ...(statusCounts ? { statusCounts } : {}) });
+    res.json({ success: true, data: await withLineSummaries(jobsWithOrderCode), ...(statusCounts ? { statusCounts } : {}) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -319,7 +364,17 @@ export const getQCJob = async (req, res) => {
       partChecks = await attachPartReference(job.partChecks, item._id, req.user.companyId);
     }
 
-    res.json({ success: true, data: { ...job.toObject(), partChecks, orderCode, isManufacturedMachine, unitStepsDynamic } });
+    // QC by PO line (2026-10-15): the line this card stands for — its
+    // requests, what's in QC, sizes — and the LINE's status (the card stays
+    // open while any request on it is still in QC).
+    let receiptGroup = null;
+    let lineStatusOverride = {};
+    if (job.source === 'Purchase' && job.receiptKey) {
+      receiptGroup = receiptSummary(await receiptContext(job));
+      if (job.lineStatus) lineStatusOverride = { ownStatus: job.status, status: job.lineStatus };
+    }
+
+    res.json({ success: true, data: { ...job.toObject(), partChecks, orderCode, isManufacturedMachine, unitStepsDynamic, receiptGroup, ...lineStatusOverride } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -471,6 +526,16 @@ export const startInspection = async (req, res) => {
       job.inspectionStartDate = today();
     }
     await job.save();
+    // QC by PO line (2026-10-15): starting the line's card starts every
+    // request's job on it.
+    if (job.source === 'Purchase' && job.receiptKey) {
+      await QCJob.updateMany(
+        { company: job.company, receiptKey: job.receiptKey, _id: { $ne: job._id }, status: 'Pending' },
+        { $set: { status: 'In Progress', inspector: job.inspector, inspectionStartDate: job.inspectionStartDate || today() } }
+      );
+      await QCJob.updateMany({ company: job.company, receiptKey: job.receiptKey, _id: { $ne: job._id } }, { $set: { inspector: job.inspector } });
+      await refreshLineStatus(job.company, job.receiptKey);
+    }
     res.json({ success: true, data: job });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -529,18 +594,19 @@ export const updateChecklistItem = async (req, res) => {
   }
 };
 
-export const submitDecision = async (req, res) => {
-  try {
-    const { decision, failReason, inspectorRemarks, rejectQty } = req.body;
+export async function decideJob(job, body, user, req, { notify = true } = {}) {
+  {
+    const { decision, failReason, inspectorRemarks, rejectQty } = body;
     if (!decision || !['Pass', 'Fail'].includes(decision)) {
-      return res.status(400).json({ success: false, message: 'decision must be Pass or Fail' });
+      return { status: 400, body: { success: false, message: 'decision must be Pass or Fail' } };
     }
+    // How bad a failure is (2026-10-13, vendor score) — Minor / Major / Critical; Major if not given.
+    const severity = ['Minor', 'Major', 'Critical'].includes(body.severity) ? body.severity : 'Major';
     if (decision === 'Fail' && !failReason) {
-      return res.status(400).json({ success: false, message: 'failReason is required when decision is Fail' });
+      return { status: 400, body: { success: false, message: 'failReason is required when decision is Fail' } };
     }
 
-    const job = await QCJob.findOne({ _id: req.params.id, company: req.user.companyId, status: 'In Progress' });
-    if (!job) return res.status(404).json({ success: false, message: 'Job not found or not In Progress' });
+    if (job.status !== 'In Progress') return { status: 404, body: { success: false, message: 'Job not found or not In Progress' } };
 
     // A per-unit job (Child Part, or a dynamic-Process-Definition Machine
     // since 2026-09-24) is only ever decided unit by unit
@@ -548,14 +614,14 @@ export const submitDecision = async (req, res) => {
     // unit's full quantity for dispatch at once, regardless of which units
     // were actually built and checked (the exact ORD-0120 bug).
     if (job.unitChecks?.length) {
-      return res.status(400).json({ success: false, message: 'This job is decided per unit — review each unit in the Units panel instead.' });
+      return { status: 400, body: { success: false, message: 'This job is decided per unit — review each unit in the Units panel instead.' } };
     }
     // Same reasoning, Sub Child Part's own whole-batch shape (QC multi-
     // checkpoint redesign, slice 2, 2026-09-26) — one whole-job Pass here
     // would credit the full quantity at once regardless of which steps
     // actually passed vs were reworked/scrapped.
     if (job.batchSteps?.length) {
-      return res.status(400).json({ success: false, message: 'This job is decided per step — review each step in the Batch Steps panel instead.' });
+      return { status: 400, body: { success: false, message: 'This job is decided per step — review each step in the Batch Steps panel instead.' } };
     }
 
     // Enforce: all checklist items must be inspected before a decision can be submitted.
@@ -565,10 +631,10 @@ export const submitDecision = async (req, res) => {
       const statusField = job.finalCheckFilledBy ? 'qcStatus' : 'status';
       const pendingItems = job.checklist.filter(c => c[statusField] === 'Pending');
       if (pendingItems.length > 0) {
-        return res.status(400).json({
+        return { status: 400, body: {
           success: false,
           message: `${pendingItems.length} checklist item${pendingItems.length > 1 ? 's' : ''} still pending. Complete all checklist items before submitting a decision.`
-        });
+        } };
       }
     }
 
@@ -581,10 +647,10 @@ export const submitDecision = async (req, res) => {
     if (job.partChecks && job.partChecks.length > 0) {
       const unresolvedParts = job.partChecks.filter(p => p.status !== 'Approved');
       if (unresolvedParts.length > 0) {
-        return res.status(400).json({
+        return { status: 400, body: {
           success: false,
           message: `${unresolvedParts.length} Sub Child Part${unresolvedParts.length > 1 ? 's' : ''} still not QC-approved. Approve every part before the Final Check.`
-        });
+        } };
       }
     }
 
@@ -594,14 +660,36 @@ export const submitDecision = async (req, res) => {
     // job can be decided on again. Omitting rejectQty (or sending it equal to
     // the full remaining quantity) is a full reject and falls through to the
     // unchanged legacy branch below.
-    const parsedRejectQty = Number(rejectQty);
+    // Purchased item with a serial per piece (2026-10-13): QC ticks the
+    // serials it rejects — their count is the reject quantity.
+    let rejectedUnitIds = null;
+    let pickedRejectQty = rejectQty;
+    if (decision === 'Fail' && job.source === 'Purchase') {
+      const { readRejectedSerials } = await import('../services/purchasedUnitService.js');
+      const picked = await readRejectedSerials(job, body.rejectSerials, rejectQty);
+      if (picked.error) return { status: 400, body: { success: false, message: picked.error } };
+      if (picked.unitIds) {
+        rejectedUnitIds = picked.unitIds;
+        pickedRejectQty = picked.qty;
+      }
+    }
+
+    const parsedRejectQty = Number(pickedRejectQty);
     const isPartialReject = decision === 'Fail'
       && Number.isFinite(parsedRejectQty) && parsedRejectQty > 0
       && parsedRejectQty < job.quantity;
 
     if (isPartialReject) {
       job.quantity -= parsedRejectQty;
-      job.partialRejections.push({ qty: parsedRejectQty, reason: failReason, rejectedBy: req.user._id });
+      // Fabrication (2026-10-15): one entry per size rejected, so a Pass
+      // credits each size's stock less exactly what QC rejected of it.
+      const sizeParts = Array.isArray(body.rejectSizes) ? body.rejectSizes.filter(s => Number(s?.qty) > 0) : [];
+      if (sizeParts.length) {
+        for (const s of sizeParts) job.partialRejections.push({ qty: Number(s.qty), reason: failReason, rejectedBy: user._id, severity, sizeValues: s.values });
+      } else {
+        job.partialRejections.push({ qty: parsedRejectQty, reason: failReason, rejectedBy: user._id, severity });
+      }
+      job.failSeverity = severity;
       job.returnedToSource = true;
       // Downstream helpers (createRejectedProductionOrder / createQCRejectedPurchaseReturn
       // / createQCRejectedPurchaseExchange) read qcJob.failReason for their
@@ -643,7 +731,7 @@ export const submitDecision = async (req, res) => {
         }
       } else {
         try {
-          await createRejectedProductionOrder(job, req.user, parsedRejectQty);
+          await createRejectedProductionOrder(job, user, parsedRejectQty);
           console.log(`✅ [QC Partial Rejection] Created production order for ${parsedRejectQty} of ${job.itemName}; ${job.quantity} remaining in QC`);
         } catch (prodError) {
           console.error('❌ Error creating production order for partially rejected item:', prodError);
@@ -656,10 +744,12 @@ export const submitDecision = async (req, res) => {
 
       if (job.source === 'Purchase') {
         const { onMaterialRejected } = await import('../services/purchaseRejectionService.js');
-        await onMaterialRejected(job, parsedRejectQty, req.user, req);
+        const rejection = await onMaterialRejected(job, parsedRejectQty, user, req);
+        const { markRejected } = await import('../services/purchasedUnitService.js');
+        await markRejected(job, { unitIds: rejectedUnitIds, qty: parsedRejectQty, rejection });
       }
 
-      try {
+      if (notify) try {
         await notificationService.triggerQCNotification({
           action: 'qc_failed',
           data: { qcJobId: job.qcJobId, itemName: job.itemName, failReason, jobId: job._id, partial: true, rejectedQty: parsedRejectQty, remainingQty: job.quantity },
@@ -667,13 +757,14 @@ export const submitDecision = async (req, res) => {
         });
       } catch (e) { console.error('QC decision notification error:', e); }
 
-      return res.json({ success: true, data: job, partial: true });
+      return { status: 200, body: { success: true, data: job, partial: true } };
     }
 
     job.decision = decision;
     job.status = decision === 'Pass' ? 'Approved' : 'Rejected';
     job.inspectionEndDate = today();
     job.failReason = failReason || '';
+    if (decision === 'Fail') job.failSeverity = severity;
     job.inspectorRemarks = inspectorRemarks || '';
 
     if (decision === 'Pass') {
@@ -806,7 +897,12 @@ export const submitDecision = async (req, res) => {
           // just increments it; a line the vendor shipped that isn't in the
           // catalog at all creates a new variant flagged isLeftover (usable
           // stock, never offered as a reorderable catalog size again).
-          const receivedLines = job.source === 'Purchase' ? purchaseSaleCtx?.pr?.receivedFabricationLines : null;
+          // What THIS job passed, per size (2026-10-15): its own received
+          // pieces (job.receivedSizes; an old job falls back to the request's
+          // lines) less what QC rejected of each size. It used to credit
+          // every received piece — rejected ones too, and once per request
+          // on a shared line.
+          const receivedLines = job.source === 'Purchase' ? passedSizesOf(job, purchaseSaleCtx?.pr) : null;
           if (inventoryItem && receivedLines?.length > 0 && inventoryItem.fabricationRef) {
             for (const line of receivedLines) {
               const existingVariant = inventoryItem.dimensionVariants.find(
@@ -1043,7 +1139,7 @@ export const submitDecision = async (req, res) => {
         // reopenFinalTestingForRejection resets whichever step sits at
         // procs.length-1 for every unit, not literally "Final Testing".
         try {
-          await reopenFinalTestingForRejection(job, req.user);
+          await reopenFinalTestingForRejection(job, user);
         } catch (scErr) {
           console.error('❌ Error reopening Sub Child Part order for rejection:', scErr);
         }
@@ -1066,7 +1162,7 @@ export const submitDecision = async (req, res) => {
           // narrower, unaddressed case and still use the old
           // createRejectedProductionOrder path below them for now.
           try {
-            await reopenFinalTestingForRejection(job, req.user);
+            await reopenFinalTestingForRejection(job, user);
             console.log(`✅ [QC Rejection] Reopened Final Testing on the original order for: ${job.itemName}`);
           } catch (prodError) {
             console.error('❌ Error reopening Final Testing for rejected item:', prodError);
@@ -1119,17 +1215,21 @@ export const submitDecision = async (req, res) => {
     // payable on the PO's bill (+ ledger); the last pass settles the PO.
     if (decision === 'Pass' && job.source === 'Purchase') {
       const { onMaterialAccepted } = await import('../services/purchaseAcceptanceService.js');
-      await onMaterialAccepted(job, req.user, req);
+      await onMaterialAccepted(job, user, req);
+      const { markAccepted } = await import('../services/purchasedUnitService.js');
+      await markAccepted(job);
     }
     // QC failed what was left: a PurchaseRejection, waiting for the vendor's
     // answer (2026-10-12, accounts Slice 3).
     if (decision === 'Fail' && job.source === 'Purchase') {
       const { onMaterialRejected } = await import('../services/purchaseRejectionService.js');
-      await onMaterialRejected(job, job.quantity, req.user, req);
+      const rejection = await onMaterialRejected(job, job.quantity, user, req);
+      const { markRejected } = await import('../services/purchasedUnitService.js');
+      await markRejected(job, { unitIds: rejectedUnitIds, qty: job.quantity, rejection });
     }
 
-    // 🔔 Notify based on QC decision
-    try {
+    // 🔔 Notify based on QC decision (one per line when decided as a line — decideLine)
+    if (notify) try {
       if (decision === 'Pass') {
         await notificationService.triggerQCNotification({
           action: 'qc_passed',
@@ -1145,7 +1245,216 @@ export const submitDecision = async (req, res) => {
       }
     } catch (e) { console.error('QC decision notification error:', e); }
 
-    res.json({ success: true, data: job });
+    return { status: 200, body: { success: true, data: job } };
+  }
+}
+
+// A fabrication purchase job's passed pieces per size: its own received
+// sizes less the pieces QC rejected of each size. A rejection recorded with
+// no size (an old job) comes off the job's only size when it has one.
+export function passedSizesOf(job, pr) {
+  const own = job.receivedSizes?.length ? job.receivedSizes : (pr?.receivedFabricationLines || []);
+  const lines = own.map(l => ({ values: l.values, quantity: Number(l.quantity) || 0, weightPerPieceKg: l.weightPerPieceKg ?? null }));
+  for (const r of job.partialRejections || []) {
+    const qty = Number(r.qty) || 0;
+    const target = r.sizeValues
+      ? lines.find(l => dimensionSignature(l.values) === dimensionSignature(r.sizeValues))
+      : (lines.length === 1 ? lines[0] : null);
+    if (target) target.quantity = Math.max(0, target.quantity - qty);
+  }
+  return lines.filter(l => l.quantity > 0);
+}
+
+// ── QC by PO line (2026-10-15) ────────────────────────────────────────────
+// Store receives one PO line; every request on it keeps its own job (stock,
+// money, REJ, serials, Sales / Production hang off it), but QC sees and
+// decides the LINE: one card (the lead job), one decision, applied to each
+// request's job. A rejected quantity goes to the requests by the user's rule
+// (services/qcLineAllocation.js).
+const OPEN = ['Pending', 'In Progress'];
+
+export function lineStatusOf(statuses) {
+  if (statuses.some(s => s === 'In Progress')) return 'In Progress';
+  if (statuses.some(s => s === 'Pending')) return statuses.every(s => s === 'Pending') ? 'Pending' : 'In Progress';
+  return statuses.some(s => s === 'Approved') ? 'Approved' : 'Rejected';
+}
+
+async function refreshLineStatus(company, receiptKey) {
+  if (!receiptKey) return;
+  const jobs = await QCJob.find({ company, receiptKey }).select('status').lean();
+  if (!jobs.length) return;
+  await QCJob.updateMany({ company, receiptKey }, { $set: { lineStatus: lineStatusOf(jobs.map(j => j.status)) } });
+}
+
+// Everything about one received line, for the decision and the page.
+export async function receiptContext(lead) {
+  const jobs = await QCJob.find({ company: lead.company, receiptKey: lead.receiptKey }).sort({ _id: 1 });
+  const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+  const { classifyRaisedBy } = await import('./purchaseRequestController.js');
+  const { kindOfRaisedBy } = await import('../services/qcLineAllocation.js');
+  const prs = await PurchaseRequest.find({ _id: { $in: jobs.map(j => j.purchaseRequestId).filter(Boolean) } })
+    .select('requestId source autoGenerated reorderItemId storeOrderId saleItemId createdAt receivedFabricationLines').lean();
+  const prById = new Map(prs.map(p => [String(p._id), p]));
+  const rows = jobs.map(j => {
+    const pr = prById.get(String(j.purchaseRequestId)) || null;
+    const rejected = (j.partialRejections || []).reduce((s, r) => s + (Number(r.qty) || 0), 0) + (j.status === 'Rejected' ? Number(j.quantity) || 0 : 0);
+    const open = OPEN.includes(j.status);
+    return {
+      job: j, pr, jobId: String(j._id), qcJobId: j.qcJobId, requestId: pr?.requestId || '',
+      kind: kindOfRaisedBy(pr ? classifyRaisedBy(pr) : 'manual'),
+      createdAt: pr?.createdAt || j.createdAt,
+      status: j.status, open,
+      inQc: open ? Number(j.quantity) || 0 : 0,
+      received: Math.round(((j.status === 'Rejected' ? 0 : Number(j.acceptedQty ?? j.quantity) || 0) + rejected) * 1000) / 1000,
+      rejected: Math.round(rejected * 1000) / 1000,
+      sizes: j.isFabrication && open ? passedSizesOf(j, pr) : [],
+    };
+  });
+  return { jobs, rows, isFabrication: !!lead.isFabrication || jobs.some(j => j.isFabrication) };
+}
+
+// What the page shows about the line (no job documents).
+export const receiptSummary = (ctx) => ({
+  isFabrication: ctx.isFabrication,
+  sizes: (() => {
+    const m = new Map();
+    for (const r of ctx.rows) for (const s of r.job.receivedSizes || []) {
+      const k = dimensionSignature(s.values);
+      const cur = m.get(k) || { values: s.values, quantity: 0 };
+      cur.quantity += Number(s.quantity) || 0;
+      m.set(k, cur);
+    }
+    return [...m.values()];
+  })(),
+  requests: ctx.rows.map(r => ({ jobId: r.jobId, qcJobId: r.qcJobId, requestId: r.requestId, kind: r.kind, status: r.status, inQc: r.inQc, received: r.received, rejected: r.rejected, sizes: r.sizes })),
+  inQc: Math.round(ctx.rows.reduce((s, r) => s + r.inQc, 0) * 1000) / 1000,
+  received: Math.round(ctx.rows.reduce((s, r) => s + r.received, 0) * 1000) / 1000,
+  rejected: Math.round(ctx.rows.reduce((s, r) => s + r.rejected, 0) * 1000) / 1000,
+});
+
+// Decide every open job of the lead's receipt together. body: decision,
+// failReason, severity, inspectorRemarks, rejectQty (line total) |
+// rejectSizes [{ values, qty }] (fabrication) | rejectSerials [unit ids],
+// dryRun (only say how a rejection would be shared out).
+export async function decideLine(lead, body, user, req) {
+  const { decision, failReason } = body;
+  if (!['Pass', 'Fail'].includes(decision)) return { status: 400, body: { success: false, message: 'decision must be Pass or Fail' } };
+  if (lead.status === 'Pending' && !body.dryRun) return { status: 400, body: { success: false, message: 'Start the inspection first.' } };
+  const ctx = await receiptContext(lead);
+  const openRows = ctx.rows.filter(r => r.open);
+  if (!openRows.length) return { status: 409, body: { success: false, message: 'Nothing on this line is waiting for QC any more.' } };
+
+  // Checklist: QC fills the lead's once — it's the line's.
+  if (!body.dryRun && lead.checklist?.length) {
+    const statusField = lead.finalCheckFilledBy ? 'qcStatus' : 'status';
+    const pending = lead.checklist.filter(c => c[statusField] === 'Pending');
+    if (pending.length) return { status: 400, body: { success: false, message: `${pending.length} checklist item${pending.length > 1 ? 's' : ''} still pending. Complete all checklist items before submitting a decision.` } };
+  }
+  if (decision === 'Fail' && !failReason && !body.dryRun) return { status: 400, body: { success: false, message: 'failReason is required when decision is Fail' } };
+
+  // How a Fail is shared out — worked out completely before anything is written.
+  const plan = new Map(); // jobId → { qty, sizes, serials }
+  if (decision === 'Fail') {
+    const PurchasedUnit = (await import('../models/PurchasedUnit.js')).default;
+    const serialPieces = await PurchasedUnit.find({ purchaseRequest: { $in: openRows.map(r => r.job.purchaseRequestId) }, isLot: false, status: 'In QC' }).select('purchaseRequest').lean();
+    if (serialPieces.length) {
+      // Serial items: the ticked serials decide — each belongs to its request.
+      let ids = body.rejectSerials;
+      if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch { ids = []; } }
+      ids = Array.isArray(ids) ? [...new Set(ids.map(String))] : [];
+      const unitPr = new Map(serialPieces.map(u => [String(u._id), String(u.purchaseRequest)]));
+      if (!ids.length) {
+        const all = !(Number(body.rejectQty) > 0) || Number(body.rejectQty) >= openRows.reduce((s, r) => s + r.inQc, 0);
+        if (!all) return { status: 400, body: { success: false, message: 'Tick the serial numbers QC rejected.' } };
+        ids = [...unitPr.keys()];
+      }
+      if (ids.some(id => !unitPr.has(id))) return { status: 400, body: { success: false, message: 'One of the ticked serial numbers isn\'t waiting for QC on this line — refresh the page.' } };
+      for (const r of openRows) {
+        const mine = ids.filter(id => unitPr.get(id) === String(r.job.purchaseRequestId));
+        if (mine.length) plan.set(r.jobId, { qty: mine.length, sizes: [], serials: mine });
+      }
+    } else {
+      const { allocateRejection } = await import('../services/qcLineAllocation.js');
+      const { isCountableUnit } = await import('../services/purchasedUnitService.js');
+      const alloc = allocateRejection({
+        jobs: openRows.map(r => ({ id: r.jobId, qty: r.inQc, kind: r.kind, createdAt: r.createdAt, sizes: r.sizes.map(s => ({ values: s.values, quantity: s.quantity })) })),
+        rejectQty: body.rejectQty, bySize: body.rejectSizes,
+        whole: ctx.isFabrication || isCountableUnit(lead.unit), isFabrication: ctx.isFabrication,
+      });
+      if (alloc.error) return { status: 400, body: { success: false, message: alloc.error } };
+      for (const [id, a] of alloc.perJob) plan.set(id, { qty: a.qty, sizes: a.sizes, serials: null });
+    }
+  }
+  const preview = openRows.map(r => ({ requestId: r.requestId, kind: r.kind, inQc: r.inQc, reject: plan.get(r.jobId)?.qty || 0 }));
+  if (body.dryRun) return { status: 200, body: { success: true, preview } };
+
+  // The other jobs catch up with the lead (they're never opened themselves).
+  const checklistCopy = (lead.checklist || []).map(c => { const o = c.toObject ? c.toObject() : { ...c }; delete o._id; return o; });
+  for (const r of openRows) {
+    if (r.jobId === String(lead._id)) continue;
+    r.job.status = 'In Progress';
+    r.job.inspector = lead.inspector;
+    r.job.inspectionStartDate = r.job.inspectionStartDate || lead.inspectionStartDate || today();
+    if (checklistCopy.length) r.job.checklist = checklistCopy;
+    await r.job.save();
+  }
+
+  const results = [];
+  if (decision === 'Fail') {
+    for (const r of openRows) {
+      const p = plan.get(r.jobId);
+      if (!p) continue;
+      const out = await decideJob(r.job, {
+        decision: 'Fail', failReason, severity: body.severity, inspectorRemarks: body.inspectorRemarks,
+        rejectQty: p.qty, rejectSerials: p.serials || undefined, rejectSizes: p.sizes?.length ? p.sizes : undefined,
+      }, user, req, { notify: false });
+      results.push({ requestId: r.requestId, kind: r.kind, rejected: p.qty, ok: out.status === 200, message: out.body?.message });
+    }
+  } else {
+    for (const r of openRows) {
+      const out = await decideJob(r.job, { decision: 'Pass', inspectorRemarks: body.inspectorRemarks }, user, req, { notify: false });
+      results.push({ requestId: r.requestId, kind: r.kind, passed: r.inQc, ok: out.status === 200, message: out.body?.message });
+    }
+  }
+  await refreshLineStatus(lead.company, lead.receiptKey);
+
+  try {
+    const rejectedTotal = results.reduce((s, x) => s + (x.rejected || 0), 0);
+    await notificationService.triggerQCNotification({
+      action: decision === 'Pass' ? 'qc_passed' : 'qc_failed',
+      data: { qcJobId: lead.qcJobId, itemName: lead.itemName, jobId: lead._id, failReason, ...(decision === 'Fail' ? { partial: true, rejectedQty: rejectedTotal } : {}) },
+      targetCompanyId: lead.company,
+    });
+  } catch (e) { console.error('QC line decision notification error:', e); }
+
+  const failed = results.filter(x => !x.ok);
+  const fresh = await QCJob.findById(lead._id);
+  return {
+    status: failed.length ? 500 : 200,
+    body: { success: !failed.length, data: fresh, line: { results }, ...(failed.length ? { message: `Some requests weren't decided: ${failed.map(f => `${f.requestId} (${f.message})`).join('; ')}` } : {}) },
+  };
+}
+
+// The HTTP decision. A purchase job that is part of a received PO line with
+// other requests still in QC is decided as the LINE (decideLine, 2026-10-15).
+export const submitDecision = async (req, res) => {
+  try {
+    const job = await QCJob.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found or not In Progress' });
+    if (job.source === 'Purchase' && job.receiptKey) {
+      const others = await QCJob.countDocuments({ company: job.company, receiptKey: job.receiptKey, _id: { $ne: job._id }, status: { $in: OPEN } });
+      // The line: the lead's card stays the line's even after the lead's own
+      // request was fully rejected while others are still in QC.
+      if (others > 0 || req.body.dryRun) {
+        if (!OPEN.includes(job.status) && job.groupMember) return res.status(404).json({ success: false, message: 'Job not found or not In Progress' });
+        const out = await decideLine(job, req.body, req.user, req);
+        return res.status(out.status).json(out.body);
+      }
+    }
+    if (job.status !== 'In Progress') return res.status(404).json({ success: false, message: 'Job not found or not In Progress' });
+    const out = await decideJob(job, req.body, req.user, req);
+    if (job.receiptKey) await refreshLineStatus(job.company, job.receiptKey);
+    res.status(out.status).json(out.body);
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

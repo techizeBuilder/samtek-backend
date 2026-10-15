@@ -397,6 +397,31 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const purchaseAuditRoutes = (await import('./routes/purchaseAuditRoutes.js')).default;
             app.use('/api/purchase-audit', purchaseAuditRoutes);
             console.log('Purchase Audit routes registered at /api/purchase-audit');
+
+            // Price history: avg / last / lowest over a period (2026-10-12)
+            const priceHistoryRoutes = (await import('./routes/priceHistoryRoutes.js')).default;
+            app.use('/api/price-history', priceHistoryRoutes);
+            console.log('Price history routes registered at /api/price-history');
+
+            // Serial numbers / lots of what Store received (2026-10-13)
+            const serialNumberRoutes = (await import('./routes/serialNumberRoutes.js')).default;
+            app.use('/api/serial-numbers', serialNumberRoutes);
+            console.log('Serial number routes registered at /api/serial-numbers');
+
+            // Vendor warranty claims, Complaints → Support (2026-10-13)
+            const vendorWarrantyClaimRoutes = (await import('./routes/vendorWarrantyClaimRoutes.js')).default;
+            app.use('/api/vendor-warranty-claims', vendorWarrantyClaimRoutes);
+            console.log('Vendor warranty claim routes registered at /api/vendor-warranty-claims');
+
+            // Purchaser score (2026-10-13, blueprint §13)
+            const purchaserScoreRoutes = (await import('./routes/purchaserScoreRoutes.js')).default;
+            app.use('/api/purchaser-scores', purchaserScoreRoutes);
+            console.log('Purchaser score routes registered at /api/purchaser-scores');
+
+            // Purchase Dashboard (2026-10-13, blueprint §21)
+            const purchaseDashboardRoutes = (await import('./routes/purchaseDashboardRoutes.js')).default;
+            app.use('/api/purchase-dashboard', purchaseDashboardRoutes);
+            console.log('Purchase dashboard routes registered at /api/purchase-dashboard');
             // Sales -> R&D new-product requests (raised from a lead's Quotation page)
             const salesItemRequestRoutes = (await import('./routes/salesItemRequestRoutes.js')).default;
             app.use('/api/sales-item-requests', salesItemRequestRoutes);
@@ -837,6 +862,27 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             }
             catch (cronError) {
                 console.warn('⚠️ Purchase payment overdue cron job setup warning:', cronError.message);
+            }
+
+            // ─── Daily Cron Job — Vendor score snapshot (2026-10-13) ─────────────────
+            // This month's score per approved vendor (blueprint vendor_scores), and
+            // the Company Admin told once when a vendor first drops below the
+            // Watchlist line (services/vendorScoreService.js).
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runVendorScoreSweep } = await import('./services/vendorScoreService.js');
+                cron.schedule('45 9 * * *', async () => {
+                    try {
+                        const r = await runVendorScoreSweep();
+                        console.log(`✅ [CRON] Vendor score sweep done — ${r.vendors} vendor(s), ${r.alerts} below-the-line alert(s)`);
+                    } catch (err) {
+                        console.error('❌ [CRON] Vendor score sweep failed:', err.message);
+                    }
+                });
+                console.log('✅ Vendor score cron job scheduled (daily at 9:45 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Vendor score cron job setup warning:', cronError.message);
             }
 
             // ─── Periodic Cron Job — Child Part Low-Stock Auto-Production ────────────

@@ -70,7 +70,7 @@ export function priceChangePercent(price, reference) {
   return Math.round(((p - ref) / ref) * 1000) / 10;
 }
 
-// itemId -> deliveries [{ price (pre-GST), unit, vendorId, vendorName, date (received), purchaseId, poNumber }], newest first.
+// itemId -> deliveries [{ price (pre-GST), unit, vendorId, vendorName, date (received), purchaseId, poNumber, quantity }], newest first.
 export async function loadPriceSamples({ companyId, itemIds }) {
   const ids = [...new Set((itemIds || []).filter(Boolean).map(String))];
   const byItem = new Map();
@@ -80,10 +80,10 @@ export async function loadPriceSamples({ companyId, itemIds }) {
     status: { $nin: ['Pending Approval', 'Rejected', 'Cancelled'] },
     'items.item': { $in: ids },
   })
-    .select('purchaseOrderNumber supplier orderDate createdAt items.item items.unitPrice items.purchaseUnit items.gstInclusive items.gstRate items.purchaseRequest items.purchaseRequests')
+    .select('purchaseOrderNumber supplier orderDate createdAt items.item items.itemName items.unitPrice items.purchaseUnit items.gstInclusive items.gstRate items.purchaseRequest items.purchaseRequests')
     .populate('supplier', 'supplierName')
-    .populate('items.purchaseRequest', 'status receivedAt purchaseUnit')
-    .populate('items.purchaseRequests', 'status receivedAt purchaseUnit')
+    .populate('items.purchaseRequest', 'status receivedAt purchaseUnit purchaseQuantity receivedQuantity quantity')
+    .populate('items.purchaseRequests', 'status receivedAt purchaseUnit purchaseQuantity receivedQuantity quantity')
     .lean();
   for (const po of purchases) {
     for (const line of po.items || []) {
@@ -106,6 +106,7 @@ export async function loadPriceSamples({ companyId, itemIds }) {
           date: pr.receivedAt || po.orderDate || po.createdAt,
           purchaseId: String(po._id),
           poNumber: po.purchaseOrderNumber,
+          quantity: Number(pr.receivedQuantity) || Number(pr.purchaseQuantity) || Number(pr.quantity) || null,
         });
       }
     }
@@ -132,12 +133,21 @@ function stats(samples) {
 // leave out a PO itself and anything after it (for checking a PO against
 // what came before it). null when there's no history.
 const RECENT_LIMIT = 20;
-export function summarizePrices(samples, { unit = '', excludePurchaseId = null, before = null } = {}) {
+const SAMPLES_LIMIT = 300;
+// Price history over a period (2026-10-12, client): `from` / `to` (dates,
+// inclusive by day) and `vendorId` narrow the deliveries. `samples` (newest
+// first, up to 300) lets a page re-cut the period without asking again.
+export function summarizePrices(samples, { unit = '', excludePurchaseId = null, before = null, from = null, to = null, vendorId = null, withSamples = true } = {}) {
   const want = normUnit(unit);
+  const fromT = from ? new Date(from).setHours(0, 0, 0, 0) : null;
+  const toT = to ? new Date(to).setHours(23, 59, 59, 999) : null;
   const usable = (samples || []).filter(s =>
     normUnit(s.unit) === want
     && (!excludePurchaseId || s.purchaseId !== String(excludePurchaseId))
-    && (!before || new Date(s.date) < new Date(before)));
+    && (!before || new Date(s.date) < new Date(before))
+    && (fromT == null || new Date(s.date).getTime() >= fromT)
+    && (toT == null || new Date(s.date).getTime() <= toT)
+    && (!vendorId || s.vendorId === String(vendorId)));
   const overall = stats(usable);
   if (!overall) return null;
   const byVendor = {};
@@ -150,6 +160,7 @@ export function summarizePrices(samples, { unit = '', excludePurchaseId = null, 
     unit: unit || '',
     byVendor: Object.fromEntries(Object.entries(byVendor).map(([vid, list]) => [vid, stats(list)])),
     recent: usable.slice(0, RECENT_LIMIT).map(s => ({ price: s.price, vendorId: s.vendorId, vendorName: s.vendorName, date: s.date, poNumber: s.poNumber })),
+    ...(withSamples ? { samples: usable.slice(0, SAMPLES_LIMIT).map(s => ({ price: s.price, vendorId: s.vendorId, vendorName: s.vendorName, date: s.date, poNumber: s.poNumber })) } : {}),
   };
 }
 

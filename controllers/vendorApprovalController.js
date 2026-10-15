@@ -9,8 +9,10 @@ import Supplier from '../models/Supplier.js';
 import VendorApprovalRequest from '../models/VendorApprovalRequest.js';
 import {
   applyApprovedRequest, getVendorStanding, notifyRequesterOfDecision, activityEntry,
-  WATCHLIST_RATING_BELOW, WATCHLIST_MIN_EVENTS, PROBATION_RECEIVED_PO_COUNT,
+  WATCHLIST_MIN_EVENTS, PROBATION_RECEIVED_PO_COUNT,
 } from '../services/vendorApprovalService.js';
+import { scoreSettingsOf } from '../services/vendorScoreService.js';
+import { getOrCreateSettings } from './purchaseSettingsController.js';
 
 const REQUEST_TYPES = ['NewVendor', 'DetailsChange', 'Suspend', 'Blacklist', 'Reinstate'];
 
@@ -138,8 +140,8 @@ export const cancelRequest = async (req, res) => {
   }
 };
 
-// GET /api/vendor-approvals/watchlist — approved vendors whose current rating
-// (vendorRatingService.js) puts them on the Watchlist.
+// GET /api/vendor-approvals/watchlist — approved vendors whose vendor score
+// (vendorScoreService.js) or a refused rejection puts them on the Watchlist.
 export const getWatchlist = async (req, res) => {
   try {
     const vendors = await Supplier.find({ companyId: req.user.companyId, approvalStatus: 'Approved' })
@@ -149,11 +151,11 @@ export const getWatchlist = async (req, res) => {
     const watchlist = vendors
       .map(v => ({ ...v, standing: standing.get(String(v._id)) }))
       .filter(v => v.standing?.stage === 'Watchlist')
-      .sort((a, b) => (a.standing.rating ?? 5) - (b.standing.rating ?? 5));
+      .sort((a, b) => (a.standing.score ?? 100) - (b.standing.score ?? 100));
     res.json({
       watchlist,
       thresholds: {
-        ratingBelow: WATCHLIST_RATING_BELOW,
+        scoreBelow: scoreSettingsOf(await getOrCreateSettings(req.user.companyId)).watchlistBelow,
         minEvents: WATCHLIST_MIN_EVENTS,
         probationReceivedPOs: PROBATION_RECEIVED_PO_COUNT,
       },
@@ -190,8 +192,8 @@ export const suspendFromWatchlist = async (req, res) => {
         reason,
         reviewDate: req.body.reviewDate || null,
         fromWatchlist: true,
-        rating: standing?.rating ?? null,
-        ratingEvents: standing?.eventCount ?? 0,
+        score: standing?.score ?? null,
+        watchReason: standing?.watchReason || null,
       },
       previousValue: { approvalStatus: vendor.approvalStatus },
       requestedBy: req.user._id,

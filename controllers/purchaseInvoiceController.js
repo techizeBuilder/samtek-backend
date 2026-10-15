@@ -7,7 +7,7 @@ import { Transaction, Account } from '../models/Account.js';
 import mongoose from 'mongoose';
 import { recalculateItemPricing } from '../services/itemPricingService.js';
 import { postEntry, gstLines } from '../services/purchaseLedgerService.js';
-import { payBill, payableNow } from '../services/purchaseBillService.js';
+import { payBill, payableNow, owedNow } from '../services/purchaseBillService.js';
 
 // Recalculates purchase-derived cost/MRP/Sale Price for every Item referenced
 // on a newly recorded Purchase Invoice — the most reliable "price actually
@@ -148,10 +148,22 @@ export const getPurchaseInvoices = async (req, res) => {
 
         const total = await PurchaseInvoice.countDocuments(query);
 
+        // The vendor's own invoice numbers recorded at receive, per PO (2026-10-12).
+        const poIds = invoices.map(inv => inv.purchaseOrder?._id).filter(Boolean);
+        const withInv = poIds.length ? await mongoose.model('PurchaseRequest').find({ purchaseOrder: { $in: poIds }, 'vendorInvoice.number': { $nin: [null, ''] } }).select('purchaseOrder productName vendorInvoice receivedAt').lean() : [];
+        const vendorInvoicesByPo = new Map();
+        for (const pr of withInv) {
+            const k = String(pr.purchaseOrder);
+            const list = vendorInvoicesByPo.get(k) || [];
+            if (!list.some(v => v.number === pr.vendorInvoice.number)) list.push({ ...pr.vendorInvoice, items: [pr.productName], receivedAt: pr.receivedAt });
+            else { const v = list.find(x => x.number === pr.vendorInvoice.number); if (!v.items.includes(pr.productName)) v.items.push(pr.productName); }
+            vendorInvoicesByPo.set(k, list);
+        }
+
         res.json({
             success: true,
             data: {
-                invoices: invoices.map(inv => ({ ...inv.toObject(), payableNow: inv.purchaseOrder ? payableNow(inv) : null })),
+                invoices: invoices.map(inv => ({ ...inv.toObject(), payableNow: inv.purchaseOrder ? payableNow(inv) : null, vendorInvoices: inv.purchaseOrder ? (vendorInvoicesByPo.get(String(inv.purchaseOrder._id)) || []) : [] })),
                 pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) }
             }
         });
@@ -423,8 +435,20 @@ export const getVendorOutstanding = async (req, res) => {
         ]);
         for (const v of outstandingData) {
             v.invoices = v.invoices
-                .map(inv => ({ ...inv, payableNow: inv.purchaseOrder ? payableNow({ ...inv, totalAmount: inv.totalAmount }) : null }))
+                .map(inv => ({ ...inv, payableNow: inv.purchaseOrder ? payableNow({ ...inv, totalAmount: inv.totalAmount }) : null, owedNow: owedNow({ ...inv, paidAmount: inv.paidAmount ?? (inv.totalAmount - inv.balance) }) }))
                 .sort((a, b) => new Date(a.date) - new Date(b.date));
+            // What we owe this vendor now and haven't paid — unpaid advances,
+            // received + QC-passed material, bills without a PO; not material
+            // still on order (2026-10-12: the credit-limit warning at PO time).
+            const r2 = (n) => Math.round(n * 100) / 100;
+            v.pending = {
+                total: r2(v.invoices.reduce((s, i) => s + i.owedNow.owed, 0)),
+                advance: r2(v.invoices.filter(i => i.purchaseOrder).reduce((s, i) => s + i.owedNow.advance, 0)),
+                material: r2(v.invoices.filter(i => i.purchaseOrder).reduce((s, i) => s + i.owedNow.material, 0)),
+                noPo: r2(v.invoices.filter(i => !i.purchaseOrder).reduce((s, i) => s + i.owedNow.owed, 0)),
+                overdue: r2(v.invoices.reduce((s, i) => s + i.owedNow.overdue, 0)),
+                onOrder: r2(v.totalOutstanding - v.invoices.reduce((s, i) => s + i.owedNow.owed, 0)),
+            };
         }
 
         res.json({ success: true, data: outstandingData });

@@ -1,41 +1,94 @@
 # Procurement v2 — what's left to build, and the browser test plan
 
-Date: 2026-10-10
+- **Started:** 2026-10-10
+- **Updated:** 2026-10-13
 
-**Where things stand:**
-- Points 1–17 from the gap list are all **built or closed**.
-- Everything from 8–10 Oct passed code-level and database tests, but **none of it has been clicked
-  through in the browser.**
-- Part A lists what's left to build.
+**Where things stand (2026-10-13):**
+- **The purchase flow is complete:** change report §1–§32; the last build was the Purchase Dashboard
+  (§32).
+- **Next, in the user's order:**
+  1. **browser testing** (Part B, T1–T40)
+  2. then **the outsource flow**
+- Everything passed code-level and database tests, but **none of it has been clicked through in the
+  browser yet.**
+- Part A records what was built and what was left out on purpose.
 - Part B is the test plan, in order. Each test builds on the ones before it, so go top to bottom.
 
 Detail for every change is in `procurement-v2-changes-2026-10.md` (§ numbers below point there).
-Open questions are in `procurement-workflow-2026-10.md` §9 (49 open, 41 resolved).
+Open questions are in `procurement-workflow-2026-10.md` §9 (27 open, 63 resolved). Those left are
+optional ("only if the client asks") or belong to the outsource flow.
+
+**Update 2026-10-12:** the Accounts work (A1) is **built** (change report §22–§25). Its browser
+tests are **Stage 8 (T27–T34)** — do them after Stages 1–7, end to end.
+
+**Update 2026-10-14:**
+- test-1's purchase data was cleaned and 15 new requests raised
+- the test roadmap is **`purchase-flow-test-roadmap-2026-10.md`**: rounds R0–R10, with a vendor
+  and price for every PO
+
+**Update 2026-10-13:**
+- serial numbers at receive (change report §28) → **T36**
+- vendor warranty claims (§29) → **T37**
+- the vendor score out of 100 (§30) → **T38** (Technical dropped by the user)
+- the purchaser score (§31) → **T39**
+- the Purchase Dashboard (§32) → **T40**
+- budgets, cost centres and separation-of-duties rules: **not built** (user)
+- **the purchase flow is complete**; next is browser testing, then the outsource flow
 
 ---
 
 # Part A — What's left to build
 
-## A1. On hold — waiting for the client
+## A1. Accounts — built 2026-10-12
 
-Everything is written up in **`accounts-bill-ledger-payments-2026-10.md`**: findings, the proposed
-model, and 9 questions.
+The client answered; the design is in **`accounts-bill-ledger-payments-2026-10.md`**, and the build
+is in change report §22–§25. Built:
+- the PO bill
+- the advance (delivery days start when it's paid)
+- QC pass → payable
+- an optional mid payment
+- full acceptance → due date by credit days
+- the overdue sweep
+- QC rejections settled by the vendor's answer (replace / refund / credit / refused)
+- refunds and vendor credit
+- cancel on the new bill
+- a real purchase ledger per company + unit
+- the vendor invoice number at receive
+- TDS removed
+
+Still open:
 
 | Item | What it is |
 |---|---|
-| **Purchase bill + ledger fix** | The PO is the bill. It's booked when goods arrive, which fixes Accounts Payable going negative (ledger bug). |
-| **Advance against the PO** | Pay the advance % when the PO is placed; it's set off when the bill is booked. |
-| **Vendor balance** | One figure: plus = we owe the vendor; minus = the vendor holds our money (advances, cancelled POs). |
-| **Payment requests and approvals** | Requested → Approved → Scheduled → Paid (blueprint §16). |
-| **Payment reminders** | Before the due date (AC7). |
-| **Credit limit at PO time** | Warn or block (AC6). |
-| **GST ledger accounts** | Input CGST / SGST / IGST. The type per PO is already worked out (§19). |
-| **TDS** | Only if the client deducts it on purchases (question 3 in the accounts doc). |
-| **QC return amount bug** | Uses a fixed 18% GST and doesn't match the invoice. Fix it with the bill work. |
+| **Credit limit at PO time** | Today a warning at ≥ 70%; block or not (AC6). |
+| **Payment approvals** | Requested → Approved → Scheduled → Paid — skipped by decision (Q8). Revisit if the client asks. |
+| **Bills with no PO** | Stays as the manual "Record New Bill"; revisit with the outsource flow. |
 
-## A2. Later phases — not started
+## A2. After the core flow — where everything stands (2026-10-13)
 
-Each needs a few decisions first (the question IDs are in the workflow doc).
+**Built 2026-10-13:**
+- **Serial numbers** at receive (§28)
+- **Vendor warranty claims** (§29)
+- **The vendor score:** out of 100, blueprint weights (§30)
+- **The purchaser score** (§31)
+- **The Purchase Dashboard:** three role views (§32)
+
+**Dropped / not built (user):**
+- technical pass / fail (S3)
+- budgets / cost centres (X1, X2)
+- separation-of-duties rules (X3)
+- QC quarantine / hold stock (probably not needed: a rejection already reaches Purchase as a
+  quantity to settle)
+
+**Parked ("keep them for now", user):**
+- return freight (RT2)
+- a return challan (RT4)
+- "due in 3 days / tomorrow" notifications: only the on-page chips and the overdue alert exist
+
+**With the outsource flow:** job work / services (G3, V7), and bills with no PO.
+
+The lists below are the original backlog by area, kept for reference. Anything not marked built is
+**optional**: only if the client asks.
 
 **Requests (PRs)** — mostly covered already (your review, 10 Oct):
 - **Approval:** already there. Store approves or rejects requests, and the Company Admin approves
@@ -49,10 +102,8 @@ Each needs a few decisions first (the question IDs are in the workflow doc).
   runs.
 
 **Quotes and vendor choice**
-- **Vendor score:** the rating already exists (on time + QC). It needs **aligning with the
-  blueprint's weighted score**: price, quality, delivery, credit, warranty (S1, S2, S4, S6).
-  Today the selection check is price-only.
-- Technical pass / fail on a quote (S3)
+- **Vendor score:** **built (§30)**: the blueprint's weighted score, out of 100 (S1, S2, S4, S6).
+- Technical pass / fail on a quote (S3): **dropped** (user)
 - Vendor call logging through the IVR (QT6)
 - Specification / drawing revision on the quotation request
 - **Already covered (closed):**
@@ -65,22 +116,23 @@ the payment terms and the terms on the quotation already cover printed terms (P4
 PDF, because the email is the PO. Still open: who approves when the Company Admin is away (A4).
 
 **Store / GRN and QC**
-- GRN details: shortage / excess and tolerance (ST1), serial number rule (ST2), batch / lot (ST3),
-  mandatory documents (ST7)
+- Serial numbers (ST2) and lot records (ST3): **built (§28)**
+- GRN details: shortage / excess and tolerance (ST1), mandatory documents (ST7)
 - Store's "Not Received" confirmation (ST4)
-- Reminders 3 days / 1 day **before** the due date (today it's overdue only)
+- Notifications 3 days / 1 day **before** the due date. Today: the "Due today / Due in 3 days" chips and due badges on Store and Purchase, plus the overdue alert.
 - QC-hold / quarantine stock kept apart from usable stock
 - Inbound logistics / Dispatch for company pickups (ST6)
-- Which items need incoming QC (QC1); deviation approval (QC2); defect categories (QC3); the
-  incoming checklist (QC4)
+- Severity on a QC fail (QC3): **built (§30)**
+- Which items need incoming QC (QC1); deviation approval (QC2); the incoming checklist (QC4)
 
 **Returns**
-- Replacement vs credit note (RT1), return freight (RT2), the exchange email step (RT3), return
-  challan (RT4)
+- Built 2026-10-12 (§24): the vendor's answer on a rejection (RT1 resolved); no automatic exchange
+  email (RT3 dropped)
+- Still open: return freight (RT2), return challan / gate pass (RT4)
 
 **Across everything**
-- Purchaser score (S5)
-- Purchase dashboard (X9)
+- Purchaser score (S5): **built (§31)**
+- Purchase dashboard (X9): **built (§32)**
 - Fraud / anomaly alerts (X5)
 - The audit log beyond POs (vendor, quote, payment, GRN, QC) and the tamper-detection chain (X4)
 - Budgets / cost centres (X1, X2)
@@ -94,10 +146,11 @@ PDF, because the email is the PO. Still open: who approves when the Company Admi
 - General decisions (G1–G4).
 
 **Small open UX points (from 9 Oct)**
-- On the vendor's quotation email page, every template charge is listed. Should charges be added by
-  choice, like terms now are?
-- The PO review lists every template term. Should it show only the vendor's terms, plus an "Add"
-  option?
+- ~~On the vendor's quotation email page, every template charge is listed. Should charges be added by
+  choice, like terms now are?~~ **Yes (user, 2026-10-14), built: change report §33.**
+- ~~The PO review lists every template term. Should it show only the vendor's terms, plus an "Add"
+  option?~~ **Yes (user, 2026-10-14), built: change report §35.** A change from the quotation's
+  charges / terms also needs a reason now.
 
 ---
 
@@ -127,8 +180,9 @@ PDF, because the email is the PO. Still open: who approves when the Company Admi
     PO approval limit, for example **₹20,000**
   - Purchase & Outsource → Purchase → **Settings**: quote validity **30** days, price warning
     **10%**, a few charge names (Freight, Packing) and term names
-- [ ] **Requests to work with:** PR001–PR012 already exist (test-1 company, "test unit"),
-      including fabrication sizes. Raise a few more from Store / Production if needed.
+- [ ] **Requests to work with:** the purchase data was **reset on 2026-10-14**, with 15 fresh
+      requests (PR006–PR018, PR024, PR025). **`purchase-flow-test-roadmap-2026-10.md`** says which
+      request goes on which PO, at which price, for each test. Follow it round by round.
 - **The daily jobs** (overdue delivery 9:30, quote reminders 9:35) run once a morning. To test
   them without waiting, ask Claude to run the sweep on demand for your company (T24, T16).
 
@@ -137,6 +191,10 @@ PDF, because the email is the PO. Still open: who approves when the Company Admi
 ---
 
 ## Stage 1 — Masters and settings
+
+*(2026-10-14: T1, T4–T8 ✅ passed (roadmap slice 1); T9–T11, T13, T14 ✅ passed (slice 2), with
+fixes §33 and §34; T12 is due 2026-10-15. T15–T17 ✅ passed (slice 3, batch POs), with fixes
+§35–§37; the Purchase Dashboard numbers were checked against them.)*
 
 **T1. Company GSTIN check**
 - **Where:** Company Admin → My Company → edit
@@ -359,10 +417,250 @@ PDF, because the email is the PO. Still open: who approves when the Company Admi
 **T26. Nothing else broke** (quick look)
 - [ ] Vendor Ratings tab: shows the same numbers as the vendor card
 - [ ] Purchase Invoice page: invoices list; a cancelled PO's invoice shows Cancelled
-- [ ] Vendor Payment / Payable Ageing pages still open. Their rework is on hold (A1).
+- [ ] Vendor Payment / Payable Ageing pages open (rebuilt 2026-10-12; tested in Stage 8).
 - [ ] Dispatch's vendor pickups list doesn't show cancelled POs
 
 ---
 
 **When something fails:** note the test number, what you did, and what you saw (a screenshot
 helps), then bring it back. That's enough to trace it.
+
+---
+
+## Stage 8 — Money: advance, QC, rejections, payments (accounts, built 2026-10-12)
+
+Do these with **one fresh PO**, end to end:
+- 2 lines, under the approval limit
+- **Advance 20%, Credit days 15**
+- a freight charge
+
+Before you start, check that a bank / cash account with enough balance exists (Accounts → Bank &
+Cash).
+
+**T27. Placing the PO** (§22)
+- [ ] PO review: the Advance % note says "delivery days start when it's paid". The Credit days note
+      says "after everything is received + QC-passed; blank = pay straight away".
+- [ ] Purchase Orders and Store → To Receive:
+  - Expected shows **"After advance"**
+  - the Payment column shows **"Advance due"**
+  - each line shows **"Waiting for advance · N days after"**
+  - no Overdue chips count it, and there's no "Change date"
+- [ ] The vendor's PO email says **"N days after advance"** instead of a date.
+- [ ] Store's notification says the dates are set when the advance is paid.
+
+- [ ] **Credit warning** (§26): at PO review the vendor line reads "Unpaid to {vendor}: ₹X of ₹Y
+      credit limit". X = what's already payable and unpaid (not this PO, not material still on
+      order). Check it before and after the payments below.
+
+**T28. Paying the advance** (§22)
+- [ ] **Vendor Payment** → the vendor → the PO card shows: Advance 20% (₹0 of ₹X paid), QC-passed
+      so far ₹0, full payment "15 days after everything passes QC", Can pay now: advance ₹X.
+- [ ] "QC-passed material" isn't offered. Paying more than the advance is refused.
+- [ ] Pay **part** of the advance → the dates are still empty.
+- [ ] Pay the **rest** → a toast says the delivery days start today.
+  - Purchase Orders / To Receive show real dates
+  - Store gets "Advance paid — delivery dates set"
+  - History shows "Advance paid"
+- [ ] **Recent payments** lists both, marked Advance.
+
+**T29. Receiving with the vendor's invoice** (§25)
+- [ ] Store → Receive line 1 → fill **Vendor's invoice**: number, date, attach a scan.
+  - A date without a number is refused.
+  - The line then shows "Vendor invoice SS/… (date)", linked to the scan.
+
+**T30. QC pass → payable; optional mid payment** (§23)
+- [ ] QC passes line 1 → Vendor Payment shows **"QC-passed material (up to ₹Y)"**, where Y = that
+      line's value less 20%.
+- [ ] Paying more than Y is refused. Pay part of it.
+
+**T31. QC rejection → the vendor's answer** (§24)
+- [ ] Receive line 2. QC **rejects part** of it (Reject Quantity), then passes the rest.
+  - **No** email goes to the vendor.
+  - The PO's creator is notified.
+  - **Purchase Orders → QC Rejections** shows REJ-… "Awaiting vendor answer", with the badge
+    count.
+- [ ] The bill is **not** fully accepted yet: Purchase Invoice still shows "Awaiting material".
+- [ ] Record the answer. Try each on separate POs if you can:
+  - **Replace** (a date is needed) → a replacement is expected on the same line. Store receives it
+    with the normal Receive button, QC passes it, and the rejection becomes "Replaced".
+  - **Refund** → the bill drops. Vendor Payment → **Refunds & credits** shows "Refund due". Use
+    "Refund received…" (account, date, ref) → Refunded.
+  - **Credit** → the bill drops. "Credit available". On a later payment to this vendor, tick
+    **"Pay from the vendor's credit"** → no bank needed → "Credit used".
+  - **Refused** (a note is needed) → the bill drops. Vendor Ratings / RFQ-PO show the vendor on
+    **Watchlist**.
+- [ ] A replacement that never came: **"Change answer"** to refund / credit / refused.
+
+**T32. Full acceptance and full payment** (§23)
+- [ ] When everything is in and passed and no rejection is open:
+  - the bill becomes **Payable**, due **today + 15**
+  - Accounts gets "Purchase ready for full payment"
+  - History shows "Fully accepted"
+- [ ] Vendor Payment offers **"Full payment (up to the balance)"** → pay it → bill and PO **Paid**.
+- [ ] **Payable Ageing** shows it in the right box before and after paying.
+- [ ] Overdue: either wait past the due date, or ask me to run the 9:40 sweep. The PO shows
+      Overdue and Accounts gets one notification.
+
+**T33. Cancel after the advance** (§24)
+- [ ] A new PO with an advance. Pay it. Receive + pass one line, then **short close** the rest
+      (Company Admin approves).
+  - The bill drops to the received line.
+  - The extra advance shows in Refunds & credits as **"To decide"** → "Vendor refunds it" or
+    "Keep as credit".
+- [ ] A line waiting for a replacement can't be short closed.
+
+**T34. The ledger** (§22–§25)
+- [ ] **Accounts → Ledger**: pick **Advance to Vendors**, **Accounts Payable**, **Input CGST /
+      SGST** (or IGST), **Purchase**, **Vendor Refund Due**, and your bank account.
+  - Every purchase entry shows the vendor's name.
+  - For a PO that's fully paid, Advance to Vendors and Accounts Payable are back to 0 (as far as
+    that PO is concerned).
+- [ ] **Record New Bill** (no PO): there's no TDS row. A payment for more than that vendor's
+      no-PO bills owe is refused.
+- [ ] Vendor Master: the TDS Section field is gone.
+
+**T35. Price History** (§27) — after some deliveries exist
+- [ ] **Purchase → Price History** and **Company Admin → Vendors → Price History**: pick an item.
+  - The periods 7 days / 30 days / 1 year / All / Custom change Average, Last and Lowest, the
+    per-vendor table and the deliveries list.
+  - Picking a vendor (or clicking one in the table) narrows to them.
+- [ ] An item bought in two units shows a unit picker. The prices are never mixed.
+- [ ] The **Bought before** pop-up (RFQ/PO tag, PO review, Company Admin PO card) has the same
+      period chips. Its numbers match the Price History page for the same period.
+
+**T36. Serial numbers at receive and QC** (§28)
+
+You need a PO line for an item counted in **Pieces**, quoted **with a warranty**, and ideally 2
+requests on it.
+
+- [ ] **Store → To Receive → Receive:** the box asks for **one serial per piece** and shows "0 of N
+      entered".
+  - [ ] **Fill a range** (`GEN-`, 0101 to 0105) adds 5.
+  - [ ] Typing a repeat shows it in red. A wrong count is refused.
+- [ ] **Warranty card:**
+  - [ ] "One card for all" with one file works.
+  - [ ] "A card for each piece" asks for a file per serial and refuses if one is missing.
+- [ ] **After receive:** **Serial Numbers** tab lists each serial with the vendor, PO, received date,
+      warranty months, card and **In QC**.
+  - [ ] The item master's own serial / warranty are unchanged (Inventory → the item).
+- [ ] Receiving the **same serial again** for that item (another PO) is refused.
+- [ ] **A kg / no-warranty line** still asks for one serial / lot number. It shows as a **Lot** in
+      the tab.
+- [ ] **QC → that job → Fail:**
+  - [ ] Shows the serials as tick boxes; tick 1 → "1 will be rejected, N−1 stay in QC".
+  - [ ] The serial shows **QC rejected** with its REJ in the tab, and the result banner lists it.
+  - [ ] Then **Pass** → the rest **Accepted**.
+- [ ] **A lot job:** Fail still asks for a quantity. The tab shows **Part rejected** and how much.
+
+**T37. Vendor warranty claims** (§29) — after T36, so a serial exists
+
+As the Complaint Management Head (or the Company Admin):
+
+- [ ] **Complaints → Support:** **Vendor Warranty Claims** is beside "+ Create Ticket". It opens the
+      list (Open by default).
+- [ ] **New claim → type a serial from T36 → Find:** shows the item, vendor, PO, received date and
+      warranty months (and the card).
+  - [ ] Fill in the problem, defect type, severity, the date the vendor was told and a photo →
+        **Raise claim** → `VWC-0001`, **Waiting for vendor**.
+  - [ ] The PO's creator gets a notification.
+- [ ] **New claim → an unknown serial → Find:** "Not in our serial records".
+  - [ ] Pick a vendor and an item. The months shown are the item's warranty.
+- [ ] **Refused:** a future date, or no problem text.
+- [ ] **Open the claim → vendor's response** (date + text) → Save → **Vendor responded**, "Responded
+      in N d".
+- [ ] **Close it:**
+  - [ ] Picking an outcome asks for the stars; saving without them is refused.
+  - [ ] With 4 ★ → **Closed**, and the history shows each step.
+  - [ ] A closed claim has no edit fields.
+- [ ] **Find the same serial again:** "Earlier claims on this serial: VWC-0001 (Repaired)".
+- [ ] **Store → Serial Numbers:** the unit shows "1 warranty claim · VWC-0001 Repaired".
+- [ ] **Purchase → Vendor Ratings:** the vendor shows "Warranty claims: … ★ handling", and its
+      Warranty bar uses the claim (T38).
+
+**T38. Vendor score** (§30) — best after Stage 8 and T36–T37, when deliveries / QC / claims exist
+
+- [ ] **Purchase → Vendor Ratings:**
+  - [ ] each vendor shows a **score / 100** (coloured), its status, and six bars (Price, Quality,
+        Delivery, Credit terms, Warranty, Response) with each part's %
+  - [ ] "How the vendor score is worked out" shows the current weights
+- [ ] **Expand rahul vendor** (demo data): each part's events are listed — deliveries with promised
+      date and days late, QC results with accepted / rejected, prices vs the lowest, PO terms,
+      quotation replies.
+  - [ ] The bars match the tables.
+- [ ] **QC → a purchase job → Fail:** the **Severity** pick (Minor / Major / Critical) shows.
+  - [ ] Reject part as **Critical**: QC Rejections shows "Critical", and the vendor's Quality drops
+        more than for a Minor one.
+- [ ] **A replacement received a day after its replacement date:** Delivery shows "(replacement)"
+      1 day late, not judged against the original date.
+- [ ] **Company Admin → Settings → Vendor score:**
+  - [ ] change the weights: the total must be 100, or Save stays off
+  - [ ] save, then Vendor Ratings uses the new weights
+  - [ ] "Blueprint defaults" puts 25 / 30 / 20 / 10 / 10 / 5 back
+- [ ] **Set "Watchlist below" to 99:** a vendor with enough history goes on **Company Admin →
+      Vendors → Watchlist** with "Vendor score … (below 99)" and the part breakdown.
+  - [ ] Vendor Master shows the reason. Put it back to 60.
+- [ ] **RFQ/PO vendor card:** "NN/100 · On time … · QC accepted …%". "Best vendor score" sorts by it.
+- [ ] A vendor with fewer than 5 deliveries / QC checks shows **Limited history** (and `*` on the RFQ/PO
+      card) and isn't put on the Watchlist by its score.
+
+**T39. Purchaser score** (§31) — after the earlier stages, so POs / quotes / QC exist
+
+- [ ] **Company Admin → Purchase & Vendor Approval → Purchasers → Purchaser Score:**
+  - [ ] each person who made POs or quotations shows their month score, 12-month score and nine bars
+  - [ ] the month picker changes them
+  - [ ] "How the purchaser score is worked out" switches English ↔ Hinglish
+- [ ] **Click a purchaser:**
+  - [ ] the 6-month trend and the Month / 12-months switch
+  - [ ] each part's table lists its events:
+    - POs with vendors asked
+    - manual quotations with what's missing
+    - chosen vs cheapest
+    - missed due dates with what happened
+    - QC results
+    - emailed / evidence
+    - rejected or cancelled POs
+    - rejection answers
+    - exceptions
+- [ ] **Check a few rows against the real records:**
+  - [ ] a PO that needed a selection exception → Policy 50
+  - [ ] a manual quotation without payment terms → Completeness 75
+  - [ ] a line where you recorded a new date the day after it was due → Follow-up 100
+- [ ] **Log in as a purchaser (not the Company Admin):**
+  - [ ] Purchase → **My Score** shows only their own
+  - [ ] the Company Admin's Purchasers tab isn't available to them
+- [ ] **Company Admin → Settings → Purchaser score:** change a weight (the total must be 100), save,
+      and the scores use it. "Blueprint defaults" resets.
+
+**T40. Purchase Dashboard** (§32) — last, when the earlier tests have left real data behind
+
+- [ ] **As an Account Employee:** Accounts → Purchases → **Purchase Dashboard** (first in the menu)
+      shows **My work**:
+  - [ ] the tiles: items to buy, my quote requests, quotes expiring, my POs, my deliveries, QC
+        rejections, replacements, my score
+  - [ ] the numbers match what you know you created, e.g. a PO you sent for approval → "1 waiting
+        for approval"
+  - [ ] a line waiting for its advance isn't counted as due
+  - [ ] clicking a tile opens the right place (RFQ/PO, Purchase Orders, QC Rejections, My Score)
+- [ ] **As the Accounts Head:** **Team** view, plus a **My work** switch.
+  - [ ] **Team tiles:**
+    - waiting for the Company Admin
+    - Store & QC
+    - 3-vendor compliance
+    - warranty claims
+    - payments (advances due / payable now / overdue)
+    - refunds due
+    - vendors to watch
+    - team scores
+  - [ ] the payments total matches Vendor Payment / Payable Ageing
+- [ ] **As the Company Admin:** Purchase & Vendor Approval **opens on Dashboard** (Management).
+  - [ ] **"Waiting for you":** PO approvals (over limit / selection), cancellations, vendor requests.
+        Clicking one jumps to that tab on the same page.
+  - [ ] **The period picker** (This month / 3 months / 12 months) changes:
+    - purchase value and the 6-month trend
+    - savings
+    - price rises
+    - the top 3 vendors
+    - compliance
+    - exceptions
+  - [ ] vendor risk, payables, purchaser scores
+- [ ] **An Account Employee can't get the Team or Management view** (the page only shows My work).

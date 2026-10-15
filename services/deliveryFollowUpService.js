@@ -69,6 +69,9 @@ const RANK = { overdue: 0, today: 1, soon: 2, later: 3 };
 export function poDueSummary(po, received = lineIsReceived, now = new Date()) {
   const counts = { overdue: 0, today: 0, soon: 0, later: 0 };
   let worst = null;
+  // Only a real, open order has deliveries due — not one waiting for the
+  // Company Admin, rejected or cancelled (2026-10-14).
+  if (po?.status && !OPEN_PO_STATUSES.includes(po.status)) return { counts, worst };
   for (const line of po?.items || []) {
     const b = lineDueBucket(line, po, received, now);
     if (!b) continue;

@@ -15,6 +15,7 @@ import { getOrCreateSettings } from './purchaseSettingsController.js';
 import { groupFabricationLines } from './itemQuoteGroupController.js';
 import { DEFAULT_QUOTE_VALIDITY_DAYS, isQuoteExpired } from '../services/quoteChecksService.js';
 import { discardQuoteEvidenceUploads, quoteEvidenceUrl } from '../middleware/quoteEvidenceUpload.js';
+import { vendorCarryOver } from '../services/quotationCarryOverService.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const dayKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -52,8 +53,11 @@ export function readManualItems(bodyItems, existingByGroup = new Map()) {
     if (!(unitPrice > 0)) return { error: `Enter the rate for ${label}.` };
     const deliveryDays = Number(raw.deliveryDays);
     if (!(deliveryDays >= 1)) return { error: `Enter the delivery time (days) for ${label}.` };
+    // GST is required, as on the vendor's email page (2026-10-14): the PO
+    // takes it from the quote and can't change it.
     let gstPercent = null;
-    if (!raw.gstInclusive && raw.gstPercent !== '' && raw.gstPercent != null) {
+    if (!raw.gstInclusive) {
+      if (raw.gstPercent === '' || raw.gstPercent == null) return { error: `Enter the GST % for ${label} (0 if none), or tick "Rate already includes GST".` };
       gstPercent = Number(raw.gstPercent);
       if (!Number.isFinite(gstPercent) || gstPercent < 0 || gstPercent > 100) return { error: `GST % for ${label} must be between 0 and 100.` };
     }
@@ -79,6 +83,25 @@ async function nextNumber(companyId) {
   const count = await ManualQuotation.countDocuments({ companyId });
   return `MQ-${String(count + 1).padStart(4, '0')}`;
 }
+
+// GET /api/manual-quotations/carry-over?vendor= — the vendor's charges +
+// payment terms from their last quotation, to pre-fill a new one (2026-10-14,
+// services/quotationCarryOverService.js). data: null when nothing carries.
+export const getCarryOver = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const vendorId = String(req.query.vendor || '');
+    if (!/^[a-f0-9]{24}$/i.test(vendorId)) return res.status(400).json({ success: false, message: 'Pick a vendor.' });
+    const vendor = await Supplier.findOne({ _id: vendorId, companyId }).select('_id').lean();
+    if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
+    const settings = await getOrCreateSettings(companyId);
+    const data = await vendorCarryOver({ companyId, vendorId: vendor._id, validityDays: settings.quoteValidityDays || DEFAULT_QUOTE_VALIDITY_DAYS });
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('getCarryOver error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 // POST /api/manual-quotations (multipart: files[] + fields; `items` is JSON)
 export const createManualQuotation = async (req, res) => {

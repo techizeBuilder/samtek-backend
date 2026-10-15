@@ -11,13 +11,12 @@ import Supplier from '../models/Supplier.js';
 import Purchase from '../models/Purchase.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import notificationService from './notificationService.js';
-import { computeVendorRating } from './vendorRatingService.js';
+import { computeVendorScores, scoreSettingsOf, MIN_HISTORY_EVENTS } from './vendorScoreService.js';
 
-// Thresholds for the derived stages — constants for now, meant to move into
-// a config master later (procurement-v2 workflow doc, Phase 0).
+// Thresholds for the derived stages. The Watchlist score line is the Company
+// Admin's (PurchaseSettings.vendorScore.watchlistBelow, default 60 / 100).
 export const PROBATION_RECEIVED_PO_COUNT = 3;
-export const WATCHLIST_RATING_BELOW = 3.0;
-export const WATCHLIST_MIN_EVENTS = 5;
+export const WATCHLIST_MIN_EVENTS = MIN_HISTORY_EVENTS;
 export const EXPIRY_REMINDER_DAYS = 30;
 // A vendor who refused to replace or refund rejected material goes on
 // Watchlist for this long (2026-10-12, client case 1).
@@ -121,13 +120,13 @@ export function validateForSubmission(vendor) {
 
 // Derived stage for each vendor — never stored. Non-approved vendors just
 // echo their approvalStatus. An Approved vendor is:
-//   Watchlist     — rating below WATCHLIST_RATING_BELOW with at least
-//                   WATCHLIST_MIN_EVENTS rating events (checked first)
+//   Watchlist     — refused to settle a QC rejection in the last 90 days, or
+//                   its vendor score (vendorScoreService) is below the
+//                   Company Admin's line with enough history (checked first)
 //   Probationary  — fewer than PROBATION_RECEIVED_PO_COUNT POs with a
 //                   received line
 //   Active        — otherwise
-// Rating = the existing computeVendorRating (on-time delivery + QC).
-export async function getVendorStanding(companyId, vendors) {
+export async function getVendorStanding(companyId, vendors, { withEvidence = false, scores: given = null } = {}) {
   const standing = new Map();
   const approved = vendors.filter(v => v.approvalStatus === 'Approved');
   for (const v of vendors) {
@@ -147,22 +146,25 @@ export async function getVendorStanding(companyId, vendors) {
     if (vid) receivedCount.set(vid, (receivedCount.get(vid) || 0) + 1);
   }
 
+  const { getOrCreateSettings } = await import('../controllers/purchaseSettingsController.js');
+  const settings = await getOrCreateSettings(companyId);
+  const { watchlistBelow } = scoreSettingsOf(settings);
+  const scores = given || await computeVendorScores({ companyId, vendorIds: approvedIds, settings, withEvidence });
   for (const v of approved) {
     const id = String(v._id);
-    const ratingInfo = await computeVendorRating({ companyId, vendorId: v._id });
-    const { rating, eventCount } = ratingInfo;
+    const info = scores.get(id) || {};
     const receivedPOCount = receivedCount.get(id) || 0;
     let stage = 'Active';
     let watchReason = null;
-    const lastDispute = ratingInfo.disputes?.lastAt ? new Date(ratingInfo.disputes.lastAt) : null;
+    const lastDispute = info.disputes?.lastAt ? new Date(info.disputes.lastAt) : null;
     if (lastDispute && Date.now() - lastDispute.getTime() <= DISPUTE_WATCHLIST_DAYS * 24 * 60 * 60 * 1000) {
       stage = 'Watchlist';
       watchReason = 'Refused to replace or refund QC-rejected material';
-    } else if (rating != null && eventCount >= WATCHLIST_MIN_EVENTS && rating < WATCHLIST_RATING_BELOW) {
+    } else if (info.score != null && !info.limitedHistory && info.score < watchlistBelow) {
       stage = 'Watchlist';
-      watchReason = `Rating below ${WATCHLIST_RATING_BELOW}`;
+      watchReason = `Vendor score ${info.score} / 100 (below ${watchlistBelow})`;
     } else if (receivedPOCount < PROBATION_RECEIVED_PO_COUNT) stage = 'Probationary';
-    standing.set(id, { stage, watchReason, ...ratingInfo, receivedPOCount });
+    standing.set(id, { stage, watchReason, ...info, watchlistBelow, receivedPOCount });
   }
   return standing;
 }

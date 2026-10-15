@@ -19,6 +19,7 @@ import {
 import { getQuotesForPR, createQuote, getEligibleVendorsForPR } from '../controllers/purchaseQuoteController.js';
 import { authenticateToken as authenticateUser } from '../middleware/auth.js';
 import { warrantyUpload } from '../middleware/warrantyUpload.js';
+import { receiveUpload } from '../middleware/receiveUpload.js';
 import { checkAnyPermission } from '../middleware/permissions.js';
 
 const router = express.Router();
@@ -50,8 +51,9 @@ router.get('/orders', purchasesView, getPurchaseOrdersForStore);
 // receiveLineItems/receiveLineFabrication's own comments. Registered before
 // the legacy per-PR routes below only for readability; the literal `orders`
 // prefix makes these unambiguous from `/:id/...` regardless of order.
-router.patch('/orders/:purchaseId/lines/:lineId/receive', purchasesEdit, warrantyUpload.single('warrantyCard'), receiveLineItems);
-router.patch('/orders/:purchaseId/lines/:lineId/receive-fabrication', purchasesEdit, receiveLineFabrication);
+// receiveUpload: the warranty card + (2026-10-12) an optional scan of the vendor's invoice.
+router.patch('/orders/:purchaseId/lines/:lineId/receive', purchasesEdit, receiveUpload, receiveLineItems);
+router.patch('/orders/:purchaseId/lines/:lineId/receive-fabrication', purchasesEdit, receiveUpload, receiveLineFabrication);
 
 // Per-PR receive — superseded by the per-line routes above for Store's own
 // UI (2026-10), left registered (not deleted) since applyReceiveSideEffects/

@@ -187,8 +187,14 @@ approval."
 
 ## Not ready to demo yet
 
-- **Bills, ledger and vendor payments:** on hold until the client answers the 9 questions in
-  `accounts-bill-ledger-payments-2026-10.md`. **The meeting is a good chance to ask them.**
+*(This list was written for the client meeting of 2026-10-12. Updated 2026-10-13.)*
+
+- **Built since the meeting** (change report §22–§32), **not yet browser-tested**:
+  - bills, ledger and vendor payments (the client answered the 9 questions)
+  - serial numbers
+  - vendor warranty claims
+  - the vendor and purchaser scores
+  - the Purchase Dashboard
 - **PO creation and approval:** not yet browser-tested (RFQ/PO slices 6–7). Walk through them
   carefully if shown live.
 - **Browser-tested so far:** RFQ/PO parts 1–7 above (slices 1–5) and Vendor Master.

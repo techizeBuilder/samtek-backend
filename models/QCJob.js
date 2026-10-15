@@ -293,6 +293,8 @@ const QCJobSchema = new mongoose.Schema({
   },
   decision: { type: String, enum: ['', 'Pass', 'Fail'], default: '' },
   failReason: { type: String, default: '' },
+  // How bad a failed purchase is (2026-10-13, vendor score): Minor / Major / Critical.
+  failSeverity: { type: String, enum: ['Minor', 'Major', 'Critical', null], default: null },
   inspectorRemarks: { type: String, default: '' },
 
   // Attachments
@@ -300,6 +302,26 @@ const QCJobSchema = new mongoose.Schema({
 
   // Back-reference to the Purchase Request that originated this QC job (Purchase source only)
   purchaseRequestId: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseRequest', default: null },
+  // QC by PO line (2026-10-15). Store receives one PO LINE at a time; every
+  // request on that line still gets its own job (stock, money, REJ, serials,
+  // Sales / Production all hang off it), but QC sees and decides the line:
+  // the jobs of one receive share a `receiptKey`, the first one is the lead
+  // (the card QC opens), the rest are `groupMember`s hidden from the lists.
+  // See qcController's decideLine and services/qcLineAllocation.js.
+  item: { type: mongoose.Schema.Types.ObjectId, ref: 'Item', default: null },
+  purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase', default: null },
+  poLineId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  receiptKey: { type: String, default: null, index: true },
+  groupMember: { type: Boolean, default: false },
+  // The LINE's status, kept on every job of the receipt — what the QC list
+  // shows / filters / counts for the line's card (the lead job itself can be
+  // fully rejected while the line's other requests are still in QC).
+  lineStatus: { type: String, enum: ['Pending', 'In Progress', 'Approved', 'Rejected', null], default: null },
+  // Decided once from the item master (Item.fabricationRef) when the PO was made.
+  isFabrication: { type: Boolean, default: false },
+  // Fabrication: THIS request's own received pieces per size — what a Pass
+  // credits to each size's stock (less what QC rejected of that size).
+  receivedSizes: { type: [{ values: { type: mongoose.Schema.Types.Mixed }, quantity: { type: Number } }], default: [] },
   // Back-reference to the Sale that originated this QC job (Store source only)
   saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', default: null },
   // Which specific Sale item (Sale.items._id) this QC job is for — multi-item
@@ -328,6 +350,9 @@ const QCJobSchema = new mongoose.Schema({
     reason: { type: String, default: '' },
     rejectedAt: { type: Date, default: Date.now },
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    severity: { type: String, enum: ['Minor', 'Major', 'Critical', null], default: null },
+    // Fabrication: which size the rejected pieces were (2026-10-15).
+    sizeValues: { type: mongoose.Schema.Types.Mixed, default: null },
   }],
 
   // Purchase jobs (2026-10-12 — purchase money, accounts Slice 2): how much

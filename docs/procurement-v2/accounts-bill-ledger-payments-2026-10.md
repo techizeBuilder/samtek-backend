@@ -4,13 +4,14 @@
 - **Client answered:** 2026-10-12
 - **Refined with the user:** 2026-10-12 (mid payment optional; credit days on the PO; Q4 yes; Q8
   skipped).
-- **Status:** **Being built in 4 slices** (§8).
+- **Status:** **Built** — all 4 slices, 2026-10-12 (§8; change report §22–§25). Browser tests: test plan
+  Stage 8 (T27–T34).
   - **Slice 1** (the PO bill, advance, delivery clock, real ledger) is **built**: change report
     §22.
   - **Slice 2** (QC pass → payable, optional mid payment, full acceptance) is **built**: §23.
   - **Slice 3** (QC rejections: the vendor's answer; refunds / credits; cancel on the new bill) is
     **built**: §24.
-  - Slice 4 is next.
+  - **Slice 4** (vendor invoice no. at receive, Ledger page, TDS hidden) is **built**: §25.
 - **Pages concerned:** Accounts → Purchases → **Purchase Invoice**
   (`/accounts/purchases/invoices`) and **Vendor Payment** (`/accounts/purchases/payments`).
 
@@ -333,4 +334,4 @@ final payables need real hooks:
 | 1 | The PO bill (advance fixed, no due date until full acceptance, no ledger at creation), advance payment, delivery clock from the advance, the purchase ledger accounts per company + unit, payment history, TDS removed from the manual bill, manual-bill payments capped at what's owed | **Built** — change report §22 |
 | 2 | QC pass → accepted value + ledger; optional mid payment; full acceptance → due date, charges + advance set-off; overdue sweep; Payable Ageing by due date | **Built** — change report §23 |
 | 3 | QC rejections: the vendor's answer (refused / replace / refund / credit), cancel / short close on the new bill, vendor score, refunds and credits | **Built** — change report §24 |
-| 4 | Vendor invoice no. at Store receive, ledger page check, Vendor Master TDS hidden, docs | Next |
+| 4 | Vendor invoice no. at Store receive, ledger page check, Vendor Master TDS hidden, docs | **Built** — change report §25 |

@@ -19,10 +19,13 @@ const purchaseItemSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // In the line's purchase unit — kg for a fabrication size can be well
+  // under 1 (11 pcs of a small angle = 0.125 kg), so anything above 0 is
+  // allowed (was min 1, which refused such a PO with a 500 — 2026-10-14).
   quantity: {
     type: Number,
     required: true,
-    min: 1
+    validate: { validator: (v) => Number.isFinite(v) && v > 0, message: 'A PO line\'s quantity must be more than 0.' }
   },
   unitPrice: {
     type: Number,
@@ -174,6 +177,13 @@ const purchaseItemSchema = new mongoose.Schema({
   warrantyMonths: {
     type: Number,
     default: 0
+  },
+  // A Fabrication Master item (2026-10-15) — decided ONCE from the item
+  // master (Item.fabricationRef) when the PO is made, then carried to
+  // Store's receive and QC; nothing downstream guesses it from units / sizes.
+  isFabrication: {
+    type: Boolean,
+    default: false
   },
   // Fabrication Master items only — read-only dimension-breakdown snapshot
   // carried from the RFQ, for the (separately deferred) Store-receiving flow
@@ -329,8 +339,17 @@ const purchaseSchema = new mongoose.Schema({
     reviewedAt: { type: Date, default: null },
     remarks: { type: String, default: '' },
     // Why it needs approval (2026-10-09): 'threshold' (over the ₹ limit)
-    // and/or 'selection' (failed the vendor selection check — gap 12).
+    // and/or 'selection' (failed the vendor selection check — gap 12)
+    // and/or 'charges' (charges above the vendor's quotation — 2026-10-14).
     reasons: { type: [String], default: [] }
+  },
+  // The PO's charges + payment terms vs the vendor's quotation (2026-10-14,
+  // services/poQuoteTermsService.js): { from: 'MQ-0003', changes: [text],
+  // quotedChargesTotal, poChargesTotal, chargesAbove, reasons, note }. Every
+  // difference needs Purchase's reason. null on POs not made from quotes.
+  quoteTermsCheck: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
   },
   // Vendor selection check at PO time (gap 12, blueprint §11 "preserve the
   // calculated score"): the snapshot the server calculated when the PO was

@@ -4,6 +4,8 @@ import { Item } from '../models/Inventory.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import ItemQuoteGroup from '../models/ItemQuoteGroup.js';
 import VendorBid from '../models/VendorBid.js';
+import '../models/QuotationRequest.js'; // registered for populate (createPurchase)
+import '../models/ManualQuotation.js';
 import { Company } from '../models/Company.js';
 import { sendPurchaseOrderEmail } from '../services/emailService.js';
 import { USER_ROLES } from '../shared/schema.js';
@@ -16,6 +18,7 @@ import { checkVendorSelection, readSelectionException } from '../services/vendor
 import { logPoEvent } from '../services/purchaseAuditService.js';
 import { notifyStoreOfIncomingPO, reviseLineDate, poDueSummary, clockDates } from '../services/deliveryFollowUpService.js';
 import { gstSplitFor } from '../services/gstStateService.js';
+import { newestQuotation, compareWithQuotation, readTermsChangeReason } from '../services/poQuoteTermsService.js';
 
 // Normalize-to-array helper (2026-10, item-wise PR consolidation) — a line
 // can now carry EITHER the original singular `purchaseRequest` (still
@@ -129,14 +132,14 @@ export const getPurchases = async (req, res) => {
       // read this same endpoint (via getPurchaseOrdersForStore) and need
       // these to pre-fill a combined receive form per line; the By Vendor
       // tab's Active POs view (the original consumer) just ignores them.
-      .populate('items.purchaseRequest', 'requestId status receivedAt purchaseUnit purchaseQuantity warrantyMonths fabricationDimensionLines quantity')
-      .populate('items.purchaseRequests', 'requestId status receivedAt purchaseUnit purchaseQuantity warrantyMonths fabricationDimensionLines quantity')
+      .populate('items.purchaseRequest', 'requestId status receivedAt purchaseUnit purchaseQuantity warrantyMonths fabricationDimensionLines quantity vendorInvoice replacementFor')
+      .populate('items.purchaseRequests', 'requestId status receivedAt purchaseUnit purchaseQuantity warrantyMonths fabricationDimensionLines quantity vendorInvoice replacementFor')
       // A PO line's own item ref (unlike PurchaseRequest, which has no real
       // `item` field) — lets the combined-receive dialog compare this
       // item's real stock unit against the line's purchaseUnit to decide
       // whether to show the unit-conversion fields at all, same UX the old
       // per-PR dialog had via getPurchaseRequests' own item enrichment.
-      .populate('items.item', 'name code unit purchaseUnit purchaseUnitType')
+      .populate('items.item', 'name code unit receiveUnit purchaseUnit purchaseUnitType')
       .sort({ createdAt: -1 });
 
     for (const purchase of allMatching) {
@@ -289,6 +292,38 @@ export async function groupsHeldByPendingPO(companyId, groupIds, excludePurchase
   return held;
 }
 
+// A PO line's quantity (in its purchase unit) shared across the requests on
+// it, in proportion to what each asked for — fabrication by its pieces,
+// anything else by its own quantity when that's in the line's purchase unit
+// (the same rule the item card sums by). Ordering more than requested shares
+// the extra the same way. A request whose quantity can't be compared counts
+// equally. The last request takes the rounding remainder, so the shares add
+// up to the line exactly. Pure — exported for tests. Returns Map prId → qty.
+export function splitLineQuantity(line, prs) {
+  const total = Number(line?.quantity) || 0;
+  const list = prs || [];
+  const unit = String(line?.purchaseUnit || '').trim().toLowerCase();
+  const weightOf = (pr) => {
+    const pieces = (pr?.fabricationDimensionLines || []).reduce((s, l) => s + (Number(l.quantity) || 0), 0);
+    if (pieces > 0) return pieces;
+    const sameUnit = !unit || String(pr?.unit || '').trim().toLowerCase() === unit;
+    return sameUnit ? Number(pr?.quantity) || 0 : 0;
+  };
+  let weights = list.map(weightOf);
+  if (!weights.every(w => w > 0)) weights = list.map(() => 1);
+  const sum = weights.reduce((s, w) => s + w, 0);
+  const out = new Map();
+  let used = 0;
+  list.forEach((pr, i) => {
+    const qty = i === list.length - 1
+      ? Math.round((total - used) * 1000) / 1000
+      : Math.round((total * weights[i] / sum) * 1000) / 1000;
+    used += qty;
+    out.set(String(pr._id), qty);
+  });
+  return out;
+}
+
 // Everything that makes a saved PO a REAL order — runs straight away for a
 // PO that needs no approval, or when the Company Admin approves a pending
 // one. Driven entirely by the stored PO (not the original request body), so
@@ -302,6 +337,18 @@ export async function groupsHeldByPendingPO(companyId, groupIds, excludePurchase
 export async function finalizePurchase(purchase, user, req = null) {
   const companyId = purchase.companyId;
 
+  // Each request's OWN share of its line (2026-10-14): a line can carry
+  // several requests, and every one of them used to get the WHOLE line's
+  // quantity — Store's receive then summed them (3 requests → 3× the line:
+  // stock and QC tripled) and the QC-pass money split went equal.
+  const shareOf = new Map();
+  for (const line of purchase.items || []) {
+    const ids = prIdsOf(line).map(String);
+    if (!ids.length) continue;
+    const linePrs = await PurchaseRequest.find({ _id: { $in: ids } }).select('quantity unit fabricationDimensionLines').lean();
+    for (const [id, qty] of splitLineQuantity(line, linePrs)) shareOf.set(id, qty);
+  }
+
   for (const prId of purchase.purchaseRequests || []) {
     const prUpdate = { purchaseOrder: purchase._id, status: 'Ordered' };
     // Each PR is matched to its OWN line — no `|| items[0]` guessing (a
@@ -309,7 +356,7 @@ export async function finalizePurchase(purchase, user, req = null) {
     const line = (purchase.items || []).find(it => prIdsOf(it).some(id => String(id) === String(prId)));
     if (line) {
       if (line.purchaseUnit && Number(line.quantity) > 0) {
-        prUpdate.purchaseQuantity = Number(line.quantity);
+        prUpdate.purchaseQuantity = shareOf.get(String(prId)) ?? Number(line.quantity);
         prUpdate.purchaseUnit = line.purchaseUnit;
         const unitType = line.purchaseUnitType
           || (line.item ? (await Item.findById(line.item).select('purchaseUnitType').lean())?.purchaseUnitType : null);
@@ -494,8 +541,14 @@ export const createPurchase = async (req, res) => {
       // The quote itself must still be this vendor's current, valid quote —
       // not replaced / declined since the page loaded, and not past the
       // company's quote validity (Purchase Settings, 2026-10-09).
+      // The line's rate, GST and warranty are read from here too — never
+      // from the page (2026-10-14) — and the quotations behind the lines give
+      // the charges / terms the PO is compared with.
       const bids = await VendorBid.find({ _id: { $in: groupLineChecks.map(it => it.vendorBidId) }, companyId })
-        .select('status vendor submittedAt createdAt deliveryDays').lean();
+        .select('status vendor submittedAt createdAt deliveryDays unitPrice gstPercent gstInclusive warrantyMonths quotationRequest manualQuotation')
+        .populate('quotationRequest', 'number charges paymentTerms submittedAt')
+        .populate('manualQuotation', 'number charges paymentTerms createdAt quoteDate')
+        .lean();
       bidById = new Map(bids.map(b => [String(b._id), b]));
       const validityDays = (await getOrCreateSettings(companyId)).quoteValidityDays || DEFAULT_QUOTE_VALIDITY_DAYS;
       for (const it of groupLineChecks) {
@@ -575,9 +628,12 @@ export const createPurchase = async (req, res) => {
       }
     }
 
-    // Lines — GST is the % typed for each line on the PO. An inclusive line
-    // (the quoted rate already contains GST) adds nothing on top, so it's
-    // never counted twice in grandTotal.
+    // Lines — a line made from a quote takes its rate, GST % / "includes
+    // GST" and warranty FROM THE QUOTE (2026-10-14): the PO can't price or tax
+    // a line differently from what the vendor quoted; a wrong quote is
+    // re-quoted. Other lines (no quote) use what was sent. An inclusive line
+    // (the rate already contains GST) adds nothing on top, so it's never
+    // counted twice in grandTotal.
     let totalAmount = 0;
     let lineGstTotal = 0;
     const purchaseItems = [];
@@ -594,11 +650,13 @@ export const createPurchase = async (req, res) => {
         return res.status(400).json({ message: `Inventory item ${item.item} not found` });
       }
 
-      const itemTotal = round2(Number(item.quantity) * Number(item.unitPrice));
+      const quote = item.itemQuoteGroup && item.vendorBidId ? bidById.get(String(item.vendorBidId)) : null;
+      const unitPrice = quote ? Number(quote.unitPrice) : Number(item.unitPrice);
+      const itemTotal = round2(Number(item.quantity) * unitPrice);
       totalAmount += itemTotal;
 
-      const gstInclusive = !!item.gstInclusive;
-      const gstRate = pctOrZero(item.gstPercent ?? item.gstRate);
+      const gstInclusive = quote ? !!quote.gstInclusive : !!item.gstInclusive;
+      const gstRate = quote ? pctOrZero(quote.gstPercent) : pctOrZero(item.gstPercent ?? item.gstRate);
       const gstAmount = gstInclusive ? 0 : round2(itemTotal * gstRate / 100);
       lineGstTotal += gstAmount;
 
@@ -615,7 +673,7 @@ export const createPurchase = async (req, res) => {
         item: item.item,
         itemName: inventoryItem.name || inventoryItem.itemName,
         quantity: item.quantity,
-        unitPrice: item.unitPrice,
+        unitPrice,
         totalPrice: itemTotal,
         purchaseRequest: item.purchaseRequest || null,
         purchaseRequests: Array.isArray(item.purchaseRequests) ? item.purchaseRequests : [],
@@ -625,7 +683,9 @@ export const createPurchase = async (req, res) => {
         purchaseUnitType: item.purchaseUnitType || null,
         expectedDeliveryDate: itemExpectedDeliveryDate,
         deliveryDays: itemDeliveryDays,
-        warrantyMonths: Number(item.warrantyMonths) || 0,
+        warrantyMonths: quote ? Number(quote.warrantyMonths) || 0 : Number(item.warrantyMonths) || 0,
+        // From the item master, once (2026-10-15) — receive and QC read this.
+        isFabrication: !!inventoryItem.fabricationRef,
         gstInclusive,
         gstRate,
         gstAmount,
@@ -658,17 +718,49 @@ export const createPurchase = async (req, res) => {
       ? purchaseRequestsBody.filter(Boolean)
       : (purchaseRequest ? [purchaseRequest] : [...new Set(purchaseItems.flatMap(it => prIdsOf(it).map(String)))]);
 
-    // Company Admin approval — over the ₹ threshold (on the final total)
-    // and/or a failed vendor selection check (gap 12).
+    // Charges + payment terms vs the vendor's quotation (2026-10-14,
+    // services/poQuoteTermsService.js): the newest quotation behind the
+    // lines, the same one PO review pre-fills from. Any difference needs
+    // Purchase's reason; charges above the quotation need the Company Admin.
+    let quoteTermsCheck = null;
+    const quotations = [...bidById.values()].map(b => (
+      b.manualQuotation?._id ? { q: b.manualQuotation, manual: true } : b.quotationRequest?._id ? { q: b.quotationRequest, manual: false } : null
+    )).filter(Boolean);
+    const quotedFrom = newestQuotation(quotations);
+    if (quotedFrom) {
+      const cmp = compareWithQuotation(quotedFrom.q, { charges, paymentTerms: poPaymentTerms });
+      let why = null;
+      if (cmp.changes.length) {
+        why = readTermsChangeReason(req.body.termsChange);
+        if (why.error) {
+          return res.status(400).json({ message: `The charges / payment terms differ from ${quotedFrom.q.number} — ${why.error}`, quoteTermsCheck: { from: quotedFrom.q.number, ...cmp } });
+        }
+      }
+      quoteTermsCheck = {
+        from: quotedFrom.q.number,
+        changes: cmp.changes,
+        quotedChargesTotal: cmp.quotedChargesTotal,
+        poChargesTotal: cmp.poChargesTotal,
+        chargesAbove: cmp.chargesAbove,
+        reasons: why?.reasons || [],
+        note: why?.note || '',
+      };
+    }
+
+    // Company Admin approval — over the ₹ threshold (on the final total),
+    // a failed vendor selection check (gap 12), and/or charges above the
+    // vendor's quotation (2026-10-14).
     const threshold = settings.poApprovalThreshold;
     const overThreshold = threshold != null && grandTotal > Number(threshold);
     const selectionFailed = !!selectionCheck && !selectionCheck.passed;
-    const approvalReasons = [...(overThreshold ? ['threshold'] : []), ...(selectionFailed ? ['selection'] : [])];
+    const chargesAbove = !!quoteTermsCheck?.chargesAbove;
+    const approvalReasons = [...(overThreshold ? ['threshold'] : []), ...(selectionFailed ? ['selection'] : []), ...(chargesAbove ? ['charges'] : [])];
     const needsApproval = approvalReasons.length > 0;
     const inr = (n) => `₹${Number(n).toLocaleString('en-IN')}`;
     const approvalWhy = [
       overThreshold ? `above the ${inr(threshold)} limit` : null,
       selectionFailed ? 'vendor selection exception' : null,
+      chargesAbove ? `charges above ${quoteTermsCheck.from}` : null,
     ].filter(Boolean).join(' + ');
 
     const purchase = await Purchase.create({
@@ -694,6 +786,7 @@ export const createPurchase = async (req, res) => {
       notes,
       purchaseRequests,
       selectionCheck,
+      quoteTermsCheck,
       gstSplit,
       status: needsApproval ? 'Pending Approval' : 'Draft',
       approval: needsApproval
@@ -718,6 +811,8 @@ export const createPurchase = async (req, res) => {
         threshold: threshold != null ? Number(threshold) : null,
         selectionPassed: selectionCheck ? !!selectionCheck.passed : null,
         selectionException: selectionCheck && !selectionCheck.passed ? { reasons: selectionCheck.exceptionReasons, note: selectionCheck.exceptionNote } : null,
+        // Charges / terms changed from the vendor's quotation, with the reason.
+        quoteTermsChange: quoteTermsCheck?.changes?.length ? quoteTermsCheck : null,
       },
     });
 
@@ -759,11 +854,7 @@ export const createPurchase = async (req, res) => {
 
     res.status(201).json({
       message: needsApproval
-        ? overThreshold && selectionFailed
-          ? `Total ${inr(grandTotal)} is above the ${inr(threshold)} limit and the vendor choice is an exception — sent to the Company Admin for approval.`
-          : overThreshold
-            ? `Total ${inr(grandTotal)} is above the ${inr(threshold)} limit — sent to the Company Admin for approval.`
-            : 'This vendor choice is an exception to the selection check — sent to the Company Admin for approval with your reason.'
+        ? `Sent to the Company Admin for approval — ${approvalWhy}.`
         : purchase.status === 'Sent'
           ? 'Purchase order created and emailed to the vendor.'
           : 'Purchase order created — but the email to the vendor didn\'t go out. Use "Send PO email" on the Purchase Orders tab.',
@@ -772,6 +863,12 @@ export const createPurchase = async (req, res) => {
     });
   } catch (error) {
     console.error('Create purchase error:', error);
+    // A rule on the PO itself (e.g. a line's quantity) — say which, instead
+    // of a bare 500 (2026-10-14: a 0.125 kg line showed only "Internal
+    // server error").
+    if (error?.name === 'ValidationError') {
+      return res.status(400).json({ message: `The PO couldn't be saved — ${Object.values(error.errors || {}).map(e => e.message).join('; ') || error.message}` });
+    }
     res.status(500).json({ message: 'Internal server error' });
   }
 };

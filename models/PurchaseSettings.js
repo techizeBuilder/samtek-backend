@@ -40,6 +40,36 @@ const purchaseSettingsSchema = new mongoose.Schema({
   }],
   quoteValidityDays: { type: Number, min: 1, max: 365, default: 30 },
   priceJumpWarnPercent: { type: Number, min: 0, max: 1000, default: 10 },
+  // Vendor score (2026-10-13, blueprint §11–§12 — services/vendorScoreService.js),
+  // the Company Admin's: the weights (whole numbers adding up to 100) and the
+  // score below which a vendor goes on the Watchlist. Empty = the defaults.
+  vendorScore: {
+    weights: {
+      price: { type: Number, default: null },
+      quality: { type: Number, default: null },
+      delivery: { type: Number, default: null },
+      credit: { type: Number, default: null },
+      warranty: { type: Number, default: null },
+      response: { type: Number, default: null },
+    },
+    watchlistBelow: { type: Number, min: 0, max: 100, default: null },
+  },
+  // Purchaser score (2026-10-13, blueprint §13 — services/purchaserScoreService.js),
+  // the Company Admin's: the nine weights (whole numbers adding up to 100).
+  // Empty = the blueprint defaults.
+  purchaserScore: {
+    weights: {
+      coverage: { type: Number, default: null },
+      completeness: { type: Number, default: null },
+      savings: { type: Number, default: null },
+      followUp: { type: Number, default: null },
+      quality: { type: Number, default: null },
+      documentation: { type: Number, default: null },
+      poAccuracy: { type: Number, default: null },
+      relationship: { type: Number, default: null },
+      policy: { type: Number, default: null },
+    },
+  },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
 }, { timestamps: true });
 
