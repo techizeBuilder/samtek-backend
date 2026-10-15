@@ -228,7 +228,7 @@ quotation behind the PO's lines (§34–§35).
 | **PO-3** | Emp #2 | mahesh | generator, Bairing, cleaning machine | — | ₹56,615 | Pre-filled from **MQ-0005** (newest; no loading). **IGST ₹4,365**. Over the limit → the **Company Admin rejects** it ("cleaning machine not needed now") → all 3 items free again. |
 | **PO-3b** | Emp #2 | mahesh | generator + Bairing | Keep 25% / 35 days | ₹30,655 | Re-ordered after the rejection → over the limit → approve. **IGST ₹405**. Later: Bairing serials, generator refund. |
 | **PO-4** | Emp #2 | sujeet | Tool-A 25 pcs @ 430 | Clear the advance, reason "Negotiated at order time" | ₹11,950 | **The vendor check fails** (rahul ₹11,000 landed) → selection reason + the terms reason → approve. |
-| *(own PO)* | Company Admin | mahesh | cleaning machine | — | ₹29,500 (its quote is on MQ-0002, so loading ₹3,000 + 18% pre-fills) | The Admin creates it, tries to approve → **refused** (nobody approves their own PO) → reject. |
+| *(own PO)* | Company Admin | mahesh | cleaning machine | — | ₹29,500 (its quote is on MQ-0002, so loading ₹3,000 + 18% pre-fills) | The Admin creates it, tries to approve → **refused** (nobody approves their own PO) → reject. **Not testable in the browser (2026-10-15):** the Company Admin has no RFQ/PO page and can't create a PO (only the Accounts roles can), so nobody normally holds both roles. The rule is in the server (`poApprovalController.reviewPOApproval`, refuses with 403 "You can't review a PO you created yourself") and was checked with a test on 2026-10-15 instead. |
 
 **Left on the board on purpose:**
 - the cleaning machine (dashboard "items to buy")

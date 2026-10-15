@@ -61,6 +61,12 @@ db.qcjobs.find({ itemName: 'Tool-A', source: 'Purchase' }, { qcJobId: 1, status:
 The REJ line says "QC QC-2026-0215": the word "QC" is printed once by the label and once by the
 job number. Wording only. Fix: drop the label's "QC", or show just the job number.
 
+### B2b 🟡 Roadmap step that can't be done (documentation only)
+The roadmap/test plan asked the Company Admin to create a PO and then try to approve it. The
+Company Admin can't create POs (no RFQ/PO page; the create route allows the Accounts roles), so
+that browser step was dropped. Nothing to fix in the code, unless you want a role that can both buy
+and approve (then the rule would matter).
+
 ### B3 🟡 Old single-request PO edit still sets one quantity on every request
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
@@ -99,7 +105,10 @@ F7, F9 and F10 are committed on `claude/brave-goodall-scfdbb` and **not pushed y
   Tool-A and +5 on each received Angle size; LOT-TA-1014 shows "Part rejected"
 - B4/B5 checks: vendor cards (on time, QC), Vendor Ratings for rahul and sujeet, Bought before
   prices, Vendor Payment (PO-4 QC-passed up to ₹9,890; PO-2 up to ₹8,102.78)
-- the Company Admin approving their own PO → must be refused
+- ~~the Company Admin approving their own PO → must be refused~~ **dropped from the browser tests
+  (2026-10-15):** the Company Admin has no RFQ/PO page and can't create a PO, so the case can't
+  happen with the normal roles. The server rule was tested directly (3/3, including reject and
+  `requestedBy` taking precedence).
 - PO-2 listed on Dispatch → Vendor Pickups
 - T12: quote validity set to 1 day (today's quotes are now a day old), then back to 7
 
