@@ -97,8 +97,21 @@ Found 2026-10-16 while testing slice 6 (3b, 3e).
     type them the same way.
 - Test data: the extra `BRG-0102` row is the replacement of `BRG0101` (REJ-0003, Replaced).
 
-### B6 🟡 Vendor Warranty score differs between the list and the expanded vendor panel
+### B6 🟡 Vendor Warranty score differs between the list and the expanded vendor panel (OPEN INVESTIGATION, unconfirmed)
 Found 2026-10-16 while testing slice 6 section 4 (sujeet, Vendor Ratings).
+
+**Status:** not confirmed. It can't be checked in the browser: Purchase → RFQ/PO → All quotes shows
+rate, GST, quantity and delivery for each quote, but **not warranty months**, and it lists only what
+can be bought now. To investigate with database access (e.g. a local session):
+```
+// sujeet's quotes that carry a warranty (the list counts these; the panel only counts items on his POs)
+db.vendorbids.find({ vendor: ObjectId('<sujeet _id>'), warrantyMonths: { $gt: 0 } },
+  { group: 1, productName: 1, warrantyMonths: 1, status: 1, submittedAt: 1 })
+```
+If this returns quotes on items that are not on sujeet's POs (e.g. Bairing, which went to mahesh),
+the theory below is right. If it returns nothing, the 100 comes from somewhere else and the
+reading below is wrong.
+
 - The list bars and the Watchlist card show **Warranty 100** for sujeet (his score is 91 only with
   it counted: (93×25 + 76×30 + 100×20 + 100×10 + 100×10) ÷ 95 = 90.6). The expanded panel under the
   same vendor shows Warranty "—" and "No warranty quoted and no claims".
