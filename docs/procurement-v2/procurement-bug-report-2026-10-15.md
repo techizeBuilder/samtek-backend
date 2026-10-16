@@ -126,6 +126,32 @@ reading below is wrong.
   not from the POs of whoever is in the query; then add a test that the score is the same for one
   vendor alone and for all vendors together.
 
+### B7 🟡 Two ledger accounts are both called "Accounts Payable"
+Found 2026-10-16 (slice 6, section 5, Ledger).
+- The account list has two: `PAY-1781949453620-WALP` (empty, ₹0, a liability account made earlier) and
+  `SYS-ACCOUNTS_PAYABLE-edf6a7-TEST-UNIT` (the one every purchase entry posts to).
+- Anyone entering something by hand can pick the wrong one. Fix: rename or hide the empty one.
+
+### B8 🟡 Ledger page: Total Debit / Total Credit / Closing Balance are for the current page only
+Found 2026-10-16 (slice 6, section 5, Ledger). Not from the purchase work: the page has done this
+since the first commit.
+- `LedgerRecord.jsx` adds up `records`, which holds only the 15 rows of the page on screen
+  (`limit: 15`), so the tiles are page totals, not totals for the chosen dates.
+- Seen: after one new debit of ₹33,040 was posted, Total Debit rose by exactly ₹33,040 but Total
+  Credit **fell by ₹10,000**, because one ₹10,000 credit row moved from page 1 to page 2.
+- Closing Balance is `records[0].balance`, so on page 2 it shows that page's newest balance, not the
+  account's closing balance.
+- Fix: have the server return the period totals and the real closing balance with the page of rows.
+
+### B9 🟡 "Bill for a Purchase Without a PO": GST type is not suggested from the GSTINs
+Found 2026-10-16 (slice 6, section 5, Record New Bill).
+- The form defaults GST type to **Local (CGST + SGST)** even for mahesh, who is in another state
+  (IGST). The PO flow decides this automatically from the company's and the vendor's GSTIN; here the
+  user must choose and can get it wrong.
+- What passed: no TDS field; ₹28,000 + 18% = ₹33,040; the bill appeared under "Bills without a PO";
+  paying ₹33,040 posted to SBI (debit, balance down by exactly ₹33,040).
+- Fix idea: preset the GST type from the vendor's and company's state, still changeable.
+
 ### B3 🟡 Old single-request PO edit still sets one quantity on every request
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
