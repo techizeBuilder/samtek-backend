@@ -152,6 +152,21 @@ Found 2026-10-16 (slice 6, section 5, Record New Bill).
   paying ₹33,040 posted to SBI (debit, balance down by exactly ₹33,040).
 - Fix idea: preset the GST type from the vendor's and company's state, still changeable.
 
+### B10 🟡 Company Admin dashboard: "Purchase value" and "Top 3 vendors" count the original PO totals (decision needed)
+Found 2026-10-16 (slice 6, section 5, dashboards).
+- Purchase value reads **₹1,62,520** (4 POs), the same as on 14 Oct, although since then PO-1 was
+  cancelled after its advance (₹26,862.60 moved to money-back), PO-2 was short closed (₹8,896.86 →
+  ₹8,102.78), PO-3b's generator was refunded (bill ₹30,655 → ₹2,655) and PO-4 lost ₹860 to a QC
+  refusal.
+- The vendor shares match the **original** totals exactly: rahul 73.8% (₹1,19,914.88), mahesh 18.9%
+  (₹30,655), sujeet 7.4% (₹11,950).
+- Cause: `purchaseDashboardService.js` sums `po.grandTotal` (what was ordered). The PO's **bill**
+  (`PurchaseInvoice.totalAmount`) is the figure that follows cancellations, short closes and QC
+  refusals.
+- **Decision needed:** is management meant to see what was **ordered** (as now, and as the design doc
+  says: "Σ PO totals") or what we **ended up buying** (the bill)? If the second, switch the sum to the
+  bill total and keep the trend and top-3 share on the same figure.
+
 ### B3 🟡 Old single-request PO edit still sets one quantity on every request
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
@@ -200,7 +215,12 @@ F7, F9, F10 and F11 are on `claude/brave-goodall-scfdbb` and pushed.
   - **3d** generator received with 1 serial (`GEN0101`), QC Critical fail, REJ-0004 answered
     **Refund**: refund due ₹7,000, bill ₹2,655, still to pay ₹1,991.25; **Refund received** →
     Refunded
-  - **3e** warranty claim raised on `BRG0103` (the hyphenated `BRG-0103` finds nothing: B5)
+  - **3e** warranty claim VWC-0001 raised on `BRG0103` and closed (Replaced, 4 ★); the hyphenated
+    `BRG-0103` finds nothing (B5)
+  - **section 4** PO-4 REJ-0001 Refused: bill ₹11,090, paid; sujeet on the Watchlist
+  - **section 5** ledgers (SBI, Advance to Vendors, Accounts Payable ends at 0), Record New Bill,
+    Price History, purchaser score, and the Employee / Head / Company Admin dashboards: passed, with
+    findings B7, B8, B9, B10 (and B6 still unconfirmed)
 
 **Still to do:**
 - slice 6, 3d / 3e details not yet confirmed in the notes: the final PO-3b payment of ₹1,991.25
