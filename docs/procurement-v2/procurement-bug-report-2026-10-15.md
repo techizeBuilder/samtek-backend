@@ -97,6 +97,22 @@ Found 2026-10-16 while testing slice 6 (3b, 3e).
     type them the same way.
 - Test data: the extra `BRG-0102` row is the replacement of `BRG0101` (REJ-0003, Replaced).
 
+### B6 🟡 Vendor Warranty score differs between the list and the expanded vendor panel
+Found 2026-10-16 while testing slice 6 section 4 (sujeet, Vendor Ratings).
+- The list bars and the Watchlist card show **Warranty 100** for sujeet (his score is 91 only with
+  it counted: (93×25 + 76×30 + 100×20 + 100×10 + 100×10) ÷ 95 = 90.6). The expanded panel under the
+  same vendor shows Warranty "—" and "No warranty quoted and no claims".
+- Cause (read in the code, not yet confirmed against the data): `computeVendorScores` takes the
+  item list for the warranty comparison from the **POs of the vendors asked for**
+  (`vendorScoreService.js`, the `itemIds` taken from `pos`). The list asks for every vendor, so
+  sujeet's quotes on items that went to other vendors (e.g. ss sheet) are included. The panel asks
+  for sujeet alone (`withEvidence`), so only Tool-A is looked at, which has no warranty quoted.
+  The two calls therefore use different item sets for the same vendor.
+- Effect: a vendor's score can change depending on which screen asks for it.
+- Fix idea: take the items for the warranty comparison from the vendor's own quotes (their bids),
+  not from the POs of whoever is in the query; then add a test that the score is the same for one
+  vendor alone and for all vendors together.
+
 ### B3 🟡 Old single-request PO edit still sets one quantity on every request
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
