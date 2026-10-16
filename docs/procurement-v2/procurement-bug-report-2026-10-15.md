@@ -214,7 +214,7 @@ F7, F9, F10 and F11 are on `claude/brave-goodall-scfdbb` and pushed.
 
 ---
 
-## Testing progress and what is still to do (updated 2026-10-16)
+## Testing progress and what is still to do (updated 2026-10-16: all planned browser testing is done)
 
 **Done in the browser:**
 - slice 4: QC by line (Tool-A, the 3 PO-2 Angle cards), rejections, vendor cards, ratings, Vendor
@@ -248,8 +248,8 @@ F7, F9, F10 and F11 are on `claude/brave-goodall-scfdbb` and pushed.
   the three dashboards
 - ~~slice 6, section 6 / slice 5 part D: the quote sweep~~ **done 2026-10-16** (run as of 20 Oct from a
   local script; see B11)
-- from slice 4: Dispatch → Vendor Pickups lists PO-2; T12 (quote validity 1 day, then back to 7); the
-  PRs tab Date column
+- ~~from slice 4: Dispatch → Vendor Pickups lists PO-2; T12 (quote validity 1 day, then back to 7); the
+  PRs tab Date column~~ **done and checked 2026-10-16**
 - open decisions: **B1** (cron, option A or B) and **B5** (serial punctuation)
 
 **Add a test for the PRs tab Date column:** reload Purchase → PRs and check one row, and the
