@@ -176,8 +176,10 @@ Found 2026-10-16 (slice 5 part D / slice 6, quote sweep).
   filters on status Sent + link valid only; the sweep also needs at least one item still `Invited`
   (`openItemsOf`).
 - Fix: make the dashboard use the same rule as the sweep (count only requests with an open item).
-- **Not yet exercised:** the "no reply after 3 days" notification itself, because no request with an
-  unanswered item exists. To test: send a new quotation request from RFQ/PO to a vendor, leave it
+- **Exercised 2026-10-16:** a new request was sent and left unanswered, and the sweep run as of
+  20 Oct gave `{ notified: 1, noReply: 1, linkExpired: 0, expiring: 4 }` (one notification for the
+  person, covering the no-reply request and 4 quotes valid till 21 Oct). The earlier note on how to
+  test: send a new quotation request from RFQ/PO to a vendor, leave it
   unanswered, and run the sweep as of 3+ days after it was sent (e.g. `node sweep-quotes-as-of.mjs
   2026-10-20`). Expect `noReply: 1` and a "Quotes to follow up" notification to its sender.
 
@@ -244,8 +246,8 @@ F7, F9, F10 and F11 are on `claude/brave-goodall-scfdbb` and pushed.
   Watchlist)
 - slice 6, section 5: Ledger, Record New Bill (no TDS), Price History, vendor score, purchaser score,
   the three dashboards
-- slice 6, section 6 / slice 5 part D: the **quote sweep** (needs mahesh's QR-0002 to be 3+ days old,
-  or run it as of a later date from a local script)
+- ~~slice 6, section 6 / slice 5 part D: the quote sweep~~ **done 2026-10-16** (run as of 20 Oct from a
+  local script; see B11)
 - from slice 4: Dispatch → Vendor Pickups lists PO-2; T12 (quote validity 1 day, then back to 7); the
   PRs tab Date column
 - open decisions: **B1** (cron, option A or B) and **B5** (serial punctuation)
