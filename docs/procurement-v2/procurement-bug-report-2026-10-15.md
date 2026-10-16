@@ -167,6 +167,20 @@ Found 2026-10-16 (slice 6, section 5, dashboards).
   says: "Σ PO totals") or what we **ended up buying** (the bill)? If the second, switch the sum to the
   bill total and keep the trend and top-3 share on the same figure.
 
+### B11 🟡 Purchase Dashboard counts a quotation request as "waiting" even when no item is still waiting
+Found 2026-10-16 (slice 5 part D / slice 6, quote sweep).
+- mahesh's QR-0002 (sent 14 Oct, status Sent, link valid to 21 Oct) has one bid, **Angle: Rejected**
+  (Angle was ordered from rahul), so nothing is left to chase. The quote sweep (9:35) correctly skipped it:
+  `{ notified: 0, noReply: 0, linkExpired: 0, expiring: 0 }` as of 18 Oct.
+- The Team dashboard still showed it under "Quote requests waiting 1". `purchaseDashboardService.js`
+  filters on status Sent + link valid only; the sweep also needs at least one item still `Invited`
+  (`openItemsOf`).
+- Fix: make the dashboard use the same rule as the sweep (count only requests with an open item).
+- **Not yet exercised:** the "no reply after 3 days" notification itself, because no request with an
+  unanswered item exists. To test: send a new quotation request from RFQ/PO to a vendor, leave it
+  unanswered, and run the sweep as of 3+ days after it was sent (e.g. `node sweep-quotes-as-of.mjs
+  2026-10-20`). Expect `noReply: 1` and a "Quotes to follow up" notification to its sender.
+
 ### B3 🟡 Old single-request PO edit still sets one quantity on every request
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
