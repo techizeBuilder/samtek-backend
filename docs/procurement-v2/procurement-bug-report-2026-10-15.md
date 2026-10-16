@@ -79,6 +79,24 @@ Found 2026-10-15 while testing slice 6 (2e / 2f).
 - Fix idea: open items always on top; the history behind a "Show history" toggle with pagination;
   optional status chips (Open / All). Server side: page the list and count open items separately.
 
+### B5 🟡 Serial numbers that differ only by a hyphen count as different serials (decision needed)
+Found 2026-10-16 while testing slice 6 (3b, 3e).
+- The Bairing serials were received as `BRG0101` … `BRG0105` (no hyphen). The replacement was then
+  received as **`BRG-0102`** (I expected it to be refused as already received). It was **accepted**, so Serial Numbers
+  now holds both `BRG0102` and `BRG-0102`.
+- Cause: `serialKeyOf` (`services/purchasedUnitService.js`) compares `trim().toUpperCase()` only, so
+  punctuation counts. The unique index on the key therefore treats the two as different.
+- Same effect on a warranty claim: typing `BRG-0103` for the stored `BRG0103` finds nothing and the
+  claim form falls back to "Not in our serial records".
+- **Decision needed:**
+  - **Yes, ignore hyphens / spaces / dots in the key** (e.g. strip `[\s\-._/]`): stops this kind of
+    duplicate, and a customer quoting `BRG-0103` still finds `BRG0103`. Risk: two real serials from
+    a vendor that differ only by punctuation would collide. The key is stored, so existing rows
+    need their keys rebuilt.
+  - **No, leave as is:** serials stay exactly as the vendor wrote them, and Store and Complaints must
+    type them the same way.
+- Test data: the extra `BRG-0102` row is the replacement of `BRG0101` (REJ-0003, Replaced).
+
 ### B3 🟡 Old single-request PO edit still sets one quantity on every request
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
@@ -106,27 +124,42 @@ pages were retired. Remove when the old RFQ backend is cleaned up.
 | F9 | Production order id could collide after any order was deleted (`ORD-year-NNN` from a count) | now the highest number + 1 (numeric), commit `d685c92` |
 | F10 | Lead code could collide after a lead was deleted (`LD-NNNN` from a count) | now the highest number + 1 (numeric), commit `c8febb5` |
 
-F7, F9 and F10 are committed on `claude/brave-goodall-scfdbb` and **not pushed yet**.
+F7, F9, F10 and F11 are on `claude/brave-goodall-scfdbb` and pushed.
 
 ---
 
-## Testing still to do (slice 4 and after)
+## Testing progress and what is still to do (updated 2026-10-16)
 
-**Slice 4, remaining:**
-- the 3 PO-2 Angle QC cards: Start → Pass (single-request lines, so no "This delivery" panel)
-- B4 checks: QC Rejections value ₹860 and badge; Emp #2 notified; no email to sujeet; stock +23 for
-  Tool-A and +5 on each received Angle size; LOT-TA-1014 shows "Part rejected"
-- B4/B5 checks: vendor cards (on time, QC), Vendor Ratings for rahul and sujeet, Bought before
-  prices, Vendor Payment (PO-4 QC-passed up to ₹9,890; PO-2 up to ₹8,102.78)
-- ~~the Company Admin approving their own PO → must be refused~~ **dropped from the browser tests
-  (2026-10-15):** the Company Admin has no RFQ/PO page and can't create a PO, so the case can't
-  happen with the normal roles. The server rule was tested directly (3/3, including reject and
-  `requestedBy` taking precedence).
-- PO-2 listed on Dispatch → Vendor Pickups
-- T12: quote validity set to 1 day (today's quotes are now a day old), then back to 7
+**Done in the browser:**
+- slice 4: QC by line (Tool-A, the 3 PO-2 Angle cards), rejections, vendor cards, ratings, Vendor
+  Payment. The own-PO approval step was **dropped** (the Company Admin can't create a PO; the server
+  rule was tested directly, 3/3).
+- slice 5: A (full cancel of PO-5), B (Keep the PO on PO-3b), C (short close of PO-2).
+- slice 6:
+  - sections 1–2 (PO-1: advance, receipt, payments, new bill ₹17,960.99, refunds and credits)
+  - **3b** Bairing replacement: serial refusal tried, replacement received (see **B5**), QC passed,
+    REJ-0003 → Replaced (F11 fixed on the way)
+  - **3c** PO-3b advance ₹7,663.75 paid; the overdue sweep run as of 31 Dec 2026 from a local script
+    (`checked 1, alerted 1`): notification "due 21 Oct 2026, 71 days late" reached the PO's creator,
+    and a second run alerts 0
+  - **3d** generator received with 1 serial (`GEN0101`), QC Critical fail, REJ-0004 answered
+    **Refund**: refund due ₹7,000, bill ₹2,655, still to pay ₹1,991.25; **Refund received** →
+    Refunded
+  - **3e** warranty claim raised on `BRG0103` (the hyphenated `BRG-0103` finds nothing: B5)
 
-**Then:** slice 5 (cancelling: PO-2 short close, a full cancel, "Keep the PO") and slice 6 (money:
-the PO-1 and PO-3b advances, their receipts with serials, payments, refunds, credits).
+**Still to do:**
+- slice 6, 3d / 3e details not yet confirmed in the notes: the final PO-3b payment of ₹1,991.25
+  (PO → Paid, nothing left); VWC-0001 closed with an outcome + 4 ★; the "future date" and "unknown
+  serial" refusals
+- slice 6, section 4: PO-4 REJ-0001 **Refused** (bill ₹11,950 → ₹11,090, pay in full, sujeet on
+  Watchlist)
+- slice 6, section 5: Ledger, Record New Bill (no TDS), Price History, vendor score, purchaser score,
+  the three dashboards
+- slice 6, section 6 / slice 5 part D: the **quote sweep** (needs mahesh's QR-0002 to be 3+ days old,
+  or run it as of a later date from a local script)
+- from slice 4: Dispatch → Vendor Pickups lists PO-2; T12 (quote validity 1 day, then back to 7); the
+  PRs tab Date column
+- open decisions: **B1** (cron, option A or B) and **B5** (serial punctuation)
 
 **Add a test for the PRs tab Date column:** reload Purchase → PRs and check one row, and the
 tooltip with the time.
@@ -135,6 +168,6 @@ tooltip with the time.
 
 ## Notes for whoever picks this up
 - Before any testing: restart the backend, hard-refresh the browser.
-- Nothing from the 15 Oct cloud session is pushed; see the daily report.
+- Everything from the 15 Oct cloud session is pushed to `claude/brave-goodall-scfdbb`; this update (16 Oct) is committed locally only.
 - Never run scripts with the database credentials found in old test scripts from a shared place.
   Keep them in `.env`.

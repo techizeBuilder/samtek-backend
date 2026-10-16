@@ -94,6 +94,9 @@ The numbers skip PR019–PR023 because Samtek Machinery uses those.
 | R2 ask vendors (T9–T14) | ✅ passed 2026-10-14, incl. re-checks of §33 + §34 (T12 validity check due tomorrow) |
 | R3 create POs (T15–T17) | ✅ passed 2026-10-14 (batch POs: PO-1 approved, PO-2 direct, PO-3 rejected → PO-3b approved, PO-4 approved); dashboard numbers checked; fixes §36, §37 |
 | R4 receive + delivery (T18–T21) | receives done 2026-10-14 (fixes §39, §40); **QC step now by PO line (§41)** — Tool-A = one card of 25 |
+| Slice 4 (QC, rejections, vendor cards, ratings, Vendor Payment) | ✅ passed 2026-10-15; own-PO approval step dropped (no role can do it) |
+| Slice 5 (cancelling) | ✅ A, B, C passed 2026-10-15; part D (the two sweeps): overdue sweep ✅ 2026-10-16 (run as of 31 Dec from a local script), quote sweep still to do |
+| Slice 6 (money, serials, scores) | in progress 2026-10-16: sections 1–2, 3b–3e done (replacement received, advance, overdue alert, generator refund, warranty claim); left: PO-3b final payment check, section 4 (PO-4 Refused), section 5 (ledger, price history, scores, dashboards), quote sweep. Findings: F11 fixed, **B5** (serials differing by a hyphen) open |
 
 ---
 
