@@ -753,11 +753,17 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             try {
                 const cron = (await import('node-cron')).default;
                 const { runLowStockReorderSweep } = await import('./jobs/lowStockReorderCron.js');
+                const { withCronLock } = await import('./services/cronLockService.js');
                 // Runs every 30 minutes — Purchase lead times are measured in days, so
-                // this cadence is more than sufficient.
+                // this cadence is more than sufficient. One server per run when
+                // several share the database (10-minute lease, bug B1 2026-10-17).
                 cron.schedule('*/30 * * * *', async () => {
-                    console.log('⏰ [CRON] Starting Material Flow low-stock reorder sweep...');
-                    await runLowStockReorderSweep();
+                    try {
+                        const r = await withCronLock('lowStockReorder', 10 * 60 * 1000, () => runLowStockReorderSweep());
+                        if (r?.skipped) console.log('⏰ [CRON] Low-stock reorder sweep skipped — another server is running it.');
+                    } catch (e) {
+                        console.error('Low-stock reorder sweep failed:', e);
+                    }
                 });
                 console.log('✅ Material Flow low-stock reorder cron job scheduled (every 30 minutes)');
             }

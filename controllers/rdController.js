@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { Item } from '../models/Inventory.js';
 import RDPrototype from '../models/RDPrototype.js';
 import RDChangeRequest from '../models/RDChangeRequest.js';
@@ -260,7 +261,7 @@ export const getMachines = async (req, res) => {
     // rely on this endpoint returning the FULL unfiltered array with no
     // params — only paginate/filter when page/limit is explicitly sent
     // (Product Master's list view, Design Approval's queue).
-    const { page, limit, search, designStatus, releaseStatus, discontinued, forwardToNextPhase, withStatusCounts, pType, category, pSourceType } = req.query;
+    const { page, limit, search, designStatus, releaseStatus, discontinued, forwardToNextPhase, withStatusCounts, pType, category, pSourceType, materialGrade } = req.query;
     const isPaginated = !!(page || limit);
 
     // Base filter excludes designStatus so status-count aggregates below can
@@ -276,6 +277,9 @@ export const getMachines = async (req, res) => {
     if (pType) baseQuery.category = pType;
     if (category) baseQuery.subCategory = category;
     if (pSourceType) baseQuery.productSourceType = pSourceType;
+    // Material Grade filter (client request, 2026-10-17) — independent of the
+    // classification chain above.
+    if (materialGrade) baseQuery.materialGrade = materialGrade;
     if (search) {
       baseQuery.$or = [
         { code: { $regex: search, $options: 'i' } },
@@ -647,13 +651,21 @@ export const addDropdownOption = async (req, res) => {
 // subCategory are shared column *names* across Inventory/Motor/Product Master,
 // so the productKind scope is required — without it a rename could bleed into
 // an unrelated kind's classification that happens to share the same text.
+//
+// parentField (2026-10-17): the Item column holding this option's PARENT
+// value. A scoped value often repeats under several parents ("In House
+// Manufacturing" sits under 6 Sub Categories), so a rename / delete check
+// must only touch products under the option's own parent. Without it,
+// renaming "Purchase Machine" under one Sub Category renamed it on every
+// product of every other Sub Category too, leaving them with a value their
+// own list doesn't have.
 const ITEM_FIELD_MAP = {
   'P-Type': { field: 'category', productKind: 'Machine' },
-  'Category': { field: 'subCategory', productKind: 'Machine' },
-  'P-SourceType': { field: 'productSourceType', productKind: 'Machine' },
+  'Category': { field: 'subCategory', productKind: 'Machine', parentField: 'category' },
+  'P-SourceType': { field: 'productSourceType', productKind: 'Machine', parentField: 'subCategory' },
   'Metrology': { field: 'metrology', productKind: null },
   MotorCategory: { field: 'category', productKind: 'Motor' },
-  MotorSubCategory: { field: 'subCategory', productKind: 'Motor' },
+  MotorSubCategory: { field: 'subCategory', productKind: 'Motor', parentField: 'category' },
   MotorType: { field: 'motorDetails.motorType', productKind: 'Motor' },
   // Unscoped like Metrology — Material Grade (e.g. SS304) is a universal spec
   // shared with Inventory's own Material Grade dropdown, not Machine-specific.
@@ -664,8 +676,21 @@ const ITEM_FIELD_MAP = {
   // rename handler's $set needs arrayFilters instead of a plain $set — see
   // its `itemMap.field === 'machineDetails.powerRequirements.powerSource'` branch.
   PowerSource: { field: 'machineDetails.powerRequirements.powerSource', productKind: 'Machine' },
-  ProductName: { field: 'name', productKind: 'Machine' },
-  ProductVariant: { field: 'variant', productKind: 'Machine' },
+  ProductName: { field: 'name', productKind: 'Machine', parentField: 'subCategory' },
+  // A machine keeps its variant under machineDetails (toMachineItemFields /
+  // toMachineResponse). This said `variant`, so renaming a Variant updated
+  // no product at all — the view kept the old value and the edit form's
+  // <select> hid it behind the first option (2026-10-17, client bug PRO-0014).
+  ProductVariant: { field: 'machineDetails.variant', productKind: 'Machine', parentField: 'name' },
+};
+
+// The Item query for "products using `value` of this option". The parent
+// scope applies only when the option has a parent (legacy options may not).
+const itemQueryForOption = (itemMap, companyId, value, parentValue) => {
+  const q = { companyId, [itemMap.field]: value };
+  if (itemMap.productKind) q.productKind = itemMap.productKind; // unscoped (e.g. Metrology) applies to any kind
+  if (itemMap.parentField && parentValue) q[itemMap.parentField] = parentValue;
+  return q;
 };
 // Field -> the child dropdown field(s) whose parentValue chains off it. Values
 // are arrays since Category (Sub Category) now has two independent children —
@@ -691,6 +716,21 @@ const PLANT_FIELD_MAP = {
   PlantCategory: 'category', PlantSubCategory: 'subCategory',
   PlantName: 'name', PlantProduction: 'productionRate',
 };
+// The RDPlant column holding each scoped Plant option's parent (same reason
+// as ITEM_FIELD_MAP.parentField).
+const PLANT_PARENT_FIELD = { PlantSubCategory: 'category', PlantName: 'subCategory', PlantProduction: 'name' };
+const plantQueryForOption = (field, companyId, value, parentValue) => {
+  const q = { company: companyId, [PLANT_FIELD_MAP[field]]: value };
+  if (PLANT_PARENT_FIELD[field] && parentValue) q[PLANT_PARENT_FIELD[field]] = parentValue;
+  return q;
+};
+
+// Is the same value also an option under ANOTHER parent? Then the child
+// options hanging off it (matched by parentValue text only) are shared by
+// both, and can't be moved or counted as this option's alone.
+const valueUsedUnderAnotherParent = (option, value) => RDMasterOption.exists({
+  _id: { $ne: option._id }, company: option.company, field: option.field, value,
+});
 
 // ─── 3b. UPDATE DROPDOWN OPTION (rename a value, cascading everywhere it's used) ─
 export const updateDropdownOption = async (req, res) => {
@@ -720,10 +760,13 @@ export const updateDropdownOption = async (req, res) => {
     option.value = newValue;
     await option.save();
 
+    const companyId = req.user.companyId;
+    const parentValue = option.parentValue || null;
+
+    // Products: only those under this option's own parent (itemQueryForOption).
     const itemMap = ITEM_FIELD_MAP[option.field];
     if (itemMap) {
-      const itemQuery = { companyId: req.user.companyId, [itemMap.field]: oldValue };
-      if (itemMap.productKind) itemQuery.productKind = itemMap.productKind; // unscoped (e.g. Metrology) applies to any kind
+      const itemQuery = itemQueryForOption(itemMap, companyId, oldValue, parentValue);
       if (itemMap.field === 'machineDetails.powerRequirements.powerSource') {
         // Array of subdocuments — a plain $set on the dot-path would overwrite
         // the whole array with a string; needs arrayFilters to rename just the
@@ -733,33 +776,56 @@ export const updateDropdownOption = async (req, res) => {
           { $set: { 'machineDetails.powerRequirements.$[elem].powerSource': newValue } },
           { arrayFilters: [{ 'elem.powerSource': oldValue }] }
         );
+        // Machines saved before several power requirements existed keep it in
+        // the single legacy field (shown when the array is empty).
+        await Item.updateMany(
+          { companyId, productKind: 'Machine', 'machineDetails.powerSource': oldValue },
+          { $set: { 'machineDetails.powerSource': newValue } }
+        );
       } else {
         await Item.updateMany(itemQuery, { $set: { [itemMap.field]: newValue } });
       }
     }
 
-    const plantField = PLANT_FIELD_MAP[option.field];
-    if (plantField) {
+    if (PLANT_FIELD_MAP[option.field]) {
       await RDPlant.updateMany(
-        { company: req.user.companyId, [plantField]: oldValue },
-        { $set: { [plantField]: newValue } }
+        plantQueryForOption(option.field, companyId, oldValue, parentValue),
+        { $set: { [PLANT_FIELD_MAP[option.field]]: newValue } }
       );
     }
 
+    // Child options hang off the parent's TEXT. If the old value is still an
+    // option under another parent, its children are shared with that one:
+    // copy them under the new value instead of moving them away from it.
     const childFields = CHILD_FIELD_MAP[option.field] || [];
-    for (const childField of childFields) {
-      await RDMasterOption.updateMany(
-        { company: req.user.companyId, field: childField, parentValue: oldValue },
-        { $set: { parentValue: newValue } }
-      );
+    if (childFields.length) {
+      const shared = await valueUsedUnderAnotherParent(option, oldValue);
+      for (const childField of childFields) {
+        if (!shared) {
+          await RDMasterOption.updateMany(
+            { company: companyId, field: childField, parentValue: oldValue },
+            { $set: { parentValue: newValue } }
+          );
+          continue;
+        }
+        const children = await RDMasterOption.find({ company: companyId, field: childField, parentValue: oldValue }).lean();
+        for (const c of children) {
+          await RDMasterOption.updateOne(
+            { company: companyId, field: childField, value: c.value, parentValue: newValue },
+            { $setOnInsert: { company: companyId, field: childField, value: c.value, parentValue: newValue } },
+            { upsert: true }
+          );
+        }
+      }
     }
 
+    // Custom field templates are keyed by the full combo; scope by the parent too.
     if (option.field === 'P-Type') {
-      await RDCustomFieldTemplate.updateMany({ company: req.user.companyId, pType: oldValue }, { $set: { pType: newValue } });
+      await RDCustomFieldTemplate.updateMany({ company: companyId, pType: oldValue }, { $set: { pType: newValue } });
     } else if (option.field === 'Category') {
-      await RDCustomFieldTemplate.updateMany({ company: req.user.companyId, category: oldValue }, { $set: { category: newValue } });
+      await RDCustomFieldTemplate.updateMany({ company: companyId, category: oldValue, ...(parentValue ? { pType: parentValue } : {}) }, { $set: { category: newValue } });
     } else if (option.field === 'P-SourceType') {
-      await RDCustomFieldTemplate.updateMany({ company: req.user.companyId, pSourceType: oldValue }, { $set: { pSourceType: newValue } });
+      await RDCustomFieldTemplate.updateMany({ company: companyId, pSourceType: oldValue, ...(parentValue ? { category: parentValue } : {}) }, { $set: { pSourceType: newValue } });
     }
 
     res.json({ success: true, data: option });
@@ -774,21 +840,23 @@ export const deleteDropdownOption = async (req, res) => {
     const option = await RDMasterOption.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!option) return res.status(404).json({ success: false, message: 'Option not found' });
 
+    // Only products / plants under this option's own parent block it — the
+    // same value under another parent is a different option (2026-10-17).
     const itemMap = ITEM_FIELD_MAP[option.field];
     let productCount = 0;
     if (itemMap) {
-      const itemQuery = { companyId: req.user.companyId, [itemMap.field]: option.value };
-      if (itemMap.productKind) itemQuery.productKind = itemMap.productKind;
-      productCount = await Item.countDocuments(itemQuery);
+      productCount = await Item.countDocuments(itemQueryForOption(itemMap, req.user.companyId, option.value, option.parentValue || null));
     }
 
-    const plantField = PLANT_FIELD_MAP[option.field];
-    const plantCount = plantField
-      ? await RDPlant.countDocuments({ company: req.user.companyId, [plantField]: option.value })
+    const plantCount = PLANT_FIELD_MAP[option.field]
+      ? await RDPlant.countDocuments(plantQueryForOption(option.field, req.user.companyId, option.value, option.parentValue || null))
       : 0;
 
+    // Children shared with the same value under another parent stay in use
+    // there, so they don't block deleting this one.
     const childFields = CHILD_FIELD_MAP[option.field] || [];
-    const childCounts = await Promise.all(
+    const sharedChildren = childFields.length ? await valueUsedUnderAnotherParent(option, option.value) : false;
+    const childCounts = sharedChildren ? childFields.map(() => 0) : await Promise.all(
       childFields.map(cf => RDMasterOption.countDocuments({ company: req.user.companyId, field: cf, parentValue: option.value }))
     );
     const childCount = childCounts.reduce((a, b) => a + b, 0);
@@ -825,6 +893,23 @@ export const getCustomFieldTemplates = async (req, res) => {
   }
 };
 
+// Fields renamed between two versions of a template, matched by the field's
+// _id: [{ from: { groupLabel, fieldName }, to: { groupLabel, fieldName } }].
+// A group rename shows up on each of its fields. Fields without a match
+// (added / removed) aren't renames. Pure — exported for tests.
+export function customFieldRenames(oldGroups, newGroups) {
+  const flat = (groups) => (groups || []).flatMap(g => (g.fields || []).map(f => ({ id: f._id ? String(f._id) : null, groupLabel: g.label, fieldName: f.name })));
+  const after = new Map(flat(newGroups).filter(f => f.id).map(f => [f.id, f]));
+  const out = [];
+  for (const f of flat(oldGroups)) {
+    const n = f.id && after.get(f.id);
+    if (n && (n.groupLabel !== f.groupLabel || n.fieldName !== f.fieldName)) {
+      out.push({ from: { groupLabel: f.groupLabel, fieldName: f.fieldName }, to: { groupLabel: n.groupLabel, fieldName: n.fieldName } });
+    }
+  }
+  return out;
+}
+
 export const saveCustomFieldTemplate = async (req, res) => {
   try {
     const { pType, category, pSourceType, groups } = req.body;
@@ -832,18 +917,53 @@ export const saveCustomFieldTemplate = async (req, res) => {
       return res.status(400).json({ success: false, message: 'pType, category and pSourceType are required.' });
     }
 
+    // Groups / fields keep their _id when the page sends it back, so a renamed
+    // group or field can be told apart from a removed + added one.
+    const keepId = (x) => (x?._id && mongoose.Types.ObjectId.isValid(x._id) ? { _id: x._id } : {});
     const cleanGroups = (groups || [])
       .map(g => ({
+        ...keepId(g),
         label: (g.label || '').trim(),
-        fields: (g.fields || []).map(f => ({ name: (f.name || '').trim() })).filter(f => f.name)
+        fields: (g.fields || []).map(f => ({ ...keepId(f), name: (f.name || '').trim() })).filter(f => f.name)
       }))
       .filter(g => g.label && g.fields.length > 0);
 
+    const combo = { company: req.user.companyId, pType, category, pSourceType };
+    const before = await RDCustomFieldTemplate.findOne(combo).lean();
+
     const template = await RDCustomFieldTemplate.findOneAndUpdate(
-      { company: req.user.companyId, pType, category, pSourceType },
+      combo,
       { groups: cleanGroups, createdBy: req.user._id },
       { new: true, upsert: true, setDefaultsOnInsert: true }
     );
+
+    // A product keeps each custom value as { groupLabel, fieldName, value },
+    // matched by NAME. Renaming a group or field here used to leave every
+    // existing product on the old name — the view kept showing it, and the
+    // next edit couldn't find the value under the new name and blanked it
+    // (2026-10-17). Carry renames over to this combo's products.
+    if (before) {
+      const renames = customFieldRenames(before.groups, template.groups);
+      if (renames.length) {
+        const products = { companyId: req.user.companyId, productKind: 'Machine', category: pType, subCategory: category, productSourceType: pSourceType };
+        // Two passes through a temporary name, so swapping two names works.
+        const temp = renames.map((r, i) => ({ ...r, tmp: `\u0000rename-${i}` }));
+        for (const r of temp) {
+          await Item.updateMany(
+            { ...products, customFields: { $elemMatch: { groupLabel: r.from.groupLabel, fieldName: r.from.fieldName } } },
+            { $set: { 'customFields.$[cf].groupLabel': r.tmp, 'customFields.$[cf].fieldName': r.tmp } },
+            { arrayFilters: [{ 'cf.groupLabel': r.from.groupLabel, 'cf.fieldName': r.from.fieldName }] }
+          );
+        }
+        for (const r of temp) {
+          await Item.updateMany(
+            { ...products, 'customFields.groupLabel': r.tmp },
+            { $set: { 'customFields.$[cf].groupLabel': r.to.groupLabel, 'customFields.$[cf].fieldName': r.to.fieldName } },
+            { arrayFilters: [{ 'cf.groupLabel': r.tmp }] }
+          );
+        }
+      }
+    }
 
     res.status(201).json({ success: true, data: template });
   } catch (err) {

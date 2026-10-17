@@ -22,3 +22,6 @@ Thumbs.db
 
 # Daily work reports (kept locally, not in git)
 docs/daily report/
+
+# Startup scripts
+../../../start-codecraft.ps1

@@ -852,7 +852,11 @@ Status: Open
 Free stock (after reservations) + confirmed incoming ≤ reorder level. This was open question 5 in
 the 2026-09 discussion doc ("protect Min Stock against reservations?").
 **Default:** yes, once Phase 0 is done.
-Status: Open
+Status: Open. **Partly settled 2026-10-17 (bug B1, change report §42):** free stock is used
+(2026-10-09). "Incoming" is handled as a block rather than added to the formula: no new request
+while a stock request for the item / size is still coming (not bought, on a PO, or received with
+QC undecided). It isn't a sum because incoming is in the purchase unit (often kg) and stock is in
+pieces.
 
 **R2. Use the same formula for the Child Part / Sub Child Part reorder sweeps?**
 Those produce production orders, not PRs.

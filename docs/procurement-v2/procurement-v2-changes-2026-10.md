@@ -1,8 +1,8 @@
 # What changed — Procurement v2 rebuild
 
 Changes made while rebuilding Purchase against the client's blueprint (plan:
-`procurement-workflow-2026-10.md`, in this folder). 41 changes, built and checked (2026-10-08 →
-2026-10-14); see each change's status in the table at the end. **The purchase flow is complete**
+`procurement-workflow-2026-10.md`, in this folder). 43 changes, built and checked (2026-10-08 →
+2026-10-17); see each change's status in the table at the end. **The purchase flow is complete**
 with §32; browser testing (test plan T1–T40, via `purchase-flow-test-roadmap-2026-10.md`) started
 2026-10-14, and fixes found there start at §33. Then the outsource flow.
 
@@ -3271,6 +3271,102 @@ Tool-A request would have been valued at ⅓ of the line.
 
 ---
 
+## 42. The low-stock reorder raised extra requests (bug report B1) (2026-10-17)
+
+**What you saw:** Tool-A got a new auto request (PR037) after Store had received it. You
+suspected the 30-minute reorder sweep ran while the material was still in QC.
+
+**Confirmed in the data, and there was a second cause.** Of the open auto requests, **5 should
+not exist**:
+
+| Request | What happened |
+|---|---|
+| PR037 Tool-A | Raised 14 Oct 12:00. Store received 25 at 11:59; QC passed them 15 Oct 05:59. Stock is now 24 (minimum 10). |
+| PR033, PR034 (Angle 100×2×100, 200×3×50) | Raised 14 Oct 11:00 while PO-2's Angles were in QC. Both sizes are above minimum now. |
+| PR036 (Angle 50×5×6000), PR039 (Angle 20×4×10) | **Raised twice in the same second** as PR035 / PR038 (170 ms apart). |
+
+**Cause 1, QC.** A request stopped counting as "already raised" once Store received it, but stock
+only goes up when QC passes. So the next sweep saw low stock and raised again. It also counted
+only its **own** requests: a Store manual request, a vendor replacement or an open PO for the same
+item didn't stop it.
+
+**Cause 2, two servers.** The sweep is registered once per server. PR035/PR036 and PR038/PR039 came
+from **two backends running against the same database at once** (your local one plus another
+copy). Both ran at :00, and both checked "already raised?" before either had saved.
+
+**Now:**
+1. **"Already coming":** an item, or a fabrication size, is skipped while any stock request for
+   it is still on its way in:
+   - not yet bought, or on a PO
+   - **received but QC not decided** (Draft / Pending / In Progress)
+   - **Counts:** the sweep's own requests, Store's manual requests, and a vendor's replacement for
+     rejected material.
+   - **Doesn't count:** requests bought for one production or sales order. That material goes to
+     the order, not back to free stock.
+   - **When it's in:** once what was coming has passed QC, if stock is still at or below the
+     minimum, the next sweep raises as before.
+   - **A rejection the vendor refunds** brings nothing more, so it doesn't block.
+2. **One sweep at a time across servers:** the first server to start a sweep holds it for 10
+   minutes, and the others skip that run ("skipped — another server is running it" in their log).
+
+**Not changed:** the quantity raised is still the item's (or size's) reorder quantity. It doesn't
+subtract what's coming: an open request of any size blocks until it's in, then the next sweep
+decides again. The blueprint's "free + incoming" formula (R1) wasn't used, because incoming is in
+the purchase unit (often kg) and stock is in pieces.
+
+**Technical notes:**
+- **`jobs/lowStockReorderCron.js`:**
+  - `requestsOnTheWay(item, inQcRequestIds)`: matches by `reorderItemId`, or code
+    (`itemId` / `materialCode`), or exact name (the RFQ board's own match); `storeOrderId` and
+    `saleItemId` empty; status Pending / Approved / Ordered, or Received with an undecided purchase
+    QC job
+  - the undecided QC jobs are loaded once per sweep
+  - fabrication: every size of every request on the way
+  - `runLowStockReorderSweep({ companyId })` (tests)
+- **New `services/cronLockService.js`:** `withCronLock(name, leaseMs, fn)`, a lease in
+  `cronlocks`.
+- **`index.js`:** the sweep runs inside it.
+
+**Checks** (21/21, on a made-up company, 0 left):
+- **Plain item** (free 3, minimum 10):
+  - raises 10 → its own Pending blocks → **received + QC Pending: 0 (was 1)** → QC In Progress:
+    0 → QC decided: raises
+  - a manual request blocks (name in other case)
+  - a production-order request doesn't block
+  - a replacement Ordered or in QC blocks; failed QC with nothing more coming: raises
+  - free 11: 0; free 10 (= minimum): raises
+- **Fabrication:** size A received (stored as text) and in QC, size B low → **only size B** (5
+  pieces); the leftover size is never raised; QC decided → size A
+- **Two servers:**
+  - two sweeps with the lease → one skipped, 2 raised for 2 low sizes
+  - a lagging server inside the lease → skipped; after it → runs
+  - without the lease, two sweeps at once also collided on the request number (E11000)
+- **Import + syntax checks.**
+
+**Your data:** the 5 extra requests are left as they are (your call, 2026-10-17).
+
+**The second server (you, 2026-10-17):** the client's deployed server crashed. While it was being
+fixed it was accidentally pointed at this database copy, and that's now corrected. The lease stays
+as a guard.
+
+---
+
+## 43. QC Rejections: "QC QC-2026-0215" read twice (bug report B2) (2026-10-17)
+
+**Where:** Accounts → Purchases → QC Rejections, the line under each REJ.
+
+**Before:** "PO-… · vendor · QC QC-2026-0215: "reason" · ₹…". The label printed "QC" and so did
+the job number.
+
+**Now:** "PO-… · vendor · QC-2026-0215: "reason" · ₹…". It falls back to "QC" only if a job
+number is missing.
+
+**Technical notes:** `QcRejections.jsx`, the REJ sub-line.
+
+**Checks:** the frontend builds. Check it in the browser on the next REJ.
+
+---
+
 ## Quick summary
 
 | # | Change | Status |
@@ -3310,6 +3406,8 @@ Tool-A request would have been valued at ⅓ of the line.
 | 33 | Browser testing slice 2 fixes: the vendor's quotation page adds charges by choice ("+ Add a charge…", like payment terms) instead of listing every template charge; vendor cards on RFQ/PO tick rows with a valid price on load and when a new price arrives (email or manual) | Done; builds; re-check in the browser |
 | 34 | Vendor page accepts "Can't supply" on every item (needs a price or a can't-supply); a vendor's charges + payment terms carry over from their last quotation (with valid prices) into each new one — email page and manual dialog, with a note to change / remove what's different; the vendor check counts only the newest quotation's charges (no double freight) | Done; 16 tests + real read-only run; builds; re-check in the browser |
 | 35 | PO review: GST read-only from the quote (the "all lines" box gone) and the server takes rate / GST / warranty from the quote, never the page; manual quotations need GST; any change to the quotation's charges / terms needs a reason (saved, shown to the Company Admin, audit log); charges above the quotation → Company Admin approval ("Charges above quotation"); our template terms added by choice | Done; 14 + 10 real-handler tests pass; builds; check in the browser (slice 3) |
+| 43 | QC Rejections: the REJ line shows the QC job number once ("QC-2026-0215", not "QC QC-2026-0215") (bug B2) | Done; builds; check in the browser |
+| 42 | Low-stock reorder (bug B1): skips an item / size while a stock request for it is still coming — not bought, on a PO, or received with QC undecided; counts its own, Store's manual and replacement requests, not production / sales-order ones; one sweep at a time across servers sharing the database (10-minute lease) — two backends had raised PR036 / PR039 twice | Done; 21 tests; the 5 extra requests left as they are (your call) |
 | 41 | QC by PO line: one QC card + one decision per received line (each request keeps its own record underneath); a rejection is counted against requests by size first (fabrication), then fill one before the next — stock → production → sales order, newest first; serials by tick; "Fabrication" decided from the item master and carried PO line → receive → QC; two fabrication stock bugs fixed (N× on a shared line; rejected pieces credited); "Rejected" requests shown as "Closed — reason" | Done; 15 + 34 end-to-end tests; data grouped; builds; check in the browser (slice 4 QC) |
 | 40 | Each request on a multi-request PO line now gets its own share of the line (it got the whole line → Store's receive would have tripled Tool-A's stock, asked 10 serials for 5 Bairings, pre-filled 210 kg for 70); the 13 requests on the open POs corrected. The unit-conversion rule itself (same unit → none; different → required) was present and correct | Done; 8 tests + data fix re-checked |
 | 39 | Purchase Orders / Store's To Receive refetch in place after a receive / date change (the open PO, filters and scroll stay); fabrication lines show size × pieces | Done; builds; re-check in the browser |

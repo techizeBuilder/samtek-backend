@@ -10,7 +10,15 @@ Sources: the browser testing of slice 4, the 15 Oct code reading, and the change
 
 ## Open
 
-### B1 🔴 The low-stock cron raises a new PR while received material is still in QC
+### B1 ✅ The low-stock cron raises a new PR while received material is still in QC
+
+**Fixed 2026-10-17, change report §42.** Confirmed in the data: PR037 was raised 14 Oct 12:00:01,
+between the receive (11:59) and the QC pass (15 Oct 05:59). PR033 and PR034 were raised the same
+way. **A second cause was found:** PR036 and PR039 were raised **twice in the same second** by two
+backends sharing the database. The fix is option A widened: any stock request still coming
+(manual, replacement, received with QC undecided) blocks; production / sales-order requests don't.
+Plus a 10-minute lease so only one server sweeps. Option B wasn't used because incoming is in kg
+and stock is in pieces. The original analysis is kept below.
 
 **What was seen:** after PO-4 (Tool-A) was received, a new auto-reorder PR for Tool-A (PR037)
 appeared on the PRs tab, although 25 pieces had just arrived and were waiting for QC.
@@ -57,7 +65,8 @@ db.purchaserequests.find({ requestId: 'PR037' }, { requestId: 1, status: 1, auto
 db.qcjobs.find({ itemName: 'Tool-A', source: 'Purchase' }, { qcJobId: 1, status: 1, createdAt: 1, updatedAt: 1 })
 ```
 
-### B2 🟡 "QC QC-2026-0215" reads twice in QC Rejections
+### B2 ✅ "QC QC-2026-0215" reads twice in QC Rejections
+**Fixed 2026-10-17, change report §43** (`QcRejections.jsx`).
 The REJ line says "QC QC-2026-0215": the word "QC" is printed once by the label and once by the
 job number. Wording only. Fix: drop the label's "QC", or show just the job number.
 
@@ -207,6 +216,7 @@ pages were retired. Remove when the old RFQ backend is cleaned up.
 | F7 | PRs tab had no date column (the date was stored as `requestDate` / `createdAt`) | Date column added, frontend commit `e792ad0` |
 | F8 | "Rejected" on a request read like a QC rejection | §41 ("Closed — reason") |
 | F11 | Receiving a QC **replacement** on a line received earlier: the Receive dialog counted the already-received requests too (a 1-piece Bairing replacement asked for 6 serials). The dialog was given every request on the line; the server already used only the unreceived ones. Fixed in the page (`openReceiveDialog` in `pages/accounts/PurchaseRequest.jsx`). Same input feeds the fabrication receive dialog. | slice 6, step 3b; frontend commit |
+| B1 | Low-stock cron raised requests while material was in QC (PR033, PR034, PR037), and twice at once from two servers (PR036, PR039) | §42, 2026-10-17 |
 | F9 | Production order id could collide after any order was deleted (`ORD-year-NNN` from a count) | now the highest number + 1 (numeric), commit `d685c92` |
 | F10 | Lead code could collide after a lead was deleted (`LD-NNNN` from a count) | now the highest number + 1 (numeric), commit `c8febb5` |
 
@@ -250,7 +260,7 @@ F7, F9, F10 and F11 are on `claude/brave-goodall-scfdbb` and pushed.
   local script; see B11)
 - ~~from slice 4: Dispatch → Vendor Pickups lists PO-2; T12 (quote validity 1 day, then back to 7); the
   PRs tab Date column~~ **done and checked 2026-10-16**
-- open decisions: **B1** (cron, option A or B) and **B5** (serial punctuation)
+- open decisions: ~~**B1** (cron, option A or B)~~ fixed 2026-10-17 (§42) and **B5** (serial punctuation)
 
 **Add a test for the PRs tab Date column:** reload Purchase → PRs and check one row, and the
 tooltip with the time.
