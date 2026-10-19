@@ -21,6 +21,7 @@ import {
   getAccountById,
   createAccount,
   updateAccount,
+  adjustAccountBalance,
   deleteAccount,
   getSalesReturnsList,
   getSalesDamagesList,
@@ -77,9 +78,7 @@ import {
   createPurchase,
   getPurchases,
   getPurchaseById,
-  updatePurchase,
   deletePurchase,
-  receivePurchase,
   sendPOToVendor,
   reviseLineExpectedDate
 } from '../controllers/purchaseController.js';
@@ -320,6 +319,7 @@ accountsRouter.put(
 
 import {
   createPurchaseInvoice,
+  getBillGstType,
   getPurchaseInvoices,
   createVendorPayment,
   getVendorPayments,
@@ -336,6 +336,8 @@ import {
 
 accountsRouter.post('/purchases/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchaseInvoice);
 accountsRouter.get('/purchases/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseInvoices);
+// Bill without a PO: suggested GST type for a vendor (bug B9, 2026-10-19).
+accountsRouter.get('/purchases/invoices/gst-type', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getBillGstType);
 accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createVendorPayment);
 accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorOutstanding);
 accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPaymentStats);
@@ -345,7 +347,9 @@ accountsRouter.get('/purchases/payments', authorizeRoles('Accounts', 'Accounts H
 accountsRouter.post('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchase);
 accountsRouter.get('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchases);
 accountsRouter.get('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseById);
-accountsRouter.put('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, updatePurchase);
+// The old PO edit is retired (bug report B3, 2026-10-19) — a PO is never edited;
+// change = cancel / short close + re-order.
+accountsRouter.put('/purchases/orders/:id', (req, res) => res.status(410).json({ success: false, message: 'A purchase order can\'t be edited. Cancel it (or short close what isn\'t received) and order again.' }));
 // Disabled 2026-10-05 — no frontend caller anywhere (confirmed by grep), and
 // deletePurchase doesn't clean up the PurchaseInvoice that's now auto-created
 // at PO-creation time (Fifteenth pass) — a pre-Fifteenth-pass Draft PO had
@@ -354,7 +358,9 @@ accountsRouter.put('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts
 // Purchase.purchaseOrder) — otherwise a deleted PO leaves a permanent,
 // uncollectible balance inflating that vendor's credit exposure forever.
 // accountsRouter.delete('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesDelete, deletePurchase);
-accountsRouter.post('/purchases/orders/:id/receive', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, receivePurchase);
+// The RFQ-era whole-PO receive is retired (bug report B15, 2026-10-19) — it added
+// stock skipping QC. Store receives per PO line (Store → To Receive).
+accountsRouter.post('/purchases/orders/:id/receive', (req, res) => res.status(410).json({ success: false, message: 'Receive on Store → To Receive, one PO line at a time (it then goes to QC).' }));
 accountsRouter.post('/purchases/orders/:id/send-email', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, sendPOToVendor);
 // Gap 13 (2026-10-09): Purchase asks to cancel a PO (the Company Admin decides — /api/po-approvals/:id/cancel-review).
 accountsRouter.post('/purchases/orders/:id/cancel-request', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, requestPoCancellation);
@@ -433,6 +439,8 @@ accountsRouter.put('/bank-cash/reconcile/:id', authorizeRoles('Accounts', 'Accou
 accountsRouter.get('/transactions', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), bankAndCashView, getTransactions);
 accountsRouter.post('/transactions/general', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), bankAndCashAdd, createGeneralTransaction);
 accountsRouter.get('/ledger', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), bankAndCashView, getLedgerRecords);
+// Correct a book bank / cash balance to the real one — one ledger line with a reason (B13, 2026-10-19).
+accountsRouter.post('/:id/adjust-balance', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), bankAndCashEdit, adjustAccountBalance);
 
 // Account Management (Chart of Accounts)
 accountsRouter.get('/', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), chartOfAccountsView, getAccounts);

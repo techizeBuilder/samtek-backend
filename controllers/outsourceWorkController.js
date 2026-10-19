@@ -761,7 +761,7 @@ export const listOutsourceWork = async (req, res) => {
     if (!isPaginated) return res.json({ success: true, data: rows, summary });
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.max(1, parseInt(limit, 10) || 20);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20)); // at most 100 a page (2026-10-19)
     const total = rows.length;
     const paged = rows.slice((pageNum - 1) * limitNum, pageNum * limitNum);
     res.json({

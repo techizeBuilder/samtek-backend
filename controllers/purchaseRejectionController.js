@@ -54,22 +54,49 @@ export const answerRejection = async (req, res) => {
   }
 };
 
-// GET ?status= &vendorId= — refunds due, credits, cancellation leftovers to decide.
+// Still something to do: decide, collect the refund, or use the credit.
+const OPEN_MONEY_BACK = ['To decide', 'Refund due', 'Credit available'];
+
+// GET ?view=open|done|all &status= &vendorId= &page= &limit= — refunds due,
+// credits, cancellation leftovers to decide. Paged, with the open count
+// across all pages (bug B2c, 2026-10-19: it returned the newest 200 and the
+// page showed the first 30, so an old open item could drop out of sight
+// while "N open" still counted it).
 export const listMoneyBack = async (req, res) => {
   try {
     const companyId = req.user.companyId;
-    const query = { companyId };
+    const base = { companyId };
+    if (req.query.vendorId && mongoose.isValidObjectId(req.query.vendorId)) base.vendor = req.query.vendorId;
+    const query = { ...base };
+    const view = ['open', 'done'].includes(req.query.view) ? req.query.view : 'all';
+    if (view === 'open') query.status = { $in: OPEN_MONEY_BACK };
+    else if (view === 'done') query.status = { $nin: OPEN_MONEY_BACK };
     if (req.query.status && req.query.status !== 'All') query.status = req.query.status;
-    if (req.query.vendorId && mongoose.isValidObjectId(req.query.vendorId)) query.vendor = req.query.vendorId;
-    const rows = await VendorMoneyBack.find(query)
-      .populate('rejection', 'number itemName rejectedQty qtyUnit')
-      .populate('refund.account', 'accountName')
-      .sort({ createdAt: -1 })
-      .limit(200)
-      .lean();
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    const [rows, total, openRows, done] = await Promise.all([
+      VendorMoneyBack.find(query)
+        .populate('rejection', 'number itemName rejectedQty qtyUnit')
+        .populate('refund.account', 'accountName')
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      VendorMoneyBack.countDocuments(query),
+      VendorMoneyBack.find({ ...base, status: { $in: OPEN_MONEY_BACK } }).select('amount used').lean(),
+      VendorMoneyBack.countDocuments({ ...base, status: { $nin: OPEN_MONEY_BACK } }),
+    ]);
+    const openAmount = Math.round(openRows.reduce((s, m) => s + (Number(m.amount) || 0) - (Number(m.used) || 0), 0) * 100) / 100;
     const credit = req.query.vendorId && mongoose.isValidObjectId(req.query.vendorId)
       ? await vendorCreditAvailable(companyId, req.query.vendorId) : null;
-    res.json({ success: true, data: { items: rows, vendorCredit: credit } });
+    res.json({
+      success: true,
+      data: {
+        items: rows, vendorCredit: credit,
+        counts: { open: openRows.length, openAmount, done },
+        pagination: { total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) },
+      },
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

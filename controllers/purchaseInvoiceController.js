@@ -8,6 +8,27 @@ import mongoose from 'mongoose';
 import { recalculateItemPricing } from '../services/itemPricingService.js';
 import { postEntry, gstLines } from '../services/purchaseLedgerService.js';
 import { payBill, payableNow, owedNow } from '../services/purchaseBillService.js';
+import { Company } from '../models/Company.js';
+import { gstSplitFor } from '../services/gstStateService.js';
+
+/**
+ * GET /purchases/invoices/gst-type?vendorId= — CGST + SGST or IGST for a bill
+ * without a PO, from the company's and the vendor's GSTIN (state as a
+ * fallback): the same rule a PO uses (bug B9, 2026-10-19 — the form always
+ * started on "Local", even for a vendor in another state). Only a suggestion;
+ * the form can still be changed. type null = a side's GSTIN / state is missing.
+ */
+export const getBillGstType = async (req, res) => {
+    try {
+        const vendor = await Supplier.findOne({ _id: req.query.vendorId, companyId: req.user.companyId }).select('gstNumber address').lean();
+        if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
+        const company = await Company.findById(req.user.companyId).select('gst state').lean();
+        const split = gstSplitFor({ ourGstin: company?.gst, ourState: company?.state, theirGstin: vendor.gstNumber, theirState: vendor.address?.state });
+        res.json({ success: true, data: split });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
 
 // Recalculates purchase-derived cost/MRP/Sale Price for every Item referenced
 // on a newly recorded Purchase Invoice — the most reliable "price actually
@@ -122,7 +143,10 @@ export const createPurchaseInvoice = async (req, res) => {
  */
 export const getPurchaseInvoices = async (req, res) => {
     try {
-        const { page = 1, limit = 20, status, search, stage } = req.query;
+        const { status, search, stage } = req.query;
+        // At most 100 a page (2026-10-19).
+        const page = Math.max(1, parseInt(req.query.page) || 1);
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
         const query = { companyId: req.user.companyId };
 
         if (status && status !== 'All') query.status = status;
@@ -325,7 +349,10 @@ export const createVendorPayment = async (req, res) => {
  */
 export const getVendorPayments = async (req, res) => {
     try {
-        const { page = 1, limit = 20, vendorId, kind } = req.query;
+        const { vendorId, kind } = req.query;
+        // At most 100 a page (2026-10-19).
+        const page = Math.max(1, parseInt(req.query.page) || 1);
+        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
         const query = { companyId: req.user.companyId };
         if (vendorId) query.vendor = vendorId;
         if (kind && kind !== 'All') query.kind = kind;

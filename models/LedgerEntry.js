@@ -94,11 +94,17 @@ ledgerEntrySchema.index({ referenceType: 1 });
 ledgerEntrySchema.index({ referenceId: 1 });
 ledgerEntrySchema.index({ status: 1 });
 
-// Auto-generate entry number
+// Auto-generate entry number — the highest in use + 1, across ALL companies
+// (bug B14, 2026-10-19). It counted one company's entries, but the number is
+// unique for the whole database, so a second company's first entry
+// (LE-000001 again) failed to save, and a deleted entry made the next number
+// collide too. Numeric ordering so LE-1000000 sorts after LE-999999.
 ledgerEntrySchema.pre('validate', async function(next) {
   if (!this.entryNumber) {
-    const count = await mongoose.model('LedgerEntry').countDocuments({ companyId: this.companyId });
-    this.entryNumber = `LE-${String(count + 1).padStart(6, '0')}`;
+    const last = await mongoose.model('LedgerEntry').findOne({ entryNumber: /^LE-\d+$/ })
+      .sort({ entryNumber: -1 }).collation({ locale: 'en', numericOrdering: true }).select('entryNumber').lean();
+    const n = last ? Number(last.entryNumber.slice(3)) + 1 : 1;
+    this.entryNumber = `LE-${String(n).padStart(6, '0')}`;
   }
   if(next) next();
 });

@@ -552,6 +552,26 @@ export const updateMachine = async (req, res) => {
   }
 };
 
+// GET /api/rd/machines/material-grades?pType=&category=&pSourceType=&discontinued=
+// The Material Grades the products in that classification actually use
+// (client, 2026-10-19): once a Category / Sub Category is chosen, Product
+// Master's Material Grade filter lists only these. Same product scope as
+// getMachines' list.
+export const getMachineMaterialGrades = async (req, res) => {
+  try {
+    const q = { companyId: req.user.companyId, type: 'Product', productKind: 'Machine', materialGrade: { $nin: [null, ''] } };
+    if (req.query.pType) q.category = req.query.pType;
+    if (req.query.category) q.subCategory = req.query.category;
+    if (req.query.pSourceType) q.productSourceType = req.query.pSourceType;
+    if (req.query.discontinued === 'true') q.isDiscontinued = true;
+    else if (req.query.discontinued === 'false') q.isDiscontinued = false;
+    const grades = (await Item.distinct('materialGrade', q)).sort((a, b) => String(a).localeCompare(String(b)));
+    res.json({ success: true, data: grades });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ─── 2. GET DYNAMIC DROPDOWN OPTIONS (Call this when page loads) ───────────────
 export const getDropdownOptions = async (req, res) => {
   try {
@@ -560,7 +580,9 @@ export const getDropdownOptions = async (req, res) => {
     // Group them for the frontend, keeping parentValue so cascading selects can filter.
     // Category depends on P-Type; P-SourceType depends on Category. Metrology and MaterialType
     // (used by BOM Management) are standalone, unrelated to the Product Master cascade.
-    const toOption = (o) => ({ _id: o._id, value: o.value, parentValue: o.parentValue || null });
+    // parentId (2026-10-19): which parent option a value belongs to — two
+    // same-named parents (two "Chakki"s) each have their own children.
+    const toOption = (o) => ({ _id: o._id, value: o.value, parentValue: o.parentValue || null, parentId: o.parentId || null });
     const groupedOptions = {
       PType: options.filter(o => o.field === 'P-Type').map(toOption),
       Category: options.filter(o => o.field === 'Category').map(toOption),
@@ -590,21 +612,23 @@ export const getDropdownOptions = async (req, res) => {
 // ─── 3. ADD NEW DROPDOWN OPTION (Call this when user clicks the "+" icon) ──────
 export const addDropdownOption = async (req, res) => {
   try {
-    const { field, value, parentValue } = req.body;
+    const { field, value, parentValue, parentId } = req.body;
 
     if (!['Category', 'P-Type', 'P-SourceType', 'Metrology', 'MaterialType', 'MotorCategory', 'MotorSubCategory', 'MotorType', 'MaterialGrade', 'PowerSource', 'PlantCategory', 'PlantSubCategory', 'ProductName', 'ProductVariant', 'PlantName', 'PlantProduction'].includes(field)) {
       return res.status(400).json({ success: false, message: 'Invalid field type.' });
     }
+    // A parent is given by its id (pages, 2026-10-19) or, from older callers, its name.
+    const noParent = !parentId && (!parentValue || !parentValue.trim());
     if (!value || value.trim() === '') {
       return res.status(400).json({ success: false, message: 'Option value cannot be empty.' });
     }
-    if (['Category', 'P-SourceType'].includes(field) && (!parentValue || !parentValue.trim())) {
+    if (['Category', 'P-SourceType'].includes(field) && noParent) {
       return res.status(400).json({ success: false, message: `Select the parent ${field === 'Category' ? 'P-Type' : 'Category'} before adding this option.` });
     }
-    if (field === 'MotorSubCategory' && (!parentValue || !parentValue.trim())) {
+    if (field === 'MotorSubCategory' && noParent) {
       return res.status(400).json({ success: false, message: 'Select the parent Motor Category before adding this option.' });
     }
-    if (field === 'PlantSubCategory' && (!parentValue || !parentValue.trim())) {
+    if (field === 'PlantSubCategory' && noParent) {
       return res.status(400).json({ success: false, message: 'Select the parent Plant Category before adding this option.' });
     }
     // Full linear chain: Category -> Sub Category -> Product Name -> Variant
@@ -613,25 +637,45 @@ export const addDropdownOption = async (req, res) => {
     // to both); Variant is scoped to a Product Name; Product Source Type
     // keeps its existing Sub Category scope unchanged — only its position in
     // the sequence moved (confirmed 2026-09-02).
-    if (field === 'ProductName' && (!parentValue || !parentValue.trim())) {
+    if (field === 'ProductName' && noParent) {
       return res.status(400).json({ success: false, message: 'Select the parent Sub Category before adding this Product Name.' });
     }
-    if (field === 'ProductVariant' && (!parentValue || !parentValue.trim())) {
+    if (field === 'ProductVariant' && noParent) {
       return res.status(400).json({ success: false, message: 'Select the parent Product Name before adding this Variant.' });
     }
     // Plant's own chain: PlantCategory -> PlantSubCategory -> PlantName ->
     // PlantProduction (confirmed 2026-09-02).
-    if (field === 'PlantName' && (!parentValue || !parentValue.trim())) {
+    if (field === 'PlantName' && noParent) {
       return res.status(400).json({ success: false, message: 'Select the parent Sub Category before adding this Plant Name.' });
     }
-    if (field === 'PlantProduction' && (!parentValue || !parentValue.trim())) {
+    if (field === 'PlantProduction' && noParent) {
       return res.status(400).json({ success: false, message: 'Select the parent Plant Name before adding this Production value.' });
+    }
+
+    // Link to the parent OPTION (2026-10-19): by parentId when the page sends
+    // it; an older caller sending only the parent's text is linked when
+    // exactly one parent has that text — with two (two "Chakki"s) it can't be
+    // guessed and is refused.
+    let parent = null;
+    const parentField = PARENT_FIELD[field];
+    if (parentField) {
+      if (parentId) {
+        if (!mongoose.Types.ObjectId.isValid(parentId)) return res.status(400).json({ success: false, message: 'The parent could not be read — refresh the page.' });
+        parent = await RDMasterOption.findOne({ _id: parentId, company: req.user.companyId, field: parentField }).lean();
+        if (!parent) return res.status(400).json({ success: false, message: 'The parent was not found — refresh the page.' });
+      } else if (parentValue && parentValue.trim()) {
+        const matches = await RDMasterOption.find({ company: req.user.companyId, field: parentField, value: parentValue.trim() }).lean();
+        if (matches.length > 1) return res.status(400).json({ success: false, message: `"${parentValue.trim()}" exists under more than one parent — add this from Manage Classifications, with the right one selected.` });
+        if (!matches.length) return res.status(400).json({ success: false, message: `"${parentValue.trim()}" was not found — refresh the page.` });
+        parent = matches[0];
+      }
     }
 
     const newOption = await RDMasterOption.create({
       field,
       value: value.trim(),
-      parentValue: parentValue ? parentValue.trim() : null,
+      parentValue: parent ? parent.value : (parentValue ? parentValue.trim() : null),
+      parentId: parent ? parent._id : null,
       company: req.user.companyId
     });
 
@@ -652,20 +696,18 @@ export const addDropdownOption = async (req, res) => {
 // so the productKind scope is required — without it a rename could bleed into
 // an unrelated kind's classification that happens to share the same text.
 //
-// parentField (2026-10-17): the Item column holding this option's PARENT
-// value. A scoped value often repeats under several parents ("In House
-// Manufacturing" sits under 6 Sub Categories), so a rename / delete check
-// must only touch products under the option's own parent. Without it,
-// renaming "Purchase Machine" under one Sub Category renamed it on every
-// product of every other Sub Category too, leaving them with a value their
-// own list doesn't have.
+// A scoped value is matched by its FULL path (2026-10-19): the parentId chain
+// gives every ancestor's value, each mapped to its own Item column — a Variant
+// rename only touches items with category = Atta Chakki, subCategory = Chakki,
+// name = aata chakki 5kg. (On 2026-10-17 it was one level up only, which
+// still mixed up two same-named Sub Categories under different Categories.)
 const ITEM_FIELD_MAP = {
   'P-Type': { field: 'category', productKind: 'Machine' },
-  'Category': { field: 'subCategory', productKind: 'Machine', parentField: 'category' },
-  'P-SourceType': { field: 'productSourceType', productKind: 'Machine', parentField: 'subCategory' },
+  'Category': { field: 'subCategory', productKind: 'Machine' },
+  'P-SourceType': { field: 'productSourceType', productKind: 'Machine' },
   'Metrology': { field: 'metrology', productKind: null },
   MotorCategory: { field: 'category', productKind: 'Motor' },
-  MotorSubCategory: { field: 'subCategory', productKind: 'Motor', parentField: 'category' },
+  MotorSubCategory: { field: 'subCategory', productKind: 'Motor' },
   MotorType: { field: 'motorDetails.motorType', productKind: 'Motor' },
   // Unscoped like Metrology — Material Grade (e.g. SS304) is a universal spec
   // shared with Inventory's own Material Grade dropdown, not Machine-specific.
@@ -676,28 +718,19 @@ const ITEM_FIELD_MAP = {
   // rename handler's $set needs arrayFilters instead of a plain $set — see
   // its `itemMap.field === 'machineDetails.powerRequirements.powerSource'` branch.
   PowerSource: { field: 'machineDetails.powerRequirements.powerSource', productKind: 'Machine' },
-  ProductName: { field: 'name', productKind: 'Machine', parentField: 'subCategory' },
+  ProductName: { field: 'name', productKind: 'Machine' },
   // A machine keeps its variant under machineDetails (toMachineItemFields /
   // toMachineResponse). This said `variant`, so renaming a Variant updated
   // no product at all — the view kept the old value and the edit form's
   // <select> hid it behind the first option (2026-10-17, client bug PRO-0014).
-  ProductVariant: { field: 'machineDetails.variant', productKind: 'Machine', parentField: 'name' },
+  ProductVariant: { field: 'machineDetails.variant', productKind: 'Machine' },
 };
 
-// The Item query for "products using `value` of this option". The parent
-// scope applies only when the option has a parent (legacy options may not).
-const itemQueryForOption = (itemMap, companyId, value, parentValue) => {
-  const q = { companyId, [itemMap.field]: value };
-  if (itemMap.productKind) q.productKind = itemMap.productKind; // unscoped (e.g. Metrology) applies to any kind
-  if (itemMap.parentField && parentValue) q[itemMap.parentField] = parentValue;
-  return q;
-};
-// Field -> the child dropdown field(s) whose parentValue chains off it. Values
-// are arrays since Category (Sub Category) now has two independent children —
-// P-SourceType (unchanged) and ProductName — making the full chain P-Type ->
-// Category -> ProductName -> ProductVariant, with P-SourceType a second child
-// of Category alongside ProductName (confirmed 2026-09-02: Source Type keeps
-// its existing Sub Category scope, only its position in the UI moved).
+// Field -> the child dropdown field(s) whose parent it is. Values are arrays
+// since Category (Sub Category) has two independent children — P-SourceType
+// and ProductName — making the full chain P-Type -> Category -> ProductName ->
+// ProductVariant, with P-SourceType a second child of Category alongside
+// ProductName (confirmed 2026-09-02).
 const CHILD_FIELD_MAP = {
   'P-Type': ['Category'],
   'Category': ['P-SourceType', 'ProductName'],
@@ -710,27 +743,54 @@ const CHILD_FIELD_MAP = {
   PlantName: ['PlantProduction'],
   ProductName: ['ProductVariant'],
 };
+// Child field -> its parent's field (CHILD_FIELD_MAP turned round).
+const PARENT_FIELD = Object.fromEntries(Object.entries(CHILD_FIELD_MAP).flatMap(([p, kids]) => kids.map(k => [k, p])));
 // Field -> the RDPlant column it's the live source of truth for (Plant Master
 // is its own collection, not an Item, so it needs its own rename/delete target).
 const PLANT_FIELD_MAP = {
   PlantCategory: 'category', PlantSubCategory: 'subCategory',
   PlantName: 'name', PlantProduction: 'productionRate',
 };
-// The RDPlant column holding each scoped Plant option's parent (same reason
-// as ITEM_FIELD_MAP.parentField).
-const PLANT_PARENT_FIELD = { PlantSubCategory: 'category', PlantName: 'subCategory', PlantProduction: 'name' };
-const plantQueryForOption = (field, companyId, value, parentValue) => {
-  const q = { company: companyId, [PLANT_FIELD_MAP[field]]: value };
-  if (PLANT_PARENT_FIELD[field] && parentValue) q[PLANT_PARENT_FIELD[field]] = parentValue;
+// The custom field template key of each Product classification field.
+const TEMPLATE_KEY = { 'P-Type': 'pType', 'Category': 'category', 'P-SourceType': 'pSourceType' };
+
+// This option's ancestors, nearest first: [{ field, value }], up the parentId
+// chain. A legacy option not yet linked (no parentId) gives its parent's text.
+async function ancestorsOf(option) {
+  const out = [];
+  let pid = option.parentId;
+  for (let guard = 0; pid && guard < 10; guard++) {
+    const p = await RDMasterOption.findById(pid).select('field value parentId').lean();
+    if (!p) break;
+    out.push({ field: p.field, value: p.value });
+    pid = p.parentId;
+  }
+  if (!option.parentId && option.parentValue && PARENT_FIELD[option.field]) out.push({ field: PARENT_FIELD[option.field], value: option.parentValue });
+  return out;
+}
+
+// Products using `value` of this option, under its full path.
+const itemQueryForOption = (itemMap, companyId, value, ancestors = []) => {
+  const q = { companyId, [itemMap.field]: value };
+  if (itemMap.productKind) q.productKind = itemMap.productKind; // unscoped (e.g. Metrology) applies to any kind
+  for (const a of ancestors) {
+    const m = ITEM_FIELD_MAP[a.field];
+    if (m && m.productKind === itemMap.productKind) q[m.field] = a.value;
+  }
   return q;
 };
-
-// Is the same value also an option under ANOTHER parent? Then the child
-// options hanging off it (matched by parentValue text only) are shared by
-// both, and can't be moved or counted as this option's alone.
-const valueUsedUnderAnotherParent = (option, value) => RDMasterOption.exists({
+// Plants using `value` of this option, under its full path.
+const plantQueryForOption = (field, companyId, value, ancestors = []) => {
+  const q = { company: companyId, [PLANT_FIELD_MAP[field]]: value };
+  for (const a of ancestors) if (PLANT_FIELD_MAP[a.field]) q[PLANT_FIELD_MAP[a.field]] = a.value;
+  return q;
+};
+// A legacy child (no parentId) can be taken as this option's own only when no
+// other option of the same field has the same text — otherwise it's shared
+// and only the migration (scripts/linkClassificationParents.js) can split it.
+const soleOwnerOfText = async (option, value) => !(await RDMasterOption.exists({
   _id: { $ne: option._id }, company: option.company, field: option.field, value,
-});
+}));
 
 // ─── 3b. UPDATE DROPDOWN OPTION (rename a value, cascading everywhere it's used) ─
 export const updateDropdownOption = async (req, res) => {
@@ -749,24 +809,27 @@ export const updateDropdownOption = async (req, res) => {
       return res.json({ success: true, data: option });
     }
 
+    // A duplicate only under the same parent.
     const duplicate = await RDMasterOption.findOne({
-      _id: { $ne: option._id }, company: req.user.companyId,
-      field: option.field, parentValue: option.parentValue, value: newValue
+      _id: { $ne: option._id }, company: req.user.companyId, field: option.field, value: newValue,
+      parentId: option.parentId || null, ...(option.parentId ? {} : { parentValue: option.parentValue }),
     });
     if (duplicate) {
       return res.status(400).json({ success: false, message: 'This option already exists.' });
     }
 
+    const companyId = req.user.companyId;
+    const ancestors = await ancestorsOf(option);
+    const childFields = CHILD_FIELD_MAP[option.field] || [];
+    const legacyChildrenMove = childFields.length ? await soleOwnerOfText(option, oldValue) : false;
+
     option.value = newValue;
     await option.save();
 
-    const companyId = req.user.companyId;
-    const parentValue = option.parentValue || null;
-
-    // Products: only those under this option's own parent (itemQueryForOption).
+    // Products / plants: only those under this option's full path.
     const itemMap = ITEM_FIELD_MAP[option.field];
     if (itemMap) {
-      const itemQuery = itemQueryForOption(itemMap, companyId, oldValue, parentValue);
+      const itemQuery = itemQueryForOption(itemMap, companyId, oldValue, ancestors);
       if (itemMap.field === 'machineDetails.powerRequirements.powerSource') {
         // Array of subdocuments — a plain $set on the dot-path would overwrite
         // the whole array with a string; needs arrayFilters to rename just the
@@ -789,47 +852,36 @@ export const updateDropdownOption = async (req, res) => {
 
     if (PLANT_FIELD_MAP[option.field]) {
       await RDPlant.updateMany(
-        plantQueryForOption(option.field, companyId, oldValue, parentValue),
+        plantQueryForOption(option.field, companyId, oldValue, ancestors),
         { $set: { [PLANT_FIELD_MAP[option.field]]: newValue } }
       );
     }
 
-    // Child options hang off the parent's TEXT. If the old value is still an
-    // option under another parent, its children are shared with that one:
-    // copy them under the new value instead of moving them away from it.
-    const childFields = CHILD_FIELD_MAP[option.field] || [];
+    // Children are linked by parentId, so they stay where they are — only
+    // the parent text they carry follows the rename.
     if (childFields.length) {
-      const shared = await valueUsedUnderAnotherParent(option, oldValue);
-      for (const childField of childFields) {
-        if (!shared) {
-          await RDMasterOption.updateMany(
-            { company: companyId, field: childField, parentValue: oldValue },
-            { $set: { parentValue: newValue } }
-          );
-          continue;
-        }
-        const children = await RDMasterOption.find({ company: companyId, field: childField, parentValue: oldValue }).lean();
-        for (const c of children) {
-          await RDMasterOption.updateOne(
-            { company: companyId, field: childField, value: c.value, parentValue: newValue },
-            { $setOnInsert: { company: companyId, field: childField, value: c.value, parentValue: newValue } },
-            { upsert: true }
-          );
-        }
+      await RDMasterOption.updateMany({ company: companyId, parentId: option._id }, { $set: { parentValue: newValue } });
+      if (legacyChildrenMove) {
+        await RDMasterOption.updateMany(
+          { company: companyId, field: { $in: childFields }, parentId: null, parentValue: oldValue },
+          { $set: { parentValue: newValue, parentId: option._id } }
+        );
       }
     }
 
-    // Custom field templates are keyed by the full combo; scope by the parent too.
-    if (option.field === 'P-Type') {
-      await RDCustomFieldTemplate.updateMany({ company: companyId, pType: oldValue }, { $set: { pType: newValue } });
-    } else if (option.field === 'Category') {
-      await RDCustomFieldTemplate.updateMany({ company: companyId, category: oldValue, ...(parentValue ? { pType: parentValue } : {}) }, { $set: { category: newValue } });
-    } else if (option.field === 'P-SourceType') {
-      await RDCustomFieldTemplate.updateMany({ company: companyId, pSourceType: oldValue, ...(parentValue ? { category: parentValue } : {}) }, { $set: { pSourceType: newValue } });
+    // Custom field templates are keyed by the full combo — matched by the path.
+    if (TEMPLATE_KEY[option.field]) {
+      const keys = {};
+      for (const a of ancestors) if (TEMPLATE_KEY[a.field]) keys[TEMPLATE_KEY[a.field]] = a.value;
+      await RDCustomFieldTemplate.updateMany(
+        { company: companyId, ...keys, [TEMPLATE_KEY[option.field]]: oldValue },
+        { $set: { [TEMPLATE_KEY[option.field]]: newValue } }
+      );
     }
 
     res.json({ success: true, data: option });
   } catch (err) {
+    if (err.code === 11000) return res.status(400).json({ success: false, message: 'This option already exists.' });
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -840,25 +892,26 @@ export const deleteDropdownOption = async (req, res) => {
     const option = await RDMasterOption.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!option) return res.status(404).json({ success: false, message: 'Option not found' });
 
-    // Only products / plants under this option's own parent block it — the
-    // same value under another parent is a different option (2026-10-17).
+    // Only products / plants under this option's own full path block it.
+    const ancestors = await ancestorsOf(option);
     const itemMap = ITEM_FIELD_MAP[option.field];
     let productCount = 0;
     if (itemMap) {
-      productCount = await Item.countDocuments(itemQueryForOption(itemMap, req.user.companyId, option.value, option.parentValue || null));
+      productCount = await Item.countDocuments(itemQueryForOption(itemMap, req.user.companyId, option.value, ancestors));
     }
 
     const plantCount = PLANT_FIELD_MAP[option.field]
-      ? await RDPlant.countDocuments(plantQueryForOption(option.field, req.user.companyId, option.value, option.parentValue || null))
+      ? await RDPlant.countDocuments(plantQueryForOption(option.field, req.user.companyId, option.value, ancestors))
       : 0;
 
-    // Children shared with the same value under another parent stay in use
-    // there, so they don't block deleting this one.
+    // Its own children (by parentId), plus legacy unlinked ones when the
+    // text is only its own.
     const childFields = CHILD_FIELD_MAP[option.field] || [];
-    const sharedChildren = childFields.length ? await valueUsedUnderAnotherParent(option, option.value) : false;
-    const childCounts = sharedChildren ? childFields.map(() => 0) : await Promise.all(
-      childFields.map(cf => RDMasterOption.countDocuments({ company: req.user.companyId, field: cf, parentValue: option.value }))
-    );
+    const legacyOwn = childFields.length ? await soleOwnerOfText(option, option.value) : false;
+    const childCounts = await Promise.all(childFields.map(cf => RDMasterOption.countDocuments({
+      company: req.user.companyId, field: cf,
+      $or: [{ parentId: option._id }, ...(legacyOwn ? [{ parentId: null, parentValue: option.value }] : [])],
+    })));
     const childCount = childCounts.reduce((a, b) => a + b, 0);
 
     if (productCount > 0 || plantCount > 0 || childCount > 0) {

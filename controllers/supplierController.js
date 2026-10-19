@@ -160,8 +160,9 @@ export const getSuppliers = async (req, res) => {
     // this with no page/limit and need the full list — only paginate when a
     // caller (Vendor Master's own browse page) actually asks for a page.
     if (page || limit) {
-      const pageNum = parseInt(page) || 1;
-      const limitNum = parseInt(limit) || 20;
+      const pageNum = Math.max(1, parseInt(page) || 1);
+      // At most 500 a page (2026-10-19) — RFQ/PO asks for every eligible vendor at once.
+      const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 20));
       const [suppliers, total] = await Promise.all([
         Supplier.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum),
         Supplier.countDocuments(query),
@@ -760,10 +761,56 @@ export const importSuppliersFromExcel = [upload.single('file'), async (req, res)
 // GET /api/suppliers/vendor-ratings — the vendor score (0–100, blueprint
 // §11–§12; services/vendorScoreService.js) per vendor, with its parts and
 // standing — for the Vendor Ratings tab and the RFQ/PO vendor cards.
+// Paged (2026-10-19): every vendor's score is worked out to sort by score, but
+// the Vendor Ratings tab gets one page; the result is kept 60 s per company +
+// unit so paging and searching don't recompute it (Refresh: ?fresh=1).
+// Without ?page the full list is returned (RFQ/PO's vendor cards need it).
+const RATINGS_TTL_MS = 60 * 1000;
+const ratingsCache = new Map(); // `${companyId}|${unit}` → { at, payload }
+
 export const getVendorRatingsOverview = async (req, res) => {
   try {
-    const companyId = req.user.companyId;
-    const unit = req.user.unit;
+    const key = `${req.user.companyId}|${req.user.unit}`;
+    let cached = ratingsCache.get(key);
+    if (!cached || req.query.fresh === '1' || Date.now() - cached.at > RATINGS_TTL_MS) {
+      cached = { at: Date.now(), payload: await buildVendorRatings(req.user) };
+      ratingsCache.set(key, cached);
+    }
+    const { data, weights, watchlistBelow } = cached.payload;
+    if (!req.query.page) return res.json({ success: true, data, weights, watchlistBelow });
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const q = String(req.query.search || '').trim().toLowerCase();
+    const scoredOnly = req.query.scoredOnly === 'true';
+    const sort = ['scoreAsc', 'name'].includes(req.query.sort) ? req.query.sort : 'scoreDesc';
+    const rows = data
+      .filter(v => (!scoredOnly || v.score != null) && (!q || (v.supplierName || '').toLowerCase().includes(q)))
+      .sort((a, b) => {
+        if (sort === 'name') return (a.supplierName || '').localeCompare(b.supplierName || '');
+        if (a.score == null && b.score == null) return (a.supplierName || '').localeCompare(b.supplierName || '');
+        if (a.score == null) return 1;
+        if (b.score == null) return -1;
+        return sort === 'scoreAsc' ? a.score - b.score : b.score - a.score;
+      });
+    res.json({
+      success: true,
+      data: rows.slice((page - 1) * limit, page * limit),
+      weights, watchlistBelow,
+      totalVendors: data.length,
+      pagination: { page, limit, total: rows.length, pages: Math.max(1, Math.ceil(rows.length / limit)) },
+      computedAt: new Date(cached.at),
+    });
+  } catch (error) {
+    console.error('getVendorRatingsOverview error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Every vendor's score, standing and claims for one company + unit.
+async function buildVendorRatings(user) {
+    const companyId = user.companyId;
+    const unit = user.unit;
     const vendors = await Supplier.find({ companyId, unit: { $in: [unit, 'Main'] } })
       .select('supplierName suppliedItems approvalStatus riskClass')
       .lean();
@@ -796,12 +843,8 @@ export const getVendorRatingsOverview = async (req, res) => {
       };
     });
 
-    res.json({ success: true, data, weights: scoreSettingsOf(settings).weights, watchlistBelow: scoreSettingsOf(settings).watchlistBelow });
-  } catch (error) {
-    console.error('getVendorRatingsOverview error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
+    return { data, weights: scoreSettingsOf(settings).weights, watchlistBelow: scoreSettingsOf(settings).watchlistBelow };
+}
 
 // GET /api/suppliers/:id/item-breakdown — the expanded row of the Vendor
 // Ratings tab: the evidence behind each part of the vendor score, and the

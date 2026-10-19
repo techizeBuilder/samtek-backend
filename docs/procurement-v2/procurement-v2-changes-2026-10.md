@@ -1,7 +1,7 @@
 # What changed — Procurement v2 rebuild
 
 Changes made while rebuilding Purchase against the client's blueprint (plan:
-`procurement-workflow-2026-10.md`, in this folder). 43 changes, built and checked (2026-10-08 →
+`procurement-workflow-2026-10.md`, in this folder). 55 changes, built and checked (2026-10-08 →
 2026-10-17); see each change's status in the table at the end. **The purchase flow is complete**
 with §32; browser testing (test plan T1–T40, via `purchase-flow-test-roadmap-2026-10.md`) started
 2026-10-14, and fixes found there start at §33. Then the outsource flow.
@@ -3306,6 +3306,11 @@ copy). Both ran at :00, and both checked "already raised?" before either had sav
    - **When it's in:** once what was coming has passed QC, if stock is still at or below the
      minimum, the next sweep raises as before.
    - **A rejection the vendor refunds** brings nothing more, so it doesn't block.
+   - **A QC rejection still "Awaiting vendor answer" blocks** (your decision, 2026-10-17, during
+     the Tool-A re-test), because the vendor may still replace it.
+     - **"Replace":** it keeps blocking through the replacement request.
+     - **Refund / credit / refused:** unblocks at the next sweep.
+     - **Tested 3/3** on a made-up company: awaiting → 0; Replace → 0; changed to Refund → raises.
 2. **One sweep at a time across servers:** the first server to start a sweep holds it for 10
    minutes, and the others skip that run ("skipped — another server is running it" in their log).
 
@@ -3343,6 +3348,30 @@ the purchase unit (often kg) and stock is in pieces.
   - without the lease, two sweeps at once also collided on the request number (E11000)
 - **Import + syntax checks.**
 
+**Browser re-test (17 Oct) and replay (19 Oct):**
+- **The live run:** Tool-A was cleared to 0 and bought again through receive → QC (2 failed) →
+  "Replace" → replacement → QC.
+- **PR041, a duplicate, appeared at 14:30 IST** while the delivery waited for QC. It was raised by
+  a second server on your domain running older code (your finding), not by this fix. PR041 also
+  blocked the later live checkpoints, so those couldn't prove anything.
+- **The replay:** copies of the real records (Tool-A, PR037, PR042, QC-2026-0225 / 0226,
+  REJ-0005; PR041 left out) were put through each state of the run. The **old cron (797104a)**
+  and the **new one** were run on each state:
+
+| State | Old | New |
+|---|---|---|
+| 1 stock 0, PR037 Pending | 0 | 0 |
+| 2 received, QC Pending / In Progress | **1** | 0 |
+| 3 QC done, REJ awaiting answer, stock 10 | **1** | 0 |
+| 4 answered Replace, PR042 Ordered | **1** | 0 |
+| 5 PR042 received, in QC | **1** | 0 |
+| 6 all passed, stock 12 | 0 | 0 |
+| Control: refunded instead, stock 10 | 1 | **1** (raises, as it should) |
+| Control: all settled, stock 9 | 1 | **1** |
+
+  9/9; the copies were removed, and the real records were untouched. The old code's 1 at state 2
+  is exactly what produced PR041 at 14:30.
+
 **Your data:** the 5 extra requests are left as they are (your call, 2026-10-17).
 
 **The second server (you, 2026-10-17):** the client's deployed server crashed. While it was being
@@ -3364,6 +3393,545 @@ number is missing.
 **Technical notes:** `QcRejections.jsx`, the REJ sub-line.
 
 **Checks:** the frontend builds. Check it in the browser on the next REJ.
+
+---
+
+## 44. Purchase Dashboard: "Quote requests waiting" counted requests with nothing left to chase (bug report B11) (2026-10-17)
+
+**Where:** the Purchase Dashboard, Team and My work views: "Quote requests waiting" (and its "no
+reply after 3 days" line), and "link ran out".
+
+**Seen in the browser (17 Oct, during the Tool-A re-test):**
+- The Team tile showed **3** (1 with no reply), and the employee's tile showed **1**.
+- That stayed the same after the Tool-A PO went to sujeet, which closed rahul's invite on QR-0005.
+- QR-0002 (mahesh, Angle ordered from rahul on 14 Oct) was counted too, as the "no reply" one.
+
+**Cause:** the dashboard counted any request that was sent, unanswered and still within its link.
+The daily quote sweep (9:35) also requires **at least one item still open** (its quote row still
+"Invited"). So the dashboard listed requests the sweep rightly ignores.
+
+**Now:** the dashboard uses the sweep's rule. A request counts only while an item on it is still
+waiting for that vendor. Once every item was ordered from someone else or closed, it drops out.
+
+**Technical notes:** `purchaseDashboardService.workTiles`: requests with an `Invited` VendorBid
+(one `distinct` query), the same rule as `quoteReminderService.openItemsOf`.
+
+**Checks** (on your real test-1 data, read-only, through the dashboard builder):
+- **Team:** waiting **1** (QR-0004), no reply 0. It showed 3 / 1 no reply.
+- **Employee:** waiting **0**. It showed 1.
+
+---
+
+## 45. Serial numbers: hyphens count, spaces refused (bug report B5, decided) (2026-10-17)
+
+**Where:** Store → Receive on a line whose item has a vendor warranty and is counted in pieces
+(one serial per piece).
+
+**Your decision:**
+- **Hyphens and dots count.** `TLA-01` and `TLA01` are **two different serials**, so the receive
+  keeps comparing serials exactly as typed, with only capitals ignored. The BRG-0102 / BRG0102
+  pair from 16 Oct stays as it is.
+- **No spaces inside a serial,** because real serials never have one.
+
+**Now:**
+- **A serial with a space or tab inside is refused,** both on the page (a red note under the box,
+  plus a message on Confirm) and on the server: *"A serial number can't contain a space: "TLA
+  0113". Type it exactly as on the piece."*
+- **Spaces at the start or end** are still just trimmed.
+- **The single serial / lot number** for an item without a per-piece warranty isn't affected.
+- **Already in the data:** none of the stored per-piece serials has a space inside.
+
+**Also checked in the browser (Tool-A re-test):** an exact repeat is refused, *"Already received
+earlier for this item: TLA0101"* ✓.
+
+**Technical notes:**
+- `purchasedUnitService.readSerialList`: the space check
+- `SerialNumbersInput.parseSerials`: returns `spaced`; the dialog shows it and `LineReceiveDialog`
+  blocks on it
+
+**Checks:** 8 tests:
+- a normal list
+- TLA-01 vs TLA01 not a repeat, with different keys
+- a space or a tab inside refused, including in a JSON list
+- spaces at the ends trimmed
+- capitals still ignored
+
+The frontend builds.
+
+---
+
+## 46. Ledger page: balances on the right side, period totals, two "Accounts Payable" told apart (bug report B7, B8, B12) (2026-10-19)
+
+**Where:** Accounts → Ledger Record.
+
+**Found during the Tool-A re-test (17 Oct):**
+- **B12, Dr / Cr reversed on payables:** ₹5,000 owed to sujeet showed **"₹5,000 Db"**. On a
+  liability, money owed is a **credit** balance. The server was right; the page called every
+  positive balance "Db" whatever the account. Every Liability, Equity and Revenue account was
+  affected (Accounts Payable, Advance from Customers, Purchase Return…). Bank, cash and other
+  assets were right.
+- **B8, totals for the page only:** Total Debit / Credit added up only the 15 rows on screen,
+  and the Closing Balance was the top row of whatever page was open. After the replacement's
+  ₹1,000 credit, **Total Credit fell** (₹49,135.27 → ₹46,772.27), because an older row moved to
+  page 2.
+- **B7, two "Accounts Payable" in the list:**
+  - an older unit account `PAY-1781949453620-WALP` (empty)
+  - the purchase ledger's own `SYS-ACCOUNTS_PAYABLE-…`, which every purchase posts to
+
+**Now:**
+- **Each balance is shown on its side:**
+  - Asset / Expense: positive = **Db**
+  - Liability / Equity / Revenue: positive = **Cr**
+  - Sujeet's ₹6,000 reads **₹6,000 Cr**.
+  - It applies to the rows, the tiles, the printout and the receipt print. Bank and cash look
+    exactly as before.
+- **Total Debit, Total Credit and Closing Balance are the whole period** you picked, sent by the
+  server, and the same on every page. The printout uses them too.
+- **Same-named accounts are told apart** in the account list:
+  - the purchase ledger's reads "Accounts Payable (purchases — posted automatically)"
+  - the other one shows its account number
+  - The older account wasn't deleted, because it's a normal unit account.
+
+**Technical notes:**
+- `accountsController.getLedgerRecords` now also returns `totals { debit, credit }` (with the bank /
+  cash column swap the rows use) and `closingBalance`.
+- `LedgerRecord.jsx`: `sideOf(amount, accountType)`, tiles / print from the server figures, and
+  the duplicate-name hint from `systemKey` / account number.
+
+**Checks** (the real endpoint on test-1, read-only, 8/8):
+- **Accounts Payable:** page 1 and page 2 give the same totals (₹72,848.77 Dr / ₹78,848.77 Cr,
+  equal to all 26 rows added up). Closing = opening + credit − debit = the newest row = the
+  account's stored balance = ₹6,000, shown **Cr**.
+- **SBI:** the totals match its passbook columns; a positive balance still reads Db.
+- **Builds:** the frontend builds; no undefined names; the controller imports.
+
+**Found while checking, not changed (sales side):** SBI's stored balance (₹9,12,237.60) doesn't
+match its transactions (₹21,15,331.60: ₹22,22,047.48 received − ₹1,06,715.88 paid). About ₹12.03
+lakh of customer receipts were posted without updating the account's own balance. The ledger page
+uses the transactions, so it shows ₹21,15,331.60. Anything that reads the stored balance shows
+less. Logged as B13 in the bug report.
+
+---
+
+## 47. QC Rejections in one place; no "date changed" when the date didn't change (2026-10-19)
+
+**1. QC Rejections had two pages showing the same list** (your question, 17 Oct):
+- Accounts → Purchases → **QC Rejections** (`/accounts/purchases/exchanges`)
+- Purchase & Outsource → Purchase Orders → **QC Rejections** tab
+
+Same list, same buttons, same permission.
+
+**Now there's one place: the tab**, next to the POs with its red count.
+- The **sidebar entry is gone**.
+- The **old address still works**: it opens Purchase & Outsource → Purchase Orders → QC
+  Rejections.
+- The Purchase Dashboard's **"QC rejections to settle"** and **"Replacements expected"** tiles
+  open the tab directly.
+- A link can now open any of the three sub-tabs (`?sub=active | history | rejections`).
+
+**2. "Date changed from 18 Oct to 18 Oct"** (seen on sujeet's PO during the Tool-A re-test):
+- **Cause:** recording "Replace" with a date that's the same day as the line's date was still
+  logged as a date change.
+- **Now:** it's logged only when the day really moves. Nothing else read that entry:
+  - the "Replacement expected on this line" note comes from the request
+  - the vendor score's promised date falls back to the line's date
+  - the purchaser score already skips replacement entries
+- **Your data:** the one entry already on sujeet's PO was left as it is.
+
+**Technical notes:**
+- **Frontend:**
+  - `App.jsx`: the old route redirects
+  - `PurchaseExchanges.jsx` removed
+  - `moduleRoutes.js`: sidebar entry removed
+  - `PurchaseOrdersTab.jsx`: `?sub=`
+  - `PurchaseDashboard.jsx`: tile links
+- **Backend:** `purchaseRejectionService.recordAnswer` (same-day check).
+
+**Checks:**
+- **The same-day rule:** on the real REJ-0005 entry it reads "same day" (the times differ, the
+  day doesn't). A real move (18 → 20 Oct) and a line with no earlier date are still logged.
+- **Builds:** the service imports; the frontend builds; no undefined names.
+
+---
+
+## 48. Vendor score: the same number on every screen (bug report B6) (2026-10-19)
+
+**Where:** Purchase → Vendor Ratings (the list, and the panel under a vendor); the vendor card on
+RFQ/PO; Vendor Master; the Company Admin's Watchlist.
+
+**What was wrong:** the warranty part looked only at items on the POs of **whichever vendors
+were being scored at that moment**.
+- **The Vendor Ratings list** scores everyone together, so the items include everything anyone
+  was ordered.
+- **A vendor's own panel** scores that vendor alone, so only the items on its own POs count.
+
+So one vendor had two scores:
+
+| Vendor | List | Own panel |
+|---|---|---|
+| rahul | 87 (his Tool-A quote: 0 months vs 6 quoted by sujeet) | **97** (no warranty counted) |
+| sujeet | 86 (incl. his Bairing quote, 12 months) | **85** (Tool-A only) |
+
+**Now:** the warranty part takes **every item the vendor quoted**, as the logic doc (§4.5) says:
+"each of their quotes vs the most months any vendor quoted for that item, any quote on record".
+- Each of their quotes is compared with the best quoted for that item by anyone.
+- The result doesn't depend on who else is on the screen.
+- **Nothing else changed:** price, quality, delivery, credit and response were already built
+  from the vendor's own records.
+
+**Your numbers now:** rahul **87**, sujeet **86**, mahesh 71 on every screen. The list showed
+these before too; the panels change.
+
+**Technical notes:** `vendorScoreService.computeVendorScores`. The warranty-duration half now loads
+the groups these vendors quoted (`VendorBid.distinct('group')`) → their items → every quote on
+those items, independent of `pos`.
+
+**Checks** (real data, read-only): every vendor in both companies (6) gives the same score, the
+same lifetime score and the same six parts alone and with all vendors (6/6). Before: rahul and
+sujeet differed.
+
+---
+
+## 49. Bill without a PO: GST type suggested from the GSTINs (bug report B9) (2026-10-19)
+
+**Where:** Purchase Invoices → **Record New Bill** ("Bill for a Purchase Without a PO").
+
+**Before:** GST Type always started on **Local (CGST + SGST)**, even for mahesh, who is in another
+state (IGST). A PO works this out from the company's and the vendor's GSTIN (§19); here the user
+had to remember.
+
+**Now:** picking the vendor **presets GST Type** by the PO's own rule: the GSTIN's state code, or
+the state as a fallback. A note under it says why:
+- *"From the GSTINs: both in Uttarakhand — local."*
+- *"From the GSTINs: Uttar Pradesh → Uttarakhand — inter-state."*
+
+It can still be changed. If you choose differently, the note turns amber: *"You chose differently —
+check the vendor's bill."* If a side's GSTIN or state is missing, it says which, and leaves the
+choice to you.
+
+**Technical notes:**
+- **New `GET /api/accounts/purchases/invoices/gst-type?vendorId=`**
+  (`purchaseInvoiceController.getBillGstType`), using `gstStateService.gstSplitFor`, the same
+  function as `createPurchase`.
+- **Frontend:** `PurchaseInvoices.jsx`, `pickVendor`, plus the note.
+
+**Checks** (real handler, test-1 vendors, read-only, 5/5):
+- rahul → local, as his PO got
+- mahesh → inter-state, as his PO got
+- deepak → local
+- sujeet → can't tell (no GSTIN / state in Vendor Master)
+- an unknown vendor → 404
+
+The routes import; the frontend builds; no undefined names.
+
+**Noticed:** sujeet has no GSTIN or state in Vendor Master, so neither a PO nor this form can
+work out his GST type. rahul's GSTIN `6666664644` isn't a valid GSTIN; his state (Uttarakhand) is
+used instead.
+
+**Checked in the browser (19 Oct):** mahesh → Inter-state (IGST), "From the GSTINs: Uttar Pradesh
+→ Uttarakhand — inter-state." ✓
+
+---
+
+## 50. Company Admin dashboard: Purchase value is what was billed (bug report B10, your decision) (2026-10-19)
+
+**Where:** Company Admin → Purchase & Vendor Approval → Dashboard: **Purchase value**, its
+6-month trend, and **Top 3 vendors**.
+
+**Before:** the sum of the **PO totals as ordered**. It never moved after a cancellation, short
+close or QC refund, and bills without a PO weren't counted at all. On test-1 in October it read
+**₹1,68,520** with rahul at 71%. What was actually bought was less than half that.
+
+**Your decision:** show what was **billed**.
+
+**Now:**
+- **Purchase value** = each real PO at its **bill**, plus **every bill without a PO**.
+  - A PO's bill starts at the full PO total when the PO is placed and drops only when something
+    falls away (cancelled, short closed, QC refund / refusal). So an order still on its way counts
+    in full.
+- **The sub-line keeps the ordered view:** *"Ordered ₹1,68,520 · ₹1,22,711 fell away · +
+  ₹33,630 without a PO"*.
+- **Months:** a PO counts in its PO month, a bill without a PO in its invoice date's month. So a
+  past month's figure can drop when something is later refunded.
+- **The 6-month trend and Top 3 vendors** use the same billed figure.
+- **Not changed:** Savings and Price rises still use the PO lines. They judge the buying decision
+  at order time.
+
+**Test-1, October:**
+
+| | Ordered (before) | Billed (now) |
+|---|---|---|
+| Purchase value | ₹1,68,520 | **₹79,438.77** |
+| PO-1 rahul (mostly cancelled after the advance) | ₹1,11,018 | ₹17,961 |
+| PO-3b mahesh (generator refunded) | ₹30,655 | ₹2,655 |
+| Bills without a PO (BILL-01, BILL_009) | not counted | ₹33,630 |
+| Top 3 | rahul 71.2 · mahesh 18.2 · sujeet 10.7 % | **mahesh 44.9 · rahul 33.6 · sujeet 21.5 %** |
+
+**Technical notes:**
+- **`purchaseDashboardService`:** new pure `spendEntries(pos, bills)`. A cancelled bill counts 0;
+  a PO with no bill (older records) counts its order total. `concentration()` takes the entries
+  (a plain PO list still works). The admin view's `purchaseValue` adds `ordered`, `fellAway` and
+  `noPoBills`.
+- **Frontend:** `PurchaseDashboard.jsx`, the tile's sub-line.
+- **The design doc row** was updated.
+
+**Checks:** 9 tests:
+- 5 hand-worked: a short-closed PO, as ordered, no bill, a cancelled bill, bills without a PO,
+  shares
+- 4 on the real test-1 dashboard, which match the numbers above to the paisa
+
+The frontend builds.
+
+**Checked in the browser (19 Oct):** ₹79,439 · "billed · 5 POs + 2 bills without a PO" · "Ordered
+₹1,68,520 · ₹1,22,711 fell away · + ₹33,630 without a PO" · Top 3 mahesh 44.9 / rahul 33.6 /
+sujeet 21.5 % ✓
+
+---
+
+## 51. Refunds & credits: Open / Settled / All, a page at a time (bug report B2c) (2026-10-19)
+
+**Where:** Vendor Payments → Refunds & credits (per vendor).
+
+**Before:**
+- The server sent the newest 200, and the page showed only the **first 30**, with no "show
+  more" and no filter.
+- Refunded / used / written-off rows stay forever, so the list only grows.
+- An **old open item** (a refund still due, or credit still available) could drop past the first
+  30 and disappear from the page, while "N open" still counted it.
+
+**Now:**
+- **Open (n) / Settled (n) / All** chips. **Open is the default**, so anything still to decide,
+  collect or use is always on screen, however old.
+- **20 per page** with Previous / Next, paged on the server.
+- **"N open (₹…)"** is counted on the server over everything: refunds due + leftovers to decide
+  + credit not yet used.
+
+**Technical notes:**
+- `purchaseRejectionController.listMoneyBack`: `view=open|done|all`, `page`, `limit` (max 100);
+  returns `counts { open, openAmount, done }` and `pagination`. `status=` and `vendorCredit` still
+  work, which Vendor Payments' "pay from credit" uses.
+- `VendorMoneyBackList.jsx`: the chips and the pager; it steps back a page when the last item on
+  a page is settled.
+
+**Checks** (the real handler, 6/6, a made-up company with 45 rows, 0 left):
+- **The Open view** lists all 4 open rows, including the **oldest** one, a refund due from 9
+  months back. The old list would have hidden it.
+- **Open ₹** = 500 + (300 − 100 used) + 200 + 70 = **₹970**.
+- **All** = 45 rows in 3 pages (20 / 20 / 5). **Settled** = 41.
+- **No `view`** = all, as before.
+
+**Test-1:** 1 open (rahul's leftover credit ₹4.51), 2 settled. The frontend builds.
+
+**Checked in the browser (19 Oct):** rahul, "1 open (₹4.51)", Open (1) / Settled (1) ✓
+
+---
+
+## 52. Bank & Cash: every balance explained by ledger lines; "Adjust balance"; receipt numbers (bug report B13, B14) (2026-10-19)
+
+**Where:** Accounts → Bank & Cash (add / edit an account); Accounts → Ledger Record; advance
+payment verification.
+
+**What was found (B13):** on test-1, three bank accounts' balance didn't match their ledger.
+
+| Account | Stored | Ledger |
+|---|---|---|
+| SBI | ₹9,12,237.60 | ₹21,15,331.60 |
+| HDFC | ₹4,80,148 | ₹4,80,048 |
+| IDFC | ₹76,990 | ₹75,990 |
+
+**The cause was the account form, not the payments.** On a made-up company, through the real
+handlers:
+- **Postings:** advance payment, customer payment and vendor payment all move the balance and the
+  ledger together.
+- **Adding an account:** the required "Opening Balance" went into the balance with **no ledger
+  line**. That's exactly HDFC's ₹100 and IDFC's ₹1,000.
+- **Editing an account:** the form re-sent its "Opening Balance" box (pre-filled with the balance
+  when the page was opened) and **overwrote the running total**. A page opened earlier wiped every
+  posting since: −₹5,000 in the test. That's SBI's pattern. Deleted test data can't produce it,
+  because it would push the gap the other way.
+
+**Your rule (19 Oct):** these are book accounts kept against real ones. The opening balance is
+what the real account holds, and corrections to match the real bank are needed. **Keep both, but
+the ledger must always have the actual figures.**
+
+**Now:**
+- **Adding an account:** the opening balance you type is posted as its **first ledger line**,
+  *"Opening balance — SBI"*, against a new **Opening Balance Equity** account.
+- **Editing an account** changes the name / type / bank details **only**. The balance shows
+  read-only, with a pointer to Adjust balance. The server ignores any balance sent on an edit.
+- **Adjust balance (⚖ in the list):**
+  - type **what the bank shows now** and a **reason** (both required)
+  - the difference from the **live** balance, worked out at the moment of saving, is posted as one
+    line against **Balance Adjustments**, e.g. *"Balance adjustment −₹200: bank charges not entered
+    (by Ravi)"*
+  - the dialog previews the line before you save
+  - refused with no reason, no figure, if it already matches, or from another unit
+- **B14, receipt numbers:** an advance payment's receipt record (`LedgerEntry`) was numbered per
+  company, but the number is unique across the database. A second company's first verified
+  payment failed to save it (LE-000001 again); the money still posted. It's now the highest
+  number in use + 1, with a retry if two land at once.
+
+**Your data (test-1, a dry run then applied):** lines were added so each ledger explains its
+stored balance; the stored balances weren't changed.
+- **HDFC:** "Opening balance" +₹100 (dated 17 Jun, when it was added)
+- **IDFC:** "Opening balance" +₹1,000 (17 Jun)
+- **SBI:** "Balance adjustment −₹12,03,094: correction made before adjustments were recorded" (19
+  Oct). This keeps **₹9,12,237.60**, your choice.
+- **Re-check:** every account in the test unit, stored = ledger ✓
+
+**Not touched (another unit, "Alpha Unit"):** "Semtek Account" +₹50,000 and "test bank" +₹1,000,
+both stored higher than the ledger, which is the opening-balance pattern. The same fix can be run
+there if you want.
+
+**Technical notes:**
+- **`accountsController`:**
+  - `postBalanceLine` (shared): one balanced line against an equity account, and the balances
+    move with it
+  - `createAccount` posts the opening balance
+  - `updateAccount` no longer takes `balance`
+  - new `adjustAccountBalance`: `POST /api/accounts/:id/adjust-balance`, `bankAndCash` edit
+    permission
+- **`models/LedgerEntry`:** the number from the global highest (numeric order).
+- **`utils/leadPaymentLedger`:** retries on a clash.
+- **Frontend `BankAndCash.jsx`:** opening balance only when adding; read-only on edit; the Adjust
+  balance button and dialog.
+
+**Checks:**
+- **The cause** (5 steps, real handlers): opening, advance, customer payment, vendor payment, stale
+  edit.
+- **The fix** (17 tests, two made-up companies, 0 left): an opening line and equity; opening 0
+  posts nothing; postings stay matched; a stale edit keeps the balance; adjust down and up with the
+  exact line text; the equity accounts match their lines; the four refusals; a second company's
+  receipt number.
+- **Data:** a dry run, then applied, then the re-check above.
+- The routes import; the frontend builds; no undefined names.
+
+---
+
+## 53. Old purchase back doors retired (bug report B3, B4, B15) (2026-10-19)
+
+**What:** three server routes from before procurement v2 could still change POs or stock, outside
+the v2 rules. No screen called any of them, but anyone logged in with the URL could.
+
+| Route | What it did | Why it had to go |
+|---|---|---|
+| `PUT /api/accounts/purchases/orders/:id` (B3) | edited a PO | a PO is never edited in v2 (cancel / short close + re-order); it also gave every request on a line the whole line's quantity (the §40 bug) |
+| `POST /api/rfq/:id/select-vendor` (B4) | picked the winning RFQ bid and created a PO | skipped the approval threshold, the vendor selection check, quote-based lines and the PO bill |
+| `POST /api/accounts/purchases/orders/:id/receive` (**B15**, found today) | received a whole PO | **added stock straight onto the item, skipping QC**; requests not marked received; bill untouched |
+
+**Now:** each answers **410 Gone** with a plain message, e.g. *"Receive on Store → To Receive, one
+PO line at a time (it then goes to QC)."* The old handler code is removed, with a note where it
+was.
+- **Not touched:**
+  - the vendor quotation links (`/api/rfq/bid/:token`, `/api/vendor-bid/:token`)
+  - every route a screen uses
+  - the PO delete (its route was already disabled on 5 Oct)
+
+**Technical notes:**
+- `purchaseController`: `updatePurchase` and `receivePurchase` removed.
+- `rfqController`: `selectVendor` removed.
+- `accountsRoutes` / `rfqRoutes`: 410 handlers; imports trimmed.
+
+**Checks:**
+- no caller left (frontend and server searched)
+- the server code loads
+- each of the three routes answers 410 with its message
+- the public bid routes are still registered
+- no garbled characters in the edited files
+
+---
+
+## 54. Paging and search across the procurement pages (your audit request) (2026-10-19)
+
+**What you asked:** check paging and debounced search on every procurement page. You had spotted
+that Vendor Ratings has no cap.
+
+**Already fine (left as they are):** these page on the server and wait for typing to pause.
+- Vendor Master
+- Purchase → PRs
+- Purchase Orders: Active / History / QC Rejections
+- Store: To Receive / Received / Serial Numbers
+- QC
+- Audit Log, Price History, Refunds & credits, Purchase Invoices
+
+**Fixed:**
+
+| Page | Problem | Now |
+|---|---|---|
+| **Purchase → Vendor Ratings** | every vendor with every score part in one response, filtered in the browser; working out the scores took **~1.9 s** for 4 vendors, on every visit | **20 vendors a page**; search (debounced), sort and "scored only" on the server; the scored list is kept 60 s, so paging / searching is instant (Refresh recalculates) |
+| **RFQ/PO** | asked for the newest **500 requests of any status** and kept the open ones in the browser; past 500 requests, older open ones **silently dropped off the board** | asks the server for the **open requests only** (up to 1000) |
+| **PRs tab + RFQ/PO** (`/api/purchase-requests`) | every call loaded every request the company ever filed (each with its PO and vendor), fixed statuses one by one, then cut out the page in memory; one item lookup per request | search, filters and paging in the database; one update for the status fix; **two** item lookups per page |
+| **Purchase Orders + Store's To Receive / Received** | every call loaded every PO with all its details, then cut out the page | a light list of every PO (status, dates, request statuses: what the status fix, the filters and the due chips need); full details for the **page only**; at most 100 a page |
+| **Vendor Payments → Recent payments** | only the newest 20 could be seen | Previous / Next |
+| **Out Source Work** | a server request on every key typed in search | asked once typing pauses |
+| **Record New Bill**, item search | the same | the same fix |
+| Server page sizes (vendors, invoices, payments, outsource work) | any size could be asked for | at most 500 (vendors: RFQ/PO needs all eligible ones) / 100 |
+
+**Technical notes:**
+- **Backend:**
+  - `supplierController.getVendorRatingsOverview`: `page`, `limit`, `search`, `sort`,
+    `scoredOnly`, `fresh`; a 60 s cache per company + unit; without `page`, the full list as
+    before (RFQ/PO)
+  - `purchaseRequestController.getPurchaseRequests`: DB paging; `updateMany` heal; batched item
+    lookup (code, then exact name, case-insensitive); up to 1000
+  - `purchaseController.getPurchases`: light pass, then the page; at most 100
+  - caps: `getSuppliers` 500, invoices / payments 100, outsource work 100
+- **Frontend:**
+  - `VendorRatingsTab.jsx`: debounced search, pager
+  - `RfqPoTab.jsx`: `status=Pending,Approved`
+  - `VendorPayments.jsx`: payments pager
+  - `SubChildJobWork.jsx`, `PurchaseInvoices.jsx`: debounced
+
+**Checks:** the **previous code (from git) and the new code were called side by side** on the
+real test-1 data, so the results had to match.
+- **Requests (9 cases, all identical):** pages 1 and 2, search, search + priority, raised-by
+  filters, the RFQ/PO open set, as Store. The RFQ/PO board gets the same 13 open requests as
+  before.
+- **POs (10 cases, all identical):** pages 1 / 3 of all 7, active, done pages 1–2, search, due
+  filter, transport filter, Store's To Receive / Received. Same POs, order, statuses, vendors and
+  line requests; caps hold.
+- **Vendor Ratings (6):** pages = the full list in score order; totals; search; scored only;
+  A–Z; low → high.
+- Imports; the frontend builds; no undefined names.
+
+**Not changed (noted):**
+- **The RFQ/PO board** is a working list of everything open, so it isn't paged; it now loads
+  the open set only.
+- **The Purchase Dashboard** reads every PO to build its figures. It shows totals, not a list,
+  so it isn't paged.
+- **The requests list** still runs the old "sales → purchase request" sync over sales on every
+  load. That's a separate behaviour, left as it is.
+
+---
+
+## 55. Vendor Ratings: the tables say when they show only part of the history (2026-10-19)
+
+**Your question:** are the tables under each part of the score capped, and does that change the
+score?
+
+**Answer:** the **score uses every event**.
+- **Main score:** the last 12 months, newer events weighing more (today ×1, a year old ×½).
+- **Lifetime score:** every event, equally.
+
+The tables list the **newest 40** events of each part, for reading only.
+
+**Two display gaps, now fixed:**
+- **A cut-off table now says so:** *"Showing the newest 40 of 63 — the score above uses all
+  63."*
+- **A row older than 12 months** (counted in the lifetime score only) is greyed and tagged
+  **lifetime only**.
+
+**Technical notes:**
+- `vendorScoreService`: `evidenceTotals` per part and `evidenceCap`; events outside the 12-month
+  window get `lifetimeOnly`.
+- `VendorRatingsTab.jsx`: `EvidenceTable` takes `total` and `flags`.
+
+**Checks** (sujeet, real data, read-only, 4/4):
+- **Today:** totals = rows shown (5 / 5 / 3 / 2 / 5 / 0 / 2), and nothing marked.
+- **Scored as of Nov 2028:** every row is lifetime only; the main score is empty; the lifetime
+  score is unchanged (86).
+
+The frontend builds.
 
 ---
 
@@ -3406,6 +3974,18 @@ number is missing.
 | 33 | Browser testing slice 2 fixes: the vendor's quotation page adds charges by choice ("+ Add a charge…", like payment terms) instead of listing every template charge; vendor cards on RFQ/PO tick rows with a valid price on load and when a new price arrives (email or manual) | Done; builds; re-check in the browser |
 | 34 | Vendor page accepts "Can't supply" on every item (needs a price or a can't-supply); a vendor's charges + payment terms carry over from their last quotation (with valid prices) into each new one — email page and manual dialog, with a note to change / remove what's different; the vendor check counts only the newest quotation's charges (no double freight) | Done; 16 tests + real read-only run; builds; re-check in the browser |
 | 35 | PO review: GST read-only from the quote (the "all lines" box gone) and the server takes rate / GST / warranty from the quote, never the page; manual quotations need GST; any change to the quotation's charges / terms needs a reason (saved, shown to the Company Admin, audit log); charges above the quotation → Company Admin approval ("Charges above quotation"); our template terms added by choice | Done; 14 + 10 real-handler tests pass; builds; check in the browser (slice 3) |
+| 55 | Vendor Ratings tables: "Showing the newest 40 of N" when cut off; rows older than 12 months greyed "lifetime only" (the score always used every event) | Done; 4 checks; builds |
+| 54 | Paging / search audit of the procurement pages: Vendor Ratings paged + server search / sort + 60 s cache; RFQ/PO asks for open requests only (it could lose open ones past 500); PRs and PO lists filter / page in the DB (they loaded everything each call); Recent payments pager; Out Source Work + bill item search debounced; server page-size caps | Done; 25 old-vs-new comparisons on real data identical; builds; check in the browser |
+| 53 | Old purchase back doors retired (410): the PO edit (B3), RFQ select-vendor → PO (B4), and the whole-PO receive that added stock skipping QC (B15) | Done; loads; 410 checked |
+| 52 | Bank & Cash: opening balance posted as a ledger line; edit no longer touches the balance; "Adjust balance" = one ledger line with a reason; receipt numbers unique across companies (bugs B13, B14); test-1's HDFC / IDFC / SBI ledgers made to explain their balances (SBI kept at ₹9,12,237.60) | Done; 5 + 17 tests; data fixed + re-checked; check in the browser |
+| 51 | Refunds & credits (Vendor Payments): Open / Settled / All chips (Open by default), 20 per page, open count + ₹ from the server — an old open refund can't drop out of sight (bug B2c) | Done; 6/6; builds; check in the browser |
+| 50 | Company Admin dashboard: Purchase value / trend / Top 3 = what was billed (POs at their bill + bills without a PO), ordered figure kept on a sub-line (bug B10, your decision) | Done; 9 tests (real October figures match); builds; check in the browser |
+| 49 | Bill without a PO: GST Type preset from the company's and vendor's GSTIN (PO rule), with a note why; still changeable (bug B9) | Done; 5/5 on real vendors; builds; check in the browser |
+| 48 | Vendor score: the warranty part takes every item the vendor quoted, so a vendor scores the same on the list and in its own panel (rahul was 87 vs 97) (bug B6) | Done; 6/6 vendors alone = together on real data |
+| 47 | QC Rejections in one place (Purchase Orders tab; sidebar entry removed, old address redirects, dashboard tiles open the tab); a replacement on the same day no longer logs "Date changed from 18 Oct to 18 Oct" | Done; builds; check in the browser |
+| 46 | Ledger page: Dr / Cr by account type (a payable owed reads Cr), Total Debit / Credit and Closing Balance for the whole period on every page, same-named accounts told apart (bugs B7, B8, B12) | Done; 8 real-endpoint checks; builds; check in the browser |
+| 45 | Serial numbers (bug B5, decided): hyphens / dots count (TLA-01 ≠ TLA01); a serial with a space inside is refused on the page and the server | Done; 8 tests; builds; exact-repeat refusal checked in the browser |
+| 44 | Purchase Dashboard: "Quote requests waiting" / "no reply" / "link ran out" count only requests with an item still open for the vendor, the quote sweep's rule (bug B11) | Done; checked on test-1 (Team 3 → 1, employee 1 → 0); refresh in the browser |
 | 43 | QC Rejections: the REJ line shows the QC job number once ("QC-2026-0215", not "QC QC-2026-0215") (bug B2) | Done; builds; check in the browser |
 | 42 | Low-stock reorder (bug B1): skips an item / size while a stock request for it is still coming — not bought, on a PO, or received with QC undecided; counts its own, Store's manual and replacement requests, not production / sales-order ones; one sweep at a time across servers sharing the database (10-minute lease) — two backends had raised PR036 / PR039 twice | Done; 21 tests; the 5 extra requests left as they are (your call) |
 | 41 | QC by PO line: one QC card + one decision per received line (each request keeps its own record underneath); a rejection is counted against requests by size first (fabrication), then fill one before the next — stock → production → sales order, newest first; serials by tick; "Fabrication" decided from the item master and carried PO line → receive → QC; two fabrication stock bugs fixed (N× on a shared line; rejected pieces credited); "Rejected" requests shown as "Closed — reason" | Done; 15 + 34 end-to-end tests; data grouped; builds; check in the browser (slice 4 QC) |

@@ -110,10 +110,56 @@ export const getPurchases = async (req, res) => {
     }
 
     // Status itself can't be filtered at the query level here — it may be
-    // stale (see computeHealedStatus above) until self-healed below, so
-    // every matching Purchase is fetched first, same tradeoff
-    // getPurchaseRequests already makes for its own self-healing sync.
-    const allMatching = await Purchase.find(query)
+    // stale (see computeHealedStatus above) until self-healed below. So a
+    // LIGHT list of every matching PO is read first (status, dates and each
+    // line's request statuses only — what the healing, the status filter and
+    // the due chips need), and the full details are loaded for the page
+    // alone (2026-10-19: every PO was loaded with all of its details on
+    // every page of Purchase Orders and Store's To Receive / Received).
+    const light = await Purchase.find(query)
+      .select('status deliveryClock expectedDeliveryDate createdAt items.cancelled items.purchaseRequest items.purchaseRequests items.quantity items.receivedQuantity items.expectedDeliveryDate')
+      .populate('items.purchaseRequest', 'status')
+      .populate('items.purchaseRequests', 'status')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    for (const p of light) {
+      const healed = computeHealedStatus(p);
+      if (healed !== p.status) {
+        await Purchase.updateOne({ _id: p._id }, { $set: { status: healed } });
+        p.status = healed;
+      }
+    }
+
+    let filtered = light;
+    if (status) {
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length) filtered = filtered.filter(p => statuses.includes(p.status));
+    }
+
+    // Expected receipts (2026-10-10): how many POs have a late / due-today /
+    // due-soon line (counted before this filter, for the chips), then the
+    // optional ?due= filter. Uses the requests' real receive status.
+    const now = new Date();
+    const dueCounts = { overdue: 0, today: 0, soon: 0 };
+    const worstById = new Map();
+    for (const p of filtered) {
+      const { counts, worst } = poDueSummary(p, undefined, now);
+      worstById.set(String(p._id), { worst, counts });
+      for (const k of Object.keys(dueCounts)) if (counts[k] > 0) dueCounts[k] += 1;
+    }
+    const { due } = req.query;
+    if (['overdue', 'today', 'soon'].includes(due)) {
+      filtered = filtered.filter(p => (worstById.get(String(p._id))?.counts?.[due] || 0) > 0);
+    }
+
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 10));
+    const total = filtered.length;
+    const pageIds = filtered.slice((pageNum - 1) * limitNum, pageNum * limitNum).map(p => p._id);
+    const order = new Map(pageIds.map((id, i) => [String(id), i]));
+
+    const purchases = (await Purchase.find({ _id: { $in: pageIds } })
       .populate('supplier', 'supplierName contactPerson email phone')
       .populate('createdBy', 'fullName')
       .populate('approvedBy', 'fullName')
@@ -139,51 +185,17 @@ export const getPurchases = async (req, res) => {
       // item's real stock unit against the line's purchaseUnit to decide
       // whether to show the unit-conversion fields at all, same UX the old
       // per-PR dialog had via getPurchaseRequests' own item enrichment.
-      .populate('items.item', 'name code unit receiveUnit purchaseUnit purchaseUnitType')
-      .sort({ createdAt: -1 });
-
-    for (const purchase of allMatching) {
-      const healed = computeHealedStatus(purchase);
-      if (healed !== purchase.status) {
-        purchase.status = healed;
-        await purchase.save();
-      }
-    }
-
-    let filtered = allMatching;
-    if (status) {
-      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
-      if (statuses.length) filtered = filtered.filter(p => statuses.includes(p.status));
-    }
-
-    // Expected receipts (2026-10-10): how many POs have a late / due-today /
-    // due-soon line (counted before this filter, for the chips), then the
-    // optional ?due= filter. Uses the requests' real receive status.
-    const now = new Date();
-    const dueCounts = { overdue: 0, today: 0, soon: 0 };
-    const worstById = new Map();
-    for (const p of filtered) {
-      const { counts, worst } = poDueSummary(p, undefined, now);
-      worstById.set(String(p._id), { worst, counts });
-      for (const k of Object.keys(dueCounts)) if (counts[k] > 0) dueCounts[k] += 1;
-    }
-    const { due } = req.query;
-    if (['overdue', 'today', 'soon'].includes(due)) {
-      filtered = filtered.filter(p => (worstById.get(String(p._id))?.counts?.[due] || 0) > 0);
-    }
-
-    const total = filtered.length;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const purchases = filtered.slice(skip, skip + parseInt(limit));
+      .populate('items.item', 'name code unit receiveUnit purchaseUnit purchaseUnitType'))
+      .sort((a, b) => order.get(String(a._id)) - order.get(String(b._id)));
 
     res.json({
       purchases,
       dueCounts,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / limitNum)
       }
     });
   } catch (error) {
@@ -873,193 +885,11 @@ export const createPurchase = async (req, res) => {
   }
 };
 
-export const updatePurchase = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const {
-      status,
-      paymentStatus,
-      expectedDeliveryDate,
-      actualDeliveryDate,
-      deliveryAddress,
-      terms,
-      notes,
-      approvedBy,
-      supplier,
-      items,
-      taxAmount,
-      purchaseQuantity,
-      purchaseUnit
-    } = req.body;
-
-    const purchase = await Purchase.findById(id);
-
-    if (!purchase) {
-      return res.status(404).json({ message: 'Purchase not found' });
-    }
-
-    if (req.user.role !== USER_ROLES.SUPER_USER && (purchase.unit !== req.user.unit || String(purchase.companyId) !== String(req.user.companyId))) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-
-    // Company Admin approval (procurement-v2): a PO waiting for approval must
-    // stay exactly what the Company Admin is looking at, and a rejected one
-    // never became an order — neither can be edited.
-    if (['Pending Approval', 'Rejected'].includes(purchase.status)) {
-      return res.status(409).json({ message: `This PO is ${purchase.status} and can't be changed.` });
-    }
-
-    const updateData = {};
-
-    // Disabled 2026-10-05 — setting status here (e.g. to 'Cancelled') never
-    // cleans up the PurchaseInvoice that's now auto-created at PO-creation
-    // time (Fifteenth pass), which would leave a permanent, uncollectible
-    // balance inflating that vendor's credit exposure forever. Confirmed
-    // this endpoint's one live caller (PurchaseRequest.jsx's "Modify PO")
-    // never actually sends `status` — it's only used to edit
-    // vendor/items/price/delivery/terms, all of which still work below.
-    // `status` itself is now silently ignored until a real Cancel/Delete PO
-    // flow is built that also voids the invoice — uncomment and fix then.
-    // if (status) {
-    //   updateData.status = status;
-    //   if (status === 'Received') {
-    //     updateData.actualDeliveryDate = actualDeliveryDate ? new Date(actualDeliveryDate) : new Date();
-    //   }
-    // }
-
-    // paymentStatus is no longer set by hand — it follows the PO's bill
-    // (services/purchaseBillService.js, 2026-10-12).
-    if (expectedDeliveryDate) updateData.expectedDeliveryDate = new Date(expectedDeliveryDate);
-    if (deliveryAddress) updateData.deliveryAddress = deliveryAddress;
-    if (terms) updateData.terms = terms;
-    if (notes) updateData.notes = notes;
-
-    if (supplier) {
-      const supplierDoc = await Supplier.findOne({ _id: supplier, companyId: req.user.companyId });
-      if (supplierDoc) {
-        updateData.supplier = supplier;
-      }
-    }
-
-    if (items && Array.isArray(items)) {
-      let totalAmt = 0;
-      const purchaseItems = [];
-      const existingItems = purchase.items || [];
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        const inventoryItem = await Item.findById(item.item);
-        const itemName = inventoryItem ? (inventoryItem.name || inventoryItem.itemName) : item.itemName;
-        const itemTotal = item.quantity * item.unitPrice;
-        totalAmt += itemTotal;
-        // Preserve every field this endpoint doesn't actually let Purchase
-        // edit — PR link(s)/group, item charges, GST, expected delivery
-        // date, warranty, fabrication breakdown — from the existing line
-        // it corresponds to. Pre-existing bug, found while building this
-        // pass: rebuilding items[] from only the fields this flow's one
-        // live caller (PurchaseRequest.jsx's "Modify PO") actually sends
-        // (item/itemName/quantity/unitPrice/totalPrice) was silently
-        // wiping all of these on every save — which would have broken
-        // computeHealedStatus, the By Vendor receive badges, and group-
-        // staleness detection on any PO ever modified here, the moment the
-        // new purchaseRequests/itemQuoteGroup fields started being relied
-        // on. Matched by Inventory item id first (stable across an edit
-        // that only changes quantity/price), falling back to position when
-        // that's not given.
-        const existing = (item.item && existingItems.find(ex => String(ex.item) === String(item.item)))
-          || existingItems[i]
-          || {};
-        purchaseItems.push({
-          item: item.item,
-          itemName,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          totalPrice: itemTotal,
-          receivedQuantity: item.receivedQuantity ?? existing.receivedQuantity ?? 0,
-          pendingQuantity: item.quantity - (item.receivedQuantity ?? existing.receivedQuantity ?? 0),
-          purchaseRequest: existing.purchaseRequest || null,
-          purchaseRequests: existing.purchaseRequests || [],
-          itemQuoteGroup: existing.itemQuoteGroup || null,
-          itemCharges: existing.itemCharges || [],
-          itemChargesTotal: existing.itemChargesTotal || 0,
-          gstInclusive: existing.gstInclusive || false,
-          gstRate: existing.gstRate || 0,
-          gstAmount: existing.gstAmount || 0,
-          vendorBid: existing.vendorBid || null,
-          purchaseUnit: existing.purchaseUnit || null,
-          purchaseUnitType: existing.purchaseUnitType || null,
-          expectedDeliveryDate: existing.expectedDeliveryDate || null,
-          deliveryDays: existing.deliveryDays ?? null,
-          warrantyMonths: existing.warrantyMonths || 0,
-          fabricationDimensionLines: existing.fabricationDimensionLines || [],
-          // Also never edited here (2026-10-12 — these were being dropped).
-          deliveryDateHistory: existing.deliveryDateHistory || [],
-          overdueNotifiedFor: existing.overdueNotifiedFor || null,
-          cancelled: existing.cancelled || null,
-        });
-      }
-      updateData.items = purchaseItems;
-      updateData.totalAmount = totalAmt;
-      const taxAmt = taxAmount !== undefined ? taxAmount : (purchase.taxAmount || 0);
-      updateData.taxAmount = taxAmt;
-      // Same formula as createPurchase: goods + tax + the PO's own charges
-      // and their GST (procurement-v2), plus any OLD automatic vendor
-      // charges a legacy PO still carries (poCharges / itemCharges).
-      const itemChargesSum = purchaseItems.reduce((sum, it) => sum + (it.itemChargesTotal || 0), 0);
-      updateData.grandTotal = totalAmt + taxAmt + (purchase.chargesTotal || 0) + (purchase.chargesGstTotal || 0)
-        + (purchase.poChargesTotal || 0) + itemChargesSum;
-    } else if (taxAmount !== undefined) {
-      updateData.taxAmount = taxAmount;
-      updateData.grandTotal = (purchase.totalAmount || 0) + taxAmount + (purchase.chargesTotal || 0) + (purchase.chargesGstTotal || 0);
-    }
-
-    // Handle approval
-    if (approvedBy && !purchase.isApproved) {
-      updateData.isApproved = true;
-      updateData.approvedBy = req.user._id;
-      updateData.status = 'Sent';
-    }
-
-    // Keep every linked PurchaseRequest's purchase-unit quantity in sync when
-    // the PO is modified (e.g. accounts corrects "2 kg" to "3 kg" before
-    // sending) — same fields set at creation time, see createPurchase above.
-    // Each PR matched to its own line the same way createPurchase does.
-    if (purchase.purchaseRequests?.length && Number(purchaseQuantity) > 0 && purchaseUnit) {
-      for (const prId of purchase.purchaseRequests) {
-        const prUpdate = { purchaseQuantity: Number(purchaseQuantity), purchaseUnit };
-        // No `|| items[0]` fallback (2026-10) — same reasoning as
-        // createPurchase's own PR-sync loop above: better to skip the
-        // purchaseUnitType lookup than guess it from an unrelated line.
-        const matchedItemId = items?.find(it =>
-          String(it.purchaseRequest || '') === String(prId)
-          || (Array.isArray(it.purchaseRequests) && it.purchaseRequests.some(id => String(id) === String(prId)))
-        )?.item || null;
-        if (matchedItemId) {
-          const matchedInventoryItem = await Item.findById(matchedItemId).select('purchaseUnitType').lean();
-          if (matchedInventoryItem?.purchaseUnitType) prUpdate.purchaseUnitType = matchedInventoryItem.purchaseUnitType;
-        }
-        await PurchaseRequest.findByIdAndUpdate(prId, prUpdate);
-      }
-    }
-
-    const updatedPurchase = await Purchase.findByIdAndUpdate(
-      id,
-      updateData,
-      { new: true }
-    ).populate([
-      { path: 'supplier', select: 'supplierName contactPerson email phone' },
-      { path: 'createdBy', select: 'fullName' },
-      { path: 'approvedBy', select: 'fullName' }
-    ]);
-
-    res.json({
-      message: 'Purchase order updated successfully',
-      purchase: updatedPurchase
-    });
-  } catch (error) {
-    console.error('Update purchase error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-};
+// updatePurchase (the old single-request PO edit, PUT /api/accounts/purchases/orders/:id)
+// was removed 2026-10-19 (bug report B3): a PO is never edited in procurement v2 — a
+// change is a cancel / short close (Company Admin) + re-order — and it gave every request
+// on a line the whole line's quantity (the §40 bug). No screen called it; the route now
+// answers 410 (accountsRoutes.js).
 
 // Route disabled 2026-10-05 (accountsRoutes.js) — this never cleans up the
 // PurchaseInvoice auto-created at PO-creation time (Fifteenth pass), so
@@ -1093,114 +923,11 @@ export const deletePurchase = async (req, res) => {
   }
 };
 
-export const receivePurchase = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { receivedItems } = req.body;
-
-    if (!receivedItems || !Array.isArray(receivedItems)) {
-      return res.status(400).json({ message: 'Received items data is required' });
-    }
-
-    const purchase = await Purchase.findById(id).populate('items.item');
-
-    if (!purchase) {
-      return res.status(404).json({ message: 'Purchase not found' });
-    }
-
-    if (req.user.role !== USER_ROLES.SUPER_USER && (purchase.unit !== req.user.unit || String(purchase.companyId) !== String(req.user.companyId))) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-    // Cancelled (gap 13, 2026-10-09) — nothing can be received on it.
-    if (purchase.status === 'Cancelled') {
-      return res.status(409).json({ message: 'This PO is cancelled — nothing can be received on it.' });
-    }
-
-    // Update received quantities and inventory
-    for (const receivedItem of receivedItems) {
-      const purchaseItem = purchase.items.find(item =>
-        !item.cancelled?.at && item.item._id.toString() === receivedItem.itemId
-      );
-
-      if (purchaseItem && receivedItem.receivedQuantity > 0) {
-        purchaseItem.receivedQuantity += receivedItem.receivedQuantity;
-        purchaseItem.pendingQuantity = purchaseItem.quantity - purchaseItem.receivedQuantity;
-
-        // Update inventory stock
-        const inventoryItem = await Item.findById(purchaseItem.item._id);
-        if (inventoryItem) {
-          const previousStock = inventoryItem.qty || 0;
-          inventoryItem.qty = previousStock + receivedItem.receivedQuantity;
-          await inventoryItem.save();
-
-          console.log(`✅ Stock updated for item ${inventoryItem.name}. Previous: ${previousStock}, New: ${inventoryItem.qty}`);
-
-          // Create stock movement record safely
-          try {
-            const { StockMovement } = await import('../models/Inventory.js');
-            if (StockMovement && typeof StockMovement.create === 'function') {
-              await StockMovement.create({
-                item: inventoryItem._id,
-                movementType: 'IN',
-                quantity: receivedItem.receivedQuantity,
-                previousStock,
-                newStock: inventoryItem.qty,
-                reference: `Purchase Order: ${purchase.purchaseOrderNumber}`,
-                referenceId: purchase._id,
-                unit: purchase.unit,
-                createdBy: req.user._id,
-                notes: `Received from ${purchase.supplier?.supplierName || 'Supplier'}`
-              });
-            } else {
-              console.log('[STOCK MOVEMENT] Model not registered, skipping DB log.');
-            }
-          } catch (e) {
-            console.log('[STOCK MOVEMENT] Skipped creation:', e.message);
-          }
-        }
-      }
-    }
-
-    // Update purchase status
-    const allReceived = purchase.items.every(item => item.pendingQuantity === 0);
-    const partiallyReceived = purchase.items.some(item => item.receivedQuantity > 0);
-
-    if (allReceived) {
-      purchase.status = 'Received';
-      purchase.actualDeliveryDate = new Date();
-    } else if (partiallyReceived) {
-      purchase.status = 'Partially Received';
-    }
-
-    await purchase.save();
-
-    // Audit log (gap 17) — the old whole-PO receive screen.
-    const receivedNow = receivedItems.filter(r => Number(r.receivedQuantity) > 0)
-      .map(r => {
-        const line = purchase.items.find(it => !it.cancelled?.at && String(it.item?._id || it.item) === String(r.itemId));
-        return line ? `${line.itemName} ${r.receivedQuantity} ${line.purchaseUnit || ''}`.trim() : null;
-      }).filter(Boolean);
-    if (receivedNow.length) {
-      await logPoEvent({ po: purchase, user: req.user, req, action: 'line_received', summary: `Received: ${receivedNow.join(', ')}.`, details: { items: receivedNow } });
-    }
-    if (allReceived) {
-      await logPoEvent({ po: purchase, user: req.user, req, action: 'fully_received', summary: 'Everything on this PO has been received.' });
-    }
-
-    await purchase.populate([
-      { path: 'supplier', select: 'supplierName contactPerson' },
-      { path: 'items.item', select: 'itemName itemCode' }
-    ]);
-
-    res.json({
-      message: 'Purchase received successfully',
-      purchase
-    });
-  } catch (error) {
-    console.error('Receive purchase error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-};
+// receivePurchase (POST /api/accounts/purchases/orders/:id/receive — the RFQ-era whole-PO
+// receive) was removed 2026-10-19 (bug report B15): it added stock straight onto the item,
+// skipping QC, the requests and the PO bill. No screen called it; Store receives one PO line at
+// a time (purchaseRequestController receiveLineItems / receiveLineFabrication → QC). The
+// route now answers 410 (accountsRoutes.js).
 
 export const getPurchaseStats = async (req, res) => {
   try {

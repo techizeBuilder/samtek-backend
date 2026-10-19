@@ -6,7 +6,6 @@ import {
   createRFQ,
   getRFQBids,
   resendVendorBidEmail,
-  selectVendor,
   getBidByToken,
   submitBidByToken,
   getRFQStats,
@@ -33,6 +32,8 @@ router.get('/', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit 
 router.post('/', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createRFQ);
 router.get('/:id/bids', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getRFQBids);
 router.post('/:id/vendor-bid/:bidId/resend', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, resendVendorBidEmail);
-router.post('/:id/select-vendor', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, selectVendor);
+// Retired (bug report B4, 2026-10-19): it created POs the pre-v2 way. POs are made
+// from RFQ/PO → PO review.
+router.post('/:id/select-vendor', (req, res) => res.status(410).json({ success: false, message: 'Purchase orders are made from Purchase → RFQ/PO (PO review), not from an RFQ.' }));
 
 export default router;

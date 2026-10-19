@@ -67,6 +67,14 @@ export function readSerialList(raw) {
     if (seen.has(k)) duplicates.add(s); else seen.add(k);
   }
   if (serials.some(s => s.length > 80)) return { error: 'A serial number can be up to 80 characters.' };
+  // No spaces inside a serial (user rule, 2026-10-17 — real serials never
+  // have one). Hyphens and dots stay meaningful: TLA-01 and TLA01 are two
+  // different serials (bug report B5, decided).
+  const spaced = serials.filter(s => /\s/.test(s));
+  if (spaced.length) {
+    const shown = spaced.slice(0, 5).map(s => `"${s}"`).join(', ') + (spaced.length > 5 ? ` and ${spaced.length - 5} more` : '');
+    return { error: `A serial number can't contain a space: ${shown}. Type it exactly as on the piece.` };
+  }
   return { serials, duplicates: [...duplicates] };
 }
 

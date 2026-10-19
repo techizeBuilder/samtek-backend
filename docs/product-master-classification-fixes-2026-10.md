@@ -97,6 +97,110 @@ grade nobody has); the frontend builds.
 
 ---
 
+## 6. A Sub Category with the same name under another Category had the other's lists (client bug, 2026-10-19)
+
+**Where:** Product Master → Manage Classifications & Custom Fields, the product form's dropdowns,
+and the same lists on Plant Master, Product Master QC and Store's Product Master tab.
+
+**What the client saw:** they created a new Category, then a Sub Category called "Chakki" (a name
+already used under another Category). The new "Chakki" already showed the other one's Product
+Names and Variants, and adding the same Product Name was refused as "already exists".
+
+**How it worked before:** each value remembered its parent by **name** only.
+- **Shared lists:** every "Chakki", under any Category, showed one shared list of Product Names,
+  Source Types and (through the Product Name) Variants.
+- **Duplicate check:** done by name too, so the second "Chakki" couldn't have a Product Name the
+  first already had.
+- **Seen on our test data:** "Chakki" under Atta Chakki and Cleaning Machine shared "aata chakki
+  5kg" and 3 Source Types; "Blower Pulverizer" under two Categories shared a Source Type.
+
+**How it works now:** each value is linked to its **exact parent** (by its id, not its name).
+- **Separate lists:** a Sub Category under a different Category is a different Sub Category, with
+  its own Product Names, Variants and Source Types. The same goes for Plant Master: Sub Category →
+  Plant Name → Production.
+- **The same name is allowed under each parent;** only a repeat under the *same* parent is refused.
+- **Renames are matched by the full path:** Category → Sub Category → Product Name → Variant. So
+  renaming one "Chakki" (or a Variant under it) changes only the products, custom-field templates
+  and lists of that branch; the other "Chakki" is untouched.
+- **A delete is blocked only by that branch's own products or values.**
+
+**Existing data (a one-time step):** a script links every existing value to its parent.
+- **A shared name:** the first parent keeps the values, and every other same-named parent gets
+  its **own copy**. Each one shows exactly what it showed before, but they're independent from now
+  on.
+- **Our test data:** 41 changes (6 copies: Cleaning Machine's "Chakki" got its own 3 Source Types,
+  "aata chakki 5kg" and its "5kg" Variant; milling machine's "Blower Pulverizer" got its own
+  Source Type). A second run changes nothing.
+
+**Technical notes:**
+- **`RDMasterOption.parentId`:** the unique index is now company + field + value + parentId +
+  parentValue.
+- **`rdController`:**
+  - adding takes `parentId`. An older caller sending only a parent name is linked when that name
+    is unique, and refused when several parents share it.
+  - rename / delete check use `ancestorsOf` (the full path); the 17 Oct copy-on-rename logic is
+    gone, because children never move.
+- **New `scripts/linkClassificationParents.js`** (dry run by default; `--apply`; `--company`).
+- **Frontend:** new `lib/classificationTree.js` (`childOptions`, `resolvePath`), used by
+  `ProductMaster.jsx`, `PlantMaster.jsx`, `ProductMasterQC.jsx`, `ProductMasterTab.jsx`.
+
+**Checks:** 20 tests through the real handlers and the real migration script on a made-up company,
+0 left:
+- **The bug shown first;** then the migration (9 links, 5 copies, index swapped, a re-run changes
+  nothing).
+- **Each "Chakki" has its own lists.**
+- **The client's steps:** a new Category → "Chakki" has empty lists → the same Product Name can be
+  added, not twice.
+- **Old-style callers:** refused when ambiguous, linked when unique.
+- **Variant, Sub Category, Source Type and Plant Name renames** touch only their branch; templates
+  follow by path.
+- **Delete checks:** only their branch.
+- The frontend builds; no undefined names.
+
+## 7. Power Source options can be deleted (client request, 2026-10-19)
+
+**Where:** Product Master → Add / Edit product → Power Requirements → Power Source.
+
+**Before:** a Power Source could be added (+) but not removed.
+
+**Now:** each option in the list has a delete icon, the same as Metrology and Material Grade.
+- It asks to confirm first.
+- It's refused while a product still uses that Power Source.
+- A row that had it selected is cleared.
+
+**Checks:** the frontend builds; no undefined names. The server's existing delete check is used.
+
+## 8. The Material Grade filter follows the Category / Sub Category (client request, 2026-10-19)
+
+**Where:** Product Master's list, the Material Grade filter (added in §5).
+
+**Before:** it always listed every Material Grade.
+
+**Now:**
+- **No Category chosen:** every grade, as before.
+- **A Category (and Sub Category / Source Type) chosen:** only the grades its products actually
+  use, in the same active or discontinued view as the list.
+- **A grade picked earlier that isn't used there** is cleared.
+
+**Technical notes:** new `GET /api/rd/machines/material-grades?pType=&category=&pSourceType=&discontinued=`
+(`rdController.getMachineMaterialGrades`, the distinct grades of the matching products).
+
+**Checks:** 13/13 on test-1's products (read-only): no Category → all grades in use; each
+Category and each of its Sub Categories → exactly its products' grades; empty where the products
+have none. The routes import; the frontend builds.
+
+### Steps for the client's server (this change)
+1. Deploy the backend and frontend together.
+2. On the server, from the `server` folder:
+   `node scripts/linkClassificationParents.js` — a dry run. It lists, per company, how many
+   values it will link and which shared names get copies.
+3. If the list looks right: `node scripts/linkClassificationParents.js --apply`.
+4. Run step 2 again. It must say **"0 change(s) planned"**.
+
+Until step 3, the lists behave as before. The script uses `MONGODB_URI` from `server/.env`.
+
+---
+
 ## For the client's server
 
 The fixes stop this happening again. **Products already affected keep their old values** until
@@ -141,3 +245,6 @@ The frontend builds, with no undefined names.
 | 3 | Renames and delete checks only touch products under the value's own parent; shared child values are copied, not moved (Product, Plant and Motor Master) | Done; tested |
 | 4 | Renaming a custom field or group carries over to products; values no longer blanked on the next edit | Done; tested; check in the browser |
 | 5 | Material Grade filter on the Product Master list (client request) | Done; 5 tests; builds; check in the browser |
+| 7 | Power Source options can be deleted (confirm; refused while a product uses it) | Done; builds; check in the browser |
+| 8 | Material Grade filter lists only the grades used in the chosen Category / Sub Category (all grades when none is chosen) | Done; 13 checks; builds; check in the browser |
+| 6 | Same-named Sub Category under another Category has its own Product Names / Variants / Source Types (values linked to their exact parent; same for Plant Master); renames / delete checks by the full path; one-time script for existing data | Done; 20 tests; test data migrated (41 changes); **client server: run the script after deploying (steps in §6)**; check in the browser |

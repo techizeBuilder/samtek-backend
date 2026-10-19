@@ -120,7 +120,15 @@ export const createLedgerTransaction = async (leadPayment, bankAccount, user) =>
     approvedBy: user._id,
     approvedDate: new Date()
   });
-  await ledgerEntry.save();
+  // Two payments verified at the same moment can pick the same next number —
+  // take a fresh one and try again (B14, 2026-10-19).
+  for (let attempt = 0; ; attempt++) {
+    try { await ledgerEntry.save(); break; }
+    catch (err) {
+      if (err?.code !== 11000 || attempt >= 3) throw err;
+      ledgerEntry.entryNumber = undefined;
+    }
+  }
 
   console.log(`✅ Ledger entry created for Lead Payment: ${leadPayment._id}`);
   return ledgerEntry;

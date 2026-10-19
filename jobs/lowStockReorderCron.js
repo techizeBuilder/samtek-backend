@@ -1,6 +1,7 @@
 import { Item } from '../models/Inventory.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import QCJob from '../models/QCJob.js';
+import PurchaseRejection from '../models/PurchaseRejection.js';
 import { generatePurchaseRequestId } from '../services/storeFlowService.js';
 import { resolveFabricationLines } from '../controllers/purchaseRequestController.js';
 import { dimensionSignature } from '../services/fabricationDemandService.js';
@@ -34,13 +35,18 @@ import { getFreeQty } from '../services/materialReservationService.js';
 // When what was coming has passed QC and stock is still at/below minimum, the
 // next sweep raises as before; a rejection the vendor refunds instead of
 // replacing brings nothing more, so it doesn't block.
+// A QC rejection still "Awaiting vendor answer" blocks too (user decision
+// 2026-10-17): the vendor may yet replace it, so the request stays on the way
+// until the answer is recorded — "Replace" then blocks through its own
+// replacement request; refund / credit / refused unblock.
 const ON_THE_WAY_STATUSES = ['Pending', 'Approved', 'Ordered'];
 const QC_UNDECIDED = ['Draft', 'Pending', 'In Progress'];
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Stock requests for `item` still on their way in. `inQcRequestIds`: ids of
-// purchase requests whose QC job is undecided (loaded once per sweep).
+// received purchase requests not settled yet — QC undecided, or a QC
+// rejection awaiting the vendor's answer (loaded once per sweep).
 async function requestsOnTheWay(item, inQcRequestIds) {
   // Same item match the RFQ board uses (resolveMasterItemId): code or exact
   // name; plus this cron's own reorderItemId.
@@ -161,13 +167,21 @@ async function checkFabricationVariants(item, stats, inQcRequestIds) {
 // `companyId` limits the sweep to one company (tests); the cron sweeps all.
 export async function runLowStockReorderSweep({ companyId = null } = {}) {
   const stats = { scanned: 0, created: 0 };
-  // Purchase requests received but still waiting for QC — their stock isn't in yet.
-  const inQcRequestIds = await QCJob.distinct('purchaseRequestId', {
-    source: 'Purchase',
-    status: { $in: QC_UNDECIDED },
-    purchaseRequestId: { $ne: null },
-    ...(companyId ? { company: companyId } : {}),
-  });
+  // Purchase requests received but not settled: still waiting for QC (their
+  // stock isn't in yet), or with a QC rejection the vendor hasn't answered.
+  const [inQc, awaitingAnswer] = await Promise.all([
+    QCJob.distinct('purchaseRequestId', {
+      source: 'Purchase',
+      status: { $in: QC_UNDECIDED },
+      purchaseRequestId: { $ne: null },
+      ...(companyId ? { company: companyId } : {}),
+    }),
+    PurchaseRejection.distinct('purchaseRequest', {
+      status: 'Awaiting vendor answer',
+      ...(companyId ? { companyId } : {}),
+    }),
+  ]);
+  const inQcRequestIds = [...inQc, ...awaitingAnswer];
   const items = await Item.find({
     ...(companyId ? { companyId } : {}),
     isDiscontinued: { $ne: true },

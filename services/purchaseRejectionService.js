@@ -243,7 +243,10 @@ export async function recordAnswer({ rejectionId, body, user, req = null }) {
     line.purchaseRequests = [...prIdsOfLine(line), String(replacement._id)];
     po.purchaseRequests = [...(po.purchaseRequests || []).map(String), String(replacement._id)];
     const from = line.expectedDeliveryDate || po.expectedDeliveryDate || null;
-    line.deliveryDateHistory.push({ from, to: read.expectedDate, reason: `Replacement for ${rejection.number}`, by: user?._id || null, byName, at: new Date() });
+    // Logged only when the date really moves — the same day was being logged
+    // as "Date changed from 18 Oct to 18 Oct" (2026-10-19).
+    const sameDay = from && new Date(from).toDateString() === new Date(read.expectedDate).toDateString();
+    if (!sameDay) line.deliveryDateHistory.push({ from, to: read.expectedDate, reason: `Replacement for ${rejection.number}`, by: user?._id || null, byName, at: new Date() });
     line.expectedDeliveryDate = read.expectedDate;
     line.overdueNotifiedFor = null;
     const live = po.items.filter(l => !l.cancelled?.at).map(l => l.expectedDeliveryDate).filter(Boolean).map(d => new Date(d).getTime());

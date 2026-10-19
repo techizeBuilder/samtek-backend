@@ -140,6 +140,12 @@ Two halves, averaged. If only one half has data, that half is the whole part.
   - **score:** `100 × months they quoted ÷ the most months any vendor quoted for that item` (any
     quote on record)
   - **skipped:** items where **nobody** quoted a warranty
+  - **which quotes:** every item the vendor ever quoted, whether or not it was ordered, and from
+    whom.
+  - **(All parts) The tables** under a vendor list the newest 40 events of each part, for
+    reading only; the score always uses every event. A cut-off table says "Showing the newest 40
+    of N"; a row older than 12 months is tagged "lifetime only" (2026-10-19). It doesn't depend on which screen asks (fixed 2026-10-19, bug B6: it used to take only
+    items on the POs of the vendors being shown).
 - **Claims half:** each **vendor warranty claim** (Complaints → Support, §29).
   - **A closed claim:** **50%** our ★ satisfaction (★ ÷ 5) + **25%** resolved (Repaired / Replaced /
     Credit note = yes) + **25%** response speed (within 3 days = full, 15+ days = none).

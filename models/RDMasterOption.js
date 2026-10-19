@@ -23,12 +23,22 @@ const RDMasterOptionSchema = new mongoose.Schema({
     // The actual text value in the dropdown
     value: { type: String, required: true, trim: true },
     // For cascading dropdowns: P-Type -> Category -> P-SourceType.
-    // Null means top-level (P-Type) or unlinked legacy data.
+    // Null means top-level (P-Type) or unlinked legacy data. The parent's
+    // TEXT, kept in step with it — products store text and the filter pages
+    // read it. Which parent it is comes from parentId below.
     parentValue: { type: String, default: null, trim: true },
+    // The parent option itself (2026-10-19, client bug). Linking by name only
+    // made two same-named parents share one list: a Sub Category "Chakki"
+    // under a new Category showed the Product Names / Variants of the
+    // "Chakki" under another Category, and the same name couldn't be added
+    // to both. Null for top-level values (and unmatched legacy orphans).
+    parentId: { type: mongoose.Schema.Types.ObjectId, ref: 'RDMasterOption', default: null },
     company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
 }, { timestamps: true });
 
-// Prevent duplicate options in the same dropdown (under the same parent) for the same company
-RDMasterOptionSchema.index({ company: 1, field: 1, value: 1, parentValue: 1 }, { unique: true });
+// No duplicate in the same dropdown under the same parent: the same name under
+// two different parents (two "Chakki"s) is allowed. parentValue keeps old
+// orphans (no parentId) distinct.
+RDMasterOptionSchema.index({ company: 1, field: 1, value: 1, parentId: 1, parentValue: 1 }, { unique: true });
 
 export default mongoose.model('RDMasterOption', RDMasterOptionSchema);

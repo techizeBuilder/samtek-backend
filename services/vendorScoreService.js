@@ -322,21 +322,37 @@ export async function computeVendorScores({ companyId, vendorIds, now = new Date
         ev.get(s.vendorId).price.push({ score: priceEvent(s.price, lowest), value: s.price * (Number(s.quantity) || 1), date: s.date, poNumber: s.poNumber, item: itemName.get(itemId) || '', unit: s.unit, price: s.price, lowest, lowestKind: lowestBy?.kind, lowestOwn: lowestBy?.vendorId === s.vendorId });
       }
     }
-    // Warranty duration: each of their quotes vs the best quoted for that item (only where someone gave one).
+  }
+
+  // Warranty duration: each of their quotes vs the best quoted for that item
+  // (only where someone gave one) — over EVERY item these vendors quoted (logic
+  // doc §4.5, "any quote on record"). It used to take the items from the POs
+  // of whichever vendors were being scored, so one vendor's score changed with
+  // the screen: rahul 87 on the Vendor Ratings list (all vendors) but 97 in his
+  // own panel (bug B6, 2026-10-19).
+  const QUOTED = { status: { $in: ['Submitted', 'Selected', 'Rejected', 'Superseded'] }, unitPrice: { $gt: 0 } };
+  const ownGroupIds = await VendorBid.distinct('group', { companyId: cid, vendor: { $in: vids }, group: { $ne: null }, ...QUOTED });
+  if (ownGroupIds.length) {
+    const IQG = mongoose.model('ItemQuoteGroup');
+    const quotedItems = await IQG.distinct('item', { _id: { $in: ownGroupIds } });
+    const wGroups = await IQG.find({ item: { $in: quotedItems } }).select('item').lean();
+    const wItemOfGroup = new Map(wGroups.map(g => [String(g._id), String(g.item)]));
+    const wBids = await VendorBid.find({ companyId: cid, group: { $in: wGroups.map(g => g._id) }, ...QUOTED })
+      .select('group vendor submittedAt createdAt warrantyMonths productName').lean();
     const bestWarranty = new Map();
-    for (const b of bids) {
-      const itemId = itemOfGroup.get(String(b.group));
+    for (const b of wBids) {
+      const itemId = wItemOfGroup.get(String(b.group));
       if (!itemId) continue;
       bestWarranty.set(itemId, Math.max(bestWarranty.get(itemId) || 0, Number(b.warrantyMonths) || 0));
     }
-    for (const b of bids) {
+    for (const b of wBids) {
       const vendorId = String(b.vendor);
       if (!ev.has(vendorId)) continue;
-      const itemId = itemOfGroup.get(String(b.group));
+      const itemId = wItemOfGroup.get(String(b.group));
       const best = bestWarranty.get(itemId) || 0;
       const score = warrantyDurationEvent(b.warrantyMonths, best);
       if (score == null) continue;
-      ev.get(vendorId).warrantyDuration.push({ score, value: 1, date: b.submittedAt || b.createdAt, item: b.productName || itemName.get(itemId) || '', months: Number(b.warrantyMonths) || 0, best });
+      ev.get(vendorId).warrantyDuration.push({ score, value: 1, date: b.submittedAt || b.createdAt, item: b.productName || '', months: Number(b.warrantyMonths) || 0, best });
     }
   }
 
@@ -390,11 +406,18 @@ export async function computeVendorScores({ companyId, vendorIds, now = new Date
       disputes: e.disputes,
     };
     if (withEvidence) {
-      const newest = (list) => [...list].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, EVIDENCE_CAP);
+      // The tables show the newest EVIDENCE_CAP events of each part; the score
+      // above used them all. `evidenceTotals` says how many there are, and an
+      // event older than the 12-month window is marked `lifetimeOnly` — it
+      // counts in the lifetime score, not the main one (2026-10-19).
+      const newest = (list) => [...list].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, EVIDENCE_CAP)
+        .map(ev => (recencyWeight(ev.date, now) > 0 ? ev : { ...ev, lifetimeOnly: true }));
       result.evidence = {
         price: newest(e.price), quality: newest(e.quality), delivery: newest(e.delivery), credit: newest(e.credit),
         warrantyDuration: newest(e.warrantyDuration), claims: newest(e.claims), response: newest(e.response),
       };
+      result.evidenceTotals = Object.fromEntries(['price', 'quality', 'delivery', 'credit', 'warrantyDuration', 'claims', 'response'].map(k => [k, e[k].length]));
+      result.evidenceCap = EVIDENCE_CAP;
     }
     out.set(id, result);
   }

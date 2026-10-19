@@ -76,7 +76,9 @@ Company Admin can't create POs (no RFQ/PO page; the create route allows the Acco
 that browser step was dropped. Nothing to fix in the code, unless you want a role that can both buy
 and approve (then the rule would matter).
 
-### B2c 🟡 Refunds & credits (Vendor Payment) has no pagination or "open only" view
+### B2c ✅ Refunds & credits (Vendor Payment) has no pagination or "open only" view
+**Fixed 2026-10-19 (change report §51):** Open / Settled / All (Open by default), 20 per page on
+the server, and the open count + ₹ over everything.
 Found 2026-10-15 while testing slice 6 (2e / 2f).
 - The list is per selected vendor. The server returns the newest 200 (`listMoneyBack`:
   `.sort({ createdAt: -1 }).limit(200)`), and the page shows only the **first 30**
@@ -88,7 +90,9 @@ Found 2026-10-15 while testing slice 6 (2e / 2f).
 - Fix idea: open items always on top; the history behind a "Show history" toggle with pagination;
   optional status chips (Open / All). Server side: page the list and count open items separately.
 
-### B5 🟡 Serial numbers that differ only by a hyphen count as different serials (decision needed)
+### B5 ✅ Serial numbers that differ only by a hyphen count as different serials (decision needed)
+**Decided 2026-10-17 (change report §45):** that's correct. Hyphens count (TLA-01 ≠ TLA01), so
+nothing changes there. A serial with a space inside is now refused.
 Found 2026-10-16 while testing slice 6 (3b, 3e).
 - The Bairing serials were received as `BRG0101` … `BRG0105` (no hyphen). The replacement was then
   received as **`BRG-0102`** (I expected it to be refused as already received). It was **accepted**, so Serial Numbers
@@ -106,7 +110,10 @@ Found 2026-10-16 while testing slice 6 (3b, 3e).
     type them the same way.
 - Test data: the extra `BRG-0102` row is the replacement of `BRG0101` (REJ-0003, Replaced).
 
-### B6 🟡 Vendor Warranty score differs between the list and the expanded vendor panel (OPEN INVESTIGATION, unconfirmed)
+### B6 ✅ Vendor Warranty score differs between the list and the expanded vendor panel (OPEN INVESTIGATION, unconfirmed)
+**Confirmed and fixed 2026-10-19 (change report §48).** The theory below was right. On the real
+data rahul read 87 on the list but 97 in his panel, and sujeet 86 vs 85. The warranty part now
+takes every item the vendor quoted; all 6 vendors give the same score both ways.
 Found 2026-10-16 while testing slice 6 section 4 (sujeet, Vendor Ratings).
 
 **Status:** not confirmed. It can't be checked in the browser: Purchase → RFQ/PO → All quotes shows
@@ -135,13 +142,37 @@ reading below is wrong.
   not from the POs of whoever is in the query; then add a test that the score is the same for one
   vendor alone and for all vendors together.
 
-### B7 🟡 Two ledger accounts are both called "Accounts Payable"
+### B12 ✅ Ledger page shows a liability's balance on the wrong side (found 2026-10-17)
+₹5,000 owed to sujeet read "₹5,000 Db". The page labelled every positive balance Db. **Fixed
+2026-10-19, change report §46.**
+
+### B14 ✅ Advance payment receipt numbers clash across companies (found 2026-10-19)
+`LedgerEntry.entryNumber` was counted per company but is unique across the database. A second
+company's first verified advance failed to save its receipt record. **Fixed 2026-10-19 (§52).**
+
+### B13 ✅ SBI's stored balance doesn't match its transactions (found 2026-10-19, sales side)
+**Fixed 2026-10-19 (§52).** Not the payments: the Bank & Cash form. The opening balance had no
+ledger line, and an edit overwrote the running total. Now there's an opening line, edits leave the
+balance alone, and "Adjust balance" posts a line with a reason. Test-1's HDFC / IDFC / SBI ledgers
+now explain their balances (SBI kept at ₹9,12,237.60). The original note follows.
+- The stored `Account.balance` is ₹9,12,237.60. The 55 transactions give ₹21,15,331.60
+  (₹22,22,047.48 received − ₹1,06,715.88 paid).
+- So about ₹12.03 lakh of customer receipts were posted as transactions without updating the
+  account's own balance.
+- Not from the purchase work. To find: which receipt flow writes a Transaction without the `$inc`,
+  then a one-off recompute of the stored balances.
+
+### B7 ✅ Two ledger accounts are both called "Accounts Payable"
+**Fixed 2026-10-19 (§46):** the account list tells same-named accounts apart. The purchase
+ledger's reads "(purchases — posted automatically)"; the other shows its account number.
 Found 2026-10-16 (slice 6, section 5, Ledger).
 - The account list has two: `PAY-1781949453620-WALP` (empty, ₹0, a liability account made earlier) and
   `SYS-ACCOUNTS_PAYABLE-edf6a7-TEST-UNIT` (the one every purchase entry posts to).
 - Anyone entering something by hand can pick the wrong one. Fix: rename or hide the empty one.
 
-### B8 🟡 Ledger page: Total Debit / Total Credit / Closing Balance are for the current page only
+### B8 ✅ Ledger page: Total Debit / Total Credit / Closing Balance are for the current page only
+**Fixed 2026-10-19 (§46):** the server sends the period totals and the closing balance. Seen
+again on 17 Oct: Total Credit fell after a new ₹1,000 credit.
 Found 2026-10-16 (slice 6, section 5, Ledger). Not from the purchase work: the page has done this
 since the first commit.
 - `LedgerRecord.jsx` adds up `records`, which holds only the 15 rows of the page on screen
@@ -152,7 +183,9 @@ since the first commit.
   account's closing balance.
 - Fix: have the server return the period totals and the real closing balance with the page of rows.
 
-### B9 🟡 "Bill for a Purchase Without a PO": GST type is not suggested from the GSTINs
+### B9 ✅ "Bill for a Purchase Without a PO": GST type is not suggested from the GSTINs
+**Fixed 2026-10-19 (change report §49):** picking the vendor presets the type by the PO's rule,
+with a note why; still changeable.
 Found 2026-10-16 (slice 6, section 5, Record New Bill).
 - The form defaults GST type to **Local (CGST + SGST)** even for mahesh, who is in another state
   (IGST). The PO flow decides this automatically from the company's and the vendor's GSTIN; here the
@@ -161,7 +194,9 @@ Found 2026-10-16 (slice 6, section 5, Record New Bill).
   paying ₹33,040 posted to SBI (debit, balance down by exactly ₹33,040).
 - Fix idea: preset the GST type from the vendor's and company's state, still changeable.
 
-### B10 🟡 Company Admin dashboard: "Purchase value" and "Top 3 vendors" count the original PO totals (decision needed)
+### B10 ✅ Company Admin dashboard: "Purchase value" and "Top 3 vendors" count the original PO totals (decision needed)
+**Decided and fixed 2026-10-19 (change report §50):** billed. POs at their bill plus bills
+without a PO; the ordered figure stays on a sub-line. Test-1 October: ₹1,68,520 → ₹79,438.77.
 Found 2026-10-16 (slice 6, section 5, dashboards).
 - Purchase value reads **₹1,62,520** (4 POs), the same as on 14 Oct, although since then PO-1 was
   cancelled after its advance (₹26,862.60 moved to money-back), PO-2 was short closed (₹8,896.86 →
@@ -176,7 +211,9 @@ Found 2026-10-16 (slice 6, section 5, dashboards).
   says: "Σ PO totals") or what we **ended up buying** (the bill)? If the second, switch the sum to the
   bill total and keep the trend and top-3 share on the same figure.
 
-### B11 🟡 Purchase Dashboard counts a quotation request as "waiting" even when no item is still waiting
+### B11 ✅ Purchase Dashboard counts a quotation request as "waiting" even when no item is still waiting
+**Fixed 2026-10-17, change report §44.** Seen again in the browser during the Tool-A re-test: Team
+3 / employee 1 after the PO. With the fix: Team 1 (QR-0004) / employee 0.
 Found 2026-10-16 (slice 5 part D / slice 6, quote sweep).
 - mahesh's QR-0002 (sent 14 Oct, status Sent, link valid to 21 Oct) has one bid, **Angle: Rejected**
   (Angle was ordered from rahul), so nothing is left to chase. The quote sweep (9:35) correctly skipped it:
@@ -192,12 +229,19 @@ Found 2026-10-16 (slice 5 part D / slice 6, quote sweep).
   unanswered, and run the sweep as of 3+ days after it was sent (e.g. `node sweep-quotes-as-of.mjs
   2026-10-20`). Expect `noReply: 1` and a "Quotes to follow up" notification to its sender.
 
-### B3 🟡 Old single-request PO edit still sets one quantity on every request
+### B15 ✅ The RFQ-era whole-PO receive added stock skipping QC (found 2026-10-19)
+`POST /api/accounts/purchases/orders/:id/receive` (`receivePurchase`) was still live. No screen
+called it. **Retired 2026-10-19 (§53):** it now answers 410.
+
+### B3 ✅ Old single-request PO edit still sets one quantity on every request
+**Retired 2026-10-19 (§53):** the route answers 410 and the handler is removed.
 `purchaseController.updatePurchase` (the old PO-edit route) still gives every request on a line the
 same quantity (the §40 bug, in the old route). v2 never edits a PO and no page calls it, so it can't
 fire today. Fix when that backend is cleaned up: remove the route, or use `splitLineQuantity`.
 
-### B4 🟡 The legacy RFQ "select winner" path still creates POs the old way
+### B4 ✅ The legacy RFQ "select winner" path still creates POs the old way
+**Retired 2026-10-19 (§53):** `POST /api/rfq/:id/select-vendor` answers 410 and the handler is
+removed; the public bid links are untouched.
 Noted in §5: it skips the approval threshold and the new rules. No screen reaches it since the RFQ
 pages were retired. Remove when the old RFQ backend is cleaned up.
 

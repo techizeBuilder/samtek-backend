@@ -85,10 +85,10 @@ Everything in §3, **for the whole team**, plus:
 | Tile | What it counts | Links to |
 |---|---|---|
 | **Waiting for you** | POs at Pending Approval, split by why (over the ₹ limit / vendor selection exception); cancellation requests; vendor requests (new vendor, vendor change, suspend / blacklist / reinstate) | the tabs on this page |
-| **Purchase value** | Σ PO totals (real orders: not pending, rejected or cancelled) in the period, and a 6-month bar trend | — |
+| **Purchase value** | **What was billed** (user decision 2026-10-19, bug B10; it was Σ PO totals): each real order (not pending, rejected or cancelled) at its **bill** amount, which starts at the PO total and drops with cancellation, short close and QC refunds / refusals, **plus every bill without a PO**. POs count in the PO's month, bills without a PO in their invoice date's month. Sub-line: ordered ₹ · ₹ fell away · + ₹ without a PO. 6-month bar trend on the same figure. | — |
 | **Savings** | POs whose selection check compared 2+ full quotes. **Saved:** where the cheapest was chosen, Σ (next-cheapest − chosen). **Paid above the cheapest:** where it wasn't, Σ (chosen − cheapest). | PO Approvals |
 | **Price rises** | PO lines in the period priced **above that vendor's last delivered price** by the price-rise warning % (Purchase Settings, default 10%): how many lines, and the ₹ extra (difference × quantity). Same rule as "Bought before". | — |
-| **Supplier concentration** | The top 3 vendors' share of purchase value in the period, with names and % | — |
+| **Supplier concentration** | The top 3 vendors' share of purchase value (billed, as above) in the period, with names and % | — |
 | **3-vendor compliance** | As in §4, for the period | — |
 | **Exceptions / urgent** | POs in the period that needed a vendor selection exception, counted per reason. "Urgent need" = the blueprint's emergency purchases. | PO Approvals |
 | **Vendor risk** | Approved vendors on Watchlist / Probationary; High-risk class; Suspended + Blacklisted | Vendors tabs |

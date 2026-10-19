@@ -82,15 +82,40 @@ export function complianceOf(pos) {
   return { passed, total, pct: total ? Math.round((100 * passed) / total) : null };
 }
 
-// The top vendors' share of purchase value.
+// Purchase value = what was BILLED, not what was ordered (bug B10, user
+// decision 2026-10-19): each real PO at its bill's amount — created at the full
+// PO total when the PO is placed, lowered by cancellation, short close and QC
+// refunds / refusals — plus every bill without a PO. A PO with no bill (older
+// records) counts its order total. Pure — exported for tests.
+//   → [{ vendorId, name, date, value, ordered, kind: 'po' | 'noPo' }]
+export function spendEntries(pos, bills) {
+  const billOfPo = new Map();
+  for (const b of bills || []) if (b.purchaseOrder) billOfPo.set(String(b.purchaseOrder?._id || b.purchaseOrder), b);
+  const cancelled = (b) => b.status === 'Cancelled' || b.stage === 'Cancelled';
+  const out = [];
+  for (const po of pos || []) {
+    const bill = billOfPo.get(String(po._id));
+    const ordered = Number(po.grandTotal) || 0;
+    out.push({ vendorId: idOf(po.supplier), name: po.supplier?.supplierName || 'Vendor', date: poDate(po), ordered, kind: 'po',
+      value: bill ? (cancelled(bill) ? 0 : Number(bill.totalAmount) || 0) : ordered });
+  }
+  for (const b of bills || []) {
+    if (b.purchaseOrder || cancelled(b)) continue;
+    out.push({ vendorId: idOf(b.vendor), name: b.vendor?.supplierName || 'Vendor', date: b.invoiceDate || b.createdAt, ordered: 0, kind: 'noPo', value: Number(b.totalAmount) || 0 });
+  }
+  return out;
+}
+
+// The top vendors' share of purchase value. Takes spend entries (above); a
+// plain PO (grandTotal / supplier) still works.
 export function concentration(pos, top = TOP_VENDORS) {
   const byVendor = new Map();
   let total = 0;
   for (const po of pos) {
-    const v = Number(po.grandTotal) || 0;
+    const v = Number(po.value ?? po.grandTotal) || 0;
     total += v;
-    const k = idOf(po.supplier);
-    const cur = byVendor.get(k) || { vendorId: k, name: po.supplier?.supplierName || 'Vendor', value: 0 };
+    const k = po.vendorId || idOf(po.supplier);
+    const cur = byVendor.get(k) || { vendorId: k, name: po.name || po.supplier?.supplierName || 'Vendor', value: 0 };
     cur.value += v;
     byVendor.set(k, cur);
   }
@@ -133,8 +158,14 @@ async function workTiles({ cid, pos, userId, now, settings }) {
   const itemsToBuy = await ItemQuoteGroup.countDocuments({ companyId: cid, status: 'Open', 'purchaseRequests.0': { $exists: true } });
 
   // Quotation requests.
-  const qrs = await QuotationRequest.find({ companyId: cid, ...(userId ? { createdBy: userId } : {}) })
+  const allQrs = await QuotationRequest.find({ companyId: cid, ...(userId ? { createdBy: userId } : {}) })
     .select('status emailStatus sentAt tokenExpiry submittedAt createdBy').lean();
+  // Only requests with an item still to chase (a quote row still Invited) —
+  // the daily quote sweep's own rule (quoteReminderService.openItemsOf). Once
+  // every item was ordered from someone else or closed, the request isn't
+  // waiting for anything (bug B11, 2026-10-17: QR-0002 / QR-0005 counted).
+  const withOpenItem = new Set((await VendorBid.distinct('quotationRequest', { quotationRequest: { $in: allQrs.map(q => q._id) }, status: 'Invited' })).map(String));
+  const qrs = allQrs.filter(q => withOpenItem.has(String(q._id)));
   const waiting = qrs.filter(q => q.status === 'Sent' && q.emailStatus !== 'Failed' && !q.submittedAt && new Date(q.tokenExpiry) > now);
   const noReply = waiting.filter(q => new Date(q.sentAt).getTime() <= now.getTime() - NO_REPLY_DAYS * DAY);
   const ranOut = qrs.filter(q => !q.submittedAt && q.emailStatus !== 'Failed' && ['Sent', 'Expired'].includes(q.status)
@@ -316,6 +347,11 @@ export async function buildDashboard({ companyId, view, userId, period = 'month'
   const real = pos.filter(p => !NOT_REAL.includes(p.status));
   const realIn = real.filter(p => inRange(poDate(p), range));
   const pending = pos.filter(p => p.status === 'Pending Approval');
+  // What was billed: real POs' bills + bills without a PO (B10).
+  const bills = await PurchaseInvoice.find({ companyId: cid }).select('purchaseOrder vendor invoiceDate createdAt totalAmount status stage')
+    .populate('vendor', 'supplierName').lean();
+  const spend = spendEntries(real, bills);
+  const spendIn = spend.filter(e => inRange(e.date, range));
   const [vendorRequests, money, vendors, scores, rises] = await Promise.all([
     VendorApprovalRequest.find({ companyId: cid, status: 'Pending' }).select('type').lean(),
     moneyTiles(cid, now),
@@ -328,11 +364,14 @@ export async function buildDashboard({ companyId, view, userId, period = 'month'
   const trend = [5, 4, 3, 2, 1, 0].map(i => {
     const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
-    const value = real.filter(p => { const t = new Date(poDate(p)).getTime(); return t >= start.getTime() && t < end.getTime(); })
-      .reduce((s, p) => s + (Number(p.grandTotal) || 0), 0);
+    const value = spend.filter(e => { const t = new Date(e.date).getTime(); return t >= start.getTime() && t < end.getTime(); })
+      .reduce((s, e) => s + e.value, 0);
     return { month: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`, value: round2(value) };
   });
-  const conc = concentration(realIn);
+  const conc = concentration(spendIn);
+  const poSpend = spendIn.filter(e => e.kind === 'po');
+  const noPo = spendIn.filter(e => e.kind === 'noPo');
+  const ordered = round2(poSpend.reduce((s, e) => s + e.ordered, 0));
   return {
     view, period: range.key,
     approvals: {
@@ -344,7 +383,12 @@ export async function buildDashboard({ companyId, view, userId, period = 'month'
       vendorRequests: byType,
       vendorRequestsTotal: vendorRequests.length,
     },
-    purchaseValue: { total: conc.total, pos: realIn.length, trend },
+    // total = billed; ordered / fellAway / noPoBills explain it (B10).
+    purchaseValue: {
+      total: conc.total, pos: realIn.length, trend,
+      ordered, fellAway: round2(ordered - poSpend.reduce((s, e) => s + e.value, 0)),
+      noPoBills: { count: noPo.length, total: round2(noPo.reduce((s, e) => s + e.value, 0)) },
+    },
     savings: savingsOf(realIn),
     priceRises: rises,
     concentration: conc,

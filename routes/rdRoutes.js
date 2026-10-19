@@ -3,7 +3,7 @@ import { authenticateToken } from '../middleware/auth.js';
 import { checkPermission, checkAnyPermission } from '../middleware/permissions.js';
 import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
-  getMachines, createMachine, updateMachine,
+  getMachines, createMachine, updateMachine, getMachineMaterialGrades,
   discontinueMachine, reactivateMachine,
   getBOMCostByMachineCode,
   getPrototypes, createPrototype, updatePrototype,
@@ -194,6 +194,8 @@ router.delete('/expenses/:id', expensesDelete, deleteRDExpense);
 
 // ── Machines (Product Master) ────────────────────────────────────────────────
 router.get('/machines', productMasterView, getMachines);
+// Material Grades used by the products of a classification (filter list, 2026-10-19).
+router.get('/machines/material-grades', productMasterView, getMachineMaterialGrades);
 router.post('/machines', productMasterAdd, createMachine);
 router.put('/machines/:id', productMasterEdit, updateMachine);
 router.put('/machines/:id/discontinue', productMasterEdit, discontinueMachine);

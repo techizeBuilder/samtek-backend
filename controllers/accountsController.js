@@ -1370,6 +1370,57 @@ export const getAccountById = async (req, res) => {
   }
 };
 
+// ── Balance lines (bug B13, 2026-10-19) ─────────────────────────────────────
+// An account's balance must always equal what its ledger lines add up to.
+// The opening balance typed when an account is added, and a correction to
+// match the real bank, used to be written straight into Account.balance with
+// no line behind them — so the Ledger and Bank & Cash disagreed (test-1: HDFC
+// +₹100, IDFC +₹1,000 = their opening balances; SBI −₹12.03 lakh after an
+// edit overwrote the running total). Now each is one ledger line against an
+// equity account, and the balance moves with it.
+const debitNatured = (type) => ['Asset', 'Expense'].includes(type);
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+async function counterAccount(name, { unit, companyId }) {
+  let acc = await Account.findOne({ unit, accountName: name, accountType: 'Equity' });
+  if (!acc) {
+    acc = await Account.create({
+      accountNumber: `EQ-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+      accountName: name, accountType: 'Equity', balance: 0, unit, companyId: companyId || null,
+      description: name === 'Opening Balance Equity' ? 'Opening balances of accounts added to the books' : 'Corrections made to match the real bank / books',
+    });
+  }
+  return acc;
+}
+
+// One balanced line: `amount` > 0 raises `account` on its normal side, < 0
+// lowers it; the counter equity account takes the other side. With
+// `moveBalance: false` only the line is written (used to explain a balance
+// that is already stored — the one-time data fix).
+export async function postBalanceLine({ account, amount, counterName, description, user, date = new Date(), moveBalance = true }) {
+  const amt = round2(amount);
+  if (!amt) return null;
+  const counter = await counterAccount(counterName, { unit: account.unit, companyId: account.companyId || user?.companyId });
+  const raiseByDebit = debitNatured(account.accountType);
+  const accDebit = (amt > 0) === raiseByDebit;
+  const abs = Math.abs(amt);
+  const entries = [
+    { account: account._id, debit: accDebit ? abs : 0, credit: accDebit ? 0 : abs },
+    { account: counter._id, debit: accDebit ? 0 : abs, credit: accDebit ? abs : 0 },
+  ];
+  const txn = await Transaction.create({
+    transactionNumber: `TXN-BAL-${Date.now()}-${Math.random().toString(36).slice(2, 9).toUpperCase()}`,
+    date, description, totalAmount: abs, unit: account.unit, mode: 'Other',
+    createdBy: user?._id, isApproved: true, approvedBy: user?._id, entries,
+  });
+  if (moveBalance) {
+    await Account.updateOne({ _id: account._id }, { $inc: { balance: amt } });
+    // Equity is credit-natured: it rises when credited.
+    await Account.updateOne({ _id: counter._id }, { $inc: { balance: accDebit ? abs : -abs } });
+  }
+  return txn;
+}
+
 export const createAccount = async (req, res) => {
   try {
     const { accountName, accountType, parentAccount, description, balance, type, bankDetails, isBankOrCash } = req.body;
@@ -1386,7 +1437,8 @@ export const createAccount = async (req, res) => {
       accountName,
       accountType: accountType === 'Bank/Cash' ? 'Asset' : accountType,
       type,
-      balance: balance || 0,
+      // Starts at 0; the opening balance is posted as a ledger line below (B13).
+      balance: 0,
       isBankOrCash: isBankOrCash || false,
       bankDetails,
       unit: req.user.role === USER_ROLES.SUPER_USER ? req.body.unit : req.user.unit,
@@ -1397,6 +1449,11 @@ export const createAccount = async (req, res) => {
 
     const account = new Account(accountData);
     await account.save();
+    const opening = round2(balance);
+    if (opening) {
+      await postBalanceLine({ account, amount: opening, counterName: 'Opening Balance Equity', description: `Opening balance — ${accountName}`, user: req.user });
+      account.balance = opening;
+    }
     await account.populate('parentAccount', 'accountName');
 
     res.status(201).json({
@@ -1413,7 +1470,11 @@ export const createAccount = async (req, res) => {
 export const updateAccount = async (req, res) => {
   try {
     const { id } = req.params;
-    const { accountName, accountType, parentAccount, description, isActive, balance, isBankOrCash, bankDetails } = req.body;
+    // `balance` is NOT taken from an edit (B13): the edit form re-sent its
+    // box, overwriting the running total with whatever it showed — a page
+    // opened earlier wiped every posting since. A correction goes through
+    // adjustAccountBalance (below), as a ledger line with a reason.
+    const { accountName, accountType, parentAccount, description, isActive, isBankOrCash, bankDetails } = req.body;
 
     const account = await Account.findById(id);
 
@@ -1431,7 +1492,6 @@ export const updateAccount = async (req, res) => {
     if (parentAccount) updateData.parentAccount = parentAccount;
     if (description !== undefined) updateData.description = description;
     if (typeof isActive === 'boolean') updateData.isActive = isActive;
-    if (balance !== undefined) updateData.balance = balance;
     if (typeof isBankOrCash === 'boolean') updateData.isBankOrCash = isBankOrCash;
     if (bankDetails) updateData.bankDetails = bankDetails;
 
@@ -1449,6 +1509,40 @@ export const updateAccount = async (req, res) => {
   } catch (error) {
     console.error('Update account error:', error);
     res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// POST /api/accounts/:id/adjust-balance { actualBalance, reason } — correct a
+// book bank / cash account to what the real bank (or cash count) shows (B13,
+// 2026-10-19). The difference from the LIVE balance (worked out here, at the
+// moment of saving — a page left open can't wipe postings) becomes one ledger
+// line "Balance adjustment" with the reason, against "Balance Adjustments".
+export const adjustAccountBalance = async (req, res) => {
+  try {
+    const account = await Account.findById(req.params.id);
+    if (!account) return res.status(404).json({ success: false, message: 'Account not found' });
+    if (req.user.role !== USER_ROLES.SUPER_USER && account.unit !== req.user.unit) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const raw = req.body?.actualBalance;
+    if (raw === '' || raw === null || raw === undefined || !Number.isFinite(Number(raw))) {
+      return res.status(400).json({ success: false, message: 'Enter the balance the bank (or cash count) shows now.' });
+    }
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) return res.status(400).json({ success: false, message: 'Give a reason for the adjustment (e.g. "bank charges not entered").' });
+    const actual = round2(raw);
+    const diff = round2(actual - (Number(account.balance) || 0));
+    if (Math.abs(diff) < 0.005) return res.status(400).json({ success: false, message: `${account.accountName} already shows ₹${actual.toLocaleString('en-IN')} — nothing to adjust.` });
+    const by = req.user?.fullName || req.user?.username || '';
+    await postBalanceLine({
+      account, amount: diff, counterName: 'Balance Adjustments', user: req.user,
+      description: `Balance adjustment ${diff > 0 ? '+' : '−'}₹${Math.abs(diff).toLocaleString('en-IN')}: ${reason}${by ? ` (by ${by})` : ''}`,
+    });
+    const updated = await Account.findById(account._id).lean();
+    res.json({ success: true, message: `${account.accountName} adjusted by ${diff > 0 ? '+' : '−'}₹${Math.abs(diff).toLocaleString('en-IN')} to ₹${round2(updated.balance).toLocaleString('en-IN')}.`, account: updated, difference: diff });
+  } catch (error) {
+    console.error('Adjust balance error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Internal server error' });
   }
 };
 
@@ -1805,8 +1899,14 @@ export const getLedgerRecords = async (req, res) => {
     }
 
     // 2. Calculate Total Effect of transactions in the range to determine range-end balance
+    // — and the period's own Debit / Credit totals (bug B8, 2026-10-17: the
+    // page added up only the 15 rows on screen, so the tiles changed with the
+    // page and a new entry could even make a total fall). Same column swap as
+    // the rows for bank / cash (passbook view, below).
     const allInRangeTransactions = await Transaction.find(query);
     let totalRangeEffect = 0;
+    let periodDebit = 0;
+    let periodCredit = 0;
     allInRangeTransactions.forEach(txn => {
       const entry = txn.entries.find(e =>
         e.account.toString() === accountId ||
@@ -1815,6 +1915,8 @@ export const getLedgerRecords = async (req, res) => {
       if (entry) {
         const effect = (entry.debit || 0) - (entry.credit || 0);
         totalRangeEffect += (['Asset', 'Expense'].includes(account.accountType)) ? effect : -effect;
+        periodDebit += account.isBankOrCash ? (entry.credit || 0) : (entry.debit || 0);
+        periodCredit += account.isBankOrCash ? (entry.debit || 0) : (entry.credit || 0);
       }
     });
 
@@ -2011,6 +2113,9 @@ export const getLedgerRecords = async (req, res) => {
         accountNumber: account.accountNumber
       },
       openingBalance,
+      // The whole period, whichever page is shown (B8).
+      totals: { debit: Math.round(periodDebit * 100) / 100, credit: Math.round(periodCredit * 100) / 100 },
+      closingBalance: Math.round(rangeClosingBalance * 100) / 100,
       records,
       pagination: {
         total: totalTransactions,
