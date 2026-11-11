@@ -45,6 +45,59 @@ export const addCandidate = async (req, res) => {
 };
 
 /**
+ * 🌐 Public: Candidate applies from the company website (no auth)
+ */
+export const applyToJob = async (req, res) => {
+  try {
+    const job = await JobOpening.findById(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ success: false, message: "Job opening not found" });
+    }
+    if (job.status !== "Open") {
+      return res.status(400).json({ success: false, message: "This job opening is no longer accepting applications" });
+    }
+
+    const { name, email, mobile } = req.body;
+    if (!name || !email || !mobile || !req.file) {
+      return res.status(400).json({ success: false, message: "Name, Email, Mobile and Resume are required" });
+    }
+
+    // A flaky network retry or a double-click on "Submit" shouldn't create a
+    // second candidate for the same person + job — just confirm the existing one.
+    const existing = await Candidate.findOne({ jobId: job._id, email: email.trim().toLowerCase() });
+    if (existing) {
+      return res.json({
+        success: true,
+        message: "You have already applied for this position",
+        candidateId: existing._id,
+      });
+    }
+
+    const resumeUrl = `/uploads/resumes/${req.file.filename}`;
+
+    const candidate = await Candidate.create({
+      name,
+      email: email.trim().toLowerCase(),
+      mobile,
+      jobId: job._id,
+      jobTitle: job.jobTitle,
+      recruitingManager: job.recruitingManager,
+      resumeUrl,
+      companyId: job.companyId,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Application submitted successfully",
+      candidateId: candidate._id,
+      jobTitle: candidate.jobTitle,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to submit application", error: error.message });
+  }
+};
+
+/**
  * 📋 Get All Candidates
  */
 export const getAllCandidates = async (req, res) => {

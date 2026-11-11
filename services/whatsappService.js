@@ -70,7 +70,9 @@ export const sendWhatsAppText = async ({ companyId, to, message }) => {
     return { success: false, error: 'No valid phone number provided', waMeUrl: null };
   }
 
-  const settings = await ApiSettings.findOne({ companyId });
+  // WhatsApp credentials are global now (shared across all companies) —
+  // companyId is accepted for call-site compatibility but no longer scopes.
+  const settings = await ApiSettings.findOne();
   if (!settings?.whatsapp?.enabled || !settings.whatsapp.phoneNumberId || !settings.whatsapp.accessToken) {
     return { success: false, error: 'WhatsApp API not configured (Admin Settings → WhatsApp)', waMeUrl };
   }
@@ -100,7 +102,9 @@ export const sendWhatsAppTemplate = async ({ companyId, to, templateName, langua
     return { success: false, error: 'No template name provided', waMeUrl };
   }
 
-  const settings = await ApiSettings.findOne({ companyId });
+  // WhatsApp credentials are global now (shared across all companies) —
+  // companyId is accepted for call-site compatibility but no longer scopes.
+  const settings = await ApiSettings.findOne();
   if (!settings?.whatsapp?.enabled || !settings.whatsapp.phoneNumberId || !settings.whatsapp.accessToken) {
     return { success: false, error: 'WhatsApp API not configured (Admin Settings → WhatsApp)', waMeUrl };
   }

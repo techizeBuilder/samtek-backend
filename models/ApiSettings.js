@@ -1,13 +1,14 @@
 import mongoose from 'mongoose';
 
-const apiSettingsSchema = new mongoose.Schema({
-  companyId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Company',
-    required: true,
-    unique: true
-  },
+// A single global document — there is exactly one ApiSettings record for the
+// whole software, not one per company (see docs/global-api-settings-2026-11.md).
+// Each integration below instead carries its own `assignedCompanyIds`: the
+// subset of companies that should receive the leads/candidates/call-logs that
+// integration produces. A webhook with an empty assignedCompanyIds has nowhere
+// to deliver leads and is treated as not-yet-configured by its receiver.
+const companyRef = { type: mongoose.Schema.Types.ObjectId, ref: 'Company' };
 
+const apiSettingsSchema = new mongoose.Schema({
   // ─── IndiaMART Settings ───────────────────────────────────────
   indiamart: {
     enabled: { type: Boolean, default: false },
@@ -25,6 +26,7 @@ const apiSettingsSchema = new mongoose.Schema({
       default: 'round_robin'
     },
     assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    assignedCompanyIds: [companyRef],
     lastAssignedIndex: { type: Number, default: 0 },
     lastSyncedAt: { type: Date }
   },
@@ -40,6 +42,7 @@ const apiSettingsSchema = new mongoose.Schema({
       default: 2
     },
     assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    assignedCompanyIds: [companyRef],
     lastAssignedIndex: { type: Number, default: 0 },
     lastSyncedAt: { type: Date }
   },
@@ -48,7 +51,8 @@ const apiSettingsSchema = new mongoose.Schema({
   website: {
     enabled: { type: Boolean, default: false },
     apiKey: { type: String, default: '' },
-    assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+    assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    assignedCompanyIds: [companyRef]
   },
 
   // ─── Google Ads Lead Form Webhook Settings ─────────────────────
@@ -59,6 +63,7 @@ const apiSettingsSchema = new mongoose.Schema({
     enabled: { type: Boolean, default: false },
     webhookKey: { type: String, default: '' },
     assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    assignedCompanyIds: [companyRef],
     lastSyncedAt: { type: Date }
   },
 
@@ -74,6 +79,7 @@ const apiSettingsSchema = new mongoose.Schema({
     pageAccessToken: { type: String, default: '' },
     pageId: { type: String, default: '' },
     assignedUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    assignedCompanyIds: [companyRef],
     lastSyncedAt: { type: Date }
   },
 
