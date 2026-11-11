@@ -91,6 +91,68 @@ export const getAllJobOpenings = async (req, res) => {
 };
 
 /**
+ * 🌐 Public: List Open Job Openings (no auth — for the company's careers page)
+ */
+export const getPublicJobOpenings = async (req, res) => {
+  try {
+    const { companyId } = req.query;
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: "companyId is required" });
+    }
+
+    const jobs = await JobOpenings.find({ companyId, status: "Open" })
+      .select("jobTitle department location openings jobDocument createdAt")
+      .sort({ createdAt: -1 });
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const data = jobs.map((job) => ({
+      jobId: job._id,
+      jobTitle: job.jobTitle,
+      department: job.department,
+      location: job.location,
+      openings: job.openings,
+      postedOn: job.createdAt,
+      jobDocumentUrl: job.jobDocument ? `${baseUrl}/${job.jobDocument}` : null,
+    }));
+
+    res.json({ success: true, count: data.length, jobs: data });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch job openings", error: error.message });
+  }
+};
+
+/**
+ * 🌐 Public: Single Job Opening detail (no auth)
+ */
+export const getPublicJobOpeningById = async (req, res) => {
+  try {
+    const job = await JobOpenings.findById(req.params.id)
+      .select("jobTitle department location openings status jobDocument createdAt");
+
+    if (!job) {
+      return res.status(404).json({ success: false, message: "Job opening not found" });
+    }
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    res.json({
+      success: true,
+      job: {
+        jobId: job._id,
+        jobTitle: job.jobTitle,
+        department: job.department,
+        location: job.location,
+        openings: job.openings,
+        status: job.status,
+        postedOn: job.createdAt,
+        jobDocumentUrl: job.jobDocument ? `${baseUrl}/${job.jobDocument}` : null,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch job opening", error: error.message });
+  }
+};
+
+/**
  * 🔍 Get Job Opening By ID
  */
 export const getJobOpeningById = async (req, res) => {

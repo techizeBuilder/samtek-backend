@@ -65,6 +65,45 @@ async function generateLeadCode(companyId) {
   return `LD-${Date.now().toString().slice(-6)}`;
 }
 
+// Push-style integrations (Website/IndiaMART/Google Ads/Facebook webhooks,
+// plus the background IndiaMART/IVR poll) are configured ONCE, globally, and
+// each names the subset of companies that should receive what it produces
+// (ApiSettings.<type>.assignedCompanyIds). A single inbound lead is therefore
+// fanned out into one Lead document per selected company — never shared
+// across companies, and never created for a company that wasn't selected.
+//
+// `assignedUserIds` on the same settings is also a flat, cross-company list
+// (the picker has no per-company grouping), so the random-assignee pick for
+// each company is restricted to the users that actually belong to it —
+// otherwise a Samtek Biosciences lead could land on a Samtek Machinery
+// salesperson's desk by chance.
+//
+// dedupeQuery: extra Lead filter (merged with companyId) to skip a lead
+// that's already been created for that company, e.g. { indiamartQueryId }.
+// buildFields(companyId): returns the rest of the Lead's fields.
+async function fanOutLeadToCompanies({ companyIds, assignedUserIds, dedupeQuery, buildFields }) {
+  const created = [];
+  for (const companyId of (companyIds || [])) {
+    if (dedupeQuery) {
+      const exists = await Lead.findOne({ companyId, ...dedupeQuery }).select('_id').lean();
+      if (exists) continue;
+    }
+
+    const usersForCompany = (assignedUserIds || []).filter(
+      (u) => u?.companyId && String(u.companyId) === String(companyId)
+    );
+    const assignedTo = usersForCompany.length > 0
+      ? usersForCompany[Math.floor(Math.random() * usersForCompany.length)]._id
+      : null;
+
+    const leadCode = await generateLeadCode(companyId);
+    const newLead = new Lead({ ...buildFields(companyId), leadCode, companyId, assignedTo });
+    await newLead.save();
+    created.push(newLead);
+  }
+  return created;
+}
+
 // Create new lead
 export const createLead = async (req, res) => {
   try {
@@ -1172,21 +1211,23 @@ export const uploadLeadDocuments = async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 export const getApiSettings = async (req, res) => {
   try {
-    // Super Admin can fetch settings for any company via ?companyId=xxx
-    const targetCompanyId = (req.user.role === 'Super Admin' && req.query.companyId)
-      ? req.query.companyId
-      : req.user.companyId;
-
-    let settings = await ApiSettings.findOne({ companyId: targetCompanyId })
+    // One shared settings document for the whole software — not per company.
+    let settings = await ApiSettings.findOne()
       .populate('indiamart.assignedUserIds', 'fullName username')
+      .populate('indiamart.assignedCompanyIds', 'name unitName city state')
       .populate('ivr.assignedUserIds', 'fullName username')
+      .populate('ivr.assignedCompanyIds', 'name unitName city state')
       .populate('website.assignedUserIds', 'fullName username')
+      .populate('website.assignedCompanyIds', 'name unitName city state')
       .populate('googleAds.assignedUserIds', 'fullName username')
-      .populate('facebook.assignedUserIds', 'fullName username');
-    // whatsapp has no assignedUserIds — nothing to populate
+      .populate('googleAds.assignedCompanyIds', 'name unitName city state')
+      .populate('facebook.assignedUserIds', 'fullName username')
+      .populate('facebook.assignedCompanyIds', 'name unitName city state');
+    // whatsapp has no assignedUserIds/assignedCompanyIds — it's a messaging
+    // channel, not a lead source, so there's nothing to route per company.
 
     if (!settings) {
-      settings = await ApiSettings.create({ companyId: targetCompanyId });
+      settings = await ApiSettings.create({});
     }
     res.json({ success: true, settings });
   } catch (error) {
@@ -1201,16 +1242,22 @@ export const getApiSettings = async (req, res) => {
 export const saveApiSettings = async (req, res) => {
   try {
     const { indiamart, ivr, website, googleAds, facebook, whatsapp } = req.body;
-    // Super Admin can save settings for any company via ?companyId=xxx
-    const targetCompanyId = (req.user.role === 'Super Admin' && req.query.companyId)
-      ? req.query.companyId
-      : req.user.companyId;
 
-    const settings = await ApiSettings.findOneAndUpdate(
-      { companyId: targetCompanyId },
-      { $set: { indiamart, ivr, website, googleAds, facebook, whatsapp } },
-      { upsert: true, new: true }
-    );
+    // Singleton document — there is only ever one. find-then-save (instead of
+    // the old findOneAndUpdate) so Mongoose validators run on every save; the
+    // old upsert silently skipped validation and could insert a document
+    // missing required fields (found live: 2026-11-11).
+    let settings = await ApiSettings.findOne();
+    if (!settings) settings = new ApiSettings({});
+
+    if (indiamart !== undefined) settings.indiamart = indiamart;
+    if (ivr !== undefined) settings.ivr = ivr;
+    if (website !== undefined) settings.website = website;
+    if (googleAds !== undefined) settings.googleAds = googleAds;
+    if (facebook !== undefined) settings.facebook = facebook;
+    if (whatsapp !== undefined) settings.whatsapp = whatsapp;
+
+    await settings.save();
     res.json({ success: true, message: 'API settings saved', settings });
   } catch (error) {
     console.error('Error saving API settings:', error);
@@ -1223,7 +1270,11 @@ export const saveApiSettings = async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 export const syncIndiamartLeads = async (req, res) => {
   try {
-    const settings = await ApiSettings.findOne({ companyId: req.user.companyId })
+    // Settings are global, but this manual "Sync" button is a deliberate,
+    // logged-in, one-company action — it always imports into req.user.companyId
+    // only, regardless of how many companies indiamart.assignedCompanyIds lists
+    // (that list only drives the webhook/CRON fan-out, not this button).
+    const settings = await ApiSettings.findOne()
       .populate('indiamart.assignedUserIds', 'fullName username _id');
 
     if (!settings?.indiamart?.enabled) {
@@ -1367,7 +1418,9 @@ export const syncIndiamartLeads = async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 export const syncIvrLeads = async (req, res) => {
   try {
-    const settings = await ApiSettings.findOne({ companyId: req.user.companyId })
+    // Same deliberate single-company behavior as syncIndiamartLeads above —
+    // this manual button always imports into req.user.companyId only.
+    const settings = await ApiSettings.findOne()
       .populate('ivr.assignedUserIds', 'fullName username _id');
 
     if (!settings?.ivr?.enabled || !settings.ivr.apiKey) {
@@ -1440,7 +1493,7 @@ export const syncIvrLeads = async (req, res) => {
     }
 
     await ApiSettings.findOneAndUpdate(
-      { companyId: req.user.companyId },
+      {},
       { 'ivr.lastAssignedIndex': assignIdx, 'ivr.lastSyncedAt': new Date() }
     );
 
@@ -1459,17 +1512,21 @@ export const receiveIvrCallLog = async (req, res) => {
     const q = req.query.q || '';
     if (!q) return res.status(400).json({ success: false, message: 'Missing API token' });
 
-    // Find company from API key
+    // Find the (global) IVR settings by API key
     const settings = await ApiSettings.findOne({ 'ivr.apiKey': q });
     if (!settings) return res.status(401).json({ success: false, message: 'Unauthorized token' });
+
+    const targetCompanyIds = settings.ivr.assignedCompanyIds || [];
+    if (targetCompanyIds.length === 0) {
+      return res.status(500).json({
+        success: false,
+        message: 'This IVR account is not linked to any company yet. Ask your admin to select at least one company in Admin Settings > API Integration Settings > Acefone IVR.'
+      });
+    }
 
     const data = req.body;
     const callId = data.call_id || '';
     if (!callId) return res.status(400).json({ success: false, message: 'Missing call_id' });
-
-    // Check duplicate
-    const exists = await CallLog.findOne({ companyId: settings.companyId, callId });
-    if (exists) return res.json({ success: true, message: 'Duplicate call ignored' });
 
     const direction = data.direction || 'inbound';
     const cleanNum = (n) => n ? (n.replace(/\D/g, '')).slice(-10) : '';
@@ -1480,39 +1537,46 @@ export const receiveIvrCallLog = async (req, res) => {
     let agentName = data?.answered_agent?.name || data.answered_agent_name || '';
     agentName = agentName.replace(/-?\s*Extension/i, '').trim();
 
-    // Try to find linked lead by mobile number
-    const linkedLead = await Lead.findOne({ companyId: settings.companyId, mobile: clientNumber });
+    // A shared IVR number can serve several companies at once, so the call
+    // itself isn't inherently "for" one of them — log it (and try to match an
+    // existing lead by mobile) under every company this IVR account serves.
+    const savedLogs = [];
+    for (const companyId of targetCompanyIds) {
+      const exists = await CallLog.findOne({ companyId, callId }).select('_id').lean();
+      if (exists) continue;
 
-    const callLog = new CallLog({
-      companyId: settings.companyId,
-      leadId: linkedLead?._id || null,
-      callId,
-      uuid: data.uuid || '',
-      direction,
-      status: data.call_status || '',
-      description: data.reason_key || '',
-      recordingUrl: data.recording_url || '',
-      service: direction === 'clicktocall' ? 'ClickToCall' : 'Inbound',
-      clientNumber,
-      didNumber: cleanNum(data.call_to_number || data.did_no_without_prefix),
-      agentNumber: data?.answered_agent?.agent_number || '',
-      agentName,
-      callDate: new Date(),
-      callDuration: parseFloat(data.duration || 0),
-      answeredSeconds: parseFloat(data.billsec || 0),
-      minutesConsumed: Math.round(parseFloat(data.billsec || 0) / 60 * 100) / 100,
-      hangupCause: data.hangup_cause || '',
-      reason: data.reason_key || '',
-      source: 'IVR'
-    });
+      const linkedLead = await Lead.findOne({ companyId, mobile: clientNumber }).select('_id').lean();
 
-    await callLog.save();
+      const callLog = new CallLog({
+        companyId,
+        leadId: linkedLead?._id || null,
+        callId,
+        uuid: data.uuid || '',
+        direction,
+        status: data.call_status || '',
+        description: data.reason_key || '',
+        recordingUrl: data.recording_url || '',
+        service: direction === 'clicktocall' ? 'ClickToCall' : 'Inbound',
+        clientNumber,
+        didNumber: cleanNum(data.call_to_number || data.did_no_without_prefix),
+        agentNumber: data?.answered_agent?.agent_number || '',
+        agentName,
+        callDate: new Date(),
+        callDuration: parseFloat(data.duration || 0),
+        answeredSeconds: parseFloat(data.billsec || 0),
+        minutesConsumed: Math.round(parseFloat(data.billsec || 0) / 60 * 100) / 100,
+        hangupCause: data.hangup_cause || '',
+        reason: data.reason_key || '',
+        source: 'IVR'
+      });
+      await callLog.save();
+      savedLogs.push({ callLogId: callLog._id, companyId, linkedLeadId: linkedLead?._id || null });
+    }
 
     res.json({
       success: true,
-      message: 'Call log saved',
-      callLogId: callLog._id,
-      linkedLeadId: linkedLead?._id || null
+      message: savedLogs.length ? 'Call log saved' : 'Duplicate call ignored',
+      callLogs: savedLogs
     });
   } catch (error) {
     console.error('Error receiving IVR call log:', error);
@@ -1529,8 +1593,16 @@ export const receiveWebsiteWebhook = async (req, res) => {
     if (!apiKey) return res.status(400).json({ success: false, message: 'API Key Missing' });
 
     const settings = await ApiSettings.findOne({ 'website.apiKey': apiKey })
-      .populate('website.assignedUserIds', '_id fullName');
+      .populate('website.assignedUserIds', '_id fullName companyId');
     if (!settings) return res.status(401).json({ success: false, message: 'Invalid API Key' });
+
+    const targetCompanyIds = settings.website.assignedCompanyIds || [];
+    if (targetCompanyIds.length === 0) {
+      return res.status(500).json({
+        success: false,
+        message: 'This webhook is not linked to any company yet. Ask your admin to select at least one company in Admin Settings > API Integration Settings > Website Webhook.'
+      });
+    }
 
     const input = req.body || {};
     const name    = (input.name || input['form_field-name'] || '').trim();
@@ -1550,41 +1622,38 @@ export const receiveWebsiteWebhook = async (req, res) => {
     // submission creates its own lead, even from a repeat visitor (e.g. a
     // genuinely new enquiry 6 months later). PHP keeps one persistent
     // "buyer" record and links each new lead to it; Samtek has no separate
-    // buyer entity, so this is simply always-create.
-
-    // Assign user
-    const users = settings.website.assignedUserIds || [];
-    const assignedTo = users.length > 0
-      ? users[Math.floor(Math.random() * users.length)]._id
-      : null;
-
-    const leadCode = await generateLeadCode(settings.companyId);
-
-    const newLead = new Lead({
-      leadCode,
-      companyId: settings.companyId,
-      source: 'Website',
-      status: 'New',
-      stage: 'N/A',
-      productRequired: product,
-      describeRequirements: desc,
-      companyName: name || 'Website Lead',
-      contactPerson: name || 'Website Lead',
-      mobile: mobile || '0000000000',
-      email: email || `website_${Date.now()}@noemail.com`,
-      city,
-      state,
-      country,
-      assignedTo,
-      history: [{
-        action: 'Lead Created',
-        notes: `Auto-created from Website Webhook`,
-        performedBy: null
-      }]
+    // buyer entity, so this is simply always-create. Applies per company too:
+    // no dedup against companyIds, every selected company gets its own lead.
+    const created = await fanOutLeadToCompanies({
+      companyIds: targetCompanyIds,
+      assignedUserIds: settings.website.assignedUserIds,
+      dedupeQuery: null,
+      buildFields: () => ({
+        source: 'Website',
+        status: 'New',
+        stage: 'N/A',
+        productRequired: product,
+        describeRequirements: desc,
+        companyName: name || 'Website Lead',
+        contactPerson: name || 'Website Lead',
+        mobile: mobile || '0000000000',
+        email: email || `website_${Date.now()}@noemail.com`,
+        city,
+        state,
+        country,
+        history: [{
+          action: 'Lead Created',
+          notes: `Auto-created from Website Webhook`,
+          performedBy: null
+        }]
+      })
     });
 
-    await newLead.save();
-    res.json({ success: true, message: 'Lead created from website', leadId: newLead._id, leadCode });
+    res.json({
+      success: true,
+      message: `Lead created from website in ${created.length} compan${created.length === 1 ? 'y' : 'ies'}`,
+      leads: created.map(l => ({ leadId: l._id, companyId: l.companyId, leadCode: l.leadCode }))
+    });
   } catch (error) {
     console.error('Error receiving website webhook:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
@@ -1613,7 +1682,13 @@ export const receiveIndiamartWebhook = async (req, res) => {
     }
     if (!settings) return res.status(401).json({ success: false, message: 'Invalid or inactive IndiaMART API key' });
 
-    const companyId = settings.companyId;
+    const targetCompanyIds = settings.indiamart.assignedCompanyIds || [];
+    if (targetCompanyIds.length === 0) {
+      return res.status(500).json({
+        success: false,
+        message: 'This IndiaMART account is not linked to any company yet. Ask your admin to select at least one company in Admin Settings > API Integration Settings > IndiaMART.'
+      });
+    }
 
     // IndiaMART posts either { RESPONSE: {...one lead...} } or
     // { RESPONSE: [...several...] } — normalise both to an array.
@@ -1629,64 +1704,60 @@ export const receiveIndiamartWebhook = async (req, res) => {
     }
 
     const cleanNum = (n) => n ? String(n).replace(/\D/g, '').slice(-10) : '';
-    let imported = 0, skipped = 0;
+    let imported = 0;
 
     for (const item of items) {
       const queryId = String(item.UNIQUE_QUERY_ID || item.QUERY_ID || '').trim();
-      if (!queryId) { skipped++; continue; }
-
-      // Same dedup key the polling sync uses, so a lead pushed by the
-      // webhook is never re-imported later if polling ever runs too.
-      const exists = await Lead.findOne({ companyId, indiamartQueryId: queryId });
-      if (exists) { skipped++; continue; }
+      if (!queryId) continue;
 
       const senderName = item.SENDER_NAME || item.SUBJECT || 'IndiaMART Lead';
       const senderMobile = cleanNum(item.SENDER_MOBILE) || cleanNum(item.SENDER_MOBILE_ALT) || '0000000000';
 
-      const leadCode = await generateLeadCode(companyId);
-
-      const newLead = new Lead({
-        leadCode,
-        companyId,
-        source: 'IndiaMart',
-        status: 'New',
-        stage: 'N/A',
-        productRequired: item.QUERY_PRODUCT_NAME || item.PRODUCT_NAME || item.SUBJECT || 'Unknown',
-        describeRequirements: `${item.QUERY_MESSAGE || ''} [QueryID:${queryId}] (Account: ${apiName})`,
-        indiamartQueryId: queryId,
-        companyName: item.SENDER_COMPANY || senderName,
-        contactPerson: senderName,
-        designation: item.DESIGNATION || '',
-        mobile: senderMobile,
-        alternateMobile: cleanNum(item.SENDER_MOBILE_ALT),
-        email: item.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`,
-        alternateEmail: item.SENDER_EMAIL_ALT || '',
-        address: item.SENDER_ADDRESS || '',
-        city: item.SENDER_CITY || '',
-        state: item.SENDER_STATE || '',
-        country: item.SENDER_COUNTRY_ISO || 'India',
-        pincode: item.SENDER_PINCODE || '',
-        // 🎯 CRUNCHER FLOW: same as the polling sync (syncIndiamartLeads /
-        // runBackgroundApiSync) — IndiaMART leads are always UNASSIGNED so
-        // both ingestion paths behave identically; Cruncher assigns manually.
-        assignedTo: null,
-        leadDate: item.QUERY_TIME ? new Date(item.QUERY_TIME) : new Date(),
-        history: [{
-          action: 'Lead Created',
-          notes: `Auto-imported via IndiaMART webhook (Account: ${apiName}, QueryID: ${queryId}) — Pending Cruncher assignment`,
-          performedBy: null
-        }]
+      // 🎯 CRUNCHER FLOW: same as the polling sync (syncIndiamartLeads /
+      // runBackgroundApiSync) — IndiaMART leads are always UNASSIGNED so all
+      // three ingestion paths behave identically; Cruncher assigns manually.
+      // Dedup (indiamartQueryId) is checked per company — same queryId the
+      // polling sync uses, so a lead pushed by the webhook is never
+      // re-imported later if polling ever runs for the same company too.
+      const created = await fanOutLeadToCompanies({
+        companyIds: targetCompanyIds,
+        assignedUserIds: null,
+        dedupeQuery: { indiamartQueryId: queryId },
+        buildFields: () => ({
+          source: 'IndiaMart',
+          status: 'New',
+          stage: 'N/A',
+          productRequired: item.QUERY_PRODUCT_NAME || item.PRODUCT_NAME || item.SUBJECT || 'Unknown',
+          describeRequirements: `${item.QUERY_MESSAGE || ''} [QueryID:${queryId}] (Account: ${apiName})`,
+          indiamartQueryId: queryId,
+          companyName: item.SENDER_COMPANY || senderName,
+          contactPerson: senderName,
+          designation: item.DESIGNATION || '',
+          mobile: senderMobile,
+          alternateMobile: cleanNum(item.SENDER_MOBILE_ALT),
+          email: item.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`,
+          alternateEmail: item.SENDER_EMAIL_ALT || '',
+          address: item.SENDER_ADDRESS || '',
+          city: item.SENDER_CITY || '',
+          state: item.SENDER_STATE || '',
+          country: item.SENDER_COUNTRY_ISO || 'India',
+          pincode: item.SENDER_PINCODE || '',
+          leadDate: item.QUERY_TIME ? new Date(item.QUERY_TIME) : new Date(),
+          history: [{
+            action: 'Lead Created',
+            notes: `Auto-imported via IndiaMART webhook (Account: ${apiName}, QueryID: ${queryId}) — Pending Cruncher assignment`,
+            performedBy: null
+          }]
+        })
       });
-
-      await newLead.save();
-      imported++;
+      imported += created.length;
     }
 
     if (accountDoc) accountDoc.lastSyncedAt = new Date();
     settings.indiamart.lastSyncedAt = new Date();
     await settings.save();
 
-    res.json({ success: true, message: `IndiaMART webhook processed. Imported: ${imported}, Skipped (duplicates): ${skipped}` });
+    res.json({ success: true, message: `IndiaMART webhook processed. Leads created: ${imported} (across ${targetCompanyIds.length} compan${targetCompanyIds.length === 1 ? 'y' : 'ies'}, duplicates skipped automatically)` });
   } catch (error) {
     console.error('Error receiving IndiaMART webhook:', error);
     res.status(500).json({ success: false, message: 'Server error', error: error.message });
@@ -1714,7 +1785,7 @@ export const receiveGoogleAdsWebhook = async (req, res) => {
     }
 
     const settings = await ApiSettings.findOne({ 'googleAds.webhookKey': googleKey, 'googleAds.enabled': true })
-      .populate('googleAds.assignedUserIds', '_id fullName');
+      .populate('googleAds.assignedUserIds', '_id fullName companyId');
 
     // Google's own key check — the payload's google_key must match what
     // this company configured, independent of the ?q= tenant lookup above.
@@ -1732,13 +1803,15 @@ export const receiveGoogleAdsWebhook = async (req, res) => {
       return res.status(200).json({ google_key: googleKey });
     }
 
-    const leadId = String(payload.lead_id || '').trim();
-    if (leadId) {
-      const exists = await Lead.findOne({ companyId: settings.companyId, googleAdsLeadId: leadId });
-      if (exists) {
-        return res.status(200).json({ google_key: googleKey });
-      }
+    const targetCompanyIds = settings.googleAds.assignedCompanyIds || [];
+    if (targetCompanyIds.length === 0) {
+      console.error('[Google Ads] webhookKey matched but no assignedCompanyIds configured — lead dropped.');
+      // Google only cares that we ack with 200 + the key; logging server-side
+      // is the only way to surface this misconfiguration.
+      return res.status(200).json({ google_key: googleKey });
     }
+
+    const leadId = String(payload.lead_id || '').trim();
 
     // Flatten Google's user_column_data array into a lookup by column_id
     const columns = {};
@@ -1751,41 +1824,33 @@ export const receiveGoogleAdsWebhook = async (req, res) => {
     const mobile = (columns.PHONE_NUMBER || columns.WORK_PHONE_NUMBER || '').replace(/\D/g, '').slice(-10) || '0000000000';
     const email = columns.EMAIL || columns.WORK_EMAIL || `googleadslead_${leadId || Date.now()}@noemail.com`;
 
-    // Assign user — same random-pick pattern as the Website webhook
-    const users = settings.googleAds.assignedUserIds || [];
-    const assignedTo = users.length > 0
-      ? users[Math.floor(Math.random() * users.length)]._id
-      : null;
-
-    const leadCode = await generateLeadCode(settings.companyId);
-
-    const newLead = new Lead({
-      leadCode,
-      companyId: settings.companyId,
-      source: 'Google Ads',
-      status: 'New',
-      stage: 'N/A',
-      productRequired: columns.LEAD_FORM_NAME || columns.COMPANY_NAME || 'Google Ads Enquiry',
-      describeRequirements: [columns.CITY, columns.STATE, columns.POSTAL_CODE].filter(Boolean).join(', ')
-        || `Lead from Google Ads campaign ${payload.campaign_name || payload.campaign_id || ''}`,
-      googleAdsLeadId: leadId || null,
-      companyName: columns.COMPANY_NAME || name,
-      contactPerson: name,
-      mobile,
-      email,
-      city: columns.CITY || '',
-      state: columns.STATE || '',
-      country: columns.COUNTRY || 'India',
-      pincode: columns.POSTAL_CODE || '',
-      assignedTo,
-      history: [{
-        action: 'Lead Created',
-        notes: `Auto-imported via Google Ads Lead Form webhook (Campaign: ${payload.campaign_name || payload.campaign_id || 'N/A'}, LeadID: ${leadId || 'N/A'})`,
-        performedBy: null
-      }]
+    await fanOutLeadToCompanies({
+      companyIds: targetCompanyIds,
+      assignedUserIds: settings.googleAds.assignedUserIds,
+      dedupeQuery: leadId ? { googleAdsLeadId: leadId } : null,
+      buildFields: () => ({
+        source: 'Google Ads',
+        status: 'New',
+        stage: 'N/A',
+        productRequired: columns.LEAD_FORM_NAME || columns.COMPANY_NAME || 'Google Ads Enquiry',
+        describeRequirements: [columns.CITY, columns.STATE, columns.POSTAL_CODE].filter(Boolean).join(', ')
+          || `Lead from Google Ads campaign ${payload.campaign_name || payload.campaign_id || ''}`,
+        googleAdsLeadId: leadId || null,
+        companyName: columns.COMPANY_NAME || name,
+        contactPerson: name,
+        mobile,
+        email,
+        city: columns.CITY || '',
+        state: columns.STATE || '',
+        country: columns.COUNTRY || 'India',
+        pincode: columns.POSTAL_CODE || '',
+        history: [{
+          action: 'Lead Created',
+          notes: `Auto-imported via Google Ads Lead Form webhook (Campaign: ${payload.campaign_name || payload.campaign_id || 'N/A'}, LeadID: ${leadId || 'N/A'})`,
+          performedBy: null
+        }]
+      })
     });
-
-    await newLead.save();
 
     settings.googleAds.lastSyncedAt = new Date();
     await settings.save();
@@ -1874,20 +1939,21 @@ async function processFacebookLead(pageId, leadgenId, changeValue) {
   const settings = await ApiSettings.findOne({
     'facebook.enabled': true,
     ...(pageId ? { 'facebook.pageId': pageId } : {})
-  });
+  }).populate('facebook.assignedUserIds', '_id fullName companyId');
   if (!settings) {
     console.error(`[Facebook] No enabled settings found for page ${pageId}`);
     return;
   }
 
-  const companyId = settings.companyId;
-
-  const exists = await Lead.findOne({ companyId, facebookLeadId: leadgenId });
-  if (exists) return;
+  const targetCompanyIds = settings.facebook.assignedCompanyIds || [];
+  if (targetCompanyIds.length === 0) {
+    console.error(`[Facebook] Page ${pageId} is enabled but has no assignedCompanyIds — lead ${leadgenId} dropped. Select at least one company in Admin Settings → Facebook.`);
+    return;
+  }
 
   const pageAccessToken = settings.facebook.pageAccessToken;
   if (!pageAccessToken) {
-    console.error(`[Facebook] Page Access Token not configured for company ${companyId} — cannot fetch lead ${leadgenId}. Configure it in Admin Settings → Facebook.`);
+    console.error(`[Facebook] Page Access Token not configured — cannot fetch lead ${leadgenId}. Configure it in Admin Settings → Facebook.`);
     return;
   }
 
@@ -1915,40 +1981,33 @@ async function processFacebookLead(pageId, leadgenId, changeValue) {
   const mobile = (fields.phone_number || '').replace(/\D/g, '').slice(-10) || '0000000000';
   const email = fields.email || `fblead_${leadgenId}@noemail.com`;
 
-  const users = settings.facebook.assignedUserIds || [];
-  const assignedTo = users.length > 0
-    ? users[Math.floor(Math.random() * users.length)]
-    : null;
-
-  const leadCode = await generateLeadCode(companyId);
-
-  const newLead = new Lead({
-    leadCode,
-    companyId,
-    source: 'Facebook Ads',
-    status: 'New',
-    stage: 'N/A',
-    productRequired: fields.job_title || fields.company_name || 'Facebook Ads Enquiry',
-    describeRequirements: [fields.city, fields.state, fields.zip_code].filter(Boolean).join(', ')
-      || `Lead from Facebook Ads form ${changeValue.form_id || ''}`,
-    facebookLeadId: leadgenId,
-    companyName: fields.company_name || name,
-    contactPerson: name,
-    mobile,
-    email,
-    city: fields.city || '',
-    state: fields.state || '',
-    pincode: fields.zip_code || fields.post_code || '',
-    assignedTo,
-    leadDate: changeValue.created_time ? new Date(changeValue.created_time * 1000) : new Date(),
-    history: [{
-      action: 'Lead Created',
-      notes: `Auto-imported via Facebook Lead Ads webhook (Form: ${changeValue.form_id || 'N/A'}, LeadID: ${leadgenId})`,
-      performedBy: null
-    }]
+  await fanOutLeadToCompanies({
+    companyIds: targetCompanyIds,
+    assignedUserIds: settings.facebook.assignedUserIds,
+    dedupeQuery: { facebookLeadId: leadgenId },
+    buildFields: () => ({
+      source: 'Facebook Ads',
+      status: 'New',
+      stage: 'N/A',
+      productRequired: fields.job_title || fields.company_name || 'Facebook Ads Enquiry',
+      describeRequirements: [fields.city, fields.state, fields.zip_code].filter(Boolean).join(', ')
+        || `Lead from Facebook Ads form ${changeValue.form_id || ''}`,
+      facebookLeadId: leadgenId,
+      companyName: fields.company_name || name,
+      contactPerson: name,
+      mobile,
+      email,
+      city: fields.city || '',
+      state: fields.state || '',
+      pincode: fields.zip_code || fields.post_code || '',
+      leadDate: changeValue.created_time ? new Date(changeValue.created_time * 1000) : new Date(),
+      history: [{
+        action: 'Lead Created',
+        notes: `Auto-imported via Facebook Lead Ads webhook (Form: ${changeValue.form_id || 'N/A'}, LeadID: ${leadgenId})`,
+        performedBy: null
+      }]
+    })
   });
-
-  await newLead.save();
 
   settings.facebook.lastSyncedAt = new Date();
   await settings.save();
@@ -1986,8 +2045,8 @@ export const clickToCall = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Customer number required' });
     }
 
-    // Get API settings for this company
-    const settings = await ApiSettings.findOne({ companyId: req.user.companyId });
+    // IVR settings are global now (shared across all companies)
+    const settings = await ApiSettings.findOne();
     if (!settings?.ivr?.enabled || !settings.ivr.apiKey) {
       return res.status(400).json({ success: false, message: 'IVR API not configured. Please configure in API Settings.' });
     }
@@ -2058,74 +2117,60 @@ export const clickToCall = async (req, res) => {
 export const runBackgroundApiSync = async () => {
   console.log('🔄 [CRON] Starting background IndiaMART & IVR Lead Sync...');
   try {
-    // 1. IndiaMART Sync
-    const indiamartSettings = await ApiSettings.find({ 'indiamart.enabled': true });
-    console.log(`[CRON] Found ${indiamartSettings.length} companies with IndiaMART enabled.`);
-    
-    for (const settings of indiamartSettings) {
-      try {
-        const { companyId } = settings;
-        
-        let activeAccounts = [];
-        if (settings.indiamart.accounts && settings.indiamart.accounts.length > 0) {
-          activeAccounts = settings.indiamart.accounts.filter(acc => acc.sellerMobile && acc.authKey);
-        } else if (settings.indiamart.sellerMobile && settings.indiamart.authKey) {
-          activeAccounts = [{
-            apiName: 'Primary Account',
-            sellerMobile: settings.indiamart.sellerMobile,
-            authKey: settings.indiamart.authKey,
-            _id: null
-          }];
-        }
+    // 1. IndiaMART Sync — one global settings doc, fanned out to every
+    // company selected in indiamart.assignedCompanyIds.
+    const indiamartSettings = await ApiSettings.findOne({ 'indiamart.enabled': true });
+    const indiamartCompanyIds = indiamartSettings?.indiamart?.assignedCompanyIds || [];
 
-        if (activeAccounts.length === 0) continue;
+    if (!indiamartSettings) {
+      console.log('[CRON] IndiaMART sync disabled — skipping.');
+    } else if (indiamartCompanyIds.length === 0) {
+      console.log('[CRON] IndiaMART is enabled but has no assignedCompanyIds — skipping.');
+    } else {
+      let activeAccounts = [];
+      if (indiamartSettings.indiamart.accounts && indiamartSettings.indiamart.accounts.length > 0) {
+        activeAccounts = indiamartSettings.indiamart.accounts.filter(acc => acc.sellerMobile && acc.authKey);
+      } else if (indiamartSettings.indiamart.sellerMobile && indiamartSettings.indiamart.authKey) {
+        activeAccounts = [{
+          apiName: 'Primary Account',
+          sellerMobile: indiamartSettings.indiamart.sellerMobile,
+          authKey: indiamartSettings.indiamart.authKey,
+          _id: null
+        }];
+      }
 
-        const startDate = new Date();
-        startDate.setDate(startDate.getDate() - 3);
-        const fmt = (d) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - 3);
+      const fmt = (d) => d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/ /g, '-');
 
-        let companyImported = 0;
+      let totalImported = 0;
 
-        for (const account of activeAccounts) {
-          try {
-            const { sellerMobile, authKey, apiName } = account;
-            const url = `https://mapi.indiamart.com/wservce/enquiry/listing/v2/?GLUSR_MOBILE=${sellerMobile}&GLUSR_MOBILE_KEY=${authKey}&START_TIME=${fmt(startDate)}&END_TIME=${fmt(new Date())}&LIMIT=50&FLAG=1`;
+      for (const account of activeAccounts) {
+        try {
+          const { sellerMobile, authKey, apiName } = account;
+          const url = `https://mapi.indiamart.com/wservce/enquiry/listing/v2/?GLUSR_MOBILE=${sellerMobile}&GLUSR_MOBILE_KEY=${authKey}&START_TIME=${fmt(startDate)}&END_TIME=${fmt(new Date())}&LIMIT=50&FLAG=1`;
 
-            const response = await fetch(url);
-            const data = await response.json();
+          const response = await fetch(url);
+          const data = await response.json();
 
-            if (data?.RESPONSE?.length) {
-              for (const lead of data.RESPONSE) {
-                const queryId = (lead.QUERY_ID || '').trim();
-                if (!queryId) continue;
+          if (data?.RESPONSE?.length) {
+            for (const lead of data.RESPONSE) {
+              const queryId = (lead.QUERY_ID || '').trim();
+              if (!queryId) continue;
 
-                // Check duplicate using fast indexed field first
-                let exists = await Lead.findOne({ companyId, indiamartQueryId: queryId });
-                if (!exists) {
-                  // Fallback legacy check to avoid duplicates for older imported leads
-                  exists = await Lead.findOne({ 
-                    companyId, 
-                    describeRequirements: { $regex: `QueryID:${queryId}`, $options: 'i' } 
-                  });
-                  // Auto-migrate legacy lead to populate indiamartQueryId
-                  if (exists) {
-                    exists.indiamartQueryId = queryId;
-                    await exists.save();
-                  }
-                }
-                if (exists) continue;
+              const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
+              const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
+              const senderEmail = lead.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`;
 
-                // 🎯 CRUNCHER FLOW: IndiaMART leads always UNASSIGNED — Cruncher will assign manually
-                const assignedTo = null;
-
-                const leadCode = await generateLeadCode(companyId);
-                const senderName = lead.SENDER_NAME || lead.SUBJECT || 'IndiaMART Lead';
-                const senderMobile = lead.SENDER_MOBILE || lead.SENDER_MOBILE_ALT || '0000000000';
-                const senderEmail = lead.SENDER_EMAIL || `indiamartlead_${queryId}@noemail.com`;
-
-                const newLead = new Lead({
-                  leadCode,
-                  companyId,
+              // 🎯 CRUNCHER FLOW: IndiaMART leads always UNASSIGNED — Cruncher
+              // will assign manually. Dedup (indiamartQueryId) is per company,
+              // matching the webhook's dedup key, so polling never re-imports
+              // a lead the push webhook already delivered for that company.
+              const created = await fanOutLeadToCompanies({
+                companyIds: indiamartCompanyIds,
+                assignedUserIds: null,
+                dedupeQuery: { indiamartQueryId: queryId },
+                buildFields: () => ({
                   source: 'IndiaMart',
                   status: 'New',
                   stage: 'N/A',
@@ -2137,82 +2182,68 @@ export const runBackgroundApiSync = async () => {
                   mobile: senderMobile,
                   email: senderEmail,
                   address: lead.SENDER_ADDRESS || '',
-                  assignedTo,
                   leadDate: lead.QUERY_TIME ? new Date(lead.QUERY_TIME) : new Date(),
                   history: [{
                     action: 'Lead Created',
                     notes: `Auto-imported via background sync from account "${apiName || 'Default'}" (QueryID: ${queryId}) — Pending Cruncher assignment`,
                     performedBy: null
                   }]
-                });
-                await newLead.save();
-                companyImported++;
-              }
-
-              // Update lastSyncedAt for this specific account
-              if (account._id && settings.indiamart.accounts) {
-                const accDoc = settings.indiamart.accounts.id(account._id);
-                if (accDoc) accDoc.lastSyncedAt = new Date();
-              }
+                })
+              });
+              totalImported += created.length;
             }
-          } catch (accErr) {
-            console.error(`[CRON] IndiaMART sync error for account ${account.apiName || account.sellerMobile} in company ${companyId}:`, accErr.message);
+
+            // Update lastSyncedAt for this specific account
+            if (account._id && indiamartSettings.indiamart.accounts) {
+              const accDoc = indiamartSettings.indiamart.accounts.id(account._id);
+              if (accDoc) accDoc.lastSyncedAt = new Date();
+            }
           }
+        } catch (accErr) {
+          console.error(`[CRON] IndiaMART sync error for account ${account.apiName || account.sellerMobile}:`, accErr.message);
         }
-
-        // Save settings with updated lastSyncedAt times for accounts
-        settings.indiamart.lastSyncedAt = new Date();
-        await settings.save();
-
-        if (companyImported > 0) {
-          console.log(`[CRON] IndiaMART sync completed for company ${companyId}. Imported: ${companyImported}`);
-        }
-      } catch (err) {
-        console.error(`[CRON] IndiaMART sync error for settings ID ${settings._id}:`, err.message);
       }
+
+      indiamartSettings.indiamart.lastSyncedAt = new Date();
+      await indiamartSettings.save();
+      console.log(`[CRON] IndiaMART sync complete. Leads created: ${totalImported} across ${indiamartCompanyIds.length} compan${indiamartCompanyIds.length === 1 ? 'y' : 'ies'}.`);
     }
 
-    // 2. IVR Sync (Acefone)
-    const ivrSettings = await ApiSettings.find({ 'ivr.enabled': true });
-    console.log(`[CRON] Found ${ivrSettings.length} companies with IVR enabled.`);
+    // 2. IVR Sync (Acefone) — one global settings doc, fanned out to every
+    // company selected in ivr.assignedCompanyIds.
+    const ivrSettings = await ApiSettings.findOne({ 'ivr.enabled': true })
+      .populate('ivr.assignedUserIds', '_id companyId');
+    const ivrCompanyIds = ivrSettings?.ivr?.assignedCompanyIds || [];
 
-    for (const settings of ivrSettings) {
-      try {
-        const { companyId } = settings;
-        const { apiKey, assignmentRule, assignedUserIds, lastAssignedIndex } = settings.ivr;
-        if (!apiKey) continue;
+    if (!ivrSettings?.ivr?.apiKey) {
+      console.log('[CRON] IVR sync disabled or not configured — skipping.');
+    } else if (ivrCompanyIds.length === 0) {
+      console.log('[CRON] IVR is enabled but has no assignedCompanyIds — skipping.');
+    } else {
+      const { apiKey, assignedUserIds } = ivrSettings.ivr;
 
-        const response = await fetch(`https://api.acefone.in/get_leads?api_key=${encodeURIComponent(apiKey)}`);
-        const data = await response.json();
+      const response = await fetch(`https://api.acefone.in/get_leads?api_key=${encodeURIComponent(apiKey)}`);
+      const data = await response.json();
+      const leads = data?.data || (Array.isArray(data) ? data : []);
 
-        const leads = data?.data || (Array.isArray(data) ? data : []);
-        if (leads.length) {
-          let imported = 0;
-          let assignIdx = lastAssignedIndex || 0;
-          const users = assignedUserIds || [];
+      if (leads.length) {
+        let totalImported = 0;
 
-          for (const ivrLead of leads) {
-            const callerNumber = (ivrLead.caller_number || '').trim();
-            if (!callerNumber) continue;
+        for (const ivrLead of leads) {
+          const callerNumber = (ivrLead.caller_number || '').trim();
+          if (!callerNumber) continue;
 
-            const exists = await Lead.findOne({ companyId, mobile: callerNumber, source: 'IVR' });
-            if (exists) continue;
-
-            let assignedTo = null;
-            if (users.length > 0) {
-              if (assignmentRule === 1) {
-                assignedTo = users[Math.floor(Math.random() * users.length)];
-              } else if (assignmentRule === 2) {
-                assignedTo = users[assignIdx % users.length];
-                assignIdx++;
-              }
-            }
-
-            const leadCode = await generateLeadCode(companyId);
-
-            const newLead = new Lead({
-              leadCode,
-              companyId,
+          // Round-robin's shared index was per-company before this settings
+          // doc became a single global record; with assignedUserIds now a
+          // flat cross-company list too, each company's pick is simplified
+          // to random-among-its-own-users here (assignmentRule's round-robin
+          // still applies as before on the manual "Sync" button / syncIvrLeads,
+          // which acts on one company at a time).
+          const created = await fanOutLeadToCompanies({
+            companyIds: ivrCompanyIds,
+            assignedUserIds,
+            dedupeQuery: { mobile: callerNumber, source: 'IVR' },
+            buildFields: () => ({
               source: 'IVR',
               status: 'New',
               stage: 'N/A',
@@ -2223,25 +2254,19 @@ export const runBackgroundApiSync = async () => {
               mobile: callerNumber,
               email: ivrLead.email || `ivr_${callerNumber}@noemail.com`,
               address: ivrLead.address || '',
-              assignedTo,
               history: [{
                 action: 'Lead Created',
                 notes: `Auto-imported via scheduled background sync (Caller: ${callerNumber})`,
                 performedBy: null
               }]
-            });
-            await newLead.save();
-            imported++;
-          }
-
-          await ApiSettings.findByIdAndUpdate(settings._id, {
-            'ivr.lastAssignedIndex': assignIdx,
-            'ivr.lastSyncedAt': new Date()
+            })
           });
-          console.log(`[CRON] IVR sync completed for company ${companyId}. Imported: ${imported}`);
+          totalImported += created.length;
         }
-      } catch (err) {
-        console.error(`[CRON] IVR sync error for settings ID ${settings._id}:`, err.message);
+
+        ivrSettings.ivr.lastSyncedAt = new Date();
+        await ivrSettings.save();
+        console.log(`[CRON] IVR sync complete. Leads created: ${totalImported} across ${ivrCompanyIds.length} compan${ivrCompanyIds.length === 1 ? 'y' : 'ies'}.`);
       }
     }
   } catch (globalErr) {

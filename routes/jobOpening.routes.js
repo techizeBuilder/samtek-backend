@@ -8,11 +8,20 @@ import {
   updateJobOpening,
   closeJobOpening,
   deleteJobOpeningById,
+  getPublicJobOpenings,
+  getPublicJobOpeningById,
 } from "../controllers/jobOpeningController.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { uploadJobDocument } from "../utils/jobOpeningUpload.js";
 
 const jobOpeningRoutes = Router();
+
+/**
+ * 🌐 Public Careers-Page Routes (No Auth — called by the company website)
+ * Base Route: /api/job-openings
+ */
+jobOpeningRoutes.get("/public", getPublicJobOpenings);       // GET /api/job-openings/public?companyId=...
+jobOpeningRoutes.get("/public/:id", getPublicJobOpeningById); // GET /api/job-openings/public/:id
 
 /**
  * 🔐 Protected HRMS Job Opening Routes

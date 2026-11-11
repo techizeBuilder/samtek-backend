@@ -9,11 +9,18 @@ import {
   deleteCandidate,
   getCandidatesForManager,
   updateInterviewFeedback,
+  applyToJob,
 } from "../controllers/candidateController.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { uploadResume } from "../utils/uploadResume.js";
 
 const CandidateRouter = Router();
+
+/**
+ * 🌐 Public Apply Route (No Auth — called by the company website's job-apply form)
+ * POST /api/candidates/apply/:jobId
+ */
+CandidateRouter.post("/apply/:jobId", uploadResume.single("resume"), applyToJob);
 
 CandidateRouter.use(authMiddleware);
 CandidateRouter.post("/", authMiddleware, uploadResume.single("resume"), addCandidate);
