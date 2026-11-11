@@ -23,9 +23,25 @@
 // Sub Child Part Master record, so there's nothing to keep in sync.
 import { Item } from '../models/Inventory.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
-import { buildFabricationBomDimensions, resolveFabricationWeight } from '../services/fabricationDemandService.js';
+import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSizeError } from '../services/fabricationDemandService.js';
+import { activeCost } from '../services/makeBuyService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
 import { cleanProcessDefinition, validateProcessDefinition } from '../utils/processDefinitionValidation.js';
+import { refreshBomMaterialLines } from '../utils/bomMaterialPrice.js';
+import { invalidateBomApproval } from '../services/productApprovalService.js';
+
+// R&D changed what this is built from: its BOM approval and Release no longer
+// match (2026-11-02). Only these user edits call it, never a cost refresh.
+const bomEdited = (itemId, req, what) => invalidateBomApproval(itemId, req.user.companyId, { byName: req.user.fullName || req.user.username || '', what });
+
+// Slice 4 (2026-10-24) — an R&D edit to this Child Part's BOM climbs to every
+// Machine using it (the price push). Never fails the edit.
+async function pushChildPartPrice(childPartId, companyId) {
+  try {
+    const { onChildPartChanged } = await import('../services/priceCascadeService.js');
+    await onChildPartChanged(childPartId, companyId);
+  } catch (e) { console.error('[ChildPartBOM] price push failed:', e.message); }
+}
 
 const pad3 = (n) => String(n).padStart(3, '0');
 
@@ -33,7 +49,9 @@ const AMOUNT_UNIT_TYPES = ['Length Unit', 'Area Unit', 'Volume Unit'];
 const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNIT_TYPES.includes(sourceItem.unitType);
 
 // A Sub Child Part's own per-unit cost — materialsCost + jobWorkCost +
-// scrapCost, the same three independently-maintained numbers
+// scrapCost (+ productionCost + productionExpense, slice 4 2026-10-24: a
+// hybrid / in-house Sub Child Part's own build cost per piece), the
+// independently-maintained numbers
 // subChildPartMasterController.js/subChildPartSheetPlanController.js write
 // onto Item.subChildPartDetails. Never pre-summed there, so summed here.
 // unitWeightKg is a fourth, similarly independently-maintained number (see
@@ -44,20 +62,25 @@ function subChildPartLineCostFrom(sourceItem) {
   const materialsCost = d.materialsCost || 0;
   const jobWorkCost = d.jobWorkCost || 0;
   const scrapCost = d.scrapCost || 0;
-  return { materialsCost, jobWorkCost, scrapCost, unitCost: materialsCost + jobWorkCost + scrapCost, unitWeightKg: d.unitWeightKg || 0 };
+  const productionCost = d.productionCost || 0;
+  const productionExpense = d.productionExpense || 0;
+  const unitCost = materialsCost + jobWorkCost + scrapCost + productionCost + productionExpense;
+  return { materialsCost, jobWorkCost, scrapCost, productionCost, productionExpense, unitCost, unitWeightKg: d.unitWeightKg || 0 };
 }
 
 // Child Part unit cost = Σ(Sub Child Part unit cost × qty) + Σ(other
 // material cost × qty) + Production Cost/Expense — per design doc §6.
 // materialsCost below folds Raw + Tool lines together (both priced the same
 // way, no distinct Tool cost model exists anywhere in this codebase).
-function computeChildPartCost(bom) {
+export function computeChildPartCost(bom) {
   const subChildPartsCost = (bom.subChildParts || []).filter(l => !l.isDiscontinued).reduce((s, l) => s + (l.totalPrice || 0), 0);
   const rawCost = (bom.materials || []).filter(m => !m.isDiscontinued && m.materialKind !== 'tool').reduce((s, m) => s + (m.totalPrice || 0), 0);
   const toolsCost = (bom.materials || []).filter(m => !m.isDiscontinued && m.materialKind === 'tool').reduce((s, m) => s + (m.totalPrice || 0), 0);
   const materialsCost = rawCost + toolsCost;
-  const totalCost = subChildPartsCost + materialsCost + (bom.productionCost || 0) + (bom.productionExpense || 0);
-  return { subChildPartsCost, rawCost, toolsCost, materialsCost, totalCost };
+  // Slice 4 (2026-10-24): + the outsourced (job work) cost of a build.
+  const jobWorkCost = bom.jobWorkCost || 0;
+  const totalCost = subChildPartsCost + materialsCost + jobWorkCost + (bom.productionCost || 0) + (bom.productionExpense || 0);
+  return { subChildPartsCost, rawCost, toolsCost, materialsCost, jobWorkCost, totalCost };
 }
 
 // Child Part total weight = Σ(Sub Child Part unit weight × qty) +
@@ -153,19 +176,31 @@ export async function refreshAndComputeChildPart(childPartId, companyId) {
   const { item, bom } = resolved;
 
   let changed = false;
+  const pendingParts = [];
   for (const line of bom.subChildParts) {
     if (line.isDiscontinued) continue;
-    const src = await Item.findOne({ _id: line.subChildPart, companyId }).select('subChildPartDetails').lean();
+    const src = await Item.findOne({ _id: line.subChildPart, companyId }).select('code productKind partSourcing subChildPartDetails purchase internalManufacturing purchaseCost').lean();
     if (!src) continue;
     const cost = subChildPartLineCostFrom(src);
+    // Make or buy (2026-10-28): a bought Sub Child Part is priced at its
+    // bought cost; pending = no purchase price yet (the made cost stands in).
+    const active = activeCost(src, cost.unitCost);
+    cost.unitCost = Math.round(active.cost * 100) / 100;
+    if (active.pending) pendingParts.push(src.code);
     const totalPrice = Math.round(cost.unitCost * line.quantity * 100) / 100;
     const totalWeightKg = Math.round(cost.unitWeightKg * line.quantity * 1000) / 1000;
     if (line.materialsCost !== cost.materialsCost || line.jobWorkCost !== cost.jobWorkCost
-      || line.scrapCost !== cost.scrapCost || line.unitCost !== cost.unitCost || line.totalPrice !== totalPrice
-      || line.unitWeightKg !== cost.unitWeightKg || line.totalWeightKg !== totalWeightKg) {
+      || line.scrapCost !== cost.scrapCost || line.productionCost !== cost.productionCost || line.productionExpense !== cost.productionExpense
+      || line.unitCost !== cost.unitCost || line.totalPrice !== totalPrice
+      || line.unitWeightKg !== cost.unitWeightKg || line.totalWeightKg !== totalWeightKg
+      || !!line.bought !== active.bought || !!line.pricePending !== active.pending) {
+      line.bought = active.bought;
+      line.pricePending = active.pending;
       line.materialsCost = cost.materialsCost;
       line.jobWorkCost = cost.jobWorkCost;
       line.scrapCost = cost.scrapCost;
+      line.productionCost = cost.productionCost;
+      line.productionExpense = cost.productionExpense;
       line.unitCost = cost.unitCost;
       line.totalPrice = totalPrice;
       line.unitWeightKg = cost.unitWeightKg;
@@ -174,13 +209,19 @@ export async function refreshAndComputeChildPart(childPartId, companyId) {
     }
   }
   if (changed) await bom.save();
+  // Its price leans on a part with no purchase price yet → provisional.
+  const prevPending = (item.priceProvisional?.parts || []).join('|');
+  if (prevPending !== pendingParts.join('|')) {
+    await Item.updateOne({ _id: item._id }, { $set: { 'priceProvisional.parts': pendingParts } });
+    if (item.priceProvisional) item.priceProvisional.parts = pendingParts;
+  }
 
   const plainBom = bom.toObject();
   // Decorate each material/tool line's own weight onto the response — never
   // persisted (see materialLineWeightKg's own comment), purely for the
   // Materials/Tools tables' own Weight column to read directly.
   plainBom.materials = (plainBom.materials || []).map(m => ({ ...m, weightKg: materialLineWeightKg(m) }));
-  return { item, bom: plainBom, cost: computeChildPartCost(plainBom), weight: computeChildPartWeight(plainBom) };
+  return { item, bom: plainBom, cost: computeChildPartCost(plainBom), weight: computeChildPartWeight(plainBom), pendingParts };
 }
 
 // Called once a Child Part's own build actually completes (one unit's
@@ -201,15 +242,9 @@ export async function recalculateChildPartCost(childPartItemId, companyId, { pro
 
   const bom = await ChildPartBOM.findOne({ childPart: childPartItemId, company: companyId });
   if (!bom) return null;
-  for (const m of bom.materials) {
-    if (m.isDiscontinued) continue;
-    const rawItem = await Item.findOne({ code: m.code, companyId });
-    if (rawItem) {
-      m.unitPrice = rawItem.purchaseCost || 0;
-      m.totalPrice = m.unitPrice * m.quantity;
-      m.stdCost = rawItem.stdCost ?? null;
-    }
-  }
+  // Slice 4 (2026-10-24): a fabrication line is weight × ₹/kg, not
+  // purchaseCost (shared with the price push — utils/bomMaterialPrice.js).
+  await refreshBomMaterialLines(bom, companyId);
   if (productionCost != null && productionExpense != null) {
     bom.productionCost = productionCost;
     bom.productionExpense = productionExpense;
@@ -257,9 +292,17 @@ export const createChildPartMaster = async (req, res) => {
       specification: specification?.trim() || '',
       productKind: 'ChildPart', type: 'Assemblies',
       unitType: 'Count Unit', unit: 'Pieces', qty: 0,
-      purchase: false,
+      // Bought from a vendor from day one (2026-10-28): no BOM needed until
+      // it's switched to Made; price pending until Accounts' estimate.
+      purchase: req.body.makeOrBuy === 'buy',
+      partSourcing: req.body.makeOrBuy === 'buy' ? 'buy' : 'make',
+      ...(req.body.makeOrBuy === 'buy' ? { pricePending: true, makeBuyHistory: [{ from: null, to: 'buy', at: new Date(), by: req.user._id, byName: req.user.fullName || req.user.username || '' }] } : {}),
       companyId: req.user.companyId, createdBy: req.user._id,
     });
+    if (req.body.makeOrBuy === 'buy') {
+      const { notifyBoughtNow } = await import('../services/makeBuyService.js');
+      await notifyBoughtNow(newItem);
+    }
 
     const bom = await ChildPartBOM.create({ childPart: newItem._id, company: req.user.companyId, createdBy: req.user._id });
 
@@ -316,10 +359,13 @@ export const addChildPartMasterSubChildPart = async (req, res) => {
       subChildPart: sourceItem._id, code: sourceItem.code, name: sourceItem.name,
       quantity: qty, unit: sourceItem.unit || 'Pieces',
       materialsCost: cost.materialsCost, jobWorkCost: cost.jobWorkCost, scrapCost: cost.scrapCost,
+      productionCost: cost.productionCost, productionExpense: cost.productionExpense,
       unitCost: cost.unitCost, totalPrice: Math.round(cost.unitCost * qty * 100) / 100,
       unitWeightKg: cost.unitWeightKg, totalWeightKg: Math.round(cost.unitWeightKg * qty * 1000) / 1000,
     });
     await bom.save();
+    await bomEdited(bom.childPart, req, 'Sub Child Part line added');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.status(201).json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -341,16 +387,20 @@ export const updateChildPartMasterSubChildPart = async (req, res) => {
     const sourceItem = await Item.findOne({ _id: line.subChildPart, companyId: req.user.companyId }).lean();
     const cost = sourceItem
       ? subChildPartLineCostFrom(sourceItem)
-      : { materialsCost: line.materialsCost, jobWorkCost: line.jobWorkCost, scrapCost: line.scrapCost, unitCost: line.unitCost, unitWeightKg: line.unitWeightKg };
+      : { materialsCost: line.materialsCost, jobWorkCost: line.jobWorkCost, scrapCost: line.scrapCost, productionCost: line.productionCost, productionExpense: line.productionExpense, unitCost: line.unitCost, unitWeightKg: line.unitWeightKg };
     line.quantity = Number(quantity);
     line.materialsCost = cost.materialsCost;
     line.jobWorkCost = cost.jobWorkCost;
     line.scrapCost = cost.scrapCost;
+    line.productionCost = cost.productionCost || 0;
+    line.productionExpense = cost.productionExpense || 0;
     line.unitCost = cost.unitCost;
     line.totalPrice = Math.round(cost.unitCost * line.quantity * 100) / 100;
     line.unitWeightKg = cost.unitWeightKg;
     line.totalWeightKg = Math.round(cost.unitWeightKg * line.quantity * 1000) / 1000;
     await bom.save();
+    await bomEdited(bom.childPart, req, 'Sub Child Part line edited');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -367,6 +417,8 @@ export const deleteChildPartMasterSubChildPart = async (req, res) => {
     if (!line) return res.status(404).json({ success: false, message: 'Sub Child Part line not found.' });
     line.deleteOne();
     await bom.save();
+    await bomEdited(bom.childPart, req, 'Sub Child Part line removed');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -383,6 +435,8 @@ export const discontinueChildPartMasterSubChildPart = async (req, res) => {
     if (!line) return res.status(404).json({ success: false, message: 'Sub Child Part line not found.' });
     line.isDiscontinued = true;
     await bom.save();
+    await bomEdited(bom.childPart, req, 'Sub Child Part line discontinued');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -399,6 +453,8 @@ export const reactivateChildPartMasterSubChildPart = async (req, res) => {
     if (!line) return res.status(404).json({ success: false, message: 'Sub Child Part line not found.' });
     line.isDiscontinued = false;
     await bom.save();
+    await bomEdited(bom.childPart, req, 'Sub Child Part line reactivated');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -434,6 +490,8 @@ export const addChildPartMasterMaterial = async (req, res) => {
       if (!dimensionVariantId || !(Number(amountValue) > 0) || !amountUnit) {
         return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
       }
+      const discErr = discontinuedSizeError(sourceItem, dimensionVariantId);
+      if (discErr) return res.status(400).json({ success: false, message: discErr });
       bomDimensions = buildFabricationBomDimensions(sourceItem, dimensionVariantId, amountValue, amountUnit);
       if (!bomDimensions) {
         return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
@@ -485,6 +543,8 @@ export const addChildPartMasterMaterial = async (req, res) => {
       specifications: sourceItem.specifications || [],
     });
     await bom.save();
+    await bomEdited(bom.childPart, req, 'material line added');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.status(201).json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -507,6 +567,7 @@ export const updateChildPartMasterMaterial = async (req, res) => {
       return res.status(400).json({ success: false, message: `"${body.code || newCode}" does not match any Inventory item.` });
     }
 
+    const prevVariantId = mat.dimensionVariantId;
     Object.assign(mat, body);
 
     let fabWeight = null;
@@ -514,6 +575,8 @@ export const updateChildPartMasterMaterial = async (req, res) => {
       if (!mat.dimensionVariantId || !(Number(mat.amountValue) > 0) || !mat.amountUnit) {
         return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
       }
+      const discErr = discontinuedSizeError(sourceItem, mat.dimensionVariantId, prevVariantId);
+      if (discErr) return res.status(400).json({ success: false, message: discErr });
       mat.bomDimensions = buildFabricationBomDimensions(sourceItem, mat.dimensionVariantId, mat.amountValue, mat.amountUnit);
       if (!mat.bomDimensions) {
         return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
@@ -566,6 +629,8 @@ export const updateChildPartMasterMaterial = async (req, res) => {
     mat.specifications = sourceItem.specifications || [];
 
     await bom.save();
+    await bomEdited(bom.childPart, req, 'material line edited');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -582,6 +647,8 @@ export const deleteChildPartMasterMaterial = async (req, res) => {
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.deleteOne();
     await bom.save();
+    await bomEdited(bom.childPart, req, 'material line removed');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -598,6 +665,8 @@ export const discontinueChildPartMasterMaterial = async (req, res) => {
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.isDiscontinued = true;
     await bom.save();
+    await bomEdited(bom.childPart, req, 'material line discontinued');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -614,6 +683,8 @@ export const reactivateChildPartMasterMaterial = async (req, res) => {
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.isDiscontinued = false;
     await bom.save();
+    await bomEdited(bom.childPart, req, 'material line reactivated');
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -639,6 +710,7 @@ export const updateChildPartMasterProductionCost = async (req, res) => {
     bom.productionCostSource = 'Manual';
     bom.productionCostUpdatedAt = new Date();
     await bom.save();
+    await pushChildPartPrice(req.params.id, req.user.companyId);
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -673,8 +745,11 @@ export const updateChildPartMasterProcessDefinition = async (req, res) => {
     });
     if (err) return res.status(400).json({ success: false, message: err });
 
+    // Saving the steps unchanged isn't an edit.
+    const stepsChanged = JSON.stringify(cleaned) !== JSON.stringify(cleanProcessDefinition(bom.toObject().processDefinition));
     bom.processDefinition = cleaned;
     await bom.save();
+    if (stepsChanged) await bomEdited(bom.childPart, req, 'process steps changed');
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -715,7 +790,7 @@ export const searchSubChildPartInventory = async (req, res) => {
       ];
     }
     const items = await Item.find(query)
-      .select('name code image qty unit materialFlow minStock reorderQty isDiscontinued createdAt')
+      .select('name code image qty unit materialFlow minStock reorderQty isDiscontinued createdAt purchase internalManufacturing pricePending purchaseCost purchaseCostKind makeBuyHistory partSourcing approvalRedo childPartDetails.releaseStatus')
       .sort({ name: 1 }).limit(500).lean();
     res.json({ success: true, data: items });
   } catch (err) {

@@ -41,6 +41,12 @@ const LeaveSchema = new Schema(
       default: "PENDING",
     },
 
+    // HR who added it for the person, already approved (2026-11-11).
+    addedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+    },
+
     remainingLeaves: {
       type: Number,
       default: 12, // static for now

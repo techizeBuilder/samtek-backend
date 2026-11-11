@@ -3,6 +3,7 @@ import Leave from "../models/Leave.js";
 import LeaveType from "../models/LeaveType.js";
 import User from "../models/User.js";
 import mongoose from "mongoose";
+import { employeeMatch, isInMyCompany } from "../utils/companyScope.js";
 
 // GET /my-balances
 export const getMyBalances = async (req, res) => {
@@ -41,6 +42,7 @@ export const getCurrentBalance = async (req, res) => {
     try {
         const { employeeId, leaveType } = req.query;
         if (!employeeId || !leaveType) return res.status(400).json({ message: "Missing params" });
+        if (!(await isInMyCompany(req.user, employeeId))) return res.status(404).json({ message: "Employee not found" });
         
         const empObjectId = new mongoose.Types.ObjectId(employeeId);
         const ltDoc = await LeaveType.findOne({ name: leaveType });
@@ -68,7 +70,7 @@ export const getCurrentBalance = async (req, res) => {
 // GET /history
 export const getHistory = async (req, res) => {
     try {
-        const history = await LeaveBalanceAdjustment.find()
+        const history = await LeaveBalanceAdjustment.find(await employeeMatch(req.user))
             .populate('employee', 'name fullName employeeId role')
             .populate('addedBy', 'name fullName role')
             .sort({ createdAt: -1 });
@@ -83,6 +85,7 @@ export const getHistory = async (req, res) => {
 export const overrideBalance = async (req, res) => {
     try {
         const { employeeId, leaveType, newBalance, reason } = req.body;
+        if (!(await isInMyCompany(req.user, employeeId))) return res.status(404).json({ message: "Employee not found" });
         
         const empObjectId = new mongoose.Types.ObjectId(employeeId);
         const ltDoc = await LeaveType.findOne({ name: leaveType });

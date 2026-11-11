@@ -3,6 +3,7 @@ import Customer from '../models/Customer.js';
 import { Company } from '../models/Company.js';
 import PaymentReminderSettings from '../models/PaymentReminderSettings.js';
 import { sendPaymentReminderEmail } from '../services/emailService.js';
+import { DEPARTMENTS, reportMissingMailbox } from '../config/mailAccounts.js';
 import mongoose from 'mongoose';
 
 // ─── GET Settings ─────────────────────────────────────────────────────────────
@@ -159,6 +160,11 @@ export const sendManualReminder = async (req, res) => {
             companyName: company?.name || company?.unitName || 'Samtek',
             daysOverdue
         });
+        // Not sent (no Accounts mailbox / mail error) → say so; it used to
+        // report "sent" and log it anyway (2026-10-29).
+        if (!result?.success) {
+            return res.status(result?.skipped ? 400 : 500).json({ success: false, message: result?.error || 'The reminder email could not be sent.' });
+        }
 
         // Log the reminder in invoice
         await Sale.findByIdAndUpdate(invoiceId, {
@@ -226,7 +232,7 @@ export const runDailyReminderCron = async () => {
                 }
 
                 if (shouldSend) {
-                    await sendPaymentReminderEmail({
+                    const sent = await sendPaymentReminderEmail({
                         companyId,
                         to: customer.email,
                         customerName: customer.name,
@@ -239,12 +245,16 @@ export const runDailyReminderCron = async () => {
                         daysOverdue: Math.max(0, daysFromDue)
                     });
 
-                    // Log reminder
-                    await Sale.findByIdAndUpdate(invoice._id, {
-                        $push: { reminderSentDates: { sentAt: today, type: reminderType } }
-                    });
-
-                    console.log(`📧 Auto reminder (${reminderType}) sent to ${customer.email} for ${invoice.invoiceNumber}`);
+                    // Only a reminder that went is logged — else tomorrow tries again,
+                    // and the Accounts Head hears the mailbox is missing (2026-10-29).
+                    if (!sent?.success) {
+                        if (sent?.skipped) await reportMissingMailbox(DEPARTMENTS.ACCOUNTS, { companyId, what: 'Customer payment reminders' });
+                    } else {
+                        await Sale.findByIdAndUpdate(invoice._id, {
+                            $push: { reminderSentDates: { sentAt: today, type: reminderType } }
+                        });
+                        console.log(`📧 Auto reminder (${reminderType}) sent to ${customer.email} for ${invoice.invoiceNumber}`);
+                    }
                 }
 
                 // Auto update to Overdue if past due date

@@ -35,6 +35,8 @@ export const USER_ROLES = {
   MARKETING_HEAD: 'Marketing Head',
   MARKETING_EMPLOYEE: 'Marketing Employee',
   MIS_ADMIN: 'MIS Admin',
+  // No login: in the system for work only. Department says who's who.
+  MANPOWER: 'Manpower',
 };
 
 export const MODULES = {

@@ -2,7 +2,7 @@ import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
 import {
-  getSettings, updateApprovalRules, updateTemplates, updateQuoteRules, getLowCoverageItems, updateVendorScoreSettings, updatePurchaserScoreSettings,
+  getSettings, updateApprovalRules, updateTemplates, updateQuoteRules, updateEntityTypes, updateVendorDocumentTypes, getLowCoverageItems, updateVendorScoreSettings, updatePurchaserScoreSettings,
 } from '../controllers/purchaseSettingsController.js';
 
 // Company-wide purchase settings (procurement-v2, 2026-10-08).
@@ -27,6 +27,9 @@ router.put('/approval-rules', authorizeRoles(...COMPANY_ADMIN_ROLES), updateAppr
 router.put('/templates', checkPermission('accounts', 'purchaseSettings', 'edit'), updateTemplates);
 // Quote validity (days) + price-rise warning (%) — same Purchase permission.
 router.put('/quote-rules', checkPermission('accounts', 'purchaseSettings', 'edit'), updateQuoteRules);
+router.put('/entity-types', checkPermission('accounts', 'purchaseSettings', 'edit'), updateEntityTypes);
+// Which vendor documents are required / verified + the type list — the Company Admin's.
+router.put('/vendor-documents', authorizeRoles(...COMPANY_ADMIN_ROLES), updateVendorDocumentTypes);
 router.get('/low-coverage-items', authorizeRoles(...COMPANY_ADMIN_ROLES), getLowCoverageItems);
 // Vendor score weights + the Watchlist line (2026-10-13) — Company Admin.
 router.put('/vendor-score', authorizeRoles(...COMPANY_ADMIN_ROLES), updateVendorScoreSettings);

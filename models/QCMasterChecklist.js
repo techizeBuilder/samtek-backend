@@ -48,11 +48,13 @@ export const QC_MODULE_STAGES = {
   // Child Part still goes through a real build pipeline under the legacy
   // flow, so the same Initial/Process staging Product Master QC's own parts
   // use still fits — just its own independent catalog now, not borrowed.
-  childPart: ['initial', 'process'],
+  // 'incoming' (2026-10-28, make or buy): a bought Child Part's own incoming
+  // inspection, separate from its build-step checklists.
+  childPart: ['initial', 'process', 'incoming'],
   // Sub Child Part's own order flow (subChildPartOrderService.js) is a
   // single order-level Assign/Start/Complete cycle, no stages — a flat
   // checklist matches its actual shape (same pattern as inventory/motorMaster).
-  subChildPart: ['default'],
+  subChildPart: ['default', 'incoming'],
 };
 
 // One document per {company, module, stage} — deliberately NOT a library of
@@ -61,7 +63,7 @@ export const QC_MODULE_STAGES = {
 // QCItemChecklist) rather than getting a whole separate template attached.
 const QCMasterChecklistSchema = new mongoose.Schema({
   module: { type: String, enum: QC_MODULES, required: true },
-  stage: { type: String, enum: ['default', 'initial', 'process', 'final'], default: 'default' },
+  stage: { type: String, enum: ['default', 'initial', 'process', 'final', 'incoming'], default: 'default' },
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   items: { type: [ChecklistRowSchema], default: [] },
 }, { timestamps: true });

@@ -2,6 +2,8 @@
 
 import AttendanceRequest from "../models/AttendanceRequest.js";
 import Attendance from "../models/Attendance.js";
+import { isInMyCompany } from "../utils/companyScope.js";
+import { userHasPermission } from "../middleware/permissions.js";
 import User from "../models/User.js";
 import notificationService from "../services/notificationService.js";
 
@@ -186,6 +188,9 @@ export const getTeamAttendanceRequests = async (req, res) => {
   }
 };
 
+// "09:30" on a date means India time, whatever the server's clock is set to.
+const indiaTime = (date, time) => new Date(`${date}T${String(time).length === 5 ? `${time}:00` : time}+05:30`);
+
 /* ================= MANAGER: UPDATE STATUS ================= */
 export const updateAttendanceRequestStatus = async (req, res) => {
   try {
@@ -199,6 +204,13 @@ export const updateAttendanceRequestStatus = async (req, res) => {
     const request = await AttendanceRequest.findById(id);
     if (!request) {
       return res.status(404).json({ message: "Attendance request not found" });
+    }
+
+    // HR in the same company, or the person's own Manager.
+    const isHr = userHasPermission(req.user, "hrms", "attendanceRequests", "edit") && await isInMyCompany(req.user, request.user);
+    const isTheirManager = !!(await User.exists({ _id: request.user, reportingManager: req.user._id }));
+    if (!isHr && !isTheirManager) {
+      return res.status(403).json({ message: "Access denied" });
     }
 
     if (request.status !== "PENDING") {
@@ -216,9 +228,11 @@ export const updateAttendanceRequestStatus = async (req, res) => {
       await Attendance.findOneAndUpdate(
         { user, date },
         {
-          punchIn: punchIn ? new Date(`${date}T${punchIn}`) : undefined,
-          punchOut: punchOut ? new Date(`${date}T${punchOut}`) : undefined,
+          punchIn: punchIn ? indiaTime(date, punchIn) : undefined,
+          punchOut: punchOut ? indiaTime(date, punchOut) : undefined,
           status: "PRESENT",
+          // HR's correction: the device sync leaves it alone.
+          source: "Correction",
         },
         { upsert: true, new: true }
       );

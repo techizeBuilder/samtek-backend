@@ -101,15 +101,21 @@ const supplierSchema = new mongoose.Schema({
   notes: {
     type: String
   },
+  // Retired 2026-10-28 (client): the old Active / Inactive switch. Approval,
+  // suspend and blacklist decide who can be quoted or ordered from
+  // (vendorApprovalService.js ELIGIBLE_VENDOR_FILTER) — nothing reads this
+  // any more. Kept so old documents still load.
   status: {
     type: String,
     enum: ['active', 'inactive'],
     default: 'active'
   },
+  // One of Purchase Settings' entityTypes (a list Purchase edits, 2026-10-28)
+  // — free text here so a type later taken off the list stays on the vendor.
   entityType: {
     type: String,
-    enum: ['Individual', 'HUF', 'Company', 'Firm', 'Others'],
-    default: 'Others'
+    trim: true,
+    default: ''
   },
   tdsSection: {
     type: String,
@@ -185,11 +191,12 @@ const supplierSchema = new mongoose.Schema({
   // reminded* flags de-duplicate the daily expiry reminder
   // (vendorApprovalService.js runVendorDocumentExpirySweep).
   documents: [{
+    // One of the company's document types (Purchase Settings → Vendor
+    // documents, 2026-10-28) — plain text so a type later deleted stays on
+    // the vendor's old documents.
     docType: {
       type: String,
-      enum: ['GST Certificate', 'PAN Card', 'MSME/Udyam Certificate', 'Company Registration',
-        'ISO/Quality Certificate', 'Authorization/Dealership Certificate', 'Product Certificate',
-        'Cancelled Cheque/Bank Proof', 'Other'],
+      trim: true,
       required: true
     },
     docNumber: { type: String, trim: true, default: '' },
@@ -230,6 +237,9 @@ const supplierSchema = new mongoose.Schema({
     panVerified: { type: Boolean, default: false },
     bankVerified: { type: Boolean, default: false },
     documentsVerified: { type: Boolean, default: false },
+    // The document types the Company Admin ticked at approval (2026-10-28);
+    // the four flags above stay filled for the three original ones.
+    checkedDocuments: { type: [String], default: [] },
     remarks: { type: String, default: '' },
     verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     verifiedAt: { type: Date, default: null }

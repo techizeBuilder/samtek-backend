@@ -28,17 +28,22 @@ const purchasesView = checkPermission('accounts', 'purchases', 'view');
 const purchasesAdd = checkPermission('accounts', 'purchases', 'add');
 const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
 const purchasesDelete = checkPermission('accounts', 'purchases', 'delete');
+// Vendor ratings are read by the Company Admin too (PO approval cards, their
+// own Vendor Ratings tab — 2026-10-29), not only by Purchase.
+const COMPANY_ADMIN_ROLES = ['Company Admin', 'Super Admin'];
+const companyAdminOrPurchasesView = (req, res, next) =>
+  (COMPANY_ADMIN_ROLES.includes(req.user?.role) ? next() : purchasesView(req, res, next));
 
 // Supplier CRUD routes
 router.get('/suppliers', auth, purchasesView, getSuppliers);
 // Must come before '/suppliers/:id', or Express matches 'catalog'/
 // 'vendor-ratings' as an id.
 router.get('/suppliers/catalog', auth, purchasesView, getSupplierCatalog);
-router.get('/suppliers/vendor-ratings', auth, purchasesView, getVendorRatingsOverview);
+router.get('/suppliers/vendor-ratings', auth, companyAdminOrPurchasesView, getVendorRatingsOverview);
 // Purchase redesign — extra path segment after :id, so route order vs.
 // '/suppliers/:id' doesn't matter for these two the way it does above.
 router.get('/suppliers/:id/batchable-quotes', auth, purchasesView, getBatchableQuotesForVendor);
-router.get('/suppliers/:id/item-breakdown', auth, purchasesView, getVendorItemBreakdown);
+router.get('/suppliers/:id/item-breakdown', auth, companyAdminOrPurchasesView, getVendorItemBreakdown);
 // Vendor Master v2 — approval lifecycle + compliance documents
 // (procurement-v2, 2026-10-08). Approving is the Company Admin's job, on
 // /api/vendor-approvals (vendorApprovalRoutes.js); these are Purchase's side.

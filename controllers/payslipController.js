@@ -5,6 +5,8 @@ import Payroll from "../models/Payroll.js";
 import generatePayslipPDF from "../utils/generatePayslipPDF.js";
 import SalaryStructure from "../models/SalaryStructure.js";
 import { sendCommonEmail, CommonEmailType } from "../utils/email.js";
+import { employeeMatch, isInMyCompany } from "../utils/companyScope.js";
+import { userHasPermission } from "../middleware/permissions.js";
 
 /* ================= GENERATE PAYSLIPS FROM PAYROLL ================= */
 export const generatePayslipsFromPayroll = async (
@@ -18,6 +20,7 @@ export const generatePayslipsFromPayroll = async (
     const payrolls = await Payroll.find({
       month,
       status: "Paid",
+      ...(await employeeMatch(req.user)),
     }).populate("employee", "fullName username email");
 
     if (!payrolls.length) {
@@ -81,8 +84,8 @@ export const generatePayslipsFromPayroll = async (
         others: salary.others,
 
         // 📅 Days
-        payDays: 30, // Default for now
-        lopDays: 0,
+        payDays: payroll.payDays ?? 0,
+        lopDays: payroll.lopDays ?? 0,
 
         // 📈 YTD Snapshots
         ytdBasic: ytd("basic"),
@@ -209,6 +212,15 @@ export const downloadPayslipPDF = async (req, res) => {
       return res.status(404).json({ message: "Payslip not found" });
     }
 
+    // The person's own, or HR in the same company.
+    const ownerId = payslip.user?._id || payslip.user;
+    const isOwner = String(ownerId) === String(req.user._id);
+    const isHr = (userHasPermission(req.user, "hrms", "payslips", "view") || userHasPermission(req.user, "hrms", "payrollRun", "view"))
+      && await isInMyCompany(req.user, ownerId);
+    if (!isOwner && !isHr) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
     await generatePayslipPDF(res, payslip);
   } catch (error) {
     res.status(500).json({
@@ -227,6 +239,9 @@ export const sendPayslipToEmployee = async (req, res) => {
     );
 
     if (!payslip) {
+      return res.status(404).json({ message: "Payslip not found" });
+    }
+    if (!(await isInMyCompany(req.user, payslip.user?._id || payslip.user))) {
       return res.status(404).json({ message: "Payslip not found" });
     }
 

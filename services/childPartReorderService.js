@@ -52,12 +52,15 @@ import { generateOrderId } from '../controllers/productionMfgController.js';
 import { sheetAreaFromItem } from '../controllers/sheetMetalPlanController.js';
 import { plainMaterialGroupsFromBOM, lengthFabricationGroupsFromBOM, sheetMetalCutGroupsFromBOM } from './bomMaterialGroupsService.js';
 import { raisePlainPurchaseRequest, raiseFabricationPurchaseRequest } from './materialAvailabilityService.js';
+import { isBought } from './makeBuyService.js';
 import { checkAndReserve, getFreeQtyExcludingOrder, getFreeQty } from './materialReservationService.js';
+import { recordCascadeCover, cascadeOnRow, cascadeIssueLimit, finishedViaStore } from './cascadeDeliveryService.js';
 import { dimensionSignature } from './fabricationDemandService.js';
 import { createSubChildPartOrderForItem } from './subChildPartOrderService.js';
 import { isReleased } from './productApprovalService.js';
 import { buildOrderStepsFromProcessDefinition } from './processStepBuilderService.js';
 import notificationService from './notificationService.js';
+import { outsourceMaterialOnOrder } from './outsourceEarmarkService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
 // A Child Part order still in any of these is "already being worked" —
@@ -134,13 +137,43 @@ export async function checkSubChildPartMaterialAvailability(productionOrder, com
   // Part. A Child Part order raised by its own 'LowStock' cron keeps
   // cascading as 'ChildPartCascade', unchanged.
   const cascadeDemandSource = productionOrder.demandSource === 'MachineCascade' ? 'MachineCascade' : 'ChildPartCascade';
+  // What was raised, for the New Stock Order form's message.
+  const partOrders = []; const noOrder = []; const purchases = [];
   for (const line of subChildPartLines) {
     const subItem = await Item.findOne({ _id: line.subChildPart, companyId });
     if (!subItem) continue;
     const neededQty = (Number(line.quantity) || 0) * buildQty;
-    const { shortfallQty } = await checkAndReserve({ item: subItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `scp:${subItem.code}` });
+    // Serial number work step 1 (2026-10-31, P1) — see machineReorderService:
+    // a built part reserves only free stock; the cascade builds the shortfall.
+    const { shortfallQty } = await checkAndReserve({ item: subItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `scp:${subItem.code}`, capToFree: !isBought(subItem) });
     if (shortfallQty === 0) continue;
-    await createSubChildPartOrderForItem(subItem, companyId, { demandSource: cascadeDemandSource, buildQtyOverride: neededQty, demandRefId: productionOrder._id });
+    // Bought from a vendor (make or buy, 2026-10-28): a purchase request,
+    // never a build order.
+    if (isBought(subItem)) {
+      // Automatic orders wait for R&D's Release — a bought part too (2026-10-29).
+      if (!isReleased(subItem)) {
+        console.warn(`[ChildPartCascade] ${productionOrder.orderId}: no purchase request for ${subItem.code} (bought), short ${shortfallQty} — not released yet.`);
+        noOrder.push(`${subItem.name} short ${shortfallQty}`);
+        continue;
+      }
+      purchases.push(await raisePlainPurchaseRequest({ item: subItem, shortfallQty, order: productionOrder }));
+      continue;
+    }
+    const res = await createSubChildPartOrderForItem(subItem, companyId, { demandSource: cascadeDemandSource, buildQtyOverride: shortfallQty, demandRefId: productionOrder._id, deliverToParent: true, parentOrderNo: productionOrder.orderId });
+    if (res.order?.deliverToParent) {
+      await recordCascadeCover(productionOrder._id, {
+        partItem: subItem._id, partCode: subItem.code, partName: subItem.name, unit: line.unit || 'Pieces',
+        qty: res.order.orderQuantity,
+        viaStore: finishedViaStore(res.order, res.kind === 'out-source' ? 'SubChildPartJobWorkOrder' : 'ProductionOrder'),
+        child: { model: res.kind === 'out-source' ? 'SubChildPartJobWorkOrder' : 'ProductionOrder', orderRef: res.order._id, orderNo: res.order.orderId },
+      });
+      partOrders.push(`${res.order.orderId} (${subItem.name})`);
+    } else {
+      // No order will deliver it (e.g. not released yet): the full need stays
+      // on stock, as before.
+      await checkAndReserve({ item: subItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `scp:${subItem.code}` });
+      noOrder.push(`${subItem.name} short ${shortfallQty}`);
+    }
   }
 
   // ── Tier 1 — plain raw materials / tools.
@@ -150,7 +183,7 @@ export async function checkSubChildPartMaterialAvailability(productionOrder, com
     const neededQty = g.perUnitQty * buildQty;
     const { shortfallQty } = await checkAndReserve({ item: matItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `plain:${matItem.code}` });
     if (shortfallQty > 0) {
-      await raisePlainPurchaseRequest({ item: matItem, shortfallQty, order: productionOrder });
+      purchases.push(await raisePlainPurchaseRequest({ item: matItem, shortfallQty, order: productionOrder }));
     }
   }
 
@@ -173,10 +206,10 @@ export async function checkSubChildPartMaterialAvailability(productionOrder, com
     // for a fabrication item — confirmed bug, 2026-09-18).
     const { shortfallQty: sheetsShort } = await checkAndReserve({ item: matItem, neededQty: sheetsNeeded, availableQty: variant.subStock || 0, order: productionOrder, orderModel: 'ProductionOrder', companyId, variantId: variant._id, lineKey: `sheet:${line.key}` });
     if (sheetsShort > 0) {
-      await raiseFabricationPurchaseRequest({
+      purchases.push(await raiseFabricationPurchaseRequest({
         matItem, dimensionValues: variant.values, piecesShort: sheetsShort,
         compositeMaterialCode: line.key, order: productionOrder,
-      });
+      }));
     }
   }
 
@@ -193,14 +226,14 @@ export async function checkSubChildPartMaterialAvailability(productionOrder, com
     // for a fabrication item — confirmed bug, 2026-09-18).
     const { shortfallQty: piecesShort } = await checkAndReserve({ item: matItem, neededQty: piecesNeeded, availableQty: variant.subStock || 0, order: productionOrder, orderModel: 'ProductionOrder', companyId, variantId: variant._id, lineKey: `length:${g.itemCode}#${g.dimensionVariantId}` });
     if (piecesShort > 0) {
-      await raiseFabricationPurchaseRequest({
+      purchases.push(await raiseFabricationPurchaseRequest({
         matItem, dimensionValues: variant.values, piecesShort,
         compositeMaterialCode: `${g.itemCode}#${g.dimensionVariantId}`, order: productionOrder,
-      });
+      }));
     }
   }
 
-  return { checked: true };
+  return { checked: true, partOrders, noOrder, purchases: purchases.filter(Boolean) };
 }
 
 // Material List — one categorized view of what building the whole order
@@ -265,7 +298,10 @@ export async function computeSubChildPartMaterialRows(order, companyId) {
   const joinDemand = (key) => {
     const d = demandByKey.get(key);
     return {
-      requestedQty: d?.quantity || 0,
+      // What was asked of Store — not what came straight from this order's
+      // own cascade (serial number work step 1).
+      requestedQty: (d?.quantity || 0) - (d?.cascadeDeliveredQuantity || 0),
+      cascadeDeliveredQty: d?.cascadeDeliveredQuantity || 0,
       transferredQty: d?.transferredQuantity || 0,
       issuedQty: d?.issuedQuantity || 0,
       returnPendingQty: d?.returnPendingQuantity || 0,
@@ -453,6 +489,9 @@ const CATEGORY_ORDER = ['Sub Child Part', 'Assembly Materials', 'Consumables', '
 
 export async function buildSubChildPartMaterialList(order, companyId) {
   const { rows } = await computeSubChildPartMaterialRows(order, companyId);
+  // outsource-v2 slice 5: material planned to go to a vendor straight from
+  // Store (an Outsource Order's material plan) — Production can't issue it.
+  const toVendor = order._id ? await outsourceMaterialOnOrder(order._id) : new Map();
   const categories = [];
   for (const name of CATEGORY_ORDER) {
     const catRows = rows.filter(r => r.category === name);
@@ -468,6 +507,11 @@ export async function buildSubChildPartMaterialList(order, companyId) {
         availability: r.available === null ? 'Unknown' : (r.available ? 'Available' : (r.isSubChildPartRow ? 'In Production' : 'Sent to Purchase')),
         requestedQty: r.requestedQty, transferredQty: r.transferredQty,
         issuedQty: r.issuedQty, returnPendingQty: r.returnPendingQty, demandStatus: r.demandStatus,
+        toVendor: toVendor.get(r.demandKey)?.store > 0 ? { store: toVendor.get(r.demandKey).store, orders: toVendor.get(r.demandKey).orders } : null,
+        // Serial number work step 1: built for this order by its cascade —
+        // delivered straight here, so Store is asked only for the rest.
+        cascade: r.isSubChildPartRow ? cascadeOnRow(order, r.demandKey) : null,
+        issueLimit: cascadeIssueLimit(r.issueTotal, r.isSubChildPartRow ? cascadeOnRow(order, r.demandKey) : null, toVendor.get(r.demandKey)?.store || 0, r.issueUnit),
       })),
     };
     if (name === 'Sub Child Part') {
@@ -501,17 +545,28 @@ export async function requestSubChildPartMaterial(order, companyId, demandKey, r
   }
 
   const existing = order.materialDemands.find(d => d.materialCode === demandKey);
-  const alreadyRequested = existing?.quantity || 0;
-  if (alreadyRequested + qty > row.issueTotal) {
-    const remaining = Math.max(0, row.issueTotal - alreadyRequested);
+  // Serial number work step 1: what came straight from this order's cascade
+  // isn't a request to Store, and what it still builds can't be asked of Store.
+  const alreadyRequested = (existing?.quantity || 0) - (existing?.cascadeDeliveredQuantity || 0);
+  const cascade = row.isSubChildPartRow ? cascadeOnRow(order, demandKey) : null;
+  // outsource-v2 slice 5: the part going to a vendor straight from Store
+  // can't be issued to Production as well.
+  const vendor = (await outsourceMaterialOnOrder(order._id)).get(demandKey);
+  const limit = cascadeIssueLimit(row.issueTotal, cascade, vendor?.store || 0, row.issueUnit);
+  if (alreadyRequested + qty > limit) {
+    const remaining = Math.max(0, Math.round((limit - alreadyRequested) * 1000) / 1000);
     return {
       ok: false, code: 400,
-      message: `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" — the whole order needs ${row.issueTotal}.`,
+      message: cascade
+        ? `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" from Store — the whole order needs ${row.issueTotal}, and ${cascade.covered} come straight from ${cascade.orders.join(', ') || 'its own build order'} (built for this order).`
+        : vendor?.store > 0
+        ? `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" — the whole order needs ${row.issueTotal}, and ${Math.round(vendor.store * 1000) / 1000} goes to the vendor straight from Store (${vendor.orders.join(", ")}).`
+        : `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" — the whole order needs ${row.issueTotal}.`,
     };
   }
 
   if (existing) {
-    existing.quantity = alreadyRequested + qty;
+    existing.quantity = (existing.quantity || 0) + qty;
     // Re-open a demand that was already fully issued so Store sends the rest.
     if (existing.status === 'Issued' && existing.issuedQuantity < existing.quantity) {
       existing.status = 'Requested';
@@ -536,7 +591,7 @@ export async function requestSubChildPartMaterial(order, companyId, demandKey, r
 // imported) from the sibling cron files' own identical helper — established
 // project convention, see subChildPartOrderService.js's own copy.
 const fallbackCreatedByCache = new Map(); // companyId string -> userId | null
-async function resolveCreatedBy(item) {
+export async function resolveCreatedBy(item) {
   if (item.createdBy) return item.createdBy;
   const key = String(item.companyId);
   if (fallbackCreatedByCache.has(key)) return fallbackCreatedByCache.get(key);
@@ -596,10 +651,16 @@ function demandSourceMatch(demandSource, demandRefId) {
 // `buildQtyOverride` lets the cascade size its own order to the actual
 // quantity the Machine's BOM line requires (line.quantity × that Machine
 // order's own quantity) instead of this Child Part's generic reorderQty.
-export async function createChildPartOrderForItem(item, companyId, { demandSource = 'LowStock', buildQtyOverride, demandRefId = null } = {}) {
+// `byHand` (New Stock Order, 2026-11-05): { deliveryDate, priority, createdBy }.
+// Production asked for this quantity on purpose, so an open low-stock order
+// doesn't stop it. It still counts as one: the sweep won't add another meanwhile.
+export async function createChildPartOrderForItem(item, companyId, { demandSource = 'LowStock', buildQtyOverride, demandRefId = null, deliverToParent = false, parentOrderNo = '', byHand = null } = {}) {
   if (!DEMAND_SOURCES.includes(demandSource)) {
     throw new Error(`createChildPartOrderForItem: unknown demandSource "${demandSource}"`);
   }
+  // Make or buy (2026-10-28): a bought part is never built — covers the
+  // low-stock sweep and every cascade in one place.
+  if (isBought(item)) return { created: false, reason: 'bought-from-vendor' };
 
   // Product Approval Gate (docs/product-approval-gate-redesign-discussion-2026-09.md
   // §3f): every caller of this function is automatic — the reorder cron and
@@ -608,12 +669,12 @@ export async function createChildPartOrderForItem(item, companyId, { demandSourc
   // unit for QC/Prototype never goes through here.
   if (!isReleased(item)) return { created: false, reason: 'not-released' };
 
-  const existing = await ProductionOrder.exists({
+  const existing = await ProductionOrder.findOne({
     subChildPartItem: item._id, orderKind: 'ChildPart', status: { $in: OPEN_STATUSES }, ...demandSourceMatch(demandSource, demandRefId),
-  });
-  if (existing) return { created: false, reason: 'open-order-exists' };
+  }).select('_id orderId orderQuantity deliverToParent processes.type').lean();
+  if (existing && !byHand) return { created: false, reason: 'open-order-exists', order: existing };
 
-  const createdBy = await resolveCreatedBy(item);
+  const createdBy = byHand?.createdBy || await resolveCreatedBy(item);
   if (!createdBy) {
     console.error(`[ChildPartReorder] Skipping ${item.code} — no createdBy and no company user found to fall back to.`);
     return { created: false, reason: 'no-createdBy' };
@@ -647,9 +708,12 @@ export async function createChildPartOrderForItem(item, companyId, { demandSourc
     orderQuantity: buildQty,
     demandSource,
     demandRefId,
+    deliverToParent: !!(deliverToParent && demandRefId),
+    parentOrderNo: deliverToParent && demandRefId ? parentOrderNo : '',
     source: 'Stock',
+    priority: byHand?.priority || 'Normal',
     receivedDate: today(),
-    deliveryDate: today(),
+    deliveryDate: byHand?.deliveryDate || today(),
     company: companyId,
     createdBy,
     // Explicit, never the schema's own bare default — Mongoose calls a
@@ -663,7 +727,22 @@ export async function createChildPartOrderForItem(item, companyId, { demandSourc
     processes,
   });
 
-  await checkSubChildPartMaterialAvailability(order, companyId);
+  // By hand the order already exists, so a failed check is reported, not thrown.
+  let material = { checked: false };
+  try {
+    material = await checkSubChildPartMaterialAvailability(order, companyId);
+  } catch (e) {
+    if (!byHand) throw e;
+    console.error(`[ChildPartReorder] ${order.orderId} material check error:`, e);
+  }
+
+  // 2026-10-22 (client change — replaces the 2026-09-22 "Production first,
+  // full stop" rule above): a first Out Source step goes to Purchase at once,
+  // all units in one request.
+  try {
+    const { autoRequestFirstOutsourceRun } = await import('../controllers/outsourceWorkController.js');
+    await autoRequestFirstOutsourceRun(order);
+  } catch (e) { console.error('[ChildPartReorder] auto outsource request error:', e); }
 
   try {
     await notificationService.triggerProductionNotification({
@@ -673,7 +752,7 @@ export async function createChildPartOrderForItem(item, companyId, { demandSourc
     });
   } catch (e) { console.error('[ChildPartReorder] notification error:', e); }
 
-  return { created: true, order };
+  return { created: true, order, material };
 }
 
 export async function runChildPartReorderSweep() {

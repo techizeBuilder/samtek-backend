@@ -35,6 +35,8 @@ import { generateOrderId } from '../controllers/productionMfgController.js';
 import { buildFabricationBomDimensions, dimensionSignature } from '../services/fabricationDemandService.js';
 import { sheetAreaFromItem } from '../controllers/sheetMetalPlanController.js';
 import { raisePlainPurchaseRequest, raiseFabricationPurchaseRequest } from './materialAvailabilityService.js';
+import { isBought } from './makeBuyService.js';
+import { addCoverOrder, coverNotReplaced } from './cascadeDeliveryService.js';
 import { checkAndReserve, getFreeQtyExcludingOrder, getFreeQty } from './materialReservationService.js';
 import { flattenProcessDefinition, classifyProcessDefinition, buildOrderStepsFromProcessDefinition } from './processStepBuilderService.js';
 import { isReleased } from './productApprovalService.js';
@@ -437,6 +439,9 @@ export async function computeSubChildPartRawMaterialAvailabilityLive(item, sourc
 // with, instead of always hardcoding 'ChildPartCascade'.
 const DEMAND_SOURCES = ['LowStock', 'ChildPartCascade', 'MachineCascade'];
 
+// What was raised, for the New Stock Order form's message.
+const materialOf = (need) => ({ checked: need?.neededQty != null, partOrders: [], noOrder: [], purchases: need?.purchaseRequestId ? [need.purchaseRequestId] : [] });
+
 // Dedup match for one demandSource — 'LowStock' also matches records that
 // predate this field entirely (every order raised before the cascade
 // existed IS a LowStock order by definition; treating a missing value as
@@ -476,10 +481,22 @@ function demandSourceMatch(demandSource, demandRefId) {
 // instead of this Sub Child Part's generic reorderQty — the cascade's whole
 // point is a build has a specific need right now, not "however much this
 // Sub Child Part normally restocks by."
-export async function createSubChildPartOrderForItem(item, companyId, { demandSource = 'LowStock', buildQtyOverride, demandRefId = null } = {}) {
+// `replacesLostOf` (2026-10-26 — partial returns): { orderId, orderCode } of an
+// order whose pieces were lost at a vendor. The same demand needs them, so the
+// one-open-order-per-demand guard is skipped and the new order says which
+// order it replaces.
+// `byHand` (New Stock Order, 2026-11-05): { deliveryDate, priority, createdBy }.
+// Production asked for this quantity on purpose, so an open low-stock order
+// doesn't stop it. It still counts as one: the sweep won't add another meanwhile.
+export async function createSubChildPartOrderForItem(item, companyId, { demandSource = 'LowStock', buildQtyOverride, demandRefId = null, replacesLostOf = null, deliverToParent = false, parentOrderNo = '', byHand = null } = {}) {
+  // Serial number work step 1 (2026-10-31): a cascade order delivers to its parent.
+  const toParent = !!(deliverToParent && demandRefId);
   if (!DEMAND_SOURCES.includes(demandSource)) {
     throw new Error(`createSubChildPartOrderForItem: unknown demandSource "${demandSource}"`);
   }
+  // Make or buy (2026-10-28): a bought part is never built — covers the
+  // low-stock sweep, cascades, replacement orders and Dispatch in one place.
+  if (isBought(item)) return { created: false, reason: 'bought-from-vendor' };
   // Product Approval Gate — see the same guard in childPartReorderService.js's
   // createChildPartOrderForItem: the reorder cron and the Child Part cascade
   // (this function's only callers) wait until this part is Released.
@@ -502,19 +519,22 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
   const classification = classifyProcessDefinition(flatSteps);
   const isOutSource = classification === 'PureOutSource';
 
-  if (isOutSource) {
-    const existing = await SubChildPartJobWorkOrder.exists({
+  if (replacesLostOf || byHand) {
+    // A replacement for lost pieces, or Production asking on purpose — not a
+    // second order for the same need.
+  } else if (isOutSource) {
+    const existing = await SubChildPartJobWorkOrder.findOne({
       subChildPartItem: item._id, status: { $in: OPEN_JOB_WORK_STATUSES }, ...demandSourceMatch(demandSource, demandRefId),
-    });
-    if (existing) return { created: false, reason: 'open-job-work-exists' };
+    }).select('_id orderId orderQuantity deliverToParent processes.type').lean();
+    if (existing) return { created: false, reason: 'open-job-work-exists', kind: 'out-source', order: existing };
   } else {
-    const existing = await ProductionOrder.exists({
+    const existing = await ProductionOrder.findOne({
       subChildPartItem: item._id, orderKind: 'SubChildPart', status: { $in: OPEN_PRODUCTION_STATUSES }, ...demandSourceMatch(demandSource, demandRefId),
-    });
-    if (existing) return { created: false, reason: 'open-order-exists' };
+    }).select('_id orderId orderQuantity deliverToParent processes.type').lean();
+    if (existing) return { created: false, reason: 'open-order-exists', order: existing };
   }
 
-  const createdBy = await resolveCreatedBy(item);
+  const createdBy = byHand?.createdBy || await resolveCreatedBy(item);
   if (!createdBy) {
     console.error(`[SubChildPartOrder] Skipping ${item.code} — no createdBy and no company user found to fall back to.`);
     return { created: false, reason: 'no-createdBy' };
@@ -548,11 +568,15 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
       orderQuantity: buildQty,
       demandSource,
       demandRefId,
+      deliverToParent: toParent,
+      parentOrderNo: toParent ? parentOrderNo : '',
+      ...(replacesLostOf ? { replacesLostOf } : {}),
       jobWorkTypes,
       company: item.companyId,
       createdBy,
+      priority: byHand?.priority || 'Normal',
       receivedDate: today(),
-      deliveryDate: today(),
+      deliveryDate: byHand?.deliveryDate || today(),
     });
     const need = await resolveSubChildPartRawMaterialNeed(item, sourceItem, buildQty, order);
     order.rawMaterial = {
@@ -573,7 +597,7 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
         targetCompanyId: item.companyId,
       });
     } catch (e) { console.error('[SubChildPartOrder] notification error:', e); }
-    return { created: true, kind: 'out-source', order };
+    return { created: true, kind: 'out-source', order, material: materialOf(need) };
   }
 
   const orderId = await generateOrderId(item.companyId);
@@ -587,9 +611,13 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
     orderQuantity: buildQty,
     demandSource,
     demandRefId,
+    deliverToParent: toParent,
+    parentOrderNo: toParent ? parentOrderNo : '',
+    ...(replacesLostOf ? { replacesLostOf } : {}),
     source: 'Stock',
+    priority: byHand?.priority || 'Normal',
     receivedDate: today(),
-    deliveryDate: today(),
+    deliveryDate: byHand?.deliveryDate || today(),
     company: item.companyId,
     createdBy,
     processes,
@@ -603,7 +631,14 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
   // ready for it. Its Store demand is only ever created by Production's
   // explicit "Issue" action — see requestSubChildPartOrderMaterial in
   // subChildPartOrderMfgController.js.
-  await resolveSubChildPartRawMaterialNeed(item, sourceItem, buildQty, order);
+  // By hand the order already exists, so a failed check is reported, not thrown.
+  let need = {};
+  try {
+    need = await resolveSubChildPartRawMaterialNeed(item, sourceItem, buildQty, order);
+  } catch (e) {
+    if (!byHand) throw e;
+    console.error(`[SubChildPartOrder] ${order.orderId} material check error:`, e);
+  }
 
   // A Hybrid order whose first step is Out Source is still auto-routed to
   // Purchase directly — the same custody rule a pure Out Source Sub Child
@@ -615,17 +650,14 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
   // so Purchase can act on it directly with no Production click needed for
   // this one; Production only gets a Send action once it reaches a LATER
   // Out Source step (outsourceWorkController.js, Stage 3).
+  // 2026-10-22 (client change): the whole first run of consecutive Out Source
+  // steps is requested (was only step 0), the same helper Child Part and
+  // Machine now use too — see outsourceWorkController.autoRequestOutsourceRuns.
   const firstStepIsOutSource = classification === 'Hybrid' && processes[0]?.type === 'Outsourcing';
+  let autoMade = [];
   if (firstStepIsOutSource) {
-    order.processes[0].outsourceStatus = 'Requested';
-    order.outsourceHandoffs.push({
-      unitIndices: [0],
-      stepIndices: [0],
-      stepNames: [processes[0].step],
-      isFirstStepOfOrder: true,
-      status: 'Requested',
-      requestedAt: new Date(),
-    });
+    const { autoRequestOutsourceRuns } = await import('../controllers/outsourceWorkController.js');
+    autoMade = autoRequestOutsourceRuns(order, [0]);
     await order.save();
   }
 
@@ -641,13 +673,46 @@ export async function createSubChildPartOrderForItem(item, companyId, { demandSo
         data: {
           orderId: order.orderId, orderRecordId: String(order._id),
           itemCode: item.code, itemName: item.name,
-          orderQuantity: buildQty, jobWorkTypes: [processes[0].step],
+          orderQuantity: buildQty, jobWorkTypes: autoMade[0]?.stepNames || [processes[0].step],
         },
         targetCompanyId: item.companyId,
       });
     }
   } catch (e) { console.error('[SubChildPartOrder] notification error:', e); }
-  return { created: true, kind: classification === 'Hybrid' ? 'hybrid' : 'in-house', order };
+  return { created: true, kind: classification === 'Hybrid' ? 'hybrid' : 'in-house', order, material: materialOf(need) };
+}
+
+// Pieces of a cascade order that won't reach stock — scrapped / rejected by
+// QC (2026-10-27, the same rule as "not coming" at a vendor): a sales order /
+// Child Part build still needs them, so the same demand gets a replacement
+// order for that quantity. A low-stock order gets none (the low-stock job
+// re-raises if the stock is still low). holder: a Sub Child Part
+// ProductionOrder or SubChildPartJobWorkOrder. Records it on the holder.
+// Never throws to its caller (a QC decision must not fail over it).
+export async function raiseReplacementFor(holder, qty, why) {
+  try {
+    if (!(qty > 0) || !['MachineCascade', 'ChildPartCascade'].includes(holder?.demandSource)) return null;
+    const item = await Item.findOne({ _id: holder.subChildPartItem, companyId: holder.company });
+    if (!item) return null;
+    const res = await createSubChildPartOrderForItem(item, holder.company, {
+      demandSource: holder.demandSource, demandRefId: holder.demandRefId, buildQtyOverride: qty,
+      deliverToParent: !!holder.deliverToParent, parentOrderNo: holder.parentOrderNo || '',
+      replacesLostOf: { orderId: holder._id, orderCode: holder.orderId, why },
+    });
+    if (!res.created) {
+      await coverNotReplaced(holder, item, qty);
+      return null;
+    }
+    if (holder.deliverToParent) {
+      await addCoverOrder(holder.demandRefId, item._id, { model: res.kind === 'out-source' ? 'SubChildPartJobWorkOrder' : 'ProductionOrder', orderRef: res.order._id, orderNo: res.order.orderId });
+    }
+    const Model = holder.constructor;
+    await Model.updateOne({ _id: holder._id }, { $push: { replacements: { qty, why, orderId: res.order._id, orderCode: res.order.orderId, at: new Date() } } });
+    return res.order;
+  } catch (e) {
+    console.error('[SubChildPartOrder] replacement order failed:', e.message);
+    return null;
+  }
 }
 
 export async function runSubChildPartOrderSweep() {

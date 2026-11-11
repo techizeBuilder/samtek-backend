@@ -23,5 +23,8 @@ Thumbs.db
 # Daily work reports (kept locally, not in git)
 docs/daily report/
 
+# Notes and test kit carried between chats (kept locally, not in git)
+docs/session handover/
+
 # Startup scripts
 ../../../start-codecraft.ps1

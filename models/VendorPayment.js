@@ -42,6 +42,8 @@ const vendorPaymentSchema = new mongoose.Schema({
     // payments made before this have neither.
     kind: { type: String, enum: ['Advance', 'Payment', null], default: null },
     purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase', default: null },
+    // An Outsource Order's bill (outsource-v2 slice 3, 2026-10-20).
+    outsourceOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'OutsourceOrder', default: null },
     // Paid out of credit the vendor already held of ours (no bank) — 2026-10-12.
     fromCredit: { type: Boolean, default: false },
     unit: {
@@ -60,6 +62,11 @@ const vendorPaymentSchema = new mongoose.Schema({
     },
     notes: {
         type: String
+    },
+    // Optional payment slip / bank transfer screenshot uploaded after payment (2026-10-29).
+    slipUrl: {
+        type: String,
+        default: null
     }
 }, {
     timestamps: true

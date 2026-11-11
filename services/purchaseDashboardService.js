@@ -17,6 +17,7 @@ import ItemQuoteGroup from '../models/ItemQuoteGroup.js';
 import VendorMoneyBack from '../models/VendorMoneyBack.js';
 import VendorWarrantyClaim from '../models/VendorWarrantyClaim.js';
 import VendorApprovalRequest from '../models/VendorApprovalRequest.js';
+import OutsourceOrder from '../models/OutsourceOrder.js';
 import Supplier from '../models/Supplier.js';
 import '../models/PurchaseRequest.js';
 import { OPEN_PO_STATUSES, lineDueBucket, lineIsReceived } from './deliveryFollowUpService.js';
@@ -100,7 +101,8 @@ export function spendEntries(pos, bills) {
       value: bill ? (cancelled(bill) ? 0 : Number(bill.totalAmount) || 0) : ordered });
   }
   for (const b of bills || []) {
-    if (b.purchaseOrder || cancelled(b)) continue;
+    // Outsource (job-work) bills aren't purchases (outsource-v2 OQ6) — not here.
+    if (b.purchaseOrder || b.outsourceOrder || cancelled(b)) continue;
     out.push({ vendorId: idOf(b.vendor), name: b.vendor?.supplierName || 'Vendor', date: b.invoiceDate || b.createdAt, ordered: 0, kind: 'noPo', value: Number(b.totalAmount) || 0 });
   }
   return out;
@@ -250,7 +252,7 @@ async function scoreRows(cid, settings, userIds = null, now) {
 async function moneyTiles(cid, now) {
   const [bills, refunds] = await Promise.all([
     PurchaseInvoice.find({ companyId: cid, status: { $ne: 'Cancelled' } })
-      .select('purchaseOrder status totalAmount paidAmount advanceAmount advancePaid advancePercent acceptedValue fullyAcceptedAt dueDate').lean(),
+      .select('purchaseOrder outsourceOrder status totalAmount paidAmount advanceAmount advancePaid advancePercent acceptedValue fullyAcceptedAt dueDate').lean(),
     VendorMoneyBack.find({ companyId: cid, status: 'Refund due' }).select('amount').lean(),
   ]);
   const out = { advanceDue: 0, payableNow: 0, owedNow: 0, overdue: 0, overdueBills: 0, refundsDue: round2(refunds.reduce((s, r) => s + (Number(r.amount) || 0), 0)), refundsCount: refunds.length };
@@ -348,16 +350,18 @@ export async function buildDashboard({ companyId, view, userId, period = 'month'
   const realIn = real.filter(p => inRange(poDate(p), range));
   const pending = pos.filter(p => p.status === 'Pending Approval');
   // What was billed: real POs' bills + bills without a PO (B10).
-  const bills = await PurchaseInvoice.find({ companyId: cid }).select('purchaseOrder vendor invoiceDate createdAt totalAmount status stage')
+  const bills = await PurchaseInvoice.find({ companyId: cid }).select('purchaseOrder outsourceOrder vendor invoiceDate createdAt totalAmount status stage')
     .populate('vendor', 'supplierName').lean();
   const spend = spendEntries(real, bills);
   const spendIn = spend.filter(e => inRange(e.date, range));
-  const [vendorRequests, money, vendors, scores, rises] = await Promise.all([
+  const [vendorRequests, money, vendors, scores, rises, outsourcePending] = await Promise.all([
     VendorApprovalRequest.find({ companyId: cid, status: 'Pending' }).select('type').lean(),
     moneyTiles(cid, now),
     vendorTiles(cid),
     scoreRows(cid, settings, null, now),
     priceRises(cid, realIn, settings?.priceJumpWarnPercent),
+    // Outsource orders waiting for the Company Admin (outsource-v2 slice 2).
+    OutsourceOrder.countDocuments({ company: cid, status: 'Pending Approval' }),
   ]);
   const byType = {};
   for (const r of vendorRequests) byType[r.type] = (byType[r.type] || 0) + 1;
@@ -382,6 +386,7 @@ export async function buildDashboard({ companyId, view, userId, period = 'month'
       cancelRequests: pos.filter(p => (p.cancellations || []).some(c => c.status === 'Requested')).length,
       vendorRequests: byType,
       vendorRequestsTotal: vendorRequests.length,
+      outsourcePending,
     },
     // total = billed; ordered / fellAway / noPoBills explain it (B10).
     purchaseValue: {

@@ -491,7 +491,9 @@ class NotificationService {
         title: 'New Sub Child Job Work Order',
         message: `${data?.itemName || 'Sub Child Part'} needs outsourced job work (${(data?.jobWorkTypes || []).join(', ')}) — Order ${data?.orderId}`,
         type: 'purchase', icon: 'shopping-cart', priority: 'high',
-        data, ...common
+        // outsourceRequest: the bell opens Out Source Work → New requests
+        // (2026-10-23 — data.orderId alone sent it to Sales Orders).
+        data: { ...data, outsourceRequest: true }, ...common
       });
     }
 
@@ -505,7 +507,7 @@ class NotificationService {
         title: 'Outsource Work Requested',
         message: `${data?.machineName || 'An order'} needs outsourced work (${(data?.stepNames || []).join(', ')}) — Order ${data?.orderCode}`,
         type: 'purchase', icon: 'shopping-cart', priority: 'high',
-        data, ...common
+        data: { ...data, outsourceRequest: true }, ...common
       });
     }
   }
@@ -521,6 +523,18 @@ class NotificationService {
         title: 'New Order Received',
         message: `Order ${data?.orderCode} received and requires store processing`,
         type: 'store', icon: 'package', priority: 'high',
+        data, ...common
+      });
+    }
+
+    // Serial number work step 2 (2026-10-31): carriers in stock waiting for a sticker.
+    if (action === 'carriers_to_label' || action === 'carriers_to_label_daily') {
+      return this.notifyRoles(['Store Head', 'Store Employee'], {
+        title: 'Label carriers',
+        message: action === 'carriers_to_label'
+          ? `${data?.count} ${data?.itemName} from ${data?.orderNo} went into stock holding tracked serial numbers — stick a sticker and pair them on Store → Label carriers.`
+          : `${data?.count} part${data?.count === 1 ? '' : 's'} in stock still wait for a sticker — Store → Label carriers.`,
+        type: 'store', icon: 'tag', priority: 'high',
         data, ...common
       });
     }
@@ -965,6 +979,17 @@ class NotificationService {
         title: 'R&D Change Request',
         message: `Change request raised for ${data?.productName || ''}`,
         type: 'rd', icon: 'alert-triangle', priority: 'high',
+        data, ...common
+      });
+    }
+
+    // Serial number work step 2 (2026-10-31): daily, while piece items have no
+    // "how is it used in production" choice.
+    if (action === 'needs_usage_type') {
+      return this.notifyRoles(['Research & Development Head', 'Research Development Employee'], {
+        title: 'Items need a usage type',
+        message: `${data?.count} item${data?.count === 1 ? '' : 's'} counted in pieces need "Built into the product" or "Used to make the product" — R&D → Inventory → Needs usage type.`,
+        type: 'rd', icon: 'alert-triangle', priority: 'medium',
         data, ...common
       });
     }

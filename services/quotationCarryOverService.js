@@ -10,15 +10,25 @@
 // newest quotation always wins, even when it's empty.
 //
 // "Last quotation" = the vendor's newest quotation (by when it was submitted /
-// entered) that still has at least one price within the quote validity. When
-// all their prices have expired, nothing carries over: an old freight figure
-// is likely stale too.
+// entered) that still has at least one price within the quote validity AND
+// on a card that is still OPEN — still being quoted. When all their prices have
+// expired, nothing carries over: an old freight figure is likely stale too.
+//
+// 2026-10-30 (your browser test): once a card goes onto a PO — with any
+// vendor — that quotation round is over for everyone, so its charges no longer
+// carry into the next round (a fresh request's quotation starts empty: an old
+// "packing ₹400" pre-filled there could reach a PO the vendor never asked for).
+// A re-quote while the card is still open carries over, as §34 wanted.
 import VendorBid from '../models/VendorBid.js';
 import { quoteValidUntil } from './quoteChecksService.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-// A price that went onto a PO ('Selected') still shows the vendor's terms.
+// Quotes that can carry: still submitted ('Selected' = on a PO — its card is no
+// longer open, so it never carries; kept here for the card check to say so).
 const LIVE_STATUSES = ['Submitted', 'Selected'];
+// A card still being quoted. A quote whose card isn't loaded (older data, a
+// test without cards) is treated as open — the old behaviour.
+const cardOpen = (b) => !b?.group || typeof b.group !== 'object' || !b.group.status || b.group.status === 'Open';
 
 // When a quotation counts as made — the same dates PO review sorts by.
 export const quotationMadeAt = (q, manual) => (manual ? (q?.createdAt || q?.quoteDate) : q?.submittedAt) || null;
@@ -29,6 +39,7 @@ export function pickCarryOver(bids, validityDays, now = new Date()) {
   let best = null;
   for (const b of bids || []) {
     if (!LIVE_STATUSES.includes(b?.status)) continue;
+    if (b.status === 'Selected' || !cardOpen(b)) continue; // that round is over
     const until = quoteValidUntil(b, validityDays);
     if (!until || now > until) continue;
     const manual = !!b.manualQuotation?._id;
@@ -62,7 +73,8 @@ export async function vendorCarryOver({ companyId, vendorId, validityDays, now =
   // Only quotes that could still be valid (a day of slack for end-of-day).
   const since = new Date(now.getTime() - ((Number(validityDays) || 0) + 1) * DAY_MS);
   const bids = await VendorBid.find({ companyId, vendor: vendorId, status: { $in: LIVE_STATUSES }, submittedAt: { $gte: since } })
-    .select('status submittedAt createdAt quotationRequest manualQuotation')
+    .select('status submittedAt createdAt quotationRequest manualQuotation group')
+    .populate('group', 'status')
     .populate('quotationRequest', 'number charges paymentTerms submittedAt')
     .populate('manualQuotation', 'number charges paymentTerms createdAt quoteDate')
     .lean();

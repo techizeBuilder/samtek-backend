@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
+import { DEPARTMENTS, getDeptMailer, mailboxMissingMessage } from '../config/mailAccounts.js';
 
 const cleanupFiles = (files = []) => {
   files.forEach((file) => {
@@ -56,7 +56,7 @@ export const sendGenericEmail = async (req, res) => {
       cleanupFiles(files);
       return res.status(400).json({
         success: false,
-        message: `${department} department ki email Admin ne set nahi ki hai. Admin Settings > SMTP Settings me set karwayen.`,
+        message: mailboxMissingMessage(department),
       });
     }
 

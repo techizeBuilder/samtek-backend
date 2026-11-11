@@ -1,5 +1,7 @@
 import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP, buildStepsFromList, stepsForKind } from '../models/ProductionOrder.js';
+import { lostBetween, lostTotal } from '../utils/lostAtVendor.js';
 import ProductionTeam from '../models/ProductionTeam.js';
+import { TeamError, searchTeamPeople, validateTeamBody, decorateTeams, teamIsBusy, assertAssignableTeam } from '../services/productionTeamService.js';
 import Sale from '../models/Sale.js';
 import QCJob from '../models/QCJob.js';
 import notificationService from '../services/notificationService.js';
@@ -12,11 +14,17 @@ import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimens
 import { toMm } from '../utils/unitConversion.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
 import { buildMachineDesignFiles } from './rdController.js';
-import { computeDesignReadiness, isPurchaseMachine } from '../services/productApprovalService.js';
-import { buildFreshUnitProcesses } from '../services/processStepBuilderService.js';
-import { findSubChildPartMaterialLines, buildSubChildPartMaterialList, requestSubChildPartMaterial, getSubChildPartJobWorkRows, getSubChildPartUnissuedJobWorkMaterials } from '../services/childPartReorderService.js';
-import { findMachineMaterialLines, buildMachineMaterialList, requestMachineMaterial, resolveMachineOrderProcesses } from '../services/machineReorderService.js';
+import { computeDesignReadiness, isPurchaseMachine, isReleased } from '../services/productApprovalService.js';
+import { buildFreshUnitProcesses, flattenProcessDefinition } from '../services/processStepBuilderService.js';
+import { findSubChildPartMaterialLines, buildSubChildPartMaterialList, requestSubChildPartMaterial, getSubChildPartJobWorkRows, getSubChildPartUnissuedJobWorkMaterials, createChildPartOrderForItem } from '../services/childPartReorderService.js';
+import { createSubChildPartOrderForItem } from '../services/subChildPartOrderService.js';
+import { isBought } from '../services/makeBuyService.js';
+import ChildPartBOM from '../models/ChildPartBOM.js';
+import SubChildPartJobWorkOrder from '../models/SubChildPartJobWorkOrder.js';
+import { findMachineMaterialLines, buildMachineMaterialList, requestMachineMaterial, resolveMachineOrderProcesses, checkMachineAssemblyMaterialAvailability, machineStockProblem, createMachineStockOrder } from '../services/machineReorderService.js';
 import { recalculateChildPartCost } from './childPartBOMController.js';
+import { isLastInHouseStep, saveProductionCost, productionCostOf, pushPartCost, outsourceMoneyFor, unitFinished } from '../services/partCostService.js';
+import { bomLinesForOrder, stepMaterialPerUnit, lineUsage, returnLimits, addUsageToList } from '../services/stepMaterialService.js';
 import MachineBOM from '../models/MachineBOM.js';
 import { syncMachineBOMPricing } from './machineBOMController.js';
 
@@ -32,6 +40,11 @@ import Purchase from '../models/Purchase.js';
 import RDChildPart from '../models/RDChildPart.js';
 import { ensurePartChecksStructure, resolvePartChecklistRows, resolveChildPartUnitChecklistRows, attachPartReference, MANUFACTURING_SOURCE_TYPES } from '../services/qcChecklistPullService.js';
 import { getQcStepIndices, needsUnitSteps, needsBatchSteps, submitBatchStepForQC, submitUnitStepForQC } from '../services/qcStepService.js';
+// Serial number work step 1 (2026-10-31): a finished cascade part goes to its parent order, else stock.
+import { deliverFinishedParts } from '../services/cascadeDeliveryService.js';
+import { pickRule, pickProblem, checkPicked, insideCandidates, noSerialCheck, acknowledged, confirmBody, logSkippedSerials } from '../services/serialTrailService.js';
+import PurchasedUnitModel from '../models/PurchasedUnit.js';
+import PartLabelModel from '../models/PartLabel.js';
 
 // Department-Head-only gate for Issue Material + Receive — mirrors
 // productionExpenseController.js's own HEAD_ROLES/canManage pattern exactly,
@@ -170,7 +183,8 @@ export async function ensureQCJobForOrder(order, sentBy, userId) {
     itemName: order.machineName,
     itemCode: order.machineCode,
     category: qcCategory,
-    quantity: order.orderQuantity || 1,
+    // A Sub Child Part batch less any pieces lost at a vendor (2026-10-27).
+    quantity: Math.max(1, (order.orderQuantity || 1) - (order.orderKind === 'SubChildPart' ? lostTotal(order) : 0)),
     unit: 'pcs',
     receivedDate: today(),
     status: order.orderKind === 'SubChildPart' ? 'Draft' : 'Pending',
@@ -284,6 +298,7 @@ export const getPartsQC = async (req, res) => {
 export const assignPartTeam = async (req, res) => {
   try {
     const { teamId } = req.body;
+    await assertAssignableTeam(teamId, req.user.companyId);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: req.user.companyId });
@@ -302,7 +317,7 @@ export const assignPartTeam = async (req, res) => {
     await qcJob.populate('partChecks.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: qcJob.partChecks.id(part._id) });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err instanceof TeamError ? err.status : 500).json({ success: false, message: err.message });
   }
 };
 
@@ -610,7 +625,7 @@ export const completeChildPartUnitPainting = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This order has no linked Child Part Item.' });
     }
     await recalculateChildPartCost(order.subChildPartItem, req.user.companyId, { productionCost, productionExpense });
-    await Item.updateOne({ _id: order.subChildPartItem, companyId: req.user.companyId }, { $inc: { qty: 1 } });
+    await deliverFinishedParts({ order, itemId: order.subChildPartItem, qty: 1, by: req.user.fullName || req.user.username || '' });
 
     if (allUnitsCompleted(order)) order.status = 'Completed';
     await order.save();
@@ -904,64 +919,103 @@ export const getTeamOrderHistory = async (req, res) => {
   }
 };
 
+// New Stock Order (2026-11-05, docs/production/stock-order-form-2026-11.md): a
+// Released Machine, Child Part or Sub Child Part, built for stock. A customer's
+// machine comes through the Order Form, never here. Each kind goes through the
+// code that already makes that kind of order.
+const STOCK_ORDER_KINDS = ['Machine', 'ChildPart', 'SubChildPart'];
+
+// Why this item can't be ordered, or null. hasBom: its BOM, for a Machine / Child Part.
+const notStockOrderable = (kind, item, hasBom) => {
+  if (kind === 'Machine') return machineStockProblem(item, hasBom);
+  if (!item) return 'This part was not found.';
+  if (item.isDiscontinued) return `${item.name} is discontinued.`;
+  if (isBought(item)) return `${item.name} is bought from a vendor: it goes through Purchase, not a build order.`;
+  if (!isReleased(item)) return `${item.name} isn't released by R&D yet.`;
+  if (kind === 'SubChildPart') {
+    if (!item.subChildPartDetails?.sourceItem) return `${item.name} has no source material yet.`;
+    if (!flattenProcessDefinition(item.subChildPartDetails.processDefinition).length) return `${item.name} has no steps yet.`;
+    return null;
+  }
+  return hasBom ? null : `${item.name} has no BOM yet.`;
+};
+
+// GET /api/production-mfg/stock-order-items?kind= — the form's pick list. All of
+// them, not paged: it's bounded by the product catalog and searched in the
+// dropdown. openOrders: orders of it still open that will add to stock.
+export const getStockOrderItems = async (req, res) => {
+  try {
+    const companyId = req.user.companyId;
+    const kind = STOCK_ORDER_KINDS.includes(req.query.kind) ? req.query.kind : 'Machine';
+    const items = await Item.find({ companyId, productKind: kind, isDiscontinued: { $ne: true } })
+      .select('code name productKind unit isDiscontinued machineDetails childPartDetails subChildPartDetails partSourcing').sort({ name: 1 }).lean();
+    const ids = items.map(i => i._id);
+    const boms = kind === 'Machine'
+      ? await MachineBOM.find({ company: companyId, machine: { $in: ids } }).select('machine isLocked').lean()
+      : kind === 'ChildPart' ? await ChildPartBOM.find({ company: companyId, childPart: { $in: ids } }).select('childPart').lean() : [];
+    const bomOf = new Map(boms.map(b => [String(b.machine || b.childPart), b]));
+    const offered = items.filter(i => !notStockOrderable(kind, i, bomOf.has(String(i._id))));
+
+    const open = { $nin: ['Completed', 'Cancelled'] };
+    const orders = kind === 'Machine'
+      ? await ProductionOrder.find({ company: companyId, source: 'Stock', status: open, machineCode: { $in: offered.map(i => i.code) }, orderKind: { $in: ['Machine', null] } }).select('orderId orderQuantity machineCode').lean()
+      : await ProductionOrder.find({ company: companyId, status: open, orderKind: kind, subChildPartItem: { $in: offered.map(i => i._id) }, deliverToParent: { $ne: true } }).select('orderId orderQuantity subChildPartItem').lean();
+    const jobWork = kind === 'SubChildPart'
+      ? await SubChildPartJobWorkOrder.find({ company: companyId, status: open, subChildPartItem: { $in: offered.map(i => i._id) }, deliverToParent: { $ne: true } }).select('orderId orderQuantity subChildPartItem').lean()
+      : [];
+    const openOf = (i) => [...orders, ...jobWork]
+      .filter(o => (kind === 'Machine' ? o.machineCode === i.code : String(o.subChildPartItem) === String(i._id)))
+      .map(o => ({ orderId: o.orderId, qty: o.orderQuantity || 1 }));
+
+    const data = offered.map(i => ({ code: i.code, name: i.name, bomLocked: kind === 'Machine' ? !!bomOf.get(String(i._id))?.isLocked : true, openOrders: openOf(i) }));
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('Listing stock order items failed:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/production-mfg/orders { orderKind, machineCode, orderQuantity, priority, deliveryDate }
+// machineCode: the item's code, as on every production order.
 export const createOrder = async (req, res) => {
   try {
-    const { machineCode, machineName, priority, deliveryDate, source, rejectionDetails } = req.body;
-    if (!machineCode || !machineName || !deliveryDate) {
-      return res.status(400).json({ success: false, message: 'machineCode, machineName and deliveryDate are required' });
-    }
+    const companyId = req.user.companyId;
+    const { orderKind = 'Machine', machineCode, orderQuantity, priority, deliveryDate, source, saleId } = req.body;
+    const refuse = (message) => res.status(400).json({ success: false, message });
+    if ((source && source !== 'Stock') || saleId) return refuse('This form makes stock orders only. A customer order comes through the Order Form.');
+    if (!STOCK_ORDER_KINDS.includes(orderKind)) return refuse('Pick Machine, Child Part or Sub Child Part.');
+    if (!machineCode) return refuse(orderKind === 'Machine' ? 'Pick a machine.' : 'Pick a part.');
+    const qty = Number(orderQuantity);
+    if (!Number.isInteger(qty) || qty < 1) return refuse('Quantity must be a whole number, 1 or more.');
+    if (!deliveryDate) return refuse('Enter the delivery date.');
 
-    // Generate appropriate order ID based on source
-    let orderId;
-    if (source === 'QC_Rejected') {
-      const year = new Date().getFullYear();
-      const lastRejectedOrder = await ProductionOrder.findOne({
-        orderId: new RegExp(`^REJ-${year}-`)
-      }).sort({ orderId: -1 }).lean();
+    const item = await Item.findOne({ code: String(machineCode), companyId, productKind: orderKind });
+    const hasBom = !item ? false
+      : orderKind === 'Machine' ? !!(await MachineBOM.exists({ machine: item._id, company: companyId }))
+      : orderKind === 'ChildPart' ? !!(await ChildPartBOM.exists({ childPart: item._id, company: companyId })) : true;
+    const problem = notStockOrderable(orderKind, item, hasBom);
+    if (problem) return refuse(problem);
+    const urgency = priority === 'Urgent' ? 'Urgent' : 'Normal';
 
-      let nextNumber = 1;
-      if (lastRejectedOrder && lastRejectedOrder.orderId) {
-        const parts = lastRejectedOrder.orderId.split('-');
-        if (parts.length === 3) {
-          const lastNumber = parseInt(parts[2]);
-          if (!isNaN(lastNumber)) {
-            nextNumber = lastNumber + 1;
-          }
-        }
-      }
-      orderId = `REJ-${year}-${String(nextNumber).padStart(4, '0')}`;
-    } else {
-      orderId = await generateOrderId(req.user.companyId);
-    }
-
-    // Explicit, never the schema's own bare default — see
-    // resolveMachineOrderProcesses's own comment for why.
-    const processes = await resolveMachineOrderProcesses(machineCode, req.user.companyId);
-
-    const order = await ProductionOrder.create({
-      orderId,
-      machineCode,
-      machineName,
-      priority: priority || (source === 'QC_Rejected' ? 'Urgent' : 'Normal'),
-      source: source || 'Stock', // manually created = 'Stock' by default (no linked sale)
-      rejectionDetails: rejectionDetails || {},
-      receivedDate: today(),
-      deliveryDate,
-      company: req.user.companyId,
-      createdBy: req.user._id,
-      processes,
-    });
-
-    // 🔔 Notify Production Head & Employee about new order
-    try {
-      await notificationService.triggerProductionNotification({
-        action: 'order_for_production',
-        data: { orderCode: order.orderId, orderId: order._id, machineName },
-        targetCompanyId: req.user.companyId,
+    if (orderKind !== 'Machine') {
+      const byHand = { deliveryDate, priority: urgency, createdBy: req.user._id };
+      const create = orderKind === 'ChildPart' ? createChildPartOrderForItem : createSubChildPartOrderForItem;
+      const made = await create(item, companyId, { buildQtyOverride: qty, byHand });
+      if (!made.created) return refuse(`${item.name}: no order was made (${made.reason}).`);
+      const m = made.material || {};
+      return res.status(201).json({
+        success: true, data: made.order, jobWork: made.kind === 'out-source',
+        summary: { checked: !!m.checked, emptyBom: !m.checked && !!m.reason, partOrders: m.partOrders || [], noOrder: m.noOrder || [], purchases: (m.purchases || []).filter(Boolean) },
       });
-    } catch (e) { console.error('Production order notification error:', e); }
+    }
 
-    res.status(201).json({ success: true, data: order });
+    const { order, material } = await createMachineStockOrder({ item, companyId, qty, deliveryDate, priority: urgency, createdBy: req.user._id });
+
+    const parts = material.childParts || [];
+    const partOrders = parts.filter(p => p.productionOrderCode).map(p => `${p.productionOrderCode} (${p.name})`);
+    const noOrder = parts.filter(p => !p.productionOrderCode).map(p => `${p.name} short ${p.shortfallQty}`);
+    const purchases = (material.needsPurchase || []).map(p => p.purchaseRequestId).filter(Boolean);
+    res.status(201).json({ success: true, data: order, summary: { checked: !!material.checked, emptyBom: !material.checked && !!material.reason, partOrders, noOrder, purchases } });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1175,6 +1229,7 @@ export const getSubChildPartMaterialList = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This order is not a Sub Child Part order.' });
     }
     const data = await buildSubChildPartMaterialList(order, companyId);
+    await addUsageToList(order, companyId, data.categories);
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1216,6 +1271,7 @@ export const getMachineMaterialList = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This order is not a Machine order.' });
     }
     const data = await buildMachineMaterialList(order, companyId);
+    await addUsageToList(order, companyId, data.categories);
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1433,29 +1489,28 @@ function getUnissuedMachineBOMMaterials(order) {
 // step with nothing extra picked, or any legacy hardcoded-pipeline step,
 // which never carries materialRefs in the first place) — every caller below
 // treats an empty result as a safe no-op.
+// outsource-v2 slice 5 (2026-10-20, gap G2): the lines now come from
+// stepMaterialService.stepMaterialPerUnit — a sheet / length line is found by
+// its real Material List key (it used to be looked up by its plain code, which
+// never matched the composite key, so it always read "not issued") and counted
+// in the list's own unit (sheets, cut pieces); a step's quantity split
+// (materialQuantities) is respected.
 export async function resolveStepMaterialLines(order, proc, companyId) {
   const refs = (proc?.materialRefs || []).map(String);
   if (!refs.length) return [];
 
-  let found = null;
-  if (order.orderKind === 'ChildPart') {
-    found = await findSubChildPartMaterialLines(order.subChildPartItem, companyId);
-  } else if (order.orderKind !== 'SubChildPart') {
-    const mfgItem = await Item.findOne({ $or: [{ code: order.machineCode }, { name: order.machineName }], companyId }).lean();
-    if (mfgItem) found = await findMachineMaterialLines(mfgItem._id, companyId);
-  }
+  const found = await bomLinesForOrder(order, companyId);
   if (!found) return []; // nothing this can resolve against
-
-  const lines = found.materials.filter(m => refs.includes(String(m._id)));
+  const lines = await stepMaterialPerUnit(proc, found, companyId);
   if (!lines.length) return [];
 
   const demandByCode = new Map((order.materialDemands || []).map(d => [d.materialCode, d]));
   return lines.map(l => {
-    const d = demandByCode.get(l.code);
+    const d = demandByCode.get(l.demandKey);
     const onFloor = Math.max(0, (d?.issuedQuantity || 0) - (d?.consumedQuantity || 0) - (d?.returnPendingQuantity || 0));
-    const perUnitNeed = Number(l.quantity) || 0;
+    const perUnitNeed = Math.round(l.perUnitDu * 10000) / 10000;
     return {
-      demandKey: l.code, code: l.code, name: l.item, unit: l.unit || 'Pieces',
+      demandKey: l.demandKey, code: l.code, name: l.name, unit: l.demandUnit,
       perUnitNeed, onFloor,
       issuedQty: d?.issuedQuantity || 0, consumedQty: d?.consumedQuantity || 0,
       // This UNIT's own share (2026-09-24, found live: the "Consumed" column
@@ -2033,6 +2088,7 @@ export const returnMaterialToStore = async (req, res) => {
     const {
       materialCode, returnQuantity, reason, returnType,
       leftoverLengthValue, leftoverLengthUnit, leftoverWidthValue, leftoverWidthUnit,
+      unitIds, labelIds, insideUnitIds, insideLabelIds, nothingInside, acknowledgeWarnings,
     } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
@@ -2053,14 +2109,17 @@ export const returnMaterialToStore = async (req, res) => {
     const demand = order.materialDemands.find(m => m.materialCode === materialCode);
     if (!demand) return res.status(404).json({ success: false, message: 'Material not found in this order.' });
 
-    // Calculate real physical availability left on the floor
-    const availableOnFloor = (demand.issuedQuantity || 0) - (demand.returnPendingQuantity || 0);
+    // What can really go back (2026-11-03): used material can't go back as
+    // Excess, and only as Defect while its in-house step is running.
+    const limits = returnLimits(demand, (await lineUsage(order, companyId)).get(materialCode)?.running || 0);
+    const availableOnFloor = returnType === 'Excess' ? limits.excess : limits.defect;
 
     if (retQty > availableOnFloor) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot return ${retQty}. Only have ${availableOnFloor} items available on the production floor.`
-      });
+      const used = Number(demand.consumedQuantity) || 0;
+      const why = returnType === 'Excess'
+        ? `can go back as excess.${used > 0 ? ` ${used} used in this order.` : ''}`
+        : `can go back as defective.${used > 0 ? ' The rest is in finished steps or with a vendor.' : ''}`;
+      return res.status(400).json({ success: false, message: `Only ${availableOnFloor} ${demand.unit} of ${demand.materialName} ${why}` });
     }
 
     // "Flat piece" demands (fabricationCategory set, empty bomDimensions) —
@@ -2113,6 +2172,49 @@ export const returnMaterialToStore = async (req, res) => {
       }
     }
 
+    // Serial number work step 2 (2026-10-31, §5.6): Production picks which
+    // tracked serials / stickers come back (the ones issued to this order and
+    // not already on a pending return). Applied when Store confirms.
+    let picked = { unitIds: [], labelIds: [] };
+    let skip = null;
+    const retItem = await Item.findOne({ code: demand.sourceItemCode || materialCode, companyId }).select('_id').lean();
+    if (retItem) {
+      const pendingLogs = await MaterialReturnLog.find({ productionOrderId: order._id, status: 'Pending' }).select('unitIds labelIds').lean();
+      const onReturn = new Set(pendingLogs.flatMap(l => [...(l.unitIds || []), ...(l.labelIds || [])]).map(String));
+      const [units, labels] = await Promise.all([
+        PurchasedUnitModel.find({ companyId, item: retItem._id, 'place.kind': { $in: ['Issued', 'Used'] }, 'place.order': order._id }).select('_id').lean(),
+        PartLabelModel.find({ companyId, item: retItem._id, 'place.kind': 'Issued', 'place.order': order._id }).select('_id').lean(),
+      ]);
+      const allowed = { units: units.filter(u => !onReturn.has(String(u._id))), labels: labels.filter(l => !onReturn.has(String(l._id))) };
+      const tracked = allowed.units.length + allowed.labels.length;
+      if (tracked > 0 || unitIds?.length || labelIds?.length) {
+        const checked = checkPicked({ unitIds, labelIds }, allowed);
+        if (checked.error) return res.status(400).json({ success: false, message: checked.error });
+        const rule = pickRule({ qty: retQty, tracked, untracked: Math.max(0, availableOnFloor - tracked) });
+        const problem = pickProblem(checked.unitIds.length + checked.labelIds.length, rule);
+        if (problem) return res.status(400).json({ success: false, message: problem, pick: { min: rule.min, max: rule.max } });
+        picked = checked;
+        skip = noSerialCheck({ itemId: retItem._id, name: demand.materialName, picked: checked.unitIds.length + checked.labelIds.length, rule, tracked });
+      }
+    }
+
+    // A part its cascade delivered has no sticker: Production says which serials
+    // are inside it, or that nothing tracked is (2 Nov review).
+    let inside = { unitIds: [], labelIds: [] };
+    if (Math.min(Number(demand.cascadeDeliveredQuantity) || 0, retQty - picked.labelIds.length) > 0) {
+      const cand = await insideCandidates(order._id, materialCode, companyId);
+      if (cand.count) {
+        const checked = checkPicked({ unitIds: insideUnitIds, labelIds: insideLabelIds }, cand);
+        if (checked.error) return res.status(400).json({ success: false, message: checked.error });
+        if (!(checked.unitIds.length + checked.labelIds.length) && nothingInside !== true) {
+          return res.status(400).json({ success: false, message: 'Say which serial number(s) are inside this part, or tick "Nothing tracked inside".' });
+        }
+        inside = checked;
+      }
+    }
+
+    if (skip && !acknowledged(acknowledgeWarnings)) return res.status(409).json(confirmBody([skip]));
+
     // ✅ Increment the specific quantitative lock field instead of altering demand.status
     demand.returnPendingQuantity = (demand.returnPendingQuantity || 0) + retQty;
     await order.save();
@@ -2135,8 +2237,13 @@ export const returnMaterialToStore = async (req, res) => {
       reason: reason || `${returnType} material return`,
       returnType: returnType, // 👈 Saved directly to log database schema
       company: companyId,
-      status: 'Pending'
+      status: 'Pending',
+      unitIds: picked.unitIds,
+      labelIds: picked.labelIds,
+      insideUnitIds: inside.unitIds,
+      insideLabelIds: inside.labelIds,
     });
+    await logSkippedSerials(companyId, [skip], { screen: 'Return to Store', reference: order.orderId, by: req.user.fullName || req.user.username || 'Production' });
 
     res.json({
       success: true,
@@ -2301,6 +2408,23 @@ function getUnitNumber(req) {
 // order.extraUnits[0..N-2], lazily created here the first time a multi-unit
 // order's process tab is actually touched. Returns null for an out-of-range
 // unit number (caller should respond 400).
+// Outsource v2 slice 4 (2026-10-24) — Production types its own cost / expense
+// for a unit (a Sub Child Part: the batch) at the unit's LAST IN-HOUSE step
+// (every later step outsourced), not only at the true last step. Returns
+// { needed, error, cost, expense } — needed: this step asks for it (first
+// time only); error: it's needed but missing / invalid. The caller saves it
+// (saveProductionCost) once the step is accepted.
+function productionCostAsk(order, procs, idx, unitIndex, body) {
+  if (!isLastInHouseStep(procs, idx)) return { needed: false };
+  if (productionCostOf(order, order.orderKind === 'SubChildPart' ? 0 : unitIndex).entered) return { needed: false };
+  const n = (v) => { const x = Number(v); return v !== '' && v != null && Number.isFinite(x) && x >= 0 ? x : undefined; };
+  const cost = n(body?.productionCost); const expense = n(body?.productionExpense);
+  if (cost === undefined || expense === undefined) {
+    return { needed: true, error: `${procs[idx].step} is the last in-house step — enter your production cost and expense for ${order.orderKind === 'SubChildPart' ? 'the whole batch' : 'this unit'} (the outsourced steps are added automatically).` };
+  }
+  return { needed: true, cost, expense };
+}
+
 function getUnitProcesses(order, unitNumber) {
   if (unitNumber <= 1) return order.processes;
   const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
@@ -2445,6 +2569,13 @@ export async function completeMachineUnit(order, job, unitNumber, { actorName, u
         { $or: [{ code: order.machineCode }, { name: order.machineName }], companyId: order.company },
         { $inc: { qty: 1 } }
       );
+      // Serial number work step 2 (§5.4): a stock machine holding tracked
+      // serials waits for its sticker.
+      const machineItem = await Item.findOne({ $or: [{ code: order.machineCode }, { name: order.machineName }], companyId: order.company }).select('_id').lean();
+      if (machineItem) {
+        const { registerStockCarriers } = await import('../services/serialTrailService.js');
+        await registerStockCarriers({ order, itemId: machineItem._id, qty: 1, by: actorName || '' });
+      }
     }
     entry.readyAt = new Date();
     if (qcJob.unitChecks.every(u => u.readyAt)) {
@@ -2491,12 +2622,29 @@ export const assignTeam = async (req, res) => {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
     const { teamId } = req.body;
+    await assertAssignableTeam(teamId, req.user.companyId);
     const unitNumber = getUnitNumber(req);
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    let order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    const procs = getUnitProcesses(order, unitNumber);
+    let procs = getUnitProcesses(order, unitNumber);
     if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
+
+    // Work back from a vendor that is still marked "at Store". Since
+    // 2026-10-25 QC-passed work (next step in-house) goes to Production by
+    // itself; this settles anything that passed QC before that rule (or was
+    // missed) right here, instead of waiting for Store's page to be opened
+    // (found 2026-10-26: Production was blocked until Store opened At Store).
+    // Only work really in QC / rework / waiting for a trip is refused.
+    if (teamId && (order.workAtStore || []).some(w => w.unitIndex === unitNumber - 1)) {
+      const { autoRequestAtStore } = await import('../services/dispatchTripService.js');
+      await autoRequestAtStore(order.company, order._id, req.user);
+      order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }); // reloaded — never save the stale copy
+      procs = getUnitProcesses(order, unitNumber);
+    }
+    if (teamId && (order.workAtStore || []).some(w => w.unitIndex === unitNumber - 1)) {
+      return res.status(400).json({ success: false, message: `Unit ${unitNumber}'s outsourced work is still at Store (in QC, out for rework, or waiting for its next outsource trip) — it comes to Production by itself once QC passes it.` });
+    }
 
     // Job Work dropped from Child Part's own pipeline (2026-09-16 — a Sub
     // Child Part is independently stocked/replenished by its own order flow
@@ -2541,7 +2689,7 @@ export const assignTeam = async (req, res) => {
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err instanceof TeamError ? err.status : 500).json({ success: false, message: err.message });
   }
 };
 
@@ -2721,6 +2869,15 @@ export const markProcessComplete = async (req, res) => {
     if (!procs || idx >= procs.length) return res.status(400).json({ success: false, message: 'Invalid step index for this order.' });
 
     const proc = procs[idx];
+
+    // Slice 4 (2026-10-24): the unit's last in-house step (the outsourced
+    // steps after it are costed automatically) asks for Production's own
+    // cost / expense, once. The true last step keeps its own dialogs.
+    if (proc?.status === 'In Progress' && idx !== procs.length - 1) {
+      const ask = productionCostAsk(order, procs, idx, unitNumber - 1, req.body);
+      if (ask.error) return res.status(400).json({ success: false, message: ask.error });
+      if (ask.needed) await saveProductionCost(order._id, order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1, ask.cost, ask.expense, req.user.fullName || req.user.username || '');
+    }
 
     // ── Child Part order — its own trimmed pipeline (Fabrication →
     // Assembly → Painting, Job Work dropped 2026-09-16), one build per
@@ -2984,6 +3141,17 @@ export const approveQC = async (req, res) => {
       return res.status(400).json({ success: false, message: "This step's QC checkpoint is decided by QC's own review, not self-certified here." });
     }
 
+    // Slice 4 (2026-10-24): the true last step of an order with no QC step
+    // finishes here — the screen sends Production's cost (it used to be
+    // ignored). Saved on the order, pushed to the BOM after the save.
+    const isLastStep = idx === procs.length - 1;
+    const n = (v) => { const x = Number(v); return v !== '' && v != null && Number.isFinite(x) && x >= 0 ? x : undefined; };
+    const costUnitIdx = order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1;
+    const costGiven = isLastStep && n(req.body.productionCost) !== undefined && n(req.body.productionExpense) !== undefined;
+    if (costGiven) {
+      await saveProductionCost(order._id, order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1, n(req.body.productionCost), n(req.body.productionExpense), req.user.fullName || req.user.username || '');
+    }
+
     const wasCompleted = order.status === 'Completed';
     procs[idx].status = 'Completed';
     procs[idx].qcStatus = 'Approved';
@@ -3009,6 +3177,9 @@ export const approveQC = async (req, res) => {
       order.status = 'Completed';
     }
     await order.save();
+    // Only when a cost is on the order — an older order approved without one
+    // keeps its BOM as it was (never zeroed).
+    if (isLastStep && (costGiven || productionCostOf(order, costUnitIdx).entered)) await pushPartCost(order._id, costUnitIdx);
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
 
@@ -3070,6 +3241,33 @@ export const rejectQC = async (req, res) => {
   }
 };
 
+// GET /api/production-mfg/orders/:id/unit-cost?unit=N — a unit's (a Sub
+// Child Part: the batch's) build cost so far, for Production's screen
+// (2026-10-24 — the user: show the outsourced money as it builds up, marked
+// not final). Same calculation as the BOM push (partCostService), read-only.
+export const getUnitCost = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const isScp = order.orderKind === 'SubChildPart';
+    const unitIndex = isScp ? 0 : Math.max(0, (parseInt(req.query.unit, 10) || 1) - 1);
+    const procs = unitIndex ? order.extraUnits?.[unitIndex - 1]?.processes : order.processes;
+    if (!procs) return res.status(400).json({ success: false, message: 'Invalid unit' });
+    const { money, waitingFor } = await outsourceMoneyFor({ productionOrder: order, unitIndex: isScp ? null : unitIndex });
+    const entry = (order.unitCosts || []).find(u => u.unitIndex === unitIndex) || null;
+    const finished = unitFinished(order, unitIndex);
+    // Outsourced steps whose money isn't in yet: not completed on this unit.
+    const toCome = procs.filter(p => p.type === 'Outsourcing' && p.status !== 'Completed').map(p => p.step);
+    res.json({ success: true, data: {
+      unitIndex, finished, jobWorkSoFar: money, waitingFor, outsourcedStepsToCome: toCome,
+      production: entry?.productionCost != null ? { cost: entry.productionCost, expense: entry.productionExpense, by: entry.enteredBy } : null,
+      pushedAt: entry?.pushedAt || null,
+    } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // PUT /api/production-mfg/orders/:id/processes/:stepIndex/complete-final?unit=N
 // Stage 3b (2026-09-23) — completes the TRUE LAST STEP of a dynamic order
 // whose QC checkpoint sits earlier in the sequence (Child Part/Machine
@@ -3121,12 +3319,18 @@ export const completeFinalProcessStep = async (req, res) => {
     proc.endDate = today();
     proc.completedAt = new Date();
 
+    // Slice 4 (2026-10-24): Production's cost goes on the order; the push
+    // (after the save) puts it + the outsourced money on the BOM — for all
+    // three kinds (a Sub Child Part's typed cost used to be dropped here).
+    const costUnit = order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1;
+    await saveProductionCost(order._id, costUnit, productionCost, productionExpense, req.user.fullName || req.user.username || '');
+
     if (order.orderKind === 'ChildPart') {
       if (!order.subChildPartItem) return res.status(400).json({ success: false, message: 'This order has no linked Child Part Item.' });
-      await recalculateChildPartCost(order.subChildPartItem, req.user.companyId, { productionCost, productionExpense });
-      await Item.updateOne({ _id: order.subChildPartItem, companyId: req.user.companyId }, { $inc: { qty: 1 } });
+      await deliverFinishedParts({ order, itemId: order.subChildPartItem, qty: 1, by: req.user.fullName || req.user.username || '' });
       if (allUnitsCompleted(order)) order.status = 'Completed';
       await order.save();
+      await pushPartCost(order._id, costUnit);
       await order.populate('processes.assignedTeam', 'name supervisor members');
       await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
       return res.json({ success: true, data: order });
@@ -3149,10 +3353,12 @@ export const completeFinalProcessStep = async (req, res) => {
       // Whatever survived every earlier QC step's scrap — that step is
       // guaranteed fully resolved already, since reaching this step at all
       // required its 'Completed' status (see submitBatchQcDecision).
-      const survivedQty = batchEntry?.passedQty ?? order.orderQuantity ?? 1;
-      await Item.updateOne({ _id: order.subChildPartItem, companyId: req.user.companyId }, { $inc: { qty: survivedQty } });
+      // Pieces lost at a vendor after the last QC step aren't here (2026-10-26).
+      const survivedQty = Math.max(0, (batchEntry?.passedQty ?? order.orderQuantity ?? 1) - lostBetween(order, lastQcIdx, procs.length - 1));
+      await deliverFinishedParts({ order, itemId: order.subChildPartItem, qty: survivedQty, by: req.user.fullName || req.user.username || '' });
       order.status = 'Completed';
       await order.save();
+      await pushPartCost(order._id, 0);
       await order.populate('processes.assignedTeam', 'name supervisor members');
       await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
       return res.json({ success: true, data: order });
@@ -3165,12 +3371,10 @@ export const completeFinalProcessStep = async (req, res) => {
     // last step is what makes THIS unit done — counted as 'Approved from
     // QC' (QC already passed it), not the old whole-order 'Production
     // Completed' the packing gate never accepted (2026-09-24).
-    try {
-      await applyManufacturedFinalCost(order, productionCost, productionExpense);
-    } catch (pricingErr) {
-      console.error('❌ Error recalculating item pricing on final-step completion:', pricingErr);
-    }
     await completeMachineUnit(order, null, unitNumber, { actorName: req.user.fullName || req.user.username, userId: req.user._id });
+    // Slice 4: Production's cost + the outsourced money → the Machine BOM →
+    // its price (replaces applyManufacturedFinalCost here; never throws).
+    await pushPartCost(order._id, costUnit);
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
@@ -3219,6 +3423,10 @@ export const submitBatchQcStep = async (req, res) => {
     if (isTrueLastStep && isFirstSubmission && (productionCost === undefined || productionExpense === undefined)) {
       return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this step.' });
     }
+    // Slice 4 (2026-10-24): the batch's last in-house step (outsourced steps
+    // after it) asks too — once. Saved on the order (unitCosts, batch = 0).
+    const costAsk = isFirstSubmission ? productionCostAsk(order, procs, idx, 0, req.body) : { needed: false };
+    if (costAsk.error) return res.status(400).json({ success: false, message: costAsk.error });
 
     // The find-entry/fix-qtyEnteringStep/compute-outstanding-qty/push-attempt
     // mechanic is shared with the outsourced-receive trigger (slice 3, see
@@ -3234,6 +3442,7 @@ export const submitBatchQcStep = async (req, res) => {
       entry.pendingProductionCost = productionCost;
       entry.pendingProductionExpense = productionExpense;
     }
+    if (costAsk.needed) await saveProductionCost(order._id, 0, costAsk.cost, costAsk.expense, req.user.fullName || req.user.username || '');
 
     await qcJob.save();
     await order.save();
@@ -3287,12 +3496,17 @@ export const submitUnitQcStep = async (req, res) => {
     if (isTrueLastStep && isFirstSubmission && (productionCost === undefined || productionExpense === undefined)) {
       return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this step.' });
     }
+    // Slice 4 (2026-10-24): the unit's last in-house step (outsourced steps
+    // after it) asks too — once. Saved on the order (unitCosts).
+    const costAsk = isFirstSubmission ? productionCostAsk(order, procs, idx, unitNumber - 1, req.body) : { needed: false };
+    if (costAsk.error) return res.status(400).json({ success: false, message: costAsk.error });
 
     const entry = submitUnitStepForQC(qcJob, unit, proc, req.user.fullName || req.user.username || 'Production');
     if (isTrueLastStep && isFirstSubmission) {
       entry.pendingProductionCost = productionCost;
       entry.pendingProductionExpense = productionExpense;
     }
+    if (costAsk.needed) await saveProductionCost(order._id, unitNumber - 1, costAsk.cost, costAsk.expense, req.user.fullName || req.user.username || '');
 
     await qcJob.save();
     await order.save();
@@ -3445,29 +3659,63 @@ export const getTeams = async (req, res) => {
       assignmentStats: statsByTeam[String(t._id)] || { total: 0, completed: 0 },
     }));
 
-    res.json({ success: true, data: teamsWithStats });
+    res.json({ success: true, data: await decorateTeams(companyId, teamsWithStats) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
+const teamFail = (res, err) => (err instanceof TeamError
+  ? res.status(err.status).json({ success: false, message: err.message })
+  : res.status(500).json({ success: false, message: err.message }));
+
+// Teams are built from people HR entered (2026-11-11): services/productionTeamService.js.
+// Efficiency isn't typed any more; the system works it out later.
 export const createTeam = async (req, res) => {
   try {
-    const { name, supervisor, members, skills, efficiency } = req.body;
-    if (!name || !supervisor) {
-      return res.status(400).json({ success: false, message: 'name and supervisor are required' });
-    }
+    const fields = await validateTeamBody(req.user.companyId, req.body);
     const team = await ProductionTeam.create({
-      name,
-      supervisor,
-      members: members || [],
-      skills: skills || [],
-      efficiency: efficiency || 85,
+      ...fields,
+      efficiency: null,
       company: req.user.companyId,
       createdBy: req.user._id,
     });
     res.status(201).json({ success: true, data: team });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+  } catch (err) { teamFail(res, err); }
+};
+
+// GET /teams/people: the picker. Production people only, searched on the server.
+export const getTeamPeople = async (req, res) => {
+  try {
+    const { search, page, limit } = req.query;
+    res.json({ success: true, ...(await searchTeamPeople(req.user.companyId, { search, page, limit })) });
+  } catch (err) { teamFail(res, err); }
+};
+
+// PUT /teams/:teamId: rename, change people, supervisor or skills.
+export const updateTeam = async (req, res) => {
+  try {
+    const team = mongoose.isValidObjectId(req.params.teamId)
+      && await ProductionTeam.findOne({ _id: req.params.teamId, company: req.user.companyId, isActive: true });
+    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
+    const fields = await validateTeamBody(req.user.companyId, req.body, team._id);
+    Object.assign(team, fields);
+    await team.save();
+    res.json({ success: true, data: team });
+  } catch (err) { teamFail(res, err); }
+};
+
+// DELETE /teams/:teamId: retire. Old orders keep showing its name; not while it has work going.
+export const retireTeam = async (req, res) => {
+  try {
+    const team = mongoose.isValidObjectId(req.params.teamId)
+      && await ProductionTeam.findOne({ _id: req.params.teamId, company: req.user.companyId, isActive: true });
+    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
+    if (await teamIsBusy(team._id)) {
+      return res.status(400).json({ success: false, message: `${team.name} has a step In Progress or waiting for QC. Retire it once that work is finished.` });
+    }
+    team.isActive = false;
+    await team.save();
+    res.json({ success: true, message: `${team.name} retired` });
+  } catch (err) { teamFail(res, err); }
 };

@@ -54,13 +54,16 @@ export function readManualItems(bodyItems, existingByGroup = new Map()) {
     const deliveryDays = Number(raw.deliveryDays);
     if (!(deliveryDays >= 1)) return { error: `Enter the delivery time (days) for ${label}.` };
     // GST is required, as on the vendor's email page (2026-10-14): the PO
-    // takes it from the quote and can't change it.
-    let gstPercent = null;
-    if (!raw.gstInclusive) {
-      if (raw.gstPercent === '' || raw.gstPercent == null) return { error: `Enter the GST % for ${label} (0 if none), or tick "Rate already includes GST".` };
-      gstPercent = Number(raw.gstPercent);
-      if (!Number.isFinite(gstPercent) || gstPercent < 0 || gstPercent > 100) return { error: `GST % for ${label} must be between 0 and 100.` };
+    // takes it from the quote and can't change it. Also when the rate
+    // already includes GST (2026-10-26): the % inside it, so the item's cost
+    // can take the GST out (it's claimed back).
+    if (raw.gstPercent === '' || raw.gstPercent == null) {
+      return { error: raw.gstInclusive
+        ? `Enter the GST % included in the rate for ${label} (0 if none).`
+        : `Enter the GST % for ${label} (0 if none), or tick "Rate already includes GST".` };
     }
+    const gstPercent = Number(raw.gstPercent);
+    if (!Number.isFinite(gstPercent) || gstPercent < 0 || gstPercent > 100) return { error: `GST % for ${label} must be between 0 and 100.` };
     const revisionReason = String(raw.revisionReason || '').trim();
     const replaces = existingByGroup.get(group) || null;
     if (replaces && !revisionReason) return { error: `${label} already has a quote from this vendor — give the reason for the new price.` };

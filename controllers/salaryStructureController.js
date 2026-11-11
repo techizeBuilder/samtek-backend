@@ -2,6 +2,7 @@
 
 import SalaryStructure from "../models/SalaryStructure.js";
 import User from "../models/User.js";
+import { isInMyCompany, isPlatformAdmin } from "../utils/companyScope.js";
 
 /**
  * ➕ Add Salary Structure
@@ -14,6 +15,9 @@ export const addSalaryStructure = async (req, res) => {
 
     if (!employee) {
       return res.status(400).json({ message: "Employee is required" });
+    }
+    if (!(await isInMyCompany(req.user, employee))) {
+      return res.status(403).json({ message: "That employee is not in your company" });
     }
 
     // check duplicate
@@ -125,7 +129,8 @@ export const getSalaryStructureById = async (req, res) => {
     const currentUser = req.user;
 
     // Ownership check: non-admins can only view their own salary structure
-    const isAdmin = currentUser.role === 'Super Admin' || currentUser.role === 'HR-Admin' || currentUser.role === 'Company Admin';
+    const isAdmin = isPlatformAdmin(currentUser)
+      || ((currentUser.role === 'HR-Admin' || currentUser.role === 'Company Admin') && await isInMyCompany(currentUser, requestedUserId));
     if (!isAdmin && currentUser._id.toString() !== requestedUserId) {
       return res.status(403).json({ message: "Access denied. You can only view your own salary structure." });
     }
@@ -158,6 +163,11 @@ export const getSalaryStructureById = async (req, res) => {
 export const updateSalaryStructure = async (req, res) => {
   try {
     const { basic, hra, otherAllowance, pf, professionalTax, tds, advance, others } = req.body;
+
+    const current = await SalaryStructure.findById(req.params.id).select("employee").lean();
+    if (!current || !(await isInMyCompany(req.user, current.employee))) {
+      return res.status(404).json({ message: "Salary structure not found" });
+    }
 
     const updateData = {};
     if (basic != null) updateData.basic = basic;
@@ -207,6 +217,11 @@ export const deleteSalaryStructureById = async (
   res
 ) => {
   try {
+    const current = await SalaryStructure.findById(req.params.id).select("employee").lean();
+    if (!current || !(await isInMyCompany(req.user, current.employee))) {
+      return res.status(404).json({ message: "Salary structure not found" });
+    }
+
     const salary = await SalaryStructure.findByIdAndDelete(req.params.id);
 
     if (!salary) {

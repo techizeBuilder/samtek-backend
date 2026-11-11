@@ -14,6 +14,19 @@
 import mongoose from 'mongoose';
 
 export const UNIT_STATUSES = ['In QC', 'Accepted', 'Part rejected', 'QC rejected'];
+export const PLACE_KINDS = ['Stock', 'Issued', 'Used', 'Fitted', 'Defective', 'Lost', 'Scrapped', 'Sold'];
+
+// One move of a tracked unit / stickered part (serial number work step 2).
+export const TrailEventSchema = new mongoose.Schema({
+  at: { type: Date, default: Date.now },
+  by: { type: String, default: '' },
+  what: { type: String, required: true },        // e.g. 'Issued', 'Returned (Excess)', 'Fitted'
+  order: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', default: null },
+  orderNo: { type: String, default: '' },
+  label: { type: mongoose.Schema.Types.ObjectId, ref: 'PartLabel', default: null },
+  labelNo: { type: String, default: '' },
+  note: { type: String, default: '' },
+}, { _id: false });
 
 const purchasedUnitSchema = new mongoose.Schema({
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true, index: true },
@@ -47,6 +60,28 @@ const purchasedUnitSchema = new mongoose.Schema({
   receivedAt: { type: Date, default: Date.now },
   receivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   receivedByName: { type: String, default: '' },
+  // Serial number work step 2 (2026-10-31, docs/serial number work/
+  // serial-tracking-logic-2026-10.md): where the unit is after QC, and every
+  // move it made (never overwritten). place.kind:
+  //   Stock — in Store · Issued — handed to a production order (built into it)
+  //   Used — used to make that order (its trail ends) · Fitted — paired into a
+  //   stickered part (place.label) · Defective — returned as a defect
+  //   Lost — lost at a vendor · Scrapped — scrapped with its part
+  //   Sold — gone to a customer Order (place.customerOrderCode)
+  place: {
+    kind: { type: String, enum: [null, ...PLACE_KINDS], default: null },
+    order: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', default: null },
+    orderNo: { type: String, default: '' },
+    label: { type: mongoose.Schema.Types.ObjectId, ref: 'PartLabel', default: null },
+    labelNo: { type: String, default: '' },
+    customerOrderCode: { type: String, default: '' },
+    // Defective: the Defective Inventory row (material code) it sits under.
+    defectiveOf: { type: String, default: '' },
+    // Sold on a service visit: the ticket and the customer it went to.
+    ticketNo: { type: String, default: '' },
+    customerMobile: { type: String, default: '' },
+  },
+  trail: { type: [TrailEventSchema], default: [] },
 }, { timestamps: true });
 
 // One serial per item per company — a lot number may repeat.
@@ -55,5 +90,7 @@ purchasedUnitSchema.index(
   { unique: true, partialFilterExpression: { isLot: false } },
 );
 purchasedUnitSchema.index({ companyId: 1, receivedAt: -1 });
+purchasedUnitSchema.index({ companyId: 1, item: 1, 'place.kind': 1 });
+purchasedUnitSchema.index({ companyId: 1, 'place.order': 1 });
 
 export default mongoose.model('PurchasedUnit', purchasedUnitSchema);

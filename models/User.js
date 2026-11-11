@@ -2,6 +2,14 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { USER_ROLES } from '../shared/schema.js';
 
+// Manpower (2026-11-06, docs/client-features-2026-11/02a-people-no-login-logic.md):
+// someone in the system for work only has no login, so no password, and email
+// is optional. Only a real document can answer this; on an update the
+// controller decides (userController.updateUser).
+const needsLogin = function () {
+  return this instanceof mongoose.Document ? this.canLogin !== false : false;
+};
+
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
@@ -11,17 +19,28 @@ const userSchema = new mongoose.Schema({
     minlength: 3,
     maxlength: 50
   },
+  // Unique only when filled in: see the index at the end of this file.
   email: {
     type: String,
-    required: true,
-    unique: true,
+    required: needsLogin,
     trim: true,
     lowercase: true
   },
   password: {
     type: String,
-    required: true,
+    required: needsLogin,
     minlength: 6
+  },
+  // false = no login (role Manpower). Missing on everyone older, which means yes.
+  canLogin: {
+    type: Boolean,
+    default: true
+  },
+  // The person's employee code on the attendance device, kept as text so 0005
+  // stays 0005. One person per code per company.
+  deviceCode: {
+    type: String,
+    trim: true
   },
   fullName: {
     type: String,
@@ -183,8 +202,15 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
+userSchema.index({ email: 1 }, {
+  name: 'email_unique_when_set', unique: true, partialFilterExpression: { email: { $type: 'string' } },
+});
+userSchema.index({ companyId: 1, deviceCode: 1 }, {
+  name: 'deviceCode_unique_per_company', unique: true, partialFilterExpression: { deviceCode: { $type: 'string' } },
+});
+
 userSchema.pre('save', async function () {
-  if (!this.isModified('password')) return;
+  if (!this.isModified('password') || !this.password) return;
 
   try {
     const salt = await bcrypt.genSalt(12);

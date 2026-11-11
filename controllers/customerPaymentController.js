@@ -3,6 +3,7 @@ import Sale from '../models/Sale.js';
 import { Transaction, Account } from '../models/Account.js';
 import mongoose from 'mongoose';
 import Customer from '../models/Customer.js';
+import { removePaymentSlip, discardSlipUpload } from '../middleware/paymentSlipUpload.js';
 
 /**
  * Record Customer Payment and allocate to outstanding invoices
@@ -218,6 +219,36 @@ export const getCustomerPaymentStats = async (req, res) => {
             }
         });
     } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+/**
+ * POST /api/accounts/sales/payments/:id/slip
+ * Upload a payment slip (bank screenshot, cheque photo, PDF) to an existing
+ * customer payment. File stored in uploads/payment-slips/ via
+ * paymentSlipUpload multer middleware. Added 2026-10-29.
+ */
+export const uploadCustomerPaymentSlip = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const payment = await CustomerPayment.findOne({ _id: id, companyId: req.user.companyId });
+        if (!payment) {
+            await discardSlipUpload(req);
+            return res.status(404).json({ success: false, message: 'Customer payment not found.' });
+        }
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'No file uploaded.' });
+        }
+        // A replaced slip's old file is deleted once the new one is saved.
+        const oldSlipUrl = payment.slipUrl;
+        payment.slipUrl = `/uploads/payment-slips/${req.file.filename}`;
+        await payment.save();
+        if (oldSlipUrl && oldSlipUrl !== payment.slipUrl) await removePaymentSlip(oldSlipUrl);
+        res.json({ success: true, message: 'Slip uploaded successfully.', slipUrl: payment.slipUrl });
+    } catch (error) {
+        console.error('❌ Error in uploadCustomerPaymentSlip:', error);
+        await discardSlipUpload(req);
         res.status(500).json({ success: false, message: error.message });
     }
 };

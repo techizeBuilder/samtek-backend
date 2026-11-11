@@ -5,6 +5,10 @@ import Designation from '../models/Designation.js';
 import { USER_ROLES } from '../shared/schema.js';
 import bcrypt from 'bcryptjs';
 import { generateEmployeeId } from '../utils/employeeUtils.js';
+import UserDocument from '../models/UserDocument.js';
+import { cleanDeviceCode, deviceCodeTaken } from '../services/peopleService.js';
+import { applyCodeQuietly } from '../services/deviceSync/deviceProcess.js';
+import fs from 'fs';
 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -67,7 +71,9 @@ export const getUsers = async (req, res) => {
       joiningDate,
       employmentType,
       contact,
-      gender
+      gender,
+      login,
+      deviceCode
     } = req.query;
 
     const skip = (page - 1) * parseInt(limit);
@@ -106,9 +112,16 @@ export const getUsers = async (req, res) => {
         { username: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
         { fullName: { $regex: search, $options: 'i' } },
-        { employeeId: { $regex: search, $options: 'i' } }
+        { employeeId: { $regex: search, $options: 'i' } },
+        { deviceCode: { $regex: search, $options: 'i' } }
       ];
     }
+
+    // People with no login (2026-11-06). Older records have no canLogin: they can.
+    if (login === 'no') query.canLogin = false;
+    else if (login === 'yes') query.canLogin = { $ne: false };
+    // Attendance Device's person picker: people still without a code.
+    if (deviceCode === 'none') query.deviceCode = { $in: [null, ''] };
 
     if (role && role !== 'all') {
       query.role = role;
@@ -308,6 +321,9 @@ export const createUser = async (req, res) => {
     if (!email || !password || !role) {
       return res.status(400).json({ message: 'Email, password, and role are required', success: false });
     }
+    if (role === USER_ROLES.MANPOWER) {
+      return res.status(400).json({ message: 'Manpower has no login: add them with Gets a login: No.', success: false });
+    }
 
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
@@ -359,6 +375,11 @@ export const createUser = async (req, res) => {
       }
     }
 
+    const finalDeviceCode = cleanDeviceCode(req.body.deviceCode);
+    if (finalDeviceCode && await deviceCodeTaken(finalCompanyId, finalDeviceCode)) {
+      return res.status(400).json({ message: `Device code ${finalDeviceCode} is already given to someone in this company.`, success: false });
+    }
+
     let finalEmployeeId = employeeId;
     if (!finalEmployeeId && finalCompanyId) {
       // Ensure generateEmployeeId is imported
@@ -407,11 +428,13 @@ export const createUser = async (req, res) => {
       // 🔥 INJECT TECHNICIAN FIELDS
       // Only attach these if the user is actually a Complaint Management Employee
       technicianSkills: role === 'Complaint Management Employee' ? finalSkills : [],
-      serviceZone: role === 'Complaint Management Employee' ? (serviceZone || finalUnit || '') : ''
+      serviceZone: role === 'Complaint Management Employee' ? (serviceZone || finalUnit || '') : '',
+      ...(finalDeviceCode ? { deviceCode: finalDeviceCode } : {}),
     };
 
     const user = new User(userData);
     await user.save();
+    await applyCodeQuietly(finalCompanyId, finalDeviceCode);
     const { password: _, ...userWithoutPassword } = user.toObject();
 
     res.status(201).json({ message: 'User created successfully', success: true, user: userWithoutPassword });
@@ -434,6 +457,159 @@ export const createUser = async (req, res) => {
       message: error.message || 'Internal server error',
       success: false
     });
+  }
+};
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const removeFiles = (files) => files.forEach((f) => { if (f?.path) fs.unlink(f.path, () => {}); });
+
+// POST /api/users/manpower (2026-11-06,
+// docs/client-features-2026-11/02a-people-no-login-logic.md). All the same
+// details as Add Employee, no login, email optional. Device code and Aadhaar are
+// required: attendance is why they're here, and they can't upload anything
+// themselves. Other documents are optional. HR has seen the originals, so all of
+// them are Verified by HR at once. All or nothing: a refusal or failure leaves no
+// person, document or file behind.
+export const createManpower = async (req, res) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  const refuse = (message, errors) => {
+    removeFiles(files);
+    return res.status(400).json({ success: false, message, ...(errors ? { errors } : {}) });
+  };
+  let created = null;
+  try {
+    const b = req.body || {};
+    const aadhaar = files.find((f) => f.fieldname === 'aadhaar');
+    const picture = files.find((f) => f.fieldname === 'profilePicture');
+    const otherDocuments = files.filter((f) => f.fieldname.startsWith('doc_'));
+    const isCompanyScoped = ['HR-Admin', 'Hr Admin', 'Company Admin'].includes(req.user.role);
+    const companyId = (isCompanyScoped && req.user.companyId) || b.companyId;
+    const unit = (isCompanyScoped && req.user.unit) || b.unit || '';
+    const reportingManager = b.reportingManager || b.managerId;
+    const email = String(b.email || '').trim().toLowerCase();
+    const deviceCode = cleanDeviceCode(b.deviceCode);
+
+    const errors = {};
+    const need = { fullName: b.fullName, gender: b.gender, dob: b.dob, joiningDate: b.joiningDate, companyId, branchId: b.branchId, departmentId: b.departmentId, designationId: b.designationId, reportingManager };
+    for (const [field, value] of Object.entries(need)) if (!String(value ?? '').trim()) errors[field] = 'Required';
+    if (!/^\d{10}$/.test(String(b.mobile || '').trim())) errors.mobile = 'Mobile must be exactly 10 digits';
+    if (email && !EMAIL_RE.test(email)) errors.email = 'Enter a valid email address';
+    if (!deviceCode) errors.deviceCode = 'Device code is required for someone with no login';
+    if (!aadhaar) errors.aadhaar = 'Aadhaar is required for someone with no login';
+    if (Object.keys(errors).length) {
+      return refuse(errors.aadhaar || errors.deviceCode || 'Please fill in all the required details.', errors);
+    }
+
+    const [department, designation, manager] = await Promise.all([
+      Department.exists({ _id: b.departmentId, companyId }),
+      Designation.exists({ _id: b.designationId, companyId }),
+      User.exists({ _id: reportingManager, companyId }),
+    ]);
+    if (!department) return refuse('That department is not in this company.');
+    if (!designation) return refuse('That designation is not in this company.');
+    if (!manager) return refuse('That reporting manager is not in this company.');
+    if (email && await User.exists({ email })) return refuse('Email already exists');
+    if (await deviceCodeTaken(companyId, deviceCode)) {
+      return refuse(`Device code ${deviceCode} is already given to someone in this company.`);
+    }
+
+    const employeeId = await generateEmployeeId(companyId);
+    created = await User.create({
+      canLogin: false,
+      username: employeeId,
+      ...(email ? { email } : {}),
+      deviceCode,
+      fullName: b.fullName,
+      role: USER_ROLES.MANPOWER,
+      permissions: { role: USER_ROLES.MANPOWER, canAccessAllUnits: false, modules: [] },
+      unit,
+      companyId,
+      branchId: b.branchId,
+      departmentId: b.departmentId,
+      designationId: b.designationId,
+      employeeId,
+      mobile: String(b.mobile).trim(),
+      gender: b.gender,
+      dob: b.dob,
+      joiningDate: b.joiningDate,
+      reportingManager,
+      employeeType: b.employeeType || b.employmentType || '',
+      address: b.address || '',
+      isActive: true,
+      ...(picture ? { profilePicture: picture.filename } : {}),
+    });
+
+    for (const [type, file] of [['AADHAAR', aadhaar], ...otherDocuments.map((f) => [f.fieldname.slice(4), f])]) {
+      await UserDocument.create({
+        userId: created._id,
+        companyId,
+        type,
+        fileUrl: `uploads/documents/${file.filename}`,
+        status: 'VERIFIED',
+        verifiedBy: req.user._id,
+        verifiedAt: new Date(),
+      });
+    }
+
+    await applyCodeQuietly(companyId, deviceCode);
+    return res.status(201).json({ success: true, message: 'Person added with no login.', user: created });
+  } catch (error) {
+    console.error('Create manpower error:', error.message);
+    if (created) {
+      await UserDocument.deleteMany({ userId: created._id }).catch(() => {});
+      await User.deleteOne({ _id: created._id }).catch(() => {});
+    }
+    removeFiles(files);
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern || {}).pop() || 'value';
+      return res.status(400).json({ success: false, message: `That ${field} is already in use.` });
+    }
+    return res.status(500).json({ success: false, message: 'Could not add this person. Please try again.' });
+  }
+};
+
+// Roles Give Login can't hand out: they run the company, not a department.
+const NOT_FROM_GIVE_LOGIN = ['Super Admin', 'Superadmin', 'super_user', 'Admin', 'Company Admin', USER_ROLES.MANPOWER];
+
+// POST /api/users/:id/give-login: a worker promoted to staff. The same record, so
+// department, documents, attendance and history stay with them.
+export const giveLogin = async (req, res) => {
+  try {
+    const { email, password, role, permissions } = req.body || {};
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const isPlatform = ['Superadmin', 'Super Admin', 'super_user'].includes(req.user.role);
+    if (!isPlatform && String(user.companyId) !== String(req.user.companyId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    if (user.canLogin !== false) return res.status(400).json({ success: false, message: 'This person already has a login.' });
+
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!EMAIL_RE.test(cleanEmail)) return res.status(400).json({ success: false, message: 'Enter a valid email address.' });
+    if (!password || String(password).length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    if (!role || NOT_FROM_GIVE_LOGIN.includes(role)) return res.status(400).json({ success: false, message: 'Pick a role for this person.' });
+    if (await User.exists({ _id: { $ne: user._id }, email: cleanEmail })) {
+      return res.status(400).json({ success: false, message: 'Email already exists' });
+    }
+
+    let perms = permissions;
+    if (typeof perms === 'string') {
+      try { perms = JSON.parse(perms); } catch { perms = null; }
+    }
+
+    user.canLogin = true;
+    user.email = cleanEmail;
+    user.username = cleanEmail;
+    user.password = password; // hashed when saved
+    user.role = role;
+    user.permissions = { canAccessAllUnits: false, modules: [], ...(perms || {}), role };
+    await user.save();
+
+    return res.json({ success: true, message: 'Login given.', user });
+  } catch (error) {
+    console.error('Give login error:', error.message);
+    if (error.code === 11000) return res.status(400).json({ success: false, message: 'Email already exists' });
+    return res.status(500).json({ success: false, message: 'Could not give this person a login.' });
   }
 };
 
@@ -484,6 +660,34 @@ export const updateUser = async (req, res) => {
       });
     }
 
+    // Manpower (2026-11-06): no login to change here; Give Login does that.
+    const noLogin = user.canLogin === false;
+    if (noLogin && role !== undefined && role !== user.role) {
+      return res.status(400).json({ message: 'This person has no login. Use Give Login to give them a role.', success: false });
+    }
+    if (noLogin && password && password.trim() !== '') {
+      return res.status(400).json({ message: 'This person has no login. Use Give Login to set a password.', success: false });
+    }
+    if (!noLogin && email !== undefined && !String(email || '').trim()) {
+      return res.status(400).json({ message: 'Email is required for someone with a login.', success: false });
+    }
+
+    // The device code decides whose attendance a punch becomes, so it's an admin's to set.
+    const unset = {};
+    let newDeviceCode;
+    if (req.body.deviceCode !== undefined) {
+      if (!isAdminTier) {
+        return res.status(403).json({ message: 'Access denied. Only an admin can change a device code.', success: false });
+      }
+      newDeviceCode = cleanDeviceCode(req.body.deviceCode);
+      if (noLogin && !newDeviceCode) {
+        return res.status(400).json({ message: 'Device code is required for someone with no login.', success: false });
+      }
+      if (newDeviceCode && await deviceCodeTaken(user.companyId, newDeviceCode, user._id)) {
+        return res.status(400).json({ message: `Device code ${newDeviceCode} is already given to someone in this company.`, success: false });
+      }
+    }
+
     // Validate fields ONLY if they are provided
     if (email) {
       // Check for duplicate email (excluding current user)
@@ -509,8 +713,17 @@ export const updateUser = async (req, res) => {
       updateData.isActive = isActive;
     }
 
-    if (username !== undefined) updateData.username = username || email?.toLowerCase();
-    if (email !== undefined) updateData.email = email.toLowerCase();
+    if (username !== undefined && !noLogin) updateData.username = username || email?.toLowerCase();
+    if (email !== undefined) {
+      // A blank must be removed, not saved: blank is still a value to the unique rule.
+      const cleanEmail = String(email || '').trim().toLowerCase();
+      if (cleanEmail) updateData.email = cleanEmail;
+      else unset.email = '';
+    }
+    if (req.body.deviceCode !== undefined) {
+      if (newDeviceCode) updateData.deviceCode = newDeviceCode;
+      else unset.deviceCode = '';
+    }
     if (fullName !== undefined) updateData.fullName = fullName;
     if (role !== undefined) updateData.role = role;
     if (unit !== undefined) updateData.unit = unit;
@@ -519,7 +732,7 @@ export const updateUser = async (req, res) => {
     if (departmentId !== undefined) updateData.departmentId = departmentId || null;
     if (designationId !== undefined) updateData.designationId = designationId || null;
     if (employeeId !== undefined) updateData.employeeId = employeeId;
-    if (permissions !== undefined) {
+    if (permissions !== undefined && !noLogin) {
       let parsedPermissions = permissions;
       try {
         if (typeof permissions === 'string') {
@@ -558,6 +771,8 @@ export const updateUser = async (req, res) => {
       updateData.password = hashedPassword;
     }
 
+    if (Object.keys(unset).length) updateData.$unset = unset;
+
     console.log('Updating user with data:', updateData);
 
     const updatedUser = await User.findByIdAndUpdate(
@@ -567,6 +782,7 @@ export const updateUser = async (req, res) => {
     ).select('-password');
 
     console.log('User updated successfully:', updatedUser);
+    if (newDeviceCode) await applyCodeQuietly(updatedUser.companyId, newDeviceCode);
 
     res.json({
       message: 'User updated successfully',
@@ -628,6 +844,10 @@ export const resetUserPassword = async (req, res) => {
 
     console.log('Found user for password reset:', { username: user.username, role: user.role });
 
+    if (user.canLogin === false) {
+      return res.status(400).json({ message: 'This person has no login. Use Give Login to set a password.' });
+    }
+
     // Non-super users can only reset passwords for users from their unit
     if (req.user.role !== USER_ROLES.SUPER_USER && user.unit !== req.user.unit) {
       return res.status(403).json({ message: 'Access denied' });
@@ -660,6 +880,14 @@ export const updateUserPassword = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    const target = await User.findById(id).select('canLogin').lean();
+    if (target?.canLogin === false) {
+      return res.status(400).json({
+        success: false,
+        message: 'This person has no login. Use Give Login to set a password.'
       });
     }
 

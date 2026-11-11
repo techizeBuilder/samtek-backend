@@ -27,7 +27,8 @@
 import { Item } from '../models/Inventory.js';
 import MachineBOM from '../models/MachineBOM.js';
 import { refreshAndComputeChildPart } from './childPartBOMController.js';
-import { buildFabricationBomDimensions, resolveFabricationWeight } from '../services/fabricationDemandService.js';
+import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSizeError } from '../services/fabricationDemandService.js';
+import { activeCost } from '../services/makeBuyService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
 import { applyPricingToItem } from '../services/itemPricingService.js';
 import { cleanProcessDefinition, validateProcessDefinition } from '../utils/processDefinitionValidation.js';
@@ -35,6 +36,11 @@ import RDDocument from '../models/RDDocument.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
+import { invalidateBomApproval } from '../services/productApprovalService.js';
+
+// R&D changed what this is built from: its BOM approval and Release no longer
+// match (2026-11-02). Only these user edits call it, never a cost refresh.
+const bomEdited = (itemId, req, what) => invalidateBomApproval(itemId, req.user.companyId, { byName: req.user.fullName || req.user.username || '', what });
 
 const AMOUNT_UNIT_TYPES = ['Length Unit', 'Area Unit', 'Volume Unit'];
 const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNIT_TYPES.includes(sourceItem.unitType);
@@ -44,13 +50,15 @@ const today = () => new Date().toISOString().split('T')[0];
 // × qty) + Production Cost/Expense — per design doc §6, one level up from
 // computeChildPartCost. materialsCost folds Raw + Tool lines together, same
 // as every other BOM level (no distinct Tool cost model anywhere).
-function computeMachineBOMCost(bom) {
+export function computeMachineBOMCost(bom) {
   const childPartsCost = (bom.childParts || []).filter(l => !l.isDiscontinued).reduce((s, l) => s + (l.totalPrice || 0), 0);
   const rawCost = (bom.materials || []).filter(m => !m.isDiscontinued && m.materialKind !== 'tool').reduce((s, m) => s + (m.totalPrice || 0), 0);
   const toolsCost = (bom.materials || []).filter(m => !m.isDiscontinued && m.materialKind === 'tool').reduce((s, m) => s + (m.totalPrice || 0), 0);
   const materialsCost = rawCost + toolsCost;
-  const totalCost = childPartsCost + materialsCost + (bom.productionCost || 0) + (bom.productionExpense || 0);
-  return { childPartsCost, rawCost, toolsCost, materialsCost, totalCost };
+  // Slice 4 (2026-10-24): + the outsourced (job work) cost of a build.
+  const jobWorkCost = bom.jobWorkCost || 0;
+  const totalCost = childPartsCost + materialsCost + jobWorkCost + (bom.productionCost || 0) + (bom.productionExpense || 0);
+  return { childPartsCost, rawCost, toolsCost, materialsCost, jobWorkCost, totalCost };
 }
 
 // One material/tool line's own weight — never stored (same "computed live,
@@ -109,17 +117,28 @@ async function resolveMachineBOMDoc(machineId, companyId) {
 // saving only if something actually changed. A referenced Child Part that
 // no longer resolves (deleted, or somehow lost its ChildPartBOM) is simply
 // skipped, not an error — its last-known snapshot stays until fixed.
-async function refreshMachineBOMChildParts(bom, companyId) {
+export async function refreshMachineBOMChildParts(bom, companyId) {
   let changed = false;
+  const pendingParts = new Set();
   for (const line of bom.childParts) {
     if (line.isDiscontinued) continue;
     const cpResult = await refreshAndComputeChildPart(line.childPart, companyId);
     if (!cpResult) continue;
-    const totalPrice = Math.round(cpResult.cost.totalCost * line.quantity * 100) / 100;
+    // Make or buy (2026-10-28): a bought Child Part at its bought cost
+    // (pending → its made cost stands in); a made one's own pending parts
+    // make this Machine's price provisional too.
+    const active = activeCost(cpResult.item, cpResult.cost.totalCost);
+    const unitCost = Math.round(active.cost * 100) / 100;
+    if (active.pending) pendingParts.add(cpResult.item.code);
+    if (!active.bought) for (const p of cpResult.pendingParts || []) pendingParts.add(p);
+    const totalPrice = Math.round(unitCost * line.quantity * 100) / 100;
     const totalWeightKg = Math.round(cpResult.weight.totalWeightKg * line.quantity * 1000) / 1000;
-    if (line.unitCost !== cpResult.cost.totalCost || line.totalPrice !== totalPrice
-      || line.unitWeightKg !== cpResult.weight.totalWeightKg || line.totalWeightKg !== totalWeightKg) {
-      line.unitCost = cpResult.cost.totalCost;
+    if (line.unitCost !== unitCost || line.totalPrice !== totalPrice
+      || line.unitWeightKg !== cpResult.weight.totalWeightKg || line.totalWeightKg !== totalWeightKg
+      || !!line.bought !== active.bought || !!line.pricePending !== active.pending) {
+      line.bought = active.bought;
+      line.pricePending = active.pending;
+      line.unitCost = unitCost;
       line.totalPrice = totalPrice;
       line.unitWeightKg = cpResult.weight.totalWeightKg;
       line.totalWeightKg = totalWeightKg;
@@ -127,6 +146,8 @@ async function refreshMachineBOMChildParts(bom, companyId) {
     }
   }
   if (changed) await bom.save();
+  const parts = [...pendingParts];
+  await Item.updateOne({ _id: bom.machine, companyId, 'priceProvisional.parts': { $ne: parts } }, { $set: { 'priceProvisional.parts': parts } });
 }
 
 // GET /api/rd/machine-bom/:machineId — tolerates "no BOM yet" (bom: null),
@@ -219,6 +240,7 @@ export const addMachineBOMChildPart = async (req, res) => {
       unitWeightKg: cpResult.weight.totalWeightKg, totalWeightKg: Math.round(cpResult.weight.totalWeightKg * qty * 1000) / 1000,
     });
     await bom.save();
+    await bomEdited(bom.machine, req, 'Child Part line added');
     const cost = await syncMachineBOMPricing(item, bom);
     res.status(201).json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -247,6 +269,7 @@ export const updateMachineBOMChildPart = async (req, res) => {
     line.unitWeightKg = unitWeightKg;
     line.totalWeightKg = Math.round(unitWeightKg * line.quantity * 1000) / 1000;
     await bom.save();
+    await bomEdited(bom.machine, req, 'Child Part line edited');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -264,6 +287,7 @@ export const deleteMachineBOMChildPart = async (req, res) => {
     if (!line) return res.status(404).json({ success: false, message: 'Child Part line not found.' });
     line.deleteOne();
     await bom.save();
+    await bomEdited(bom.machine, req, 'Child Part line removed');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -281,6 +305,7 @@ export const discontinueMachineBOMChildPart = async (req, res) => {
     if (!line) return res.status(404).json({ success: false, message: 'Child Part line not found.' });
     line.isDiscontinued = true;
     await bom.save();
+    await bomEdited(bom.machine, req, 'Child Part line discontinued');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -298,6 +323,7 @@ export const reactivateMachineBOMChildPart = async (req, res) => {
     if (!line) return res.status(404).json({ success: false, message: 'Child Part line not found.' });
     line.isDiscontinued = false;
     await bom.save();
+    await bomEdited(bom.machine, req, 'Child Part line reactivated');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -335,6 +361,8 @@ export const addMachineBOMMaterial = async (req, res) => {
       if (!dimensionVariantId || !(Number(amountValue) > 0) || !amountUnit) {
         return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
       }
+      const discErr = discontinuedSizeError(sourceItem, dimensionVariantId);
+      if (discErr) return res.status(400).json({ success: false, message: discErr });
       bomDimensions = buildFabricationBomDimensions(sourceItem, dimensionVariantId, amountValue, amountUnit);
       if (!bomDimensions) {
         return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
@@ -386,6 +414,7 @@ export const addMachineBOMMaterial = async (req, res) => {
       specifications: sourceItem.specifications || [],
     });
     await bom.save();
+    await bomEdited(bom.machine, req, 'material line added');
     const cost = await syncMachineBOMPricing(item, bom);
     res.status(201).json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -409,6 +438,7 @@ export const updateMachineBOMMaterial = async (req, res) => {
       return res.status(400).json({ success: false, message: `"${body.code || newCode}" does not match any Inventory item.` });
     }
 
+    const prevVariantId = mat.dimensionVariantId;
     Object.assign(mat, body);
 
     let fabWeight = null;
@@ -416,6 +446,8 @@ export const updateMachineBOMMaterial = async (req, res) => {
       if (!mat.dimensionVariantId || !(Number(mat.amountValue) > 0) || !mat.amountUnit) {
         return res.status(400).json({ success: false, message: 'A dimension size, amount, and amount unit are required for a Fabrication Master material.' });
       }
+      const discErr = discontinuedSizeError(sourceItem, mat.dimensionVariantId, prevVariantId);
+      if (discErr) return res.status(400).json({ success: false, message: discErr });
       mat.bomDimensions = buildFabricationBomDimensions(sourceItem, mat.dimensionVariantId, mat.amountValue, mat.amountUnit);
       if (!mat.bomDimensions) {
         return res.status(400).json({ success: false, message: 'Chosen dimension size not found on this item, or the amount unit is invalid for its shape.' });
@@ -468,6 +500,7 @@ export const updateMachineBOMMaterial = async (req, res) => {
     mat.specifications = sourceItem.specifications || [];
 
     await bom.save();
+    await bomEdited(bom.machine, req, 'material line edited');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -485,6 +518,7 @@ export const deleteMachineBOMMaterial = async (req, res) => {
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.deleteOne();
     await bom.save();
+    await bomEdited(bom.machine, req, 'material line removed');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -502,6 +536,7 @@ export const discontinueMachineBOMMaterial = async (req, res) => {
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.isDiscontinued = true;
     await bom.save();
+    await bomEdited(bom.machine, req, 'material line discontinued');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -519,6 +554,7 @@ export const reactivateMachineBOMMaterial = async (req, res) => {
     if (!mat) return res.status(404).json({ success: false, message: 'Material not found' });
     mat.isDiscontinued = false;
     await bom.save();
+    await bomEdited(bom.machine, req, 'material line reactivated');
     const cost = await syncMachineBOMPricing(item, bom);
     res.json({ success: true, data: { bom, cost } });
   } catch (err) {
@@ -578,8 +614,11 @@ export const updateMachineBOMProcessDefinition = async (req, res) => {
     });
     if (err) return res.status(400).json({ success: false, message: err });
 
+    // Saving the steps unchanged isn't an edit.
+    const stepsChanged = JSON.stringify(cleaned) !== JSON.stringify(cleanProcessDefinition(bom.toObject().processDefinition));
     bom.processDefinition = cleaned;
     await bom.save();
+    if (stepsChanged) await bomEdited(bom.machine, req, 'process steps changed');
     res.json({ success: true, data: bom });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

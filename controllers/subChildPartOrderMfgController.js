@@ -9,6 +9,7 @@
 // server/controllers/inventoryController.js's transfer/receive endpoints —
 // none of them check orderKind) — no new material-handshake code needed.
 import ProductionOrder from '../models/ProductionOrder.js';
+import { assertAssignableTeam, TeamError } from '../services/productionTeamService.js';
 import QCJob from '../models/QCJob.js';
 import { Item } from '../models/Inventory.js';
 import { ensureQCJobForOrder } from './productionMfgController.js';
@@ -35,12 +36,13 @@ export const assignSubChildPartOrderTeam = async (req, res) => {
     const order = await resolveOrder(req, res);
     if (!order) return;
     const { teamId } = req.body;
+    await assertAssignableTeam(teamId, req.user.companyId);
     order.assignedTeam = teamId || null;
     await order.save();
     await order.populate('assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err instanceof TeamError ? err.status : 500).json({ success: false, message: err.message });
   }
 };
 
@@ -76,6 +78,13 @@ export const requestSubChildPartOrderMaterial = async (req, res) => {
   try {
     const order = await resolveOrder(req, res);
     if (!order) return;
+    // outsource-v2 (2026-10-20): when the first step is Out Source,
+    // the raw material goes to the vendor with that first trip — Purchase's
+    // send takes it out of Store (outsourceWorkController.js). Issuing it to
+    // Production as well would take it twice.
+    if (order.processes?.[0]?.type === 'Outsourcing') {
+      return res.status(400).json({ success: false, message: 'This material goes to the vendor with the first outsourced step (Store hands it to Dispatch), so it isn\'t issued to Production.' });
+    }
     const { demandKey, requestQuantity } = req.body;
     const result = await requestSubChildPartRawMaterial(order, req.user.companyId, demandKey, requestQuantity);
     if (!result.ok) return res.status(result.code).json({ success: false, message: result.message });

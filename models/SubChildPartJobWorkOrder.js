@@ -18,12 +18,34 @@ const SubChildPartJobWorkRoundSchema = new mongoose.Schema({
   // per-round quantity field; every round always covers the order's full
   // orderQuantity, only which job-work-types are included varies.
   jobWorkTypes: { type: [String], required: true },
-  status: { type: String, enum: ['Sent', 'Received'], default: 'Sent' },
+  // 'Ordered' (outsource-v2 slice 2, 2026-10-20): an Outsource Order claimed
+  // this trip — nothing has gone out yet. Then Sent → Received.
+  status: { type: String, enum: ['Ordered', 'Sent', 'Received'], default: 'Sent' },
   sentAt: { type: Date, default: Date.now },
   sentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   receivedAt: { type: Date, default: null },
   receivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   notes: { type: String, default: '' },
+  // The Outsource Order (and its line) this trip belongs to — null for a
+  // round sent before slice 2.
+  outsourceOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'OutsourceOrder', default: null },
+  lineId: { type: mongoose.Schema.Types.ObjectId, default: null },
+  // Per-step QC (2026-10-22): when this trip comes back, its steps that have
+  // "QC required" are checked — the next step can be ordered only after this
+  // passes, and this trip's Outsource Order line is paid from THIS check
+  // (not from the order's last one). needed:false = no QC step on the trip
+  // (passed straight away). The last trip's check is the order's own final
+  // QC (order.qcJobId) — passing it credits stock.
+  qc: {
+    needed: { type: Boolean, default: null },
+    stepNames: { type: [String], default: undefined },
+    qcJobId: { type: mongoose.Schema.Types.ObjectId, ref: 'QCJob', default: null },
+    status: { type: String, enum: [null, 'Pending', 'Passed', 'Rejected'], default: null },
+    sentQty: { type: Number, default: null },
+    passedQty: { type: Number, default: null },
+    rejectedQty: { type: Number, default: 0 },
+    decidedAt: { type: Date, default: null },
+  },
 });
 
 const SubChildPartJobWorkOrderSchema = new mongoose.Schema({
@@ -72,6 +94,54 @@ const SubChildPartJobWorkOrderSchema = new mongoose.Schema({
   // PER TRIGGERING ORDER", so two different Child Part orders needing the
   // same Sub Child Part are correctly treated as two different demands.
   demandRefId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', default: null },
+  // Serial number work step 1 (2026-10-31, docs/serial number work/
+  // cascade-to-parent-logic-2026-10.md): a cascade order raised under the new
+  // rule delivers its finished parts STRAIGHT to its parent order (demandRefId)
+  // instead of stock. False on every order made before — they still go to stock.
+  deliverToParent: { type: Boolean, default: false },
+  deliveredToParentQty: { type: Number, default: 0 },
+  parentOrderNo: { type: String, default: '' }, // the parent's order number, for display
+
+  // Partial returns (2026-10-26 — docs/outsource-v2/partial-returns-2026-10.md):
+  // pieces written off at an outsource vendor ("not coming" — lost, or kept by
+  // the vendor). orderQuantity stays what was ordered; every "how many pieces"
+  // place uses orderQuantity − these. stepIndex: the first step of the trip
+  // they were lost on (a production order); onRework: lost on a rework resend
+  // (already taken off the batch as scrap at that QC step).
+  // Every piece was lost at the vendor, nothing left to build (2026-11-04,
+  // docs/outsource-v2/all-lost-at-vendor-logic-2026-11.md): Completed with 0 made.
+  closedAllLost: { type: Boolean, default: false },
+  lostAtVendor: {
+    type: [{
+      qty: { type: Number, required: true },
+      stepIndex: { type: Number, default: null },
+      jobWorkTypes: { type: [String], default: undefined },
+      handoffId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      onRework: { type: Boolean, default: false },
+      reason: { type: String, default: '' },
+      at: { type: Date, default: Date.now }, byName: { type: String, default: '' },
+      outsourceOrderNo: { type: String, default: '' },
+      replacementOrderId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      replacementOrderCode: { type: String, default: '' },
+    }],
+    default: undefined,
+  },
+  // A replacement for pieces lost at a vendor on another order (same demand).
+  replacesLostOf: {
+    orderId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    orderCode: { type: String, default: '' },
+    why: { type: String, default: '' }, // "Lost at the vendor" / "Scrapped at QC (laser cutting)"
+  },
+  // Replacement orders raised for this order's pieces that won't reach stock
+  // (QC scrap / reject, 2026-10-27 — a lost-at-vendor one is on lostAtVendor).
+  replacements: {
+    type: [{
+      qty: { type: Number, required: true }, why: { type: String, default: '' },
+      orderId: { type: mongoose.Schema.Types.ObjectId, default: null }, orderCode: { type: String, default: '' },
+      at: { type: Date, default: Date.now },
+    }],
+    default: undefined,
+  },
   rounds: { type: [SubChildPartJobWorkRoundSchema], default: [] },
   // Back-reference to the QCJob this order's finished quantity was sent to
   // (set once, when the last round is received — see
@@ -97,6 +167,12 @@ const SubChildPartJobWorkOrderSchema = new mongoose.Schema({
   // becomes lives on Item.subChildPartDetails.jobWorkCost (= this ÷
   // orderQuantity), the number every downstream BOM cost rollup reads.
   jobWorkCostTotal: { type: Number, default: null },
+  // Outsource v2 slice 4 (2026-10-24): jobWorkCostTotal is now read from the
+  // Outsource Orders (accepted money, no GST, + charges share), never typed.
+  // costWaitingFor: Outsource Orders whose per minute / per hour time isn't
+  // entered yet — the cost is pushed again once it is.
+  costPushedAt: { type: Date, default: null },
+  costWaitingFor: { type: [String], default: [] },
   // Raw-material availability snapshot, checked once at creation — NOT a
   // full materialDemands[]/Store issue-receive-return handshake (that shape
   // belongs to the In-House ProductionOrder route only). The material

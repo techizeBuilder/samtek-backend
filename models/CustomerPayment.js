@@ -55,6 +55,11 @@ const customerPaymentSchema = new mongoose.Schema({
     },
     notes: {
         type: String
+    },
+    // Optional payment slip / bank transfer screenshot uploaded after payment (2026-10-29).
+    slipUrl: {
+        type: String,
+        default: null
     }
 }, {
     timestamps: true

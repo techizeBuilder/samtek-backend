@@ -2,6 +2,7 @@
 
 import Candidate from "../models/Candidate.js";
 import JobOpening from "../models/JobOpenings.js";
+import { companyMatch } from "../utils/companyScope.js";
 
 /**
  * ➕ Add Candidate
@@ -122,7 +123,7 @@ export const updateCandidate = async (req, res) => {
       updateData.resumeUrl = `/uploads/resumes/${req.file.filename}`;
     }
 
-    const candidate = await Candidate.findByIdAndUpdate(req.params.id, updateData, {
+    const candidate = await Candidate.findOneAndUpdate({ _id: req.params.id, ...companyMatch(req.user) }, updateData, {
       new: true,
     });
 
@@ -146,8 +147,7 @@ export const updateCandidateStatus = async (req, res) => {
   try {
     const { status } = req.body;
 
-    const candidate = await Candidate.findByIdAndUpdate(
-      req.params.id,
+    const candidate = await Candidate.findOneAndUpdate({ _id: req.params.id, ...companyMatch(req.user) },
       { status },
       { new: true }
     );
@@ -170,7 +170,7 @@ export const updateCandidateStatus = async (req, res) => {
  */
 export const deleteCandidate = async (req, res) => {
   try {
-    const candidate = await Candidate.findByIdAndDelete(req.params.id);
+    const candidate = await Candidate.findOneAndDelete({ _id: req.params.id, ...companyMatch(req.user) });
     if (!candidate) {
       return res.status(404).json({ message: "Candidate not found" });
     }
@@ -254,8 +254,7 @@ export const updateInterviewFeedback = async (req, res) => {
       status 
     } = req.body;
 
-    const candidate = await Candidate.findByIdAndUpdate(
-      req.params.id,
+    const candidate = await Candidate.findOneAndUpdate({ _id: req.params.id, ...companyMatch(req.user) },
       { 
         applied, 
         shortlisted, 

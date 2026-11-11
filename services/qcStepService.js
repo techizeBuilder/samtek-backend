@@ -5,6 +5,7 @@
 // checklist applies to this step" the same way, in one place.
 import { resolveSelectedChecklist } from '../controllers/qcChecklistController.js';
 import { resolveFlatChecklistRows } from './qcChecklistPullService.js';
+import { lostBetween } from '../utils/lostAtVendor.js';
 
 // Every index with a QC flag, ascending — replaces the old single-checkpoint
 // qcCheckpointIndex (which returned the FIRST qcRequired step, or -1). An
@@ -142,8 +143,10 @@ export function submitBatchStepForQC(qcJob, order, procs, idx, submittedBy, { qt
     const qcStepIndices = getQcStepIndices(order, procs);
     const posInList = qcStepIndices.indexOf(idx);
     const buildQty = Math.max(1, Number(order.orderQuantity) || 1);
+    // Pieces written off at a vendor before this step aren't in the batch
+    // (partial returns, 2026-10-26).
     if (posInList <= 0) {
-      entry.qtyEnteringStep = buildQty;
+      entry.qtyEnteringStep = Math.max(0, buildQty - lostBetween(order, -1, idx));
     } else {
       const prevProc = procs[qcStepIndices[posInList - 1]];
       const prevEntry = qcJob.batchSteps.find(b => b.category === prevProc.category && b.stepName === prevProc.step);
@@ -160,7 +163,8 @@ export function submitBatchStepForQC(qcJob, order, procs, idx, submittedBy, { qt
       // instead of its not-yet-meaningful passedQty. Once a step actually
       // has a decision, its passedQty is correct again, same as before.
       const prevUndecided = prevLatestAttempt && !prevLatestAttempt.decidedAt;
-      entry.qtyEnteringStep = prevUndecided ? prevEntry.qtyEnteringStep : (prevEntry?.passedQty ?? buildQty);
+      const prevIdx = qcStepIndices[posInList - 1];
+      entry.qtyEnteringStep = Math.max(0, (prevUndecided ? prevEntry.qtyEnteringStep : (prevEntry?.passedQty ?? buildQty)) - lostBetween(order, prevIdx, idx));
     }
   }
 

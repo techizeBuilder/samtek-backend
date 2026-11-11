@@ -2,7 +2,6 @@ import express from 'express';
 import {
   listSubChildPartJobWorkOrders,
   getSubChildPartJobWorkOrder,
-  getSubChildPartJobWorkMaterialOptions,
   sendSubChildPartJobWorkRound,
   receiveSubChildPartJobWorkRound,
 } from '../controllers/subChildPartJobWorkOrderController.js';
@@ -21,7 +20,6 @@ const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
 
 router.get('/', purchasesView, listSubChildPartJobWorkOrders);
 router.get('/:id', purchasesView, getSubChildPartJobWorkOrder);
-router.get('/:id/material-options', purchasesView, getSubChildPartJobWorkMaterialOptions);
 router.post('/:id/rounds', purchasesEdit, sendSubChildPartJobWorkRound);
 router.put('/:id/rounds/:roundId/receive', purchasesEdit, receiveSubChildPartJobWorkRound);
 

@@ -2,6 +2,7 @@
 
 import TravelRequest from "../models/TravelRequest.js";
 import User from "../models/User.js";
+import { canApprove } from "../utils/companyScope.js";
 
 /* ================= CREATE ================= */
 export const createTravelRequest = async (req, res) => {
@@ -204,6 +205,11 @@ export const updateManagerTravelStatus = async (
 
     if (!["APPROVED", "REJECTED"].includes(status)) {
       return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const current = await TravelRequest.findById(req.params.id).select("employee").lean();
+    if (current && !(await canApprove(req.user, current.employee, { features: ["travelRequests"] }))) {
+      return res.status(403).json({ message: "You can't decide on this person's request." });
     }
 
     const request = await TravelRequest.findByIdAndUpdate(

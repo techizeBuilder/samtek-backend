@@ -76,6 +76,18 @@ import mongoose from 'mongoose';
 // checklist (usually after assembly/testing, though steps may follow it).
 // Exactly one per Machine BOM, mandatory. Independent of qcRequired — a step
 // can carry both (a Process check of how it was built + the Final check).
+// operation (2026-10-22, outsource pricing "per job work" — docs/outsource-v2/
+// pricing-types-logic-2026-10.md R3): how many operations ONE piece needs at
+// this step, e.g. drilling: 4 holes. Optional. An Outsource Order can price
+// the step per operation only when this is set. Out Source steps only for
+// now (validated); stored on every step so In-House can use it later.
+// Shared with ProductionOrder's process steps (copied at order creation, so a
+// later BOM edit doesn't change an order already made).
+export const StepOperationSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  perPiece: { type: Number, required: true, min: 1 },
+}, { _id: false });
+
 const InternalProcessSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   type: { type: String, enum: ['InHouse', 'OutSource'], required: true },
@@ -87,6 +99,7 @@ const InternalProcessSchema = new mongoose.Schema({
   },
   qcRequired: { type: Boolean, default: false },
   finalQc: { type: Boolean, default: false },
+  operation: { type: StepOperationSchema, default: null },
 }, { _id: true, timestamps: false });
 
 const ProcessCategorySchema = new mongoose.Schema({

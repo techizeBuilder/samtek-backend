@@ -2,6 +2,31 @@
 
 import Payroll from "../models/Payroll.js";
 import User from "../models/User.js";
+import { employeeMatch, isInMyCompany } from "../utils/companyScope.js";
+import { monthRows, personDays, runMonth, recalculateOne, PayrollError } from "../services/payroll/payrollService.js";
+
+// The pay itself is worked out on the server (2026-11-11): services/payroll/.
+const fail = (res, error, what) => {
+  if (error instanceof PayrollError) return res.status(error.status).json({ message: error.message });
+  console.error(error);
+  return res.status(500).json({ message: `Failed to ${what}` });
+};
+
+/* ================= MONTH: the Payroll Run table, paged ================= */
+export const getPayrollMonth = async (req, res) => {
+  try {
+    const { month, page, limit, search, companyId } = req.query;
+    res.json(await monthRows(req.user, month, { page, limit, search, companyId }));
+  } catch (error) { fail(res, error, "load payroll"); }
+};
+
+/* ================= ONE PERSON'S DAYS ================= */
+export const getPayrollDays = async (req, res) => {
+  try {
+    const { month, userId, companyId } = req.query;
+    res.json(await personDays(req.user, month, userId, { companyId }));
+  } catch (error) { fail(res, error, "load the days"); }
+};
 
 /* ================= GET PAYROLL BY MONTH ================= */
 export const getPayrollByMonth = async (req, res) => {
@@ -48,45 +73,25 @@ export const getPayrollByMonth = async (req, res) => {
   }
 };
 
-/* ================= SAVE / UPDATE PAYROLL (RUN PAYROLL) ================= */
+/* ================= RUN PAYROLL ================= */
+// Numbers sent by the screen are ignored: the server works out everyone's pay.
 export const savePayroll = async (req, res) => {
   try {
-    const { month, payroll } = req.body;
-
-    if (!month || !Array.isArray(payroll)) {
-      return res.status(400).json({ message: "Invalid payload" });
-    }
-
-    const bulkOps = payroll.map((p) => ({
-      updateOne: {
-        filter: { employee: p.userId, month },
-        update: {
-          $set: {
-            gross: p.gross,
-            deduction: p.deduction,
-            net: p.net,
-            payDays: p.payDays || 0,
-            lopDays: p.lopDays || 0,
-            status: "Paid",
-          },
-        },
-        upsert: true,
-      },
-    }));
-
-    await Payroll.bulkWrite(bulkOps);
-
-    res.json({ message: "Payroll processed successfully" });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Failed to save payroll" });
-  }
+    const { month, companyId } = req.body;
+    const result = await runMonth(req.user, month, { companyId });
+    res.json({ message: `Payroll processed: ${result.created} added${result.kept ? `, ${result.kept} already run` : ""}`, ...result });
+  } catch (error) { fail(res, error, "run payroll"); }
 };
 
 /* ================= UPDATE STATUS (Paid) ================= */
 export const updatePayrollStatus = async (req, res) => {
   try {
     const { status } = req.body;
+
+    const existing = await Payroll.findById(req.params.id).select("employee").lean();
+    if (!existing || !(await isInMyCompany(req.user, existing.employee))) {
+      return res.status(404).json({ message: "Payroll not found" });
+    }
 
     const payrollDoc = await Payroll.findByIdAndUpdate(
       req.params.id,
@@ -117,10 +122,14 @@ export const resetPayrollByMonth = async (req, res) => {
       return res.status(400).json({ message: "Month required" });
     }
 
+    // Only this company's: the month alone would reach every company.
+    const scope = await employeeMatch(req.user);
+
     // ❌ Paid payroll delete nahi hone chahiye
     const paidExists = await Payroll.findOne({
       month,
       status: "Paid",
+      ...scope,
     });
 
     if (paidExists) {
@@ -129,7 +138,7 @@ export const resetPayrollByMonth = async (req, res) => {
       });
     }
 
-    await Payroll.deleteMany({ month });
+    await Payroll.deleteMany({ month, ...scope });
 
     res.json({
       message: `Payroll reset successfully for ${month}`,
@@ -149,7 +158,7 @@ export const rejectPayroll = async (req, res) => {
   }
 
   const payroll = await Payroll.findById(req.params.id);
-  if (!payroll) {
+  if (!payroll || !(await isInMyCompany(req.user, payroll.employee))) {
     return res.status(404).json({ message: "Payroll not found" });
   }
 
@@ -162,55 +171,12 @@ export const rejectPayroll = async (req, res) => {
   res.json(payroll);
 };
 /* ================= RECALCULATE REJECTED PAYROLL ================= */
-export const recalculatePayroll = async (
-  req,
-  res
-) => {
+// Worked out again from today's attendance, leave and salary; numbers sent are ignored.
+export const recalculatePayroll = async (req, res) => {
   try {
-    const { payrollId, gross, deduction, net } = req.body;
-
-    if (!payrollId) {
-      return res.status(400).json({ message: "PayrollId required" });
-    }
-
-    const payroll = await Payroll.findById(payrollId);
-
-    if (!payroll) {
-      return res.status(404).json({ message: "Payroll not found" });
-    }
-
-    // 🔒 SAFETY CHECKS
-    if (payroll.status === "Paid") {
-      return res
-        .status(400)
-        .json({ message: "Paid payroll cannot be recalculated" });
-    }
-
-    if (payroll.status !== "Rejected") {
-      return res
-        .status(400)
-        .json({ message: "Only rejected payroll can be recalculated" });
-    }
-
-    // 👉 UPDATE WITH NEW CALCULATION
-    payroll.gross = gross;
-    payroll.deduction = deduction;
-    payroll.net = net;
-    payroll.payDays = req.body.payDays || 0;
-    payroll.lopDays = req.body.lopDays || 0;
-
-    payroll.status = "Paid"; // 🔥 reset status directly to paid
-    payroll.rejectReason = undefined;
-    payroll.rejectedAt = undefined;
-
-    await payroll.save();
-
-    res.json({
-      message: "Payroll recalculated successfully",
-      payroll,
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Failed to recalculate payroll" });
-  }
+    const { payrollId } = req.body;
+    if (!payrollId) return res.status(400).json({ message: "PayrollId required" });
+    const payroll = await recalculateOne(req.user, payrollId);
+    res.json({ message: "Payroll recalculated successfully", payroll });
+  } catch (error) { fail(res, error, "recalculate payroll"); }
 };

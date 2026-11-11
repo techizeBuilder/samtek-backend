@@ -52,7 +52,15 @@ export const updateAttendancePolicy = async (req, res) => {
       overtimeEnabled,
       overtimeAfter,
       overtimeType,
+      weeklyOffDays,
     } = req.body;
+
+    // 0 = Sunday … 6 = Saturday; none at all is allowed (2026-11-11).
+    if (weeklyOffDays !== undefined) {
+      const ok = Array.isArray(weeklyOffDays) && weeklyOffDays.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+        && new Set(weeklyOffDays).size === weeklyOffDays.length && weeklyOffDays.length < 7;
+      if (!ok) return res.status(400).json({ message: "Weekly off must be days of the week, each once, and not all seven" });
+    }
 
     const updateData = {};
     if (graceTime !== undefined) updateData.graceTime = graceTime;
@@ -62,6 +70,7 @@ export const updateAttendancePolicy = async (req, res) => {
     if (overtimeEnabled !== undefined) updateData.overtimeEnabled = overtimeEnabled;
     if (overtimeAfter !== undefined) updateData.overtimeAfter = overtimeAfter;
     if (overtimeType !== undefined) updateData.overtimeType = overtimeType;
+    if (weeklyOffDays !== undefined) updateData.weeklyOffDays = [...weeklyOffDays].sort((a, b) => a - b);
 
     const policy = await AttendancePolicy.findOneAndUpdate(
       { companyId },

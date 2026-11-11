@@ -17,6 +17,7 @@ import {
   diffSensitiveFields, validateForSubmission, getVendorStanding, activityEntry,
   notifyCompanyAdminOfRequest,
 } from '../services/vendorApprovalService.js';
+import { documentTypesFor } from '../services/vendorDocumentRulesService.js';
 
 // suppliedItems/services arrive straight from the Vendor Master form — keep
 // only valid Item ids and trimmed, non-empty, de-duplicated (case-
@@ -64,11 +65,14 @@ export const getSupplierCatalog = async (req, res) => {
     const companyId = req.user.companyId;
     const notDiscontinued = { isDiscontinued: { $ne: true } };
 
+    // Child Parts / Sub Child Parts R&D marked as bought are in too (make or
+    // buy, 2026-10-28); a made part stays out (purchase is off).
     const items = await Item.find({
-      companyId, purchase: true, ...notDiscontinued,
-      productKind: { $nin: ['SubChildPart', 'ChildPart'] },
-    }).select('code name productKind category subCategory itemCategories unit').sort({ name: 1 }).lean();
-    const sourceOf = (it) => it.productKind === 'Machine' ? 'Product Master' : it.productKind === 'Motor' ? 'Motor Master' : 'Inventory';
+      companyId, purchase: true, internalManufacturing: { $ne: true }, ...notDiscontinued,
+      $nor: [{ productKind: { $in: ['ChildPart', 'SubChildPart'] }, partSourcing: { $ne: 'buy' } }],
+    }).select('code name productKind category subCategory itemCategories itemType unit').sort({ name: 1 }).lean();
+    const SOURCE_BY_KIND = { Machine: 'Product Master', Motor: 'Motor Master', ChildPart: 'Child Part', SubChildPart: 'Sub Child Part' };
+    const sourceOf = (it) => SOURCE_BY_KIND[it.productKind] || 'Inventory';
 
     const byName = new Map();
     const entryFor = (name) => {
@@ -407,7 +411,7 @@ export const submitForApproval = async (req, res) => {
     if (!['Draft', 'Rejected'].includes(vendor.approvalStatus)) {
       return res.status(409).json({ message: `This vendor is already ${vendor.approvalStatus}.` });
     }
-    const missing = validateForSubmission(vendor);
+    const missing = validateForSubmission(vendor, await documentTypesFor(vendor.companyId));
     if (missing.length) {
       return res.status(400).json({ message: 'Complete these before submitting for approval.', missing });
     }
@@ -453,7 +457,6 @@ export const withdrawApproval = async (req, res) => {
   }
 };
 
-const DOC_TYPES = Supplier.schema.path('documents').schema.path('docType').enumValues;
 
 // POST /api/suppliers/:id/documents — multipart: file, docType, docNumber,
 // expiryDate. Closed while the vendor is under review (same rule as editing).
@@ -472,7 +475,7 @@ export const uploadVendorDocument = async (req, res) => {
     }
     if (!req.file) return fail(400, 'Choose a file to upload.');
     const { docType, docNumber, expiryDate } = req.body;
-    if (!DOC_TYPES.includes(docType)) return fail(400, 'Choose a valid document type.');
+    if (!(await documentTypesFor(vendor.companyId)).some(t => t.name === docType)) return fail(400, 'Choose a valid document type.');
     // A date-only value ('YYYY-MM-DD'), stored as that day's UTC midnight;
     // the UI compares it by day, so a document is valid through its date.
     const expiry = expiryDate ? new Date(expiryDate) : null;
@@ -768,9 +771,13 @@ export const importSuppliersFromExcel = [upload.single('file'), async (req, res)
 const RATINGS_TTL_MS = 60 * 1000;
 const ratingsCache = new Map(); // `${companyId}|${unit}` → { at, payload }
 
+// The Company Admin sees every unit's vendors; Purchase its own unit + Main.
+const seesAllUnits = (user) => ['Company Admin', 'Super Admin'].includes(user?.role);
+const unitFilter = (user) => (seesAllUnits(user) ? {} : { unit: { $in: [user.unit, 'Main'] } });
+
 export const getVendorRatingsOverview = async (req, res) => {
   try {
-    const key = `${req.user.companyId}|${req.user.unit}`;
+    const key = `${req.user.companyId}|${seesAllUnits(req.user) ? '*' : req.user.unit}`;
     let cached = ratingsCache.get(key);
     if (!cached || req.query.fresh === '1' || Date.now() - cached.at > RATINGS_TTL_MS) {
       cached = { at: Date.now(), payload: await buildVendorRatings(req.user) };
@@ -810,8 +817,7 @@ export const getVendorRatingsOverview = async (req, res) => {
 // Every vendor's score, standing and claims for one company + unit.
 async function buildVendorRatings(user) {
     const companyId = user.companyId;
-    const unit = user.unit;
-    const vendors = await Supplier.find({ companyId, unit: { $in: [unit, 'Main'] } })
+    const vendors = await Supplier.find({ companyId, ...unitFilter(user) })
       .select('supplierName suppliedItems approvalStatus riskClass')
       .lean();
 
@@ -853,9 +859,7 @@ export const getVendorItemBreakdown = async (req, res) => {
   try {
     const { id } = req.params;
     const companyId = req.user.companyId;
-    const unit = req.user.unit;
-
-    const vendor = await Supplier.findOne({ _id: id, companyId, unit: { $in: [unit, 'Main'] } }).lean();
+    const vendor = await Supplier.findOne({ _id: id, companyId, ...unitFilter(req.user) }).lean();
     if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found' });
 
     const items = await Item.find({ _id: { $in: vendor.suppliedItems || [] } }).select('name code').lean();

@@ -31,7 +31,7 @@ export const getHrmsDashboardStats = async (req, res) => {
 
     const presentToday = await Attendance.countDocuments({ 
       date: todayString, 
-      status: "PRESENT",
+      status: { $in: ["PRESENT", "HALF_DAY"] },
       user: { $in: userIds }
     });
 

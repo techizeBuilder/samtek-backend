@@ -10,6 +10,27 @@ const todayDate = () => new Date().toISOString().split("T")[0];
 const secondsBetween = (start, end) =>
   Math.floor((end.getTime() - start.getTime()) / 1000);
 
+// Someone with a Device Code has one source of attendance: the device (2026-11-11).
+const onDevice = async (userId) => !!(await User.exists({ _id: userId, deviceCode: { $type: "string", $ne: "" } }));
+const DEVICE_ONLY = "Your attendance comes from the device, so it can't be marked here.";
+
+export const refuseIfOnDevice = async (req, res, next) => {
+  try {
+    if (await onDevice(req.user._id)) return res.status(403).json({ message: DEVICE_ONLY });
+    return next();
+  } catch (err) {
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+};
+
+export const getSelfMark = async (req, res) => {
+  try {
+    res.json({ onDevice: await onDevice(req.user._id) });
+  } catch (err) {
+    res.status(500).json({ message: "Something went wrong" });
+  }
+};
+
 /* =====================================================
    ✅ PUNCH IN
  ===================================================== */
@@ -305,9 +326,12 @@ export const getAllAttendance = async (req, res) => {
     });
 
     /* 3️⃣ TODAY PRESENT */
+    const { $or: _search, ...scopeFilter } = userFilter;
+    const scopedUserIds = await User.find(scopeFilter).distinct("_id");
     const totalTodayPresent = await Attendance.distinct("user", {
       date: todayStr,
-      status: "PRESENT",
+      status: { $in: ["PRESENT", "HALF_DAY"] },
+      user: { $in: scopedUserIds },
     }).then((u) => u.length);
 
     res.json({

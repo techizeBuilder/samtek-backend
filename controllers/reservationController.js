@@ -32,7 +32,11 @@ export const listReservations = async (req, res) => {
       for (const o of await PO.find({ _id: { $in: idsOf('ProductionOrder') } }).select('orderId orderKind machineName status demandSource orderCode').lean()) {
         orderInfo.set(String(o._id), {
           code: o.orderId, kind: KIND_LABEL[o.orderKind] || o.orderKind || 'Production',
-          forWhat: o.machineName || '', status: o.status, source: o.demandSource || '', salesOrder: o.orderCode || '',
+          // A Machine order never sets demandSource (the model's default
+          // 'LowStock' showed under a sales order's machine, 2026-10-24) —
+          // it's either for a sales order or for stock.
+          forWhat: o.machineName || '', status: o.status, salesOrder: o.orderCode || '',
+          source: (o.orderKind || 'Machine') === 'Machine' ? (o.orderCode ? 'Sales order' : 'Stock') : (o.demandSource || ''),
         });
       }
     }

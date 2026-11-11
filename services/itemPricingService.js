@@ -87,13 +87,16 @@ export async function resolveManufacturingItemCost(item) {
  */
 export async function getMachineBillingBOMCost(code, companyId) {
   const machine = await Item.findOne({ code, companyId, productKind: 'Machine' })
-    .select('costSource stdCost billAmountPercent').lean();
+    .select('costSource stdCost billAmountPercent pricePending priceProvisional').lean();
+  // Make or buy (2026-10-28): the order form warns when the price is
+  // provisional — never blocks.
+  const provisional = { pending: !!machine?.pricePending, parts: machine?.priceProvisional?.parts || [] };
   if (!machine || machine.costSource !== 'BOM' || !(machine.stdCost > 0)) {
-    return { found: false, totalCost: 0 };
+    return { found: false, totalCost: 0, provisional };
   }
   // Company Admin > Pricing Value's per-item "Bill Amount %" — null/unset
   // (item never touched in Pricing Value) falls back to the old hardcoded 10%.
-  return { found: true, totalCost: machine.stdCost, billAmountPercent: machine.billAmountPercent ?? 10 };
+  return { found: true, totalCost: machine.stdCost, billAmountPercent: machine.billAmountPercent ?? 10, provisional };
 }
 
 /**
@@ -192,6 +195,35 @@ export async function resolvePurchaseItemCost(item, knownConversionFactor = null
   return { cost, rawPurchaseUnitPrice };
 }
 
+// What one purchase unit of a PO line really cost (2026-10-26 — server/docs/
+// procurement-v2/purchase-cost-logic-2026-10.md): the rate before GST (an
+// "includes GST" rate has its GST taken out when the % is known — unknown
+// stays as is, never guessed) + the line's share of the PO's charges before
+// GST, split over every line by value (rate before GST × qty). GST is left
+// out because it's claimed back; our own vehicle freight isn't in it (open).
+const lineRateExGst = (l) => {
+  const rate = Number(l.unitPrice) || 0;
+  const pct = Number(l.gstRate);
+  return l.gstInclusive && pct > 0 ? rate / (1 + pct / 100) : rate;
+};
+
+export function poLineUnitCost(po, line) {
+  const qty = Number(line.quantity) || 0;
+  const rate = lineRateExGst(line);
+  const lineValue = (l) => (Number(l.quantity) || 0) * lineRateExGst(l);
+  const allValue = (po.items || []).reduce((s, l) => s + lineValue(l), 0);
+  const poCharges = (po.charges || []).reduce((s, c) => s + (Number(c.amount) || 0), 0) + (Number(po.poChargesTotal) || 0);
+  const share = (allValue > 0 ? poCharges * lineValue(line) / allValue : 0) + (Number(line.itemChargesTotal) || 0);
+  return qty > 0 ? rate + share / qty : rate;
+}
+
+// The PO line a purchase request is on (a line carries one request, or
+// several after item-wise consolidation).
+export function poLineOfRequest(po, prId) {
+  const ids = (l) => (l.purchaseRequests?.length ? l.purchaseRequests : (l.purchaseRequest ? [l.purchaseRequest] : []));
+  return (po?.items || []).find(l => ids(l).some(id => String(id?._id || id) === String(prId))) || null;
+}
+
 /**
  * Applies the Item's own profit%/discount% (Company Admin > Pricing Value)
  * to a resolved cost and persists it onto the Item. Never overwrites a
@@ -244,8 +276,22 @@ export async function applyPricingToItem(item, cost, source, rawPurchaseUnitPric
  * `knownConversionFactor` — pass this from a receive-time caller that
  * already knows exactly which purchase-to-base-unit factor applies (see
  * resolvePurchaseItemCost's own comment on it). Omit it everywhere else.
+ *
+ * `fromPoLine` — { po, line }: a Store receive passes the PO line it received,
+ * so the price is that line's own cost (poLineUnitCost), not the newest bill's
+ * rate (2026-10-26). Without it (a manual bill), the newest bill as before.
  */
-export async function recalculateItemPricing(item, { visiting = new Set(), depth = 0, knownConversionFactor = null } = {}) {
+export async function recalculateItemPricing(item, { visiting = new Set(), depth = 0, knownConversionFactor = null, fromPoLine = null } = {}) {
+  // Make or buy (2026-10-28): a part now made here that receives an old PO
+  // only updates its bought cost — the price in use (its made cost) doesn't
+  // move (docs/make-or-buy-parts-2026-10.md §3).
+  const { isPart, isBought } = await import('./makeBuyService.js');
+  if (isPart(item) && !isBought(item)) {
+    if (!fromPoLine?.po || !fromPoLine?.line) return { updated: false };
+    const cost = poLineUnitCost(fromPoLine.po, fromPoLine.line) * (knownConversionFactor > 0 ? knownConversionFactor : 1);
+    if (cost > 0) await Item.updateOne({ _id: item._id }, { $set: { purchaseCost: round2(cost), purchaseCostKind: 'actual', purchaseCostAt: new Date() } });
+    return { updated: false };
+  }
   if (!item.internalManufacturing && !item.purchase) return { updated: false };
   if (depth > MAX_BOM_DEPTH) return { updated: false };
   const key = item._id.toString();
@@ -266,6 +312,13 @@ export async function recalculateItemPricing(item, { visiting = new Set(), depth
       return { updated: false, issue };
     }
     updated = await applyPricingToItem(item, resolved.cost, 'BOM');
+  } else if (fromPoLine?.po && fromPoLine?.line) {
+    // A Store receive: priced from the PO line actually received.
+    const perPurchaseUnit = poLineUnitCost(fromPoLine.po, fromPoLine.line);
+    const cost = perPurchaseUnit * (knownConversionFactor > 0 ? knownConversionFactor : 1);
+    // A real purchase replaces any estimate and clears "price pending".
+    if (cost > 0) Object.assign(item, { purchaseCostKind: 'actual', purchaseCostAt: new Date(), pricePending: false });
+    updated = await applyPricingToItem(item, cost, 'Purchase', perPurchaseUnit);
   } else {
     const { cost, rawPurchaseUnitPrice } = await resolvePurchaseItemCost(item, knownConversionFactor);
     if (cost == null) return { updated: false };
@@ -278,17 +331,21 @@ export async function recalculateItemPricing(item, { visiting = new Set(), depth
   return { updated, issue };
 }
 
-// Used to ripple a changed Item's price up through every RDBOM that consumed
-// it as a material. That model (and the Legacy BOM Management flow that
-// wrote it) is gone, along with resolveManufacturingItemCost above — there's
-// no RDBOM left to search for dependents. Kept as a no-op stub, not deleted,
-// so its one external caller (purchaseController.js's updatePurchaseItemCost)
-// and recalculateItemPricing's own call below don't need touching. Cost
-// cascading to consumers more broadly (MachineBOM/ChildPartBOM legs) was
-// already a known, separate gap — see
-// server/docs/automated-pricing-cascade-design-2026-09.md — unaffected by
-// this removal either way.
-export async function cascadeRecalculateToConsumers() {}
+// Ripples a changed raw material's price up the new BOM hierarchy — every Sub
+// Child Part made from it, every Child Part / Machine using it directly, and
+// on up to the Machines' prices (outsource v2 slice 4, 2026-10-24 —
+// services/priceCascadeService.js). It used to walk the old RDBOM (gone), and
+// was a no-op stub since. Called after every purchase-cost change
+// (recalculateItemPricing below), Accounts' manual cost and ₹/kg
+// (purchaseController.js). Never throws.
+export async function cascadeRecalculateToConsumers(item) {
+  if (!item) return;
+  const cascade = await import('./priceCascadeService.js');
+  // A bought part's price climbs like a raw material's (2026-10-28).
+  if (item.productKind === 'SubChildPart') return cascade.onSubChildPartChanged(item._id, item.companyId);
+  if (item.productKind === 'ChildPart') return cascade.onChildPartChanged(item._id, item.companyId);
+  await cascade.onRawMaterialChanged(item);
+}
 
 /**
  * Cheap reapply for when a single Item's own profitPercent/discountPercent

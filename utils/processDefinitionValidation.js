@@ -45,6 +45,11 @@ export function cleanProcessDefinition(raw) {
               materialQuantities,
               qcRequired: p?.qcRequired === true,
               finalQc: p?.finalQc === true,
+              // Operations per piece (2026-10-22): kept when a count or a name
+              // was given — validateProcessDefinition then checks it.
+              operation: (p?.operation && (String(p.operation.name ?? '').trim() || (p.operation.perPiece !== '' && p.operation.perPiece != null)))
+                ? { name: String(p.operation.name ?? '').trim(), perPiece: Number(p.operation.perPiece) }
+                : null,
             };
           })
           .filter(p => p.name)
@@ -124,6 +129,13 @@ export function validateProcessDefinition(processDefinition, {
     for (const proc of (cat.internalProcesses || [])) {
       if (!proc?.name) return `Every internal process under "${cat.label}" needs a name.`;
       if (!VALID_TYPES.includes(proc.type)) return `"${proc.name}" must be typed In-House or Out Source.`;
+      // Operations per piece (2026-10-22, outsource "per job work" pricing):
+      // Out Source steps only for now; a whole number ≥ 1 with a name.
+      if (proc.operation) {
+        if (proc.type !== 'OutSource') return `"${proc.name}": operations per piece can only be set on an Out Source step for now.`;
+        if (!Number.isInteger(proc.operation.perPiece) || proc.operation.perPiece < 1) return `"${proc.name}": operations per piece must be a whole number of at least 1.`;
+        if (!proc.operation.name) return `"${proc.name}": name the operation (e.g. holes).`;
+      }
       if (anyLineIdSet && Array.isArray(proc.materialRefs)) {
         for (const refId of proc.materialRefs) {
           if (!anyLineIdSet.has(String(refId))) return `"${proc.name}" references a material or sub-assembly that isn't on this BOM.`;

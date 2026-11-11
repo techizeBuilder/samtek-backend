@@ -44,9 +44,20 @@ const AttendanceSchema = new Schema(
 
     status: {
       type: String,
-      enum: ["PRESENT", "ABSENT"],
+      enum: ["PRESENT", "ABSENT", "HALF_DAY", "WEEKLY_OFF"],
       default: "PRESENT",
     },
+
+    // Where this day came from (2026-11-11): Device, or Correction for an approved
+    // Attendance Request. Older records have none and count as self-marked. The
+    // device sync only ever overwrites its own.
+    source: { type: String, enum: ["Device", "Correction"] },
+    deviceCode: { type: String },
+    deviceStatus: { type: String },
+    deviceRemark: { type: String },
+    overtimeSeconds: { type: Number, default: 0 },
+    lateSeconds: { type: Number, default: 0 },
+    earlyOutSeconds: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

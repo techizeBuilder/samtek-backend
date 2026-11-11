@@ -1,13 +1,13 @@
 import Meeting from '../models/Meeting.js';
 import Lead from '../models/Lead.js';
 import User from '../models/User.js';
-import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
+import { DEPARTMENTS, getDeptMailer, mailboxWarning } from '../config/mailAccounts.js';
 
 /**
  * Send Meeting Schedule Email
  */
 const sendMeetingInviteEmail = async ({ companyId, to, contactPerson, meetingDate, startTime, endTime, meetingType, venue, onlineMeetingUrl, purpose, remarks, assigneeName, companyName }) => {
-  const mailer = await getDeptMailer(companyId, DEPARTMENTS.SALES);
+  const mailer = await getDeptMailer(DEPARTMENTS.SALES);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Sales SMTP not configured. Would send meeting invite to: ${to}`);
     return { skipped: true };
@@ -150,8 +150,10 @@ export const scheduleMeeting = async (req, res) => {
     });
     await lead.save();
 
-    // Send email if requested
-    if (sendInviteEmail && lead.email) {
+    // Send email if requested. No Sales mailbox → the meeting is saved and
+    // the reply says the invite didn't go (2026-10-29).
+    const emailWarning = sendInviteEmail && lead.email ? await mailboxWarning(DEPARTMENTS.SALES) : null;
+    if (sendInviteEmail && lead.email && !emailWarning) {
       try {
         // Get company name
         const Company = (await import('../models/Company.js')).default;
@@ -184,7 +186,8 @@ export const scheduleMeeting = async (req, res) => {
 
     res.status(isUpdate ? 200 : 201).json({
       success: true,
-      message: `Meeting ${isUpdate ? 'updated' : 'scheduled'} successfully${sendInviteEmail && lead.email ? ' and invite sent' : ''}`,
+      message: `Meeting ${isUpdate ? 'updated' : 'scheduled'} successfully${sendInviteEmail && lead.email && !emailWarning ? ' and invite sent' : ''}`,
+      emailWarning,
       meeting
     });
   } catch (error) {

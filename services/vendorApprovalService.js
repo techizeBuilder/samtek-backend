@@ -11,6 +11,7 @@ import Supplier from '../models/Supplier.js';
 import Purchase from '../models/Purchase.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import notificationService from './notificationService.js';
+import { effectiveDocumentTypes, missingTypesFor } from './vendorDocumentRulesService.js';
 import { computeVendorScores, scoreSettingsOf, MIN_HISTORY_EVENTS } from './vendorScoreService.js';
 
 // Thresholds for the derived stages. The Watchlist score line is the Company
@@ -24,8 +25,10 @@ export const DISPUTE_WATCHLIST_DAYS = 90;
 
 // Only these vendors can be quoted or given a PO. Invoices, payments,
 // returns and ratings are deliberately NOT gated — money already owed to a
-// suspended vendor still has to be paid.
-export const ELIGIBLE_VENDOR_FILTER = { approvalStatus: 'Approved', status: 'active' };
+// suspended vendor still has to be paid. Approval alone decides (suspend /
+// blacklist take a vendor off it); the old Active / Inactive status was
+// retired 2026-10-28.
+export const ELIGIBLE_VENDOR_FILTER = { approvalStatus: 'Approved' };
 
 // On an already-approved vendor, a change to any of these goes to the
 // Company Admin instead of saving straight away (client decision: bank
@@ -55,7 +58,6 @@ export function eligibleVendorError(vendor) {
   if (vendor.approvalStatus !== 'Approved') {
     return `${vendor.supplierName} is ${vendor.approvalStatus || 'not approved'} — only vendors approved by the Company Admin can be quoted or ordered from.`;
   }
-  if (vendor.status !== 'active') return `${vendor.supplierName} is marked Inactive.`;
   return null;
 }
 
@@ -93,11 +95,11 @@ export function diffSensitiveFields(vendor, body) {
 }
 
 // What's still missing before a vendor can be submitted for approval — a
-// list of plain sentences shown to Purchase as-is. Empty = ready.
-export function validateForSubmission(vendor) {
+// list of plain sentences shown to Purchase as-is. Empty = ready. types: the
+// company's document types (documentTypesFor) — which documents are required
+// (2026-10-28); omitted = the original rules.
+export function validateForSubmission(vendor, types = effectiveDocumentTypes(null)) {
   const missing = [];
-  const docs = vendor.documents || [];
-  const hasDoc = (type) => docs.some(d => d.docType === type);
 
   if (!norm(vendor.panNumber)) missing.push('PAN number');
   if (!norm(vendor.phone)) missing.push('Phone');
@@ -112,9 +114,7 @@ export function validateForSubmission(vendor) {
   if (!(vendor.suppliedItems || []).length && !(vendor.services || []).length) {
     missing.push('At least one Product or Service (the "Products & Services" button on the vendor card)');
   }
-  if (!hasDoc('PAN Card')) missing.push('PAN Card document');
-  if (norm(vendor.gstNumber) && !hasDoc('GST Certificate')) missing.push('GST Certificate document (a GSTIN is entered)');
-  if (!hasDoc('Cancelled Cheque/Bank Proof')) missing.push('Cancelled cheque / bank proof document');
+  for (const t of missingTypesFor(vendor, types)) missing.push(t.onlyWithGstin ? `${t.name} document (a GSTIN is entered)` : `${t.name} document`);
   return missing;
 }
 
@@ -184,11 +184,13 @@ export async function applyApprovedRequest(request, reviewer, extras = {}) {
       vendor.approvedAt = new Date();
       vendor.rejectionReason = '';
       const v = extras.verification || {};
+      const checked = Array.isArray(v.checkedDocuments) ? v.checkedDocuments.map(String) : [];
       vendor.verification = {
-        gstVerified: !!v.gstVerified,
-        panVerified: !!v.panVerified,
-        bankVerified: !!v.bankVerified,
-        documentsVerified: !!v.documentsVerified,
+        checkedDocuments: checked,
+        gstVerified: checked.includes('GST Certificate'),
+        panVerified: checked.includes('PAN Card'),
+        bankVerified: checked.includes('Cancelled Cheque/Bank Proof'),
+        documentsVerified: true, // the review only gets here with every required tick on
         remarks: v.remarks || remarks,
         verifiedBy: reviewer._id,
         verifiedAt: new Date(),

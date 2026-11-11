@@ -1,13 +1,13 @@
 // Machine — the top of the BOM hierarchy (Raw Material -> Sub Child Part ->
-// Child Part -> Machine). Unlike the two tiers below it, a Machine order is
-// never raised by a low-stock reorder sweep of its own — it's always raised
-// by Store's order-form flow (storeFlowService.js's applyStoreDecisionToItem,
-// CASE 2: an in-house-manufactured Sale item that's Not Available). This
-// file holds the one thing that tier needed and never had: a real BOM-aware
-// material check for the Machine order once it's created, cascading into
-// real Child Part orders instead of flat Purchase Requests for the Child
-// Parts it's built from, mirroring childPartReorderService.js's own
-// checkSubChildPartMaterialAvailability one tier down exactly.
+// Child Part -> Machine). A Machine order is raised three ways: Store's
+// order-form flow (storeFlowService.js's applyStoreDecisionToItem, CASE 2: an
+// in-house-manufactured Sale item that's Not Available), the New Stock Order
+// form, and the low-stock sweep at the end of this file (2026-11-06). This
+// file holds a real BOM-aware material check for the Machine order once it's
+// created, cascading into real Child Part orders instead of flat Purchase
+// Requests for the Child Parts it's built from, mirroring
+// childPartReorderService.js's own checkSubChildPartMaterialAvailability one
+// tier down exactly.
 //
 // Full cutover (2026-09-16), not a coexistence flow: the OLD RDBOM this
 // order-creation path used to read is retired here entirely — confirmed
@@ -22,12 +22,18 @@ import MachineBOM from '../models/MachineBOM.js';
 import Sale from '../models/Sale.js';
 import { plainMaterialGroupsFromBOM, lengthFabricationGroupsFromBOM, sheetMetalCutGroupsFromBOM } from './bomMaterialGroupsService.js';
 import { raisePlainPurchaseRequest, raiseFabricationPurchaseRequest } from './materialAvailabilityService.js';
-import { checkAndReserve, getFreeQtyExcludingOrder } from './materialReservationService.js';
+import { isBought } from './makeBuyService.js';
+import { isReleased, isPurchaseMachine } from './productApprovalService.js';
+import { checkAndReserve, getFreeQty, getFreeQtyExcludingOrder } from './materialReservationService.js';
+import { recordCascadeCover, cascadeOnRow, cascadeIssueLimit, finishedViaStore } from './cascadeDeliveryService.js';
 import { dimensionSignature } from './fabricationDemandService.js';
 import { sheetAreaFromItem } from '../controllers/sheetMetalPlanController.js';
-import { createChildPartOrderForItem } from './childPartReorderService.js';
-import { buildProcessSteps, buildStepsFromList, MACHINE_BOM_STEPS } from '../models/ProductionOrder.js';
+import { createChildPartOrderForItem, resolveCreatedBy } from './childPartReorderService.js';
+import ProductionOrder, { buildProcessSteps, buildStepsFromList, MACHINE_BOM_STEPS } from '../models/ProductionOrder.js';
+import { generateOrderId } from '../controllers/productionMfgController.js';
+import notificationService from './notificationService.js';
 import { buildOrderStepsFromProcessDefinition } from './processStepBuilderService.js';
+import { outsourceMaterialOnOrder } from './outsourceEarmarkService.js';
 
 // Resolves a Machine order's own machine Item — a Machine order (unlike
 // Child Part/Sub Child Part) has no direct ObjectId ref to its own Item,
@@ -142,9 +148,42 @@ export async function checkMachineAssemblyMaterialAvailability(productionOrder, 
     const cpItem = await Item.findOne({ _id: line.childPart, companyId });
     if (!cpItem) continue;
     const neededQty = (Number(line.quantity) || 0) * buildQty;
-    const { freeQty, shortfallQty } = await checkAndReserve({ item: cpItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `cp:${cpItem.code}` });
+    // Serial number work step 1 (2026-10-31, P1): a BUILT part reserves only
+    // what free stock covers, and its cascade order is built for the
+    // shortfall and delivers straight to this order. A bought part keeps the
+    // full reservation (its purchase arrives into stock and Store issues it).
+    const built = !isBought(cpItem);
+    const { freeQty, shortfallQty } = await checkAndReserve({ item: cpItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `cp:${cpItem.code}`, capToFree: built });
     if (shortfallQty === 0) continue;
-    const result = await createChildPartOrderForItem(cpItem, companyId, { demandSource: 'MachineCascade', buildQtyOverride: neededQty, demandRefId: productionOrder._id });
+    // Bought from a vendor (make or buy, 2026-10-28): the shortfall is a
+    // purchase request, like a short raw material — never a build order.
+    if (isBought(cpItem)) {
+      // Automatic orders wait for R&D's Release — a bought part too (2026-10-29).
+      if (!isReleased(cpItem)) {
+        console.warn(`[MachineCascade] ${productionOrder.orderId}: no purchase request for ${cpItem.code} (bought), short ${shortfallQty} — not released yet.`);
+        continue;
+      }
+      const purchaseRequestId = await raisePlainPurchaseRequest({ item: cpItem, shortfallQty, order: productionOrder });
+      needsPurchase.push({ code: cpItem.code, name: cpItem.name, neededQty, availableQty: freeQty, shortfallQty, unit: cpItem.unit || 'Pieces', purchaseRequestId });
+      continue;
+    }
+    const result = await createChildPartOrderForItem(cpItem, companyId, { demandSource: 'MachineCascade', buildQtyOverride: shortfallQty, demandRefId: productionOrder._id, deliverToParent: true, parentOrderNo: productionOrder.orderId });
+    if (result.order?.deliverToParent) {
+      await recordCascadeCover(productionOrder._id, {
+        partItem: cpItem._id, partCode: cpItem.code, partName: cpItem.name, unit: 'Pieces',
+        qty: result.order.orderQuantity, viaStore: finishedViaStore(result.order), child: { model: 'ProductionOrder', orderRef: result.order._id, orderNo: result.order.orderId },
+      });
+    } else {
+      // No order will deliver it (e.g. not released yet): the full need stays
+      // on stock, as before.
+      await checkAndReserve({ item: cpItem, neededQty, order: productionOrder, orderModel: 'ProductionOrder', companyId, lineKey: `cp:${cpItem.code}` });
+    }
+    // A short Child Part that got no order is otherwise silent (found
+    // 2026-10-21: a machine order's Chamber was never raised and nothing said
+    // why) — say which reason stopped it.
+    if (!result.created) {
+      console.warn(`[MachineCascade] ${productionOrder.orderId}: no Child Part order for ${cpItem.code} (${cpItem.name}), short ${shortfallQty} — ${result.reason || 'unknown reason'}.`);
+    }
     childParts.push({
       code: cpItem.code, name: cpItem.name, neededQty, availableQty: freeQty, shortfallQty,
       productionOrderId: result.order?._id || null, productionOrderCode: result.order?.orderId || null,
@@ -282,7 +321,10 @@ export async function computeMachineMaterialRows(order, companyId) {
   const joinDemand = (key) => {
     const d = demandByKey.get(key);
     return {
-      requestedQty: d?.quantity || 0,
+      // What was asked of Store — not what came straight from this order's
+      // own cascade (serial number work step 1).
+      requestedQty: (d?.quantity || 0) - (d?.cascadeDeliveredQuantity || 0),
+      cascadeDeliveredQty: d?.cascadeDeliveredQuantity || 0,
       transferredQty: d?.transferredQuantity || 0,
       issuedQty: d?.issuedQuantity || 0,
       returnPendingQty: d?.returnPendingQuantity || 0,
@@ -438,6 +480,9 @@ const CATEGORY_ORDER = ['Child Part', 'Assembly Materials', 'Consumables', 'Shee
 
 export async function buildMachineMaterialList(order, companyId) {
   const { rows } = await computeMachineMaterialRows(order, companyId);
+  // outsource-v2 slice 5: material planned to go to a vendor straight from
+  // Store (an Outsource Order's material plan) — Production can't issue it.
+  const toVendor = order._id ? await outsourceMaterialOnOrder(order._id) : new Map();
   const categories = [];
   for (const name of CATEGORY_ORDER) {
     const catRows = rows.filter(r => r.category === name);
@@ -453,6 +498,11 @@ export async function buildMachineMaterialList(order, companyId) {
         availability: r.available === null ? 'Unknown' : (r.available ? 'Available' : (r.isChildPartRow ? 'In Production' : 'Sent to Purchase')),
         requestedQty: r.requestedQty, transferredQty: r.transferredQty,
         issuedQty: r.issuedQty, returnPendingQty: r.returnPendingQty, demandStatus: r.demandStatus,
+        toVendor: toVendor.get(r.demandKey)?.store > 0 ? { store: toVendor.get(r.demandKey).store, orders: toVendor.get(r.demandKey).orders } : null,
+        // Serial number work step 1: built for this order by its cascade —
+        // delivered straight here, so Store is asked only for the rest.
+        cascade: r.isChildPartRow ? cascadeOnRow(order, r.demandKey) : null,
+        issueLimit: cascadeIssueLimit(r.issueTotal, r.isChildPartRow ? cascadeOnRow(order, r.demandKey) : null, toVendor.get(r.demandKey)?.store || 0, r.issueUnit),
       })),
     };
     if (name === 'Child Part') {
@@ -481,17 +531,28 @@ export async function requestMachineMaterial(order, companyId, demandKey, reques
   }
 
   const existing = order.materialDemands.find(d => d.materialCode === demandKey);
-  const alreadyRequested = existing?.quantity || 0;
-  if (alreadyRequested + qty > row.issueTotal) {
-    const remaining = Math.max(0, row.issueTotal - alreadyRequested);
+  // Serial number work step 1: what came straight from this order's cascade
+  // isn't a request to Store, and what it still builds can't be asked of Store.
+  const alreadyRequested = (existing?.quantity || 0) - (existing?.cascadeDeliveredQuantity || 0);
+  const cascade = row.isChildPartRow ? cascadeOnRow(order, demandKey) : null;
+  // outsource-v2 slice 5: the part going to a vendor straight from Store
+  // can't be issued to Production as well.
+  const vendor = (await outsourceMaterialOnOrder(order._id)).get(demandKey);
+  const limit = cascadeIssueLimit(row.issueTotal, cascade, vendor?.store || 0, row.issueUnit);
+  if (alreadyRequested + qty > limit) {
+    const remaining = Math.max(0, Math.round((limit - alreadyRequested) * 1000) / 1000);
     return {
       ok: false, code: 400,
-      message: `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" — the whole order needs ${row.issueTotal}.`,
+      message: cascade
+        ? `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" from Store — the whole order needs ${row.issueTotal}, and ${cascade.covered} come straight from ${cascade.orders.join(', ') || 'its own build order'} (built for this order).`
+        : vendor?.store > 0
+        ? `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" — the whole order needs ${row.issueTotal}, and ${Math.round(vendor.store * 1000) / 1000} goes to the vendor straight from Store (${vendor.orders.join(", ")}).`
+        : `Can only request ${remaining} more ${row.issueUnit} of "${row.name}" — the whole order needs ${row.issueTotal}.`,
     };
   }
 
   if (existing) {
-    existing.quantity = alreadyRequested + qty;
+    existing.quantity = (existing.quantity || 0) + qty;
     if (existing.status === 'Issued' && existing.issuedQuantity < existing.quantity) {
       existing.status = 'Requested';
       order.materialIssued = false;
@@ -505,4 +566,112 @@ export async function requestMachineMaterial(order, companyId, demandKey, reques
   }
   await order.save();
   return { ok: true, data: order };
+}
+
+// ─── Stock orders: the New Stock Order form and the low-stock sweep ──────────
+// One rule and one order, so a build works the same however it was raised.
+// docs/client-features-2026-11/01-machine-low-stock-discussion.md
+
+// Why this machine can't have a stock order, or null. hasBom: its Machine BOM exists.
+export const machineStockProblem = (item, hasBom) => {
+  if (!item) return 'This machine was not found.';
+  if (item.isDiscontinued) return `${item.name} is discontinued.`;
+  if (isPurchaseMachine(item)) return `${item.name} is a Purchase Machine: it's bought, not built.`;
+  if (!isReleased(item)) return `${item.name} isn't released by R&D yet.`;
+  return hasBom ? null : `${item.name} has no BOM yet.`;
+};
+
+// Machine, source Stock, real BOM steps. Stock first, then a part order or a
+// purchase request for what's short; a first Out Source step goes to Purchase at
+// once (client change 2026-10-22); the bell goes to Production.
+export async function createMachineStockOrder({ item, companyId, qty, deliveryDate, priority = 'Normal', createdBy }) {
+  const orderId = await generateOrderId(companyId);
+  // Explicit, never the schema's own bare default — see
+  // resolveMachineOrderProcesses's own comment for why.
+  const processes = await resolveMachineOrderProcesses(item.code, companyId);
+
+  const order = await ProductionOrder.create({
+    orderId,
+    orderKind: 'Machine',
+    machineCode: item.code,
+    machineName: item.name,
+    priority,
+    source: 'Stock',
+    orderQuantity: qty,
+    receivedDate: new Date().toISOString().split('T')[0],
+    deliveryDate,
+    company: companyId,
+    createdBy,
+    processes,
+  });
+
+  let material = { checked: false };
+  try {
+    material = await checkMachineAssemblyMaterialAvailability(order, companyId);
+  } catch (e) { console.error(`Stock order ${orderId} material check error:`, e); }
+
+  try {
+    const { autoRequestFirstOutsourceRun } = await import('../controllers/outsourceWorkController.js');
+    await autoRequestFirstOutsourceRun(order);
+  } catch (e) { console.error('Auto outsource request error:', e); }
+
+  // 🔔 Notify Production Head & Employee about new order
+  try {
+    await notificationService.triggerProductionNotification({
+      action: 'order_for_production',
+      data: { orderCode: order.orderId, orderId: order._id, machineName: item.name },
+      targetCompanyId: companyId,
+    });
+  } catch (e) { console.error('Production order notification error:', e); }
+
+  return { order, material };
+}
+
+// Low stock (2026-11-06). Runs every 30 minutes (server/index.js). A machine is
+// switched on by Material Flow as well as Min Stock, so a Min Stock typed long
+// ago on Product Master starts nothing. One open stock order at a time, from the
+// sweep or the form; a sales order doesn't count, because those machines go to
+// a customer and never reach stock. A bought machine goes through the purchase
+// sweep (jobs/lowStockReorderCron.js) instead.
+export async function runMachineLowStockSweep({ companyId = null } = {}) {
+  const stats = { scanned: 0, created: 0 };
+  const items = await Item.find({
+    ...(companyId ? { companyId } : { companyId: { $ne: null } }),
+    productKind: 'Machine',
+    isDiscontinued: { $ne: true },
+    minStock: { $gt: 0 },
+    materialFlow: { $in: ['High Flow', 'Medium Flow', 'Low Flow'] },
+    'machineDetails.forwardToNextPhase': true,
+  });
+
+  for (const item of items) {
+    stats.scanned++;
+    try {
+      if ((await getFreeQty(item._id, item.qty || 0, item.companyId)) > item.minStock) continue;
+      const hasBom = !!(await MachineBOM.exists({ machine: item._id, company: item.companyId }));
+      if (machineStockProblem(item, hasBom)) continue;
+      const open = await ProductionOrder.exists({
+        company: item.companyId,
+        machineCode: item.code,
+        source: 'Stock',
+        orderKind: { $in: ['Machine', null] },
+        status: { $nin: ['Completed', 'Cancelled'] },
+      });
+      if (open) continue;
+      const createdBy = await resolveCreatedBy(item);
+      if (!createdBy) {
+        console.error(`[MachineLowStock] Skipping ${item.code} — no createdBy and no company user to fall back on.`);
+        continue;
+      }
+      // Build Days is R&D's estimate; blank means today, like the part sweeps.
+      const deliveryDate = new Date(Date.now() + (item.buildDays || 0) * 864e5).toISOString().split('T')[0];
+      await createMachineStockOrder({ item, companyId: item.companyId, qty: item.reorderQty || 1, deliveryDate, createdBy });
+      stats.created++;
+    } catch (err) {
+      console.error(`[MachineLowStock] Error processing machine ${item.code}:`, err);
+    }
+  }
+
+  console.log(`[MachineLowStock] Sweep complete — scanned ${stats.scanned} machine(s), created ${stats.created} order(s).`);
+  return stats;
 }

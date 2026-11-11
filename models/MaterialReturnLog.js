@@ -37,6 +37,13 @@ const MaterialReturnLogSchema = new mongoose.Schema({
     unit: { type: String, required: true },
     returnedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // The Production Worker
     reason: { type: String, default: 'Excess/Defective' },
+    // Serial number work step 2: which tracked units / stickered parts come
+    // back (picked by Production at the return, applied when Store confirms).
+    unitIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'PurchasedUnit' }],
+    labelIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'PartLabel' }],
+    // A cascade part with no sticker: the serials Production says are inside it.
+    insideUnitIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'PurchasedUnit' }],
+    insideLabelIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'PartLabel' }],
     company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true }
 }, { timestamps: true });
 

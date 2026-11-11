@@ -48,6 +48,8 @@ app.use((req, res, next) => {
 // Add body parsing and static file serving
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Aadhaar, PAN and the like aren't public: they open through GET /api/documents/file/:docId.
+app.use('/uploads/documents', (req, res) => res.status(403).json({ message: 'Open this document from inside the app.' }));
 // Serve static files from uploads directory (for company logos and other uploads) with CORS enabled
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
     setHeaders: (res) => {
@@ -60,6 +62,31 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
     try {
         // Connect to MongoDB
         await connectDB();
+        // People with no login (2026-11-06): email is unique only when filled in.
+        try {
+            const { ensureUserIndexes } = await import('./services/peopleService.js');
+            await ensureUserIndexes();
+        }
+        catch (indexError) {
+            console.error('User index update failed:', indexError.message);
+        }
+        // HR permissions that were impossible to give (2026-11-11): once per user.
+        try {
+            const { backfillHrPermissions } = await import('./services/hrPermissionBackfill.js');
+            await backfillHrPermissions();
+        }
+        catch (permError) {
+            console.error('HR permission backfill failed:', permError.message);
+        }
+        // Departments from roles (2026-11-06): an existing company with none gets
+        // the list once. Must never stop the server starting.
+        try {
+            const { seedExistingCompanies } = await import('./services/departmentSeedService.js');
+            await seedExistingCompanies();
+        }
+        catch (seedError) {
+            console.error('Department seed failed:', seedError.message);
+        }
         // Import all models to ensure they're registered with mongoose
         console.log('🔄 Registering models...');
         const User = (await import('./models/User.js')).default;
@@ -327,6 +354,11 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const outsourceWorkRoutes = (await import('./routes/outsourceWorkRoutes.js')).default;
             app.use('/api/outsource-work', outsourceWorkRoutes);
             console.log('Outsource Work routes registered at /api/outsource-work');
+            // outsource-v2 slice 6 — Dispatch trips to vendors (vehicles,
+            // PO pickups, outsource sends; Store / Production handovers).
+            const dispatchTripRoutes = (await import('./routes/dispatchTripRoutes.js')).default;
+            app.use('/api/dispatch-trips', dispatchTripRoutes);
+            console.log('Dispatch Trip routes registered at /api/dispatch-trips');
             // RFQ (Vendor Bidding) routes
             const rfqRoutes = (await import('./routes/rfqRoutes.js')).default;
             app.use('/api/rfq', rfqRoutes);
@@ -393,6 +425,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const poApprovalRoutes = (await import('./routes/poApprovalRoutes.js')).default;
             app.use('/api/po-approvals', poApprovalRoutes);
             console.log('PO Approval routes registered at /api/po-approvals');
+            // Outsource order approvals (outsource-v2 slice 2, 2026-10-20).
+            const outsourceApprovalRoutes = (await import('./routes/outsourceApprovalRoutes.js')).default;
+            app.use('/api/outsource-approvals', outsourceApprovalRoutes);
+            console.log('Outsource Approval routes registered at /api/outsource-approvals');
             // Purchase audit log (read only) — procurement-v2 gap 17
             const purchaseAuditRoutes = (await import('./routes/purchaseAuditRoutes.js')).default;
             app.use('/api/purchase-audit', purchaseAuditRoutes);
@@ -407,6 +443,11 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const serialNumberRoutes = (await import('./routes/serialNumberRoutes.js')).default;
             app.use('/api/serial-numbers', serialNumberRoutes);
             console.log('Serial number routes registered at /api/serial-numbers');
+
+            // Store → Label carriers: stickers on stock parts holding tracked serials (serial number work, 2026-10-31)
+            const partLabelRoutes = (await import('./routes/partLabelRoutes.js')).default;
+            app.use('/api/part-labels', partLabelRoutes);
+            console.log('Part label routes registered at /api/part-labels');
 
             // Vendor warranty claims, Complaints → Support (2026-10-13)
             const vendorWarrantyClaimRoutes = (await import('./routes/vendorWarrantyClaimRoutes.js')).default;
@@ -482,6 +523,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const leaveBalanceAdjustmentRouter = (await import('./routes/leaveBalanceAdjustment.routes.js')).default;
             const performanceRouter = (await import('./routes/performance.routes.js')).default;
             app.use('/api/attendance', attendanceRouter);
+            app.use('/api/attendance-device', (await import('./routes/attendanceDevice.routes.js')).default);
             app.use('/api/holidays', holidayRouter);
             app.use('/api/payroll', payrollRouter);
             app.use('/api/payslips', payslipRouter);
@@ -766,6 +808,13 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
                     }
                 });
                 console.log('✅ Material Flow low-stock reorder cron job scheduled (every 30 minutes)');
+                // Make or buy (2026-10-28): a bought part / machine still
+                // waiting for Accounts' estimated price — one reminder a day.
+                const { remindPendingPrices } = await import('./services/makeBuyService.js');
+                cron.schedule('30 9 * * *', async () => {
+                    try { await withCronLock('pendingPriceReminder', 10 * 60 * 1000, () => remindPendingPrices()); }
+                    catch (e) { console.error('Pending price reminder failed:', e); }
+                });
             }
             catch (cronError) {
                 console.warn('⚠️ Low-stock reorder cron job setup warning:', cronError.message);
@@ -817,7 +866,7 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
                 cron.schedule('30 9 * * *', async () => {
                     try {
                         const r = await runOverdueDeliverySweep();
-                        console.log(`✅ [CRON] Overdue delivery sweep done — ${r.alerted} PO(s) alerted of ${r.checked} open`);
+                        console.log(`✅ [CRON] Delivery due sweep done — ${r.headsUp} due tomorrow, ${r.alerted} overdue, of ${r.checked} open PO(s)`);
                     } catch (err) {
                         console.error('❌ [CRON] Overdue delivery sweep failed:', err.message);
                     }
@@ -826,6 +875,27 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             }
             catch (cronError) {
                 console.warn('⚠️ Overdue delivery cron job setup warning:', cronError.message);
+            }
+
+            // ─── Daily Cron Job — QC results to vendors (client, 2026-10-29) ─
+            // One email per PO with QC results the vendor hasn't been told about:
+            // accepted / not accepted / still to come, "all passed" + payment due
+            // date (services/qcVendorEmailService.js).
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runQcVendorEmailSweep } = await import('./services/qcVendorEmailService.js');
+                cron.schedule('0 18 * * *', async () => {
+                    try {
+                        const r = await runQcVendorEmailSweep();
+                        console.log(`✅ [CRON] QC results to vendors — ${r.sent} email(s) sent, ${r.skipped} waiting, of ${r.pos} PO(s)`);
+                    } catch (err) {
+                        console.error('❌ [CRON] QC results to vendors failed:', err.message);
+                    }
+                });
+                console.log('✅ QC results vendor email cron job scheduled (daily at 6:00 PM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ QC results vendor email cron job setup warning:', cronError.message);
             }
 
             // ─── Daily Cron Job — Quote reminders (procurement-v2 point 16, 2026-10-10) ─
@@ -891,6 +961,44 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
                 console.warn('⚠️ Vendor score cron job setup warning:', cronError.message);
             }
 
+            // ─── Daily — Store: carriers in stock waiting for a sticker (serial
+            // number work step 2, 2026-10-31) ─────────────────────────────────
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runLabelReminder } = await import('./services/serialTrailService.js');
+                cron.schedule('50 9 * * *', async () => {
+                    try {
+                        const r = await runLabelReminder();
+                        console.log(`✅ [CRON] Label reminder — ${r.labels} part(s) in ${r.companies} company(ies)`);
+                    } catch (err) {
+                        console.error('❌ [CRON] Label reminder failed:', err.message);
+                    }
+                });
+                console.log('✅ Label reminder cron job scheduled (daily at 9:50 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Label reminder cron job setup warning:', cronError.message);
+            }
+
+            // ─── Daily — R&D: piece items without a usage type (serial number
+            // work step 2, 2026-10-31) ─────────────────────────────────────────
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runUsageTypeReminder } = await import('./services/serialTrailService.js');
+                cron.schedule('55 9 * * *', async () => {
+                    try {
+                        const r = await runUsageTypeReminder();
+                        console.log(`✅ [CRON] Usage type reminder — ${r.items} item(s) in ${r.companies} company(ies)`);
+                    } catch (err) {
+                        console.error('❌ [CRON] Usage type reminder failed:', err.message);
+                    }
+                });
+                console.log('✅ Usage type reminder cron job scheduled (daily at 9:55 AM)');
+            }
+            catch (cronError) {
+                console.warn('⚠️ Usage type reminder cron job setup warning:', cronError.message);
+            }
+
             // ─── Periodic Cron Job — Child Part Low-Stock Auto-Production ────────────
             try {
                 const cron = (await import('node-cron')).default;
@@ -928,6 +1036,32 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
                     await runSubChildPartOrderSweep();
                 });
                 console.log('✅ Sub Child Part (leaf) low-stock auto-order cron job scheduled (every 30 minutes)');
+                // Attendance device (2026-11-11): nothing runs for a company with no saved login.
+                const { runDeviceSync, runDeviceNightly } = await import('./services/deviceSync/deviceSyncService.js');
+                const { withCronLock: withDeviceLock } = await import('./services/cronLockService.js');
+                cron.schedule('*/15 * * * *', async () => {
+                    try { await withDeviceLock('deviceSync', 10 * 60 * 1000, () => runDeviceSync()); }
+                    catch (e) { console.error('Device sync failed:', e.message); }
+                }, { timezone: 'Asia/Kolkata' });
+                cron.schedule('0 2 * * *', async () => {
+                    try { await withDeviceLock('deviceNightly', 30 * 60 * 1000, () => runDeviceNightly()); }
+                    catch (e) { console.error('Device nightly download failed:', e.message); }
+                }, { timezone: 'Asia/Kolkata' });
+                console.log('✅ Attendance device sync scheduled (every 15 minutes, and nightly)');
+                // Machines, the top of the same pipeline (2026-11-06). One server
+                // per run when several share the database, same lease as the
+                // purchase sweep.
+                const { runMachineLowStockSweep } = await import('./services/machineReorderService.js');
+                const { withCronLock } = await import('./services/cronLockService.js');
+                cron.schedule('*/30 * * * *', async () => {
+                    try {
+                        const r = await withCronLock('machineLowStock', 10 * 60 * 1000, () => runMachineLowStockSweep());
+                        if (r?.skipped) console.log('⏰ [CRON] Machine low-stock sweep skipped — another server is running it.');
+                    } catch (e) {
+                        console.error('Machine low-stock sweep failed:', e);
+                    }
+                });
+                console.log('✅ Machine low-stock auto-order cron job scheduled (every 30 minutes)');
             }
             catch (cronError) {
                 console.warn('⚠️ Sub Child Part (leaf) order cron job setup warning:', cronError.message);

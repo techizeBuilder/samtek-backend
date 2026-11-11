@@ -21,7 +21,7 @@ export const sendTaskEmail = async ({
     taskDetails = null
 }) => {
     try {
-        const mailer = await getDeptMailer(companyId, DEPARTMENTS.HR);
+        const mailer = await getDeptMailer(DEPARTMENTS.HR);
         if (!mailer) {
             console.log(`[EMAIL SKIPPED] HR SMTP not configured. Would send task email to: ${to}`);
             return false;

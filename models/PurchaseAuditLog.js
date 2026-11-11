@@ -12,6 +12,10 @@ import mongoose from 'mongoose';
 export const PO_AUDIT_ACTIONS = [
   'created', 'sent_for_approval', 'approved', 'rejected',
   'emailed', 'email_failed',
+  // "Download PO" — the PDF Purchase sends by WhatsApp etc. (2026-10-29).
+  'downloaded',
+  // The vendor's daily QC results email (2026-10-29).
+  'qc_results_emailed',
   'cancel_requested', 'cancelled', 'short_closed', 'cancel_refused',
   'line_received', 'fully_received',
   // Delivery follow-up (2026-10-10).

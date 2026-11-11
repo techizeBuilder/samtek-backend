@@ -10,7 +10,7 @@
 //  - Optional part payment in between, for material already QC-passed:
 //    up to its value minus its share of the advance.
 import mongoose from 'mongoose';
-import PurchaseInvoice from '../models/PurchaseInvoice.js';
+import PurchaseInvoice, { isStagedBill } from '../models/PurchaseInvoice.js';
 import VendorPayment from '../models/VendorPayment.js';
 import { Account } from '../models/Account.js';
 import { postEntry } from './purchaseLedgerService.js';
@@ -32,6 +32,13 @@ export function fullDueDate(fullyAcceptedAt, creditDays) {
   const days = Number(creditDays) > 0 ? Math.round(Number(creditDays)) : 0;
   return new Date(new Date(fullyAcceptedAt).getTime() + days * DAY_MS);
 }
+
+// A bill is overdue once its due DAY has ended — not the same second it falls
+// due (2026-10-24, the user: with no credit days a bill read "overdue" right
+// after acceptance). Only how the date is read changes; fullDueDate above
+// still sets it. Days count like delivery dates (deliveryFollowUpService).
+export const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+export const isBillOverdue = (dueDate, now = new Date()) => !!dueDate && new Date(dueDate) < startOfDay(now);
 
 // What can be paid on a bill right now:
 //   advance  — the advance still unpaid (only before everything's accepted)
@@ -58,14 +65,14 @@ export function payableNow(bill) {
 export function owedNow(bill, now = new Date()) {
   if (!bill || bill.status === 'Cancelled') return { owed: 0, advance: 0, material: 0, overdue: 0 };
   const paid = Number(bill.paidAmount) || 0;
-  if (!bill.purchaseOrder) {
+  if (!isStagedBill(bill)) {
     const owed = Math.max(0, round2((Number(bill.totalAmount) || 0) - paid));
-    const overdue = bill.dueDate && new Date(bill.dueDate) < now ? owed : 0;
+    const overdue = isBillOverdue(bill.dueDate, now) ? owed : 0;
     return { owed, advance: 0, material: owed, overdue };
   }
   if (bill.fullyAcceptedAt) {
     const owed = Math.max(0, round2((Number(bill.totalAmount) || 0) - paid));
-    const overdue = bill.dueDate && new Date(bill.dueDate) < now ? owed : 0;
+    const overdue = isBillOverdue(bill.dueDate, now) ? owed : 0;
     return { owed, advance: 0, material: owed, overdue };
   }
   const advance = Math.max(0, round2((Number(bill.advanceAmount) || 0) - (Number(bill.advancePaid) || 0)));
@@ -80,7 +87,7 @@ export function poPaymentStatus(bill, now = new Date()) {
   const paid = Number(bill.paidAmount) || 0;
   const balance = round2((Number(bill.totalAmount) || 0) - paid);
   if (bill.fullyAcceptedAt && balance <= 0) return 'Paid';
-  if (bill.fullyAcceptedAt && bill.dueDate && new Date(bill.dueDate) < now && balance > 0) return 'Overdue';
+  if (bill.fullyAcceptedAt && isBillOverdue(bill.dueDate, now) && balance > 0) return 'Overdue';
   return paid > 0 ? 'Partially Paid' : 'Pending';
 }
 
@@ -115,28 +122,40 @@ export async function startDeliveryClock(po, start) {
   return set;
 }
 
-// Records a payment against a PO bill. Returns { status, message } on a
-// refusal, or { payment, bill, clockStarted }.
+// Records a payment against a staged bill — a PO's, or (outsource-v2 slice 3,
+// 2026-10-20) an Outsource Order's: the same advance / accepted / full
+// rules; an outsource order has no delivery clock and logs to its own
+// history. Returns { status, message } on a refusal, or
+// { payment, bill, clockStarted }.
 // body.useCredit: paid out of credit the vendor already holds of ours
 // (Slice 3 — the advance on rejected / cancelled material they kept), no bank.
 export async function payBill({ billId, body, user, req = null }) {
   const useCredit = !!body?.useCredit;
   const read = readPayment(useCredit ? { ...body, paymentMode: 'Other' } : body);
   if (read.error) return { status: 400, message: read.error };
-  const bill = await PurchaseInvoice.findOne({ _id: billId, companyId: user.companyId, purchaseOrder: { $ne: null } });
-  if (!bill) return { status: 404, message: 'This PO bill wasn\'t found.' };
-  if (bill.status === 'Cancelled') return { status: 409, message: 'This PO was cancelled — nothing is payable on it.' };
-  const Purchase = mongoose.model('Purchase');
-  const po = await Purchase.findOne({ _id: bill.purchaseOrder, companyId: user.companyId }).populate('supplier', 'supplierName');
-  if (!po) return { status: 404, message: 'The PO behind this bill wasn\'t found.' };
+  const bill = await PurchaseInvoice.findOne({ _id: billId, companyId: user.companyId, $or: [{ purchaseOrder: { $ne: null } }, { outsourceOrder: { $ne: null } }] });
+  if (!bill) return { status: 404, message: 'This bill wasn\'t found.' };
+  const isOutsource = !!bill.outsourceOrder;
+  if (bill.status === 'Cancelled') return { status: 409, message: `This ${isOutsource ? 'outsource order' : 'PO'} was cancelled — nothing is payable on it.` };
+  let po = null;
+  let oso = null;
+  if (isOutsource) {
+    oso = await mongoose.model('OutsourceOrder').findOne({ _id: bill.outsourceOrder, company: user.companyId });
+    if (!oso) return { status: 404, message: 'The outsource order behind this bill wasn\'t found.' };
+  } else {
+    po = await mongoose.model('Purchase').findOne({ _id: bill.purchaseOrder, companyId: user.companyId }).populate('supplier', 'supplierName');
+    if (!po) return { status: 404, message: 'The PO behind this bill wasn\'t found.' };
+  }
+  const docNo = isOutsource ? oso.orderNo : po.purchaseOrderNumber;
+  const vendorName = isOutsource ? oso.vendorName : po.supplier?.supplierName;
 
   const can = payableNow(bill);
   if (read.kind === 'Advance') {
-    if (!(can.advance > 0)) return { status: 409, message: bill.fullyAcceptedAt ? 'Everything is accepted — pay the full balance as a payment for material.' : 'There\'s no advance left to pay on this PO.' };
+    if (!(can.advance > 0)) return { status: 409, message: bill.fullyAcceptedAt ? 'Everything is accepted — pay the full balance as a payment for material.' : `There's no advance left to pay on ${docNo}.` };
     if (read.amount > can.advance + 0.005) return { status: 400, message: `The advance left to pay is ${inr(can.advance)}.` };
   } else {
     if (!(can.material > 0)) {
-      return { status: 409, message: bill.fullyAcceptedAt ? 'This bill is fully paid.' : 'Nothing on this PO has passed QC yet — only the advance can be paid now.' };
+      return { status: 409, message: bill.fullyAcceptedAt ? 'This bill is fully paid.' : `Nothing on ${docNo} has passed QC yet — only the advance can be paid now.` };
     }
     if (read.amount > can.material + 0.005) return { status: 400, message: `You can pay up to ${inr(can.material)} now${bill.fullyAcceptedAt ? '' : ' — the value of the material QC has passed, less its share of the advance'}.` };
   }
@@ -169,13 +188,14 @@ export async function payBill({ billId, body, user, req = null }) {
     fromCredit: useCredit,
     allocations: [{ invoice: bill._id, amount: read.amount }],
     kind: read.kind,
-    purchaseOrder: po._id,
+    purchaseOrder: po?._id || null,
+    outsourceOrder: oso?._id || null,
     unit: bill.unit,
     companyId: bill.companyId,
     createdBy: user._id,
     notes: read.notes,
   });
-  if (useCredit) await credit.consumeVendorCredit({ companyId: bill.companyId, vendorId: bill.vendor, amount: read.amount, payment: payment._id, purchaseOrder: po._id });
+  if (useCredit) await credit.consumeVendorCredit({ companyId: bill.companyId, vendorId: bill.vendor, amount: read.amount, payment: payment._id, purchaseOrder: po?._id || null });
   bill.paidAmount = round2((Number(bill.paidAmount) || 0) + read.amount);
   if (read.kind === 'Advance') bill.advancePaid = round2((Number(bill.advancePaid) || 0) + read.amount);
   await bill.save();
@@ -190,8 +210,8 @@ export async function payBill({ billId, body, user, req = null }) {
         { key: read.kind === 'Advance' ? 'advance_to_vendors' : 'accounts_payable', debit: read.amount },
         useCredit ? { key: 'advance_to_vendors', credit: read.amount } : { account: bank, credit: read.amount },
       ],
-      description: `${read.kind === 'Advance' ? 'Advance' : 'Payment'} to ${po.supplier?.supplierName || 'vendor'} — ${po.purchaseOrderNumber}${useCredit ? ' (from their credit with us)' : read.referenceNo ? ` (Ref: ${read.referenceNo})` : ''}`,
-      reference: po.purchaseOrderNumber,
+      description: `${read.kind === 'Advance' ? 'Advance' : 'Payment'} to ${vendorName || 'vendor'} — ${docNo}${useCredit ? ' (from their credit with us)' : read.referenceNo ? ` (Ref: ${read.referenceNo})` : ''}`,
+      reference: docNo,
       relatedDocument: 'Payment',
       relatedDocumentId: payment._id,
       mode: read.paymentMode,
@@ -203,6 +223,20 @@ export async function payBill({ billId, body, user, req = null }) {
     // The payment is recorded either way; a ledger hiccup is reported, not
     // allowed to undo a payment that was actually made.
     console.error('Ledger posting for a vendor payment failed:', err.message);
+  }
+
+  // An outsource order: its own history; no delivery clock.
+  if (isOutsource) {
+    const how = `${useCredit ? 'from vendor credit' : read.paymentMode}${read.referenceNo ? `, ${read.referenceNo}` : ''}`;
+    oso.activity.push({
+      at: new Date(), by: user._id, byName: user.fullName || user.username || '',
+      action: read.kind === 'Advance' ? 'advance_paid' : 'payment_made',
+      summary: read.kind === 'Advance'
+        ? `Advance of ${inr(read.amount)} paid (${how}).`
+        : `Payment of ${inr(read.amount)} for accepted work (${how}) — ${inr(Math.max(0, bill.totalAmount - bill.paidAmount))} left on the bill.`,
+    });
+    await oso.save();
+    return { payment, bill, clockStarted: false };
   }
 
   // The advance is now fully paid → the delivery days start (D3).

@@ -191,6 +191,7 @@ add up to the submitted quantity. A reason is required for Rework and Scrap.
 
 ### 11. Not affected
 - QC for purchased materials and Store-sourced items. Those don't use BOM steps.
+  *2026-11-05: a manufactured machine on a Store or Purchase job had in fact been left waiting for Production's Final checklist since 17 Sep. Fixed: [qc-store-purchase-final-checklist-2026-11.md](qc-store-purchase-final-checklist-2026-11.md).*
 
 ## Pending the client
 - What happens after an outsourced step is QC-rejected and handed to Purchase.

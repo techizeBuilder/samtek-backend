@@ -142,7 +142,13 @@ export async function getFreeQtyExcludingOrder(itemId, currentQty, companyId, ex
 // `dimensionVariants[]` entry themselves and pass its `subStock` in here
 // explicitly (confirmed bug, 2026-09-18) — and, since 2026-10-09, that same
 // entry's _id as `variantId`.
-export async function checkAndReserve({ item, neededQty, order, orderModel, companyId, availableQty, variantId = null, lineKey = '' }) {
+// capToFree (2026-10-31, serial number work step 1): a Child Part / Sub Child
+// Part line whose shortfall is BUILT by a cascade order that delivers straight
+// to this order — reserve only what free stock covers (the cascade part never
+// enters stock), never below what's already been issued. Without it the order
+// reserved its full need AND the cascade built the full need (one part built
+// for nobody, a false "short" on Reservations).
+export async function checkAndReserve({ item, neededQty, order, orderModel, companyId, availableQty, variantId = null, lineKey = '', capToFree = false }) {
   const currentQty = availableQty != null ? availableQty : (item.qty || 0);
   const key = { item: item._id, dimensionVariantId: variantId ? oid(variantId) : null, reservedByOrderId: order._id, lineKey: lineKey || '', company: oid(companyId) };
   const own = await MaterialReservation.findOne(key).select('issuedQuantity createdAt').lean();
@@ -157,14 +163,30 @@ export async function checkAndReserve({ item, neededQty, order, orderModel, comp
   const freeQty = currentQty - (await sumRemaining(match));
   const stillNeeded = Math.max(0, neededQty - alreadyIssued);
   const shortfallQty = Math.min(stillNeeded, Math.max(0, stillNeeded - freeQty));
-  if (neededQty > 0) {
+  const reservedQty = capToFree ? Math.max(alreadyIssued, round3(neededQty - shortfallQty)) : neededQty;
+  if (reservedQty > 0) {
     await MaterialReservation.findOneAndUpdate(
       key,
-      { $set: { quantity: neededQty, reservedByOrderModel: orderModel } },
+      { $set: { quantity: reservedQty, reservedByOrderModel: orderModel } },
       { upsert: true }
     );
+  } else if (capToFree && own) {
+    // Nothing in stock for it any more (a re-check): no claim on stock.
+    await MaterialReservation.deleteOne(key);
   }
-  return { freeQty, shortfallQty, available: shortfallQty === 0 };
+  return { freeQty, shortfallQty, reservedQty, available: shortfallQty === 0 };
+}
+
+// Adds to an order's claim on stock that has just arrived for it (a cascade
+// part waiting at Store, a part returned defective, a bought part replacing a
+// refused build). Same row checkAndReserve keeps for that line.
+export async function reserveForOrder({ item, qty, order, orderModel = 'ProductionOrder', companyId, lineKey = '' }) {
+  if (!(Number(qty) > 0) || !item || !order) return;
+  await MaterialReservation.findOneAndUpdate(
+    { item: oid(item._id || item), dimensionVariantId: null, reservedByOrderId: oid(order._id || order), lineKey, company: oid(companyId) },
+    { $inc: { quantity: round3(qty) }, $set: { reservedByOrderModel: orderModel } },
+    { upsert: true },
+  );
 }
 
 // ── Issuing / returning (2026-10-09) ────────────────────────────────────────
@@ -234,6 +256,21 @@ export async function heldForEarlierOrders({ itemId, variantId = null, companyId
   }
   const heldTotal = round3(earlier.reduce((s, e) => s + e.remaining, 0));
   return { freeForThisOrder: round3((Number(currentQty) || 0) - heldTotal), heldTotal, earlier };
+}
+
+// The same check for one handover shared by several orders (an Outsource Order
+// line): what `qty` would take from orders outside this group. null = nothing.
+export async function heldBeyondOrders({ itemId, variantId = null, companyId, orderIds, currentQty, qty }) {
+  const mine = new Set(orderIds.map(String));
+  const others = new Map();
+  for (const orderId of orderIds) {
+    const { earlier } = await heldForEarlierOrders({ itemId, variantId, companyId, orderId, currentQty });
+    for (const e of earlier) if (!mine.has(String(e.orderId))) others.set(String(e.orderId), e);
+  }
+  const earlier = [...others.values()];
+  const free = (Number(currentQty) || 0) - earlier.reduce((s, e) => s + e.remaining, 0);
+  if (!earlier.length || !(Number(qty) > free + 1e-9)) return null;
+  return { taken: round3(Number(qty) - Math.max(0, free)), earlier };
 }
 
 // Called from ProductionOrder.js/SubChildPartJobWorkOrder.js's own

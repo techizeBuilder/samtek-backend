@@ -1,7 +1,7 @@
 // Vendor warranty claims — Complaints → Support (2026-10-13,
 // services/vendorWarrantyClaimService.js).
 import mongoose from 'mongoose';
-import { lookupSerial, createClaim, updateClaim, listClaims } from '../services/vendorWarrantyClaimService.js';
+import { lookupSerial, partsForClaim, createClaim, updateClaim, listClaims } from '../services/vendorWarrantyClaimService.js';
 
 const fail = (res, err, what) => {
   console.error(`${what} failed:`, err);
@@ -33,6 +33,13 @@ export const lookupClaimSerial = async (req, res) => {
   try {
     res.json({ success: true, data: await lookupSerial(req.user.companyId, req.query.serial) });
   } catch (err) { fail(res, err, 'Looking up a serial'); }
+};
+
+// GET /api/vendor-warranty-claims/parts?q= — a mobile number or order number.
+export const getClaimParts = async (req, res) => {
+  try {
+    res.json({ success: true, data: await partsForClaim(req.user.companyId, req.query.q) });
+  } catch (err) { fail(res, err, 'Finding parts for a claim'); }
 };
 
 // GET /api/vendor-warranty-claims/vendors — for picking the vendor by hand.

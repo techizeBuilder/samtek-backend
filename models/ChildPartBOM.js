@@ -17,6 +17,10 @@ const SubChildPartLineSchema = new mongoose.Schema({
   materialsCost: { type: Number, default: 0 },
   jobWorkCost: { type: Number, default: 0 },
   scrapCost: { type: Number, default: 0 },
+  // Slice 4 (2026-10-24) — the Sub Child Part's own Production cost /
+  // expense per piece, read live like the three above.
+  productionCost: { type: Number, default: 0 },
+  productionExpense: { type: Number, default: 0 },
   unitCost: { type: Number, default: 0 },
   totalPrice: { type: Number, default: 0 },
   // Weight of one Sub Child Part unit, in kg — copied from the referenced
@@ -26,6 +30,11 @@ const SubChildPartLineSchema = new mongoose.Schema({
   unitWeightKg: { type: Number, default: 0 },
   totalWeightKg: { type: Number, default: 0 },
   isDiscontinued: { type: Boolean, default: false },
+  // Make or buy (2026-10-28): the part is bought — unitCost is its bought
+  // cost, not the made breakdown above; pricePending: no purchase price yet
+  // (the made cost stands in).
+  bought: { type: Boolean, default: false },
+  pricePending: { type: Boolean, default: false },
 }, { timestamps: true });
 
 // Material/Tool line — RDBOM.MaterialSchema, trimmed. Dropped:
@@ -101,7 +110,23 @@ const ChildPartBOMSchema = new mongoose.Schema({
   productionExpense: { type: Number, default: null, min: 0 },
   productionCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
   productionCostUpdatedAt: { type: Date, default: null },
-  company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
+  // Outsource v2 slice 4 (2026-10-24): the outsourced (job work) cost of one
+  // build, read from the Outsource Orders at the true last step (never typed).
+  jobWorkCost: { type: Number, default: null, min: 0 },
+  jobWorkCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
+  jobWorkCostUpdatedAt: { type: Date, default: null },
+  // Still waiting for a per minute / per hour time on these Outsource Orders.
+  jobWorkWaitingFor: { type: [String], default: [] },
+  // The build that last set the actual cost ("the latest build wins").
+  costFrom: {
+    orderId: { type: String, default: null },
+    unitIndex: { type: Number, default: null },
+    finishedAt: { type: Date, default: null },
+    // Its job work still waits for a per minute / per hour time (2026-10-27:
+    // a newer build still waiting doesn't replace a complete cost).
+    waiting: { type: Boolean, default: false },
+  },
+  company:{ type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 

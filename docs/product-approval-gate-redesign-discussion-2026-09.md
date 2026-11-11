@@ -143,6 +143,10 @@ execution-record model.
    replenishment (cron/cascade) is gated, and only from the moment Release is decided.
    Nothing about the existing manual/internal build path needs to change or be
    special-cased.
+   **Changed 2026-11-05 (user's decision):** Production's New Stock Order form offers Released
+   machines only, so an unreleased machine can't get a production order from it. A prototype record
+   doesn't need an order, so Release still works. See
+   [production/stock-order-form-2026-11.md](production/stock-order-form-2026-11.md).
 
 ### 3g. Production's per-order gate (Process Execution) stays exactly the mechanism it is today
 `getBomDesignStatus`'s check (BOM locked + Design approved) is unchanged in shape — it

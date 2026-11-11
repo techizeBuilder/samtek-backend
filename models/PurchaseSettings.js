@@ -30,14 +30,49 @@ const purchaseSettingsSchema = new mongoose.Schema({
     unique: true
   },
   minVendorsPerItem: { type: Number, min: 1, default: 3 },
+  // Quotations RECEIVED from different vendors before an item can go on a PO
+  // (2026-10-29, docs/procurement-v2/minimum-quotations-2026-10.md) — never
+  // above minVendorsPerItem. 1 = no change (a PO line is always a quote).
+  minQuotationsPerItem: { type: Number, min: 1, default: 1 },
   poApprovalThreshold: { type: Number, min: 0, default: null },
+  // Outsource Order approval limit (outsource-v2 slice 2, 2026-10-20, D4) —
+  // the Company Admin's, separate from the PO limit: an outsource order whose
+  // grand total is ABOVE this waits for the Company Admin. null = never.
+  outsourceApprovalThreshold: { type: Number, min: 0, default: null },
+  // Pricing types (2026-10-22): when on, an outsource order with a per minute /
+  // per hour step waits for the Company Admin even under the limit (the rate
+  // is checked). Off: entering the time later only notifies the admin.
+  approveTimeBasedOutsource: { type: Boolean, default: false },
   chargeLabels: [{
     name: { type: String, trim: true, required: true },
-    defaultGstPercent: { type: Number, min: 0, max: 100, default: 0 }
+    defaultGstPercent: { type: Number, min: 0, max: 100, default: 0 },
+    // A transport charge (Freight, Cartage…). Never offered on an Outsource
+    // Order — outsource transport is always ours, arranged by Dispatch
+    // (2026-10-21). POs still use it when the vendor delivers.
+    isTransport: { type: Boolean, default: false }
   }],
   termLabels: [{
     name: { type: String, trim: true, required: true }
   }],
+  // Vendor Master's Entity Type choices (2026-10-28, client: a list Purchase
+  // can edit, not a fixed one). Starts as the old fixed list; a company that
+  // never edited it gets these too (the default applies on read).
+  // Vendor documents (2026-10-28, docs/procurement-v2/vendor-documents-design-2026-10.md):
+  // the choice per type — none / required / verified — for the nine built-in
+  // types (builtIn: true, only the rule is kept) and the Company Admin's own
+  // types. Empty = today's rules (services/vendorDocumentRulesService.js).
+  vendorDocumentTypes: {
+    type: [{
+      name: { type: String, trim: true, required: true },
+      builtIn: { type: Boolean, default: false },
+      rule: { type: String, enum: ['none', 'required', 'verified'], default: 'none' },
+    }],
+    default: [],
+  },
+  entityTypes: {
+    type: [{ name: { type: String, trim: true, required: true } }],
+    default: () => ['Individual', 'HUF', 'Company', 'Firm', 'Others'].map(name => ({ name })),
+  },
   quoteValidityDays: { type: Number, min: 1, max: 365, default: 30 },
   priceJumpWarnPercent: { type: Number, min: 0, max: 1000, default: 10 },
   // Vendor score (2026-10-13, blueprint §11–§12 — services/vendorScoreService.js),

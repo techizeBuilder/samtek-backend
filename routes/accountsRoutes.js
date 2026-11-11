@@ -53,6 +53,7 @@ import {
   getDueBillData
 } from '../controllers/salesAccountController.js';
 import { paymentProofUpload } from '../middleware/paymentProofUpload.js';
+import { paymentSlipUpload } from '../middleware/paymentSlipUpload.js';
 
 import {
   getSalesmanDailyStats,
@@ -67,7 +68,8 @@ import { getTaxSummary } from '../controllers/taxController.js';
 import {
   createCustomerPayment,
   getCustomerPayments,
-  getCustomerPaymentStats
+  getCustomerPaymentStats,
+  uploadCustomerPaymentSlip
 } from '../controllers/customerPaymentController.js';
 
 import {
@@ -80,6 +82,7 @@ import {
   getPurchaseById,
   deletePurchase,
   sendPOToVendor,
+  downloadPurchaseOrderPdf,
   reviseLineExpectedDate
 } from '../controllers/purchaseController.js';
 import {
@@ -331,7 +334,8 @@ import {
   getPurchaseSummary,
   getPaymentStats,
   getVendorPurchasedItems,
-  getSuppliersForAccounts
+  getSuppliersForAccounts,
+  uploadVendorPaymentSlip
 } from '../controllers/purchaseInvoiceController.js';
 
 accountsRouter.post('/purchases/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchaseInvoice);
@@ -342,6 +346,8 @@ accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Accounts 
 accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorOutstanding);
 accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPaymentStats);
 accountsRouter.get('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorPayments);
+// Upload a payment slip to an existing vendor payment (2026-10-29).
+accountsRouter.post('/purchases/payments/:id/slip', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, paymentSlipUpload.single('slip'), uploadVendorPaymentSlip);
 
 // Purchase Orders
 accountsRouter.post('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchase);
@@ -362,6 +368,8 @@ accountsRouter.put('/purchases/orders/:id', (req, res) => res.status(410).json({
 // stock skipping QC. Store receives per PO line (Store → To Receive).
 accountsRouter.post('/purchases/orders/:id/receive', (req, res) => res.status(410).json({ success: false, message: 'Receive on Store → To Receive, one PO line at a time (it then goes to QC).' }));
 accountsRouter.post('/purchases/orders/:id/send-email', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, sendPOToVendor);
+// The PO PDF to send by WhatsApp etc. — the one the email attaches (2026-10-29).
+accountsRouter.get('/purchases/orders/:id/pdf', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, downloadPurchaseOrderPdf);
 // Gap 13 (2026-10-09): Purchase asks to cancel a PO (the Company Admin decides — /api/po-approvals/:id/cancel-review).
 accountsRouter.post('/purchases/orders/:id/cancel-request', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, requestPoCancellation);
 // Delivery follow-up (2026-10-10): Purchase records the vendor's new date for a line.
@@ -419,6 +427,8 @@ accountsRouter.get('/sales/account/invoices/:id/pdf', authorizeRoles('Accounts',
 accountsRouter.post('/sales/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), salesAdd, createCustomerPayment);
 accountsRouter.get('/sales/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), salesView, getCustomerPayments);
 accountsRouter.get('/sales/payment/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), salesView, getCustomerPaymentStats);
+// Upload a payment slip to an existing customer payment (2026-10-29).
+accountsRouter.post('/sales/payments/:id/slip', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), salesEdit, paymentSlipUpload.single('slip'), uploadCustomerPaymentSlip);
 
 // Packed Orders & Payment Proof Upload
 accountsRouter.get('/packed-orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), salesView, getPackedOrders);

@@ -38,8 +38,9 @@ async function resolveSheetMetalSubChildPart(id, companyId) {
 // BOM-specific assumptions). Its scrapCost is for the WHOLE plan (orderQty
 // units) — dividing by orderQty gives the average for one piece, the figure
 // that actually belongs alongside Materials Cost / Job Work Cost (already
-// per-piece).
-function costBreakdownFor(plan, sourceItem, dimensionVariantId) {
+// per-piece). Exported for the price push (2026-10-26): a new sheet price
+// re-prices the scrap too (services/priceCascadeService.js).
+export function costBreakdownFor(plan, sourceItem, dimensionVariantId) {
   const breakdown = computeSheetMetalPlanCostBreakdown({
     dimensionVariantId,
     sheetAreaMm2: plan.sheetAreaMm2,
@@ -149,6 +150,9 @@ export const saveSubChildPartSheetPlan = async (req, res) => {
     const cost = costBreakdownFor(plan, sourceItem, item.subChildPartDetails.sourceDimensionVariantId);
     item.subChildPartDetails.scrapCost = cost.scrapCostPerPiece;
     await item.save();
+    // Slice 4 (2026-10-24): scrap cost is part of its price — climb it up.
+    const { onSubChildPartChanged } = await import('../services/priceCascadeService.js');
+    await onSubChildPartChanged(item._id, item.companyId);
 
     res.json({ success: true, data: { plan, cost } });
   } catch (err) {

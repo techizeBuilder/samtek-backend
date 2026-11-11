@@ -135,7 +135,7 @@ export const sendSupportEmail = async ({ companyId, type, to, name, data }) => {
             return;
     }
 
-    const mailer = await getDeptMailer(companyId, DEPARTMENTS.INFO);
+    const mailer = await getDeptMailer(DEPARTMENTS.INFO);
     if (!mailer) {
         console.log(`[EMAIL SKIPPED] Info SMTP not configured. Would send [${type}] to: ${to}`);
         return;

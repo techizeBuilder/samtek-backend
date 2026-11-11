@@ -2,6 +2,13 @@
 
 import ProfileUpdate from "../models/ProfileUpdate.js";
 import User from "../models/User.js";
+import { canApprove } from "../utils/companyScope.js";
+import { userHasPermission } from "../middleware/permissions.js";
+
+// What an approved request may change, by the type the screen offers. Anything
+// else (bank, emergency contact, other) is applied by HR by hand: never a field name
+// taken from the request, which could have been "role" (2026-11-11).
+const APPLIES_TO = { Address: "address", Phone: "mobile" };
 
 /* ================= CREATE ================= */
 export const createProfileUpdate = async (req, res) => {
@@ -96,6 +103,12 @@ export const updateProfileUpdate = async (req, res) => {
     }
 
     /* ================= MANAGER / HR STATUS UPDATE ================= */
+    if (!userHasPermission(req.user, "hrms", "profileRequests", "edit") && !["HR-Admin", "Hr Admin", "Company Admin"].includes(req.user.role)) {
+      return res.status(403).json({ message: "You can't decide on this person's request." });
+    }
+    if (!(await canApprove(req.user, request.employee, { features: ["profileRequests"], hrRoles: true }))) {
+      return res.status(403).json({ message: "You can't decide on this person's request." });
+    }
     if (!["APPROVED", "REJECTED"].includes(status)) {
       return res.status(400).json({
         message: "Invalid status value",
@@ -111,9 +124,9 @@ export const updateProfileUpdate = async (req, res) => {
     request.status = status;
 
     /* ================= APPLY PROFILE CHANGE ON APPROVE ================= */
-    if (status === "APPROVED") {
+    if (status === "APPROVED" && APPLIES_TO[request.updateType]) {
       await User.findByIdAndUpdate(request.employee, {
-        [request.updateType]: request.newValue,
+        [APPLIES_TO[request.updateType]]: request.newValue,
       });
     }
 

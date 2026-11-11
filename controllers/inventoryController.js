@@ -24,7 +24,19 @@ import { dimensionSignature, resolveFabricationWeight } from '../services/fabric
 import { calculateFabricationWeight } from '../utils/fabricationWeightCalc.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
 import { toMm, toMm2 } from '../utils/unitConversion.js';
-import { recordIssue, recordReturn, heldForEarlierOrders } from '../services/materialReservationService.js';
+import { recordIssue, recordReturn, reserveForOrder, heldForEarlierOrders } from '../services/materialReservationService.js';
+import { needsProductionUse, stockTracked, unlabelledInStock, untrackedCount, unlabelledProblem, pickRule, pickProblem, checkPicked, move, IN_STOCK, addCarrierEntry, checkDefectivePick, repairDefective, scrapDefective, noSerialCheck, acknowledged, confirmBody, logSkippedSerials } from '../services/serialTrailService.js';
+import { COUNTABLE } from '../services/purchasedUnitService.js';
+
+// Serial number work step 2 (2026-10-31): R&D must say how an item counted in
+// pieces is used in production (D3–D5) — no default. null = fine.
+const PRODUCTION_USES = ['BuiltIn', 'UsedToMake'];
+function productionUseProblem(item) {
+  if (item.productionUse === '') item.productionUse = null;
+  if (item.productionUse != null && !PRODUCTION_USES.includes(item.productionUse)) return 'Pick how this item is used in production.';
+  if (needsProductionUse(item) && !item.productionUse) return 'Pick how this item is used in production: "Built into the product" or "Used to make the product".';
+  return null;
+}
 
 // ── Reservations on Store transfers (2026-10-09, reservation pipeline fix) ──
 // A transfer issues material to an order: that order's reservation for the
@@ -287,6 +299,7 @@ export const getItems = async (req, res) => {
       lowStock,
       quantity, // Add quantity filter
       discontinued,
+      needsUsage,
       sortBy = 'name',
       sortOrder = 'asc'
     } = req.query;
@@ -433,6 +446,11 @@ export const getItems = async (req, res) => {
     } else if (discontinued === 'false' || discontinued === undefined) {
       query.isDiscontinued = { $ne: true };
     }
+
+    // Serial number work step 2: R&D's "Needs usage type" filter — plain items
+    // counted in pieces that R&D hasn't said how they're used in production.
+    const needsUsageMatch = { productKind: null, isDiscontinued: { $ne: true }, productionUse: null, unit: { $regex: COUNTABLE } };
+    if (needsUsage === 'true') Object.assign(query, needsUsageMatch);
 
     // Category filter
     if (category) {
@@ -670,11 +688,17 @@ export const getItems = async (req, res) => {
       pages: Math.ceil(total / limit)
     };
 
+    // The badge count for R&D's "Needs usage type" filter (plain Inventory only).
+    const needsUsageCount = productKind === 'none'
+      ? (req.user.companyId ? await Item.countDocuments({ $or: [{ store: req.user.companyId }, { companyId: req.user.companyId.toString() }, { companyId: req.user.companyId }], ...needsUsageMatch }) : 0)
+      : undefined;
+
     res.json({
       items: itemsWithCompanyNames,
       pagination: paginationResponse,
       stats: stats[0] || { totalItems: 0, totalValue: 0, lowStockCount: 0 },
-      typeStats
+      typeStats,
+      needsUsageCount,
     });
   } catch (error) {
     console.error('❌ Get items error:', error);
@@ -815,6 +839,9 @@ export const createItem = async (req, res) => {
       });
     }
 
+    const useProblem = productionUseProblem(itemData);
+    if (useProblem) return res.status(400).json({ message: 'Validation failed', errors: { productionUse: useProblem } });
+
     // ─────────────────────────────────────────────────────────────
     // STRICT R&D CODING RULE (Point 8 Enforced):
     // System will NOT auto-generate codes. R&D must define them.
@@ -916,6 +943,8 @@ export const createItem = async (req, res) => {
     if (itemData.hsn !== undefined) sanitizedData.hsn = itemData.hsn;
     if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
     if (itemData.group !== undefined) sanitizedData.group = itemData.group;
+    // Serial number work step 2: R&D's usage choice (checked above).
+    if (itemData.productionUse !== undefined) sanitizedData.productionUse = itemData.productionUse || null;
 
     // 3. Media & Notes — image/brochureUrl are uploaded separately (see uploadItemImage/
     // uploadItemBrochure) and arrive here as plain URL strings; videoUrl is never uploaded,
@@ -992,6 +1021,16 @@ export const updateItem = async (req, res) => {
       });
     }
 
+    // The usage choice is required on R&D's full form save (name + unit come
+    // together); other screens updating one field aren't blocked by it.
+    if ('productionUse' in itemData || ('name' in itemData && 'unit' in itemData)) {
+      const current = await Item.findOne({ _id: id }).select('unit productKind productionUse').lean();
+      const merged = { ...(current || {}), ...itemData };
+      const useProblem = productionUseProblem(merged);
+      if (useProblem) return res.status(400).json({ message: 'Validation failed', errors: { productionUse: useProblem } });
+      if ('productionUse' in itemData) itemData.productionUse = merged.productionUse;
+    }
+
     // Check if code is being changed and if it already exists
     if (itemData.code && itemData.code.trim() !== '') {
       const existingItem = await Item.findOne({
@@ -1008,10 +1047,33 @@ export const updateItem = async (req, res) => {
 
     // Capture the item's current media URLs before overwriting, so a replaced
     // image/brochure can be cleaned up from disk once the update succeeds.
-    const previousMedia = await Item.findById(id).select('image brochureUrl').lean();
+    const previousMedia = await Item.findById(id).select('image brochureUrl fabricationRef dimensionVariants productKind').lean();
 
     // Sanitize and prepare data
     const sanitizedData = sanitizeItemData(itemData);
+
+    // A Child Part / Sub Child Part switches Make / Buy only through R&D's
+    // own switch (PUT /api/rd/parts/:id/make-buy, 2026-10-28) — it re-prices
+    // and notifies; a plain item save must not flip it silently.
+    if (['ChildPart', 'SubChildPart'].includes(previousMedia?.productKind)) {
+      delete sanitizedData.purchase;
+      delete sanitizedData.internalManufacturing;
+      delete sanitizedData.partSourcing;
+    }
+
+    // An item already linked to Fabrication Master keeps its OWN sizes and
+    // stock (2026-10-28, docs/fabrication-size-sync-2026-10.md §7): the sync
+    // owns them, and Store / QC move the stock. The form sent back what it
+    // loaded — an old form would put back old sizes and old stock — so only
+    // what it edits is taken: material flow / min stock / order qty, by id.
+    if (previousMedia?.fabricationRef && sanitizedData.dimensionVariants
+      && String(sanitizedData.fabricationRef || previousMedia.fabricationRef) === String(previousMedia.fabricationRef)) {
+      const sent = new Map(sanitizedData.dimensionVariants.filter(v => v._id).map(v => [String(v._id), v]));
+      sanitizedData.dimensionVariants = (previousMedia.dimensionVariants || []).map(v => {
+        const f = sent.get(String(v._id));
+        return f ? { ...v, materialFlow: f.materialFlow, minStock: f.minStock, reorderQty: f.reorderQty } : v;
+      });
+    }
 
     // ─────────────────────────────────────────────────────────────
     // GUARANTEE ALL R&D AND FINANCIAL FIELDS ARE UPDATED
@@ -1039,6 +1101,8 @@ export const updateItem = async (req, res) => {
     if (itemData.hsn !== undefined) sanitizedData.hsn = itemData.hsn;
     if (itemData.customerCategory !== undefined) sanitizedData.customerCategory = itemData.customerCategory;
     if (itemData.group !== undefined) sanitizedData.group = itemData.group;
+    // Serial number work step 2: R&D's usage choice (checked above).
+    if (itemData.productionUse !== undefined) sanitizedData.productionUse = itemData.productionUse || null;
 
     // 3. Media & Notes (see createItem for the upload flow this feeds from)
     if (itemData.image !== undefined) sanitizedData.image = itemData.image || null;
@@ -1181,6 +1245,10 @@ const validateItemData = (data, isUpdate = false) => {
   if (data.reorderQty !== undefined && (isNaN(data.reorderQty) || data.reorderQty < 0)) {
     errors.reorderQty = 'Order Quantity must be a non-negative number';
   }
+  if (data.buildDays !== undefined && data.buildDays !== null && data.buildDays !== ''
+    && (!Number.isInteger(Number(data.buildDays)) || Number(data.buildDays) < 0)) {
+    errors.buildDays = 'Build Days must be a whole number, 0 or more';
+  }
   // Order Qty is deliberately allowed to be lower than Min Stock — the
   // client explicitly asked for free input here (was previously blocked:
   // "Order Quantity must be at least the Minimum Stock value", on the
@@ -1300,6 +1368,7 @@ const sanitizeItemData = (data) => {
       // Edit form silently strips the tag off any leftover variant it
       // already has, making it indistinguishable from a real catalog size.
       isLeftover: !!dv.isLeftover,
+      isDiscontinued: !!dv.isDiscontinued,
     }));
   }
   if (sanitized.itemCategories && Array.isArray(sanitized.itemCategories)) {
@@ -1351,6 +1420,7 @@ const sanitizeItemData = (data) => {
   if (sanitized.mrp !== undefined) sanitized.mrp = Number(sanitized.mrp);
   if (sanitized.gst !== undefined) sanitized.gst = Number(sanitized.gst);
   if (sanitized.minStock !== undefined) sanitized.minStock = Number(sanitized.minStock);
+  if (sanitized.buildDays !== undefined) sanitized.buildDays = Number(sanitized.buildDays) || 0;
   if (sanitized.leadTime !== undefined) sanitized.leadTime = Number(sanitized.leadTime);
   if (sanitized.order !== undefined) sanitized.order = Number(sanitized.order);
 
@@ -3732,7 +3802,7 @@ export const getPendingRequests = async (req, res) => {
 // ── 2. TRANSFER MATERIAL TO PRODUCTION ───────────────────────────────
 export const transferMaterialToProduction = async (req, res) => {
   try {
-    const { materialCode, quantityToTransfer, issuedTo } = req.body;
+    const { materialCode, quantityToTransfer, issuedTo, unitIds, labelIds, acknowledgeWarnings } = req.body;
     const orderId = req.params.id;
     const companyId = req.user.companyId;
     const transferQty = Number(quantityToTransfer);
@@ -3763,6 +3833,28 @@ export const transferMaterialToProduction = async (req, res) => {
       return res.status(400).json({ success: false, message: 'This is a fabrication material — use the dimension-based transfer instead.' });
     }
     const sourceCode = demand.sourceItemCode || materialCode;
+
+    // Serial number work step 2 (2026-10-31, §5.1): Store picks the serial
+    // numbers / stickers it hands over when the item has tracked stock.
+    const pickItem = await Item.findOne({ code: sourceCode, companyId }).select('_id qty unit productKind productionUse name');
+    let picked = { unitIds: [], labelIds: [] };
+    let skip = null;
+    if (pickItem) {
+      const waitingSticker = await unlabelledInStock(companyId, pickItem._id);
+      const stickerBlock = unlabelledProblem({ qty: transferQty, stock: pickItem.qty, unlabelled: waitingSticker, name: pickItem.name });
+      if (stickerBlock) return res.status(400).json({ success: false, message: stickerBlock });
+      const tracked = await stockTracked(companyId, pickItem._id);
+      if (tracked.count > 0 || (unitIds?.length || labelIds?.length)) {
+        const checked = checkPicked({ unitIds, labelIds }, tracked);
+        if (checked.error) return res.status(400).json({ success: false, message: checked.error });
+        const rule = pickRule({ qty: transferQty, tracked: tracked.count, untracked: untrackedCount(pickItem.qty, tracked.count, waitingSticker) });
+        const problem = pickProblem(checked.unitIds.length + checked.labelIds.length, rule);
+        if (problem) return res.status(400).json({ success: false, message: problem, pick: { min: rule.min, max: rule.max } });
+        picked = checked;
+        skip = noSerialCheck({ itemId: pickItem._id, name: pickItem.name, picked: checked.unitIds.length + checked.labelIds.length, rule, tracked: tracked.count });
+        if (skip && !acknowledged(acknowledgeWarnings)) return res.status(409).json(confirmBody([skip]));
+      }
+    }
 
     // 1. ATOMIC DEDUCTION (The Store Gatekeeper)
     // Only deduct if we have enough stock. This prevents race conditions.
@@ -3810,7 +3902,21 @@ export const transferMaterialToProduction = async (req, res) => {
       company: companyId
     });
 
-    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.`, warning });
+    // The picked serials / stickers move with it: built into that order, or —
+    // for an item used to make it — used there (their trail ends).
+    let serialNote = '';
+    if (picked.unitIds.length || picked.labelIds.length) {
+      const by = req.user.fullName || req.user.username || 'Store';
+      const placeOf = (kind) => ({ kind, order: order._id, orderNo: order.orderId });
+      if (picked.unitIds.length) await move({ unitIds: picked.unitIds, place: placeOf(pickItem.productionUse === 'UsedToMake' ? 'Used' : 'Issued'), what: pickItem.productionUse === 'UsedToMake' ? 'Used in production' : 'Issued to production', by, note: issuedTo || '', from: IN_STOCK });
+      if (picked.labelIds.length) await move({ labelIds: picked.labelIds, place: placeOf('Issued'), what: 'Issued to production', by, note: issuedTo || '', from: IN_STOCK });
+      serialNote = ` · ${picked.unitIds.length + picked.labelIds.length} serial number(s) recorded`;
+      if (picked.unitIds.length && !pickItem.productionUse && needsProductionUse(pickItem)) serialNote += ` — R&D hasn't set how ${pickItem.name} is used in production yet`;
+    }
+
+    await logSkippedSerials(companyId, [skip], { screen: 'Material Transfers', reference: order.orderId, by: req.user.fullName || req.user.username || 'Store' });
+
+    res.json({ success: true, message: `Successfully transferred ${transferQty} to Production.${serialNote}`, warning });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -4127,6 +4233,9 @@ export const bulkTransferOrderMaterials = async (req, res) => {
     const shortfalls = [];
     let orderUpdated = false;
     let skippedFabricationCount = 0;
+    // Serial number work step 2 (D15): lines whose item has tracked serials /
+    // stickers in stock need the pick — issued one by one, not in bulk.
+    const skippedSerialLines = [];
 
     for (let demand of order.materialDemands) {
       if (demand.status !== 'Requested') continue;
@@ -4147,6 +4256,10 @@ export const bulkTransferOrderMaterials = async (req, res) => {
 
       const sourceCode = demand.sourceItemCode || demand.materialCode;
       const storeItem = await Item.findOne({ code: sourceCode, companyId: companyId });
+      if (storeItem && ((await stockTracked(companyId, storeItem._id)).count > 0 || unlabelledProblem({ qty: neededQty, stock: storeItem.qty, unlabelled: await unlabelledInStock(companyId, storeItem._id) }))) {
+        skippedSerialLines.push(demand.materialName);
+        continue;
+      }
       const availableStock = storeItem ? Math.max(0, storeItem.qty) : 0;
 
       // PATH 1: Stock is completely empty (This is what hit your "metal sheet" item)
@@ -4246,7 +4359,8 @@ export const bulkTransferOrderMaterials = async (req, res) => {
       success: true,
       message: 'Bulk transfer operation executed completely and queue updated.',
       shortfallsCount: shortfalls.length,
-      skippedFabricationCount
+      skippedFabricationCount,
+      skippedSerialLines,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -4565,6 +4679,9 @@ export const confirmReturn = async (req, res) => {
       // real Inventory Item must be resolved via sourceItemCode, not
       // materialCode directly — see MaterialDemandSchema's comment.
       const sourceCode = log.sourceItemCode || log.materialCode;
+      // A part its cascade delivered, coming back (those not picked by sticker):
+      // it leaves the cascade's count, so the order asks Store for it instead.
+      const cascadeBack = Math.min(Number(demand.cascadeDeliveredQuantity) || 0, Math.max(0, log.quantityReturned - (log.labelIds?.length || 0)));
       if (log.returnType === 'Defect') {
 
         // 🎯 AUTOMATIC INITIALIZATION OR UPDATE (UPSERT)
@@ -4584,7 +4701,7 @@ export const confirmReturn = async (req, res) => {
         // Reservation (user decision 2026-10-09): a defective return means the
         // order still needs a good replacement — reserve it for the order again.
         try {
-          const srcItem = await Item.findOne({ code: sourceCode, companyId }).select('dimensionVariants').lean();
+          const srcItem = await Item.findOne({ code: sourceCode, companyId }).select('code productKind dimensionVariants').lean();
           if (srcItem) {
             let qty = log.quantityReturned;
             const variantId = demand.fabricationCategory ? (demand.dimensionVariantId || null) : null;
@@ -4593,7 +4710,9 @@ export const confirmReturn = async (req, res) => {
               const category = getCategoryByKey(demand.fabricationCategory);
               qty = catalogEquivalentPieces({ sourceItem: srcItem, catalogVariantId: variantId, demand, isSheet: category?.calcType === 'sheet', qty: log.quantityReturned });
             }
-            if (qty > 0) await recordReturn({ orderId: order._id, itemId: srcItem._id, variantId, qty });
+            if (qty - cascadeBack > 0) await recordReturn({ orderId: order._id, itemId: srcItem._id, variantId, qty: qty - cascadeBack });
+            // It was never on the ledger: the replacement is a new claim.
+            if (cascadeBack > 0) await reserveForOrder({ item: srcItem, qty: cascadeBack, order, companyId, lineKey: `${srcItem.productKind === 'ChildPart' ? 'cp' : 'scp'}:${srcItem.code}` });
           }
         } catch (err) {
           console.error('recordReturn failed:', err);
@@ -4644,6 +4763,24 @@ export const confirmReturn = async (req, res) => {
           { code: sourceCode, companyId: companyId },
           { $inc: { qty: log.quantityReturned } }
         );
+        // 2026-11-04: what the order still needs, once this is back, it asks
+        // Store for again below, so that much stays held for the order. Store
+        // can't issue more than was asked, so normally that's all of it; anything
+        // above the need would be free stock. A delivered part was never on the
+        // ledger: a new claim, as a Defect. (Fabrication is the branch above.)
+        try {
+          const returned = await Item.findOne({ code: sourceCode, companyId }).select('code productKind').lean();
+          const stillNeeded = Math.max(0, (Number(demand.quantity) || 0) - ((Number(demand.issuedQuantity) || 0) - log.quantityReturned));
+          const hold = Math.min(log.quantityReturned, stillNeeded);
+          if (hold > 0 && returned && order.status !== 'Completed') {
+            const fromLedger = Math.min(hold, log.quantityReturned - cascadeBack);
+            const { applied } = fromLedger > 0 ? await recordReturn({ orderId: order._id, itemId: returned._id, qty: fromLedger }) : { applied: 0 };
+            const kindKey = { ChildPart: 'cp', SubChildPart: 'scp' }[returned.productKind] || 'plain';
+            await reserveForOrder({ item: returned, qty: hold - applied, order, companyId, lineKey: `${kindKey}:${returned.code}` });
+          }
+        } catch (err) {
+          console.error('Holding an excess return for its order failed:', err);
+        }
       }
 
       // B. Release the reservation lock
@@ -4652,6 +4789,14 @@ export const confirmReturn = async (req, res) => {
       // C. Deduct balances from manufacturing counts
       demand.issuedQuantity = Math.max(0, (demand.issuedQuantity || 0) - log.quantityReturned);
       demand.transferredQuantity = Math.max(0, (demand.transferredQuantity || 0) - log.quantityReturned);
+      if (cascadeBack > 0) {
+        demand.cascadeDeliveredQuantity = Math.max(0, (demand.cascadeDeliveredQuantity || 0) - cascadeBack);
+        const cover = (order.cascadeCovers || []).find(c => c.partCode === log.materialCode);
+        if (cover) {
+          cover.qty = Math.max(0, (cover.qty || 0) - cascadeBack);
+          cover.delivered = Math.max(0, (cover.delivered || 0) - cascadeBack);
+        }
+      }
 
       // D. AUTOMATED FEEDBACK LOOP
       if (demand.issuedQuantity >= demand.quantity) {
@@ -4661,6 +4806,33 @@ export const confirmReturn = async (req, res) => {
         order.materialIssued = false;
       }
 
+      // Serial number work step 2 (§5.6): the serials / stickers Production
+      // picked come back — Excess to stock (can be issued again), Defect to
+      // Defective (not issued again; a vendor warranty claim can be raised).
+      if (log.unitIds?.length || log.labelIds?.length) {
+        const defect = log.returnType === 'Defect';
+        await move({
+          unitIds: log.unitIds, labelIds: log.labelIds,
+          place: defect ? { kind: 'Defective', order: order._id, orderNo: order.orderId, defectiveOf: log.materialCode } : { kind: 'Stock' },
+          what: defect ? 'Returned as defective' : 'Returned to stock (excess)',
+          by: req.user.fullName || req.user.username || 'Store', note: log.reason || '',
+          from: ['Issued', 'Used'],
+        });
+      }
+      // A cascade part with no sticker: the serials Production said are inside.
+      if (log.insideUnitIds?.length || log.insideLabelIds?.length) {
+        const by = req.user.fullName || req.user.username || 'Store';
+        if (log.returnType === 'Defect') {
+          await move({
+            unitIds: log.insideUnitIds, labelIds: log.insideLabelIds,
+            place: { kind: 'Defective', order: order._id, orderNo: order.orderId, defectiveOf: log.materialCode },
+            what: `Returned inside a defective ${log.materialName}`, by, note: log.reason || '', from: ['Issued'],
+          });
+        } else {
+          const part = await Item.findOne({ code: sourceCode, companyId }).select('code name productKind').lean();
+          await addCarrierEntry({ companyId, order, item: part, qty: Math.max(1, cascadeBack), contains: { units: log.insideUnitIds, labels: log.insideLabelIds }, by, what: 'Returned by Production — waiting for its sticker' });
+        }
+      }
       log.status = 'Accepted';
     }
     else if (action === 'Reject') {
@@ -4727,7 +4899,7 @@ export const getDefectiveInventory = async (req, res) => {
 export const repairDefectiveInventory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { quantityToRepair } = req.body;
+    const { quantityToRepair, unitIds, labelIds, nothingInside, acknowledgeWarnings } = req.body;
     const companyId = req.user.companyId;
 
     const amtToProcess = Number(quantityToRepair);
@@ -4735,6 +4907,12 @@ export const repairDefectiveInventory = async (req, res) => {
     if (isNaN(amtToProcess) || amtToProcess <= 0) {
       return res.status(400).json({ success: false, message: 'Quantity must be a positive number.' });
     }
+
+    // Serial number work (2 Nov review): which serial / sticker is being repaired.
+    const row = await DefectiveInventory.findOne({ _id: id, companyId }).lean();
+    const picked = row ? await checkDefectivePick({ companyId, code: row.materialCode, qty: amtToProcess, rowQty: row.quantity, unitIds, labelIds, nothingInside }) : null;
+    if (picked?.error) return res.status(400).json({ success: false, message: picked.error });
+    if (picked?.skip && !acknowledged(acknowledgeWarnings)) return res.status(409).json(confirmBody([picked.skip]));
 
     // 🎯 ATOMIC CHECK & DEDUCTION
     // We only update IF the document matches the ID, the company, AND has enough quantity.
@@ -4767,6 +4945,8 @@ export const repairDefectiveInventory = async (req, res) => {
       { $inc: { qty: amtToProcess } },
       { upsert: true }
     );
+    await repairDefective({ companyId, qty: amtToProcess, checked: picked, by: req.user.fullName || req.user.username || 'Store' });
+    await logSkippedSerials(companyId, [picked?.skip], { screen: 'Defective repair', reference: defectiveItem.materialCode, by: req.user.fullName || req.user.username || 'Store' });
 
     res.json({
       success: true,
@@ -4781,7 +4961,7 @@ export const repairDefectiveInventory = async (req, res) => {
 export const scrapDefectiveInventory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { quantityToScrap } = req.body;
+    const { quantityToScrap, unitIds, labelIds, nothingInside, acknowledgeWarnings } = req.body;
     const companyId = req.user.companyId;
 
     const amtToScrap = Number(quantityToScrap);
@@ -4789,6 +4969,12 @@ export const scrapDefectiveInventory = async (req, res) => {
     if (isNaN(amtToScrap) || amtToScrap <= 0) {
       return res.status(400).json({ success: false, message: 'Quantity must be a positive number.' });
     }
+
+    // Serial number work (2 Nov review): which serial / sticker is being scrapped.
+    const row = await DefectiveInventory.findOne({ _id: id, companyId }).lean();
+    const picked = row ? await checkDefectivePick({ companyId, code: row.materialCode, qty: amtToScrap, rowQty: row.quantity, unitIds, labelIds, nothingInside }) : null;
+    if (picked?.error) return res.status(400).json({ success: false, message: picked.error });
+    if (picked?.skip && !acknowledged(acknowledgeWarnings)) return res.status(409).json(confirmBody([picked.skip]));
 
     // 🎯 ATOMIC CHECK & DEDUCTION
     const defectiveItem = await DefectiveInventory.findOneAndUpdate(
@@ -4812,6 +4998,8 @@ export const scrapDefectiveInventory = async (req, res) => {
         message: 'Action rejected. Item not found or requested quantity exceeds available defective stock.'
       });
     }
+    await scrapDefective({ checked: picked, by: req.user.fullName || req.user.username || 'Store' });
+    await logSkippedSerials(companyId, [picked?.skip], { screen: 'Defective scrap', reference: defectiveItem.materialCode, by: req.user.fullName || req.user.username || 'Store' });
 
     res.json({
       success: true,

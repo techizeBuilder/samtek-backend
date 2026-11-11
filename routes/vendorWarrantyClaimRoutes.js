@@ -2,7 +2,7 @@ import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
 import { claimEvidenceUpload } from '../middleware/claimEvidenceUpload.js';
-import { getClaims, getClaim, lookupClaimSerial, getClaimVendors, getClaimItems, postClaim, putClaim } from '../controllers/vendorWarrantyClaimController.js';
+import { getClaims, getClaim, lookupClaimSerial, getClaimParts, getClaimVendors, getClaimItems, postClaim, putClaim } from '../controllers/vendorWarrantyClaimController.js';
 
 // Vendor warranty claims (2026-10-13) — Complaints → Support Management, plus
 // the Company Admin (checkPermission alone doesn't let that role through —
@@ -18,6 +18,7 @@ const support = (action) => {
 
 router.get('/', support('view'), getClaims);
 router.get('/lookup', support('view'), lookupClaimSerial);
+router.get('/parts', support('view'), getClaimParts);
 router.get('/vendors', support('view'), getClaimVendors);
 router.get('/items', support('view'), getClaimItems);
 router.get('/:id', support('view'), getClaim);

@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { TrainingProfile, Module, Question, Progress, TestAttempt } from '../models/TrainingmanagementModel.js';
 import { sendTrainingEmail, TrainingEmailType } from '../utils/trainingEmail.js';
+import { DEPARTMENTS, mailboxWarning } from '../config/mailAccounts.js';
 import User from '../models/User.js';
 import fs from 'fs';
 import path from 'path';
@@ -140,6 +141,7 @@ export const stageCandidate = async (req, res) => {
 
         res.status(201).json({
             success: true,
+            emailWarning: await mailboxWarning(DEPARTMENTS.HR),
             message: `${traineeUser.fullName} has been successfully staged for training.`,
             data: newProfile
         });
@@ -454,6 +456,7 @@ export const finalizeTrainee = async (req, res) => {
 
             return res.status(200).json({
                 success: true,
+                emailWarning: await mailboxWarning(DEPARTMENTS.HR),
                 message: `${profile.user.fullName} has successfully completed onboarding and is now active!`
             });
 
@@ -471,6 +474,7 @@ export const finalizeTrainee = async (req, res) => {
 
             return res.status(200).json({
                 success: true,
+                emailWarning: await mailboxWarning(DEPARTMENTS.HR),
                 message: `${profile.user.fullName}'s training has been terminated and access revoked.`
             });
 

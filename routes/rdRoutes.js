@@ -42,6 +42,7 @@ import {
   createSubChildPart,
   updateSubChildPart as updateSubChildPartMaster,
 } from '../controllers/subChildPartMasterController.js';
+import { switchPartMakeBuy } from '../controllers/makeBuyController.js';
 import {
   getSubChildPartSheetPlan,
   saveSubChildPartSheetPlan,
@@ -381,6 +382,8 @@ router.get('/sub-child-parts', bomManagementView, getSubChildParts);
 router.get('/sub-child-parts/:id', bomManagementView, getSubChildPart);
 router.post('/sub-child-parts', bomManagementAdd, createSubChildPart);
 router.put('/sub-child-parts/:id', bomManagementEdit, updateSubChildPartMaster);
+// Make or buy a Child Part / Sub Child Part (2026-10-28).
+router.put('/parts/:id/make-buy', bomManagementEdit, switchPartMakeBuy);
 router.get('/sub-child-parts/:id/sheet-metal-plan', bomManagementView, getSubChildPartSheetPlan);
 router.post('/sub-child-parts/:id/sheet-metal-plan', bomManagementAdd, saveSubChildPartSheetPlan);
 

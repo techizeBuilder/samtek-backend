@@ -2318,7 +2318,12 @@ export const deleteSalespersonDamage = async (req, res) => {
 export const sendQuotationEmailHandler = async (req, res) => {
   console.log('📬 [API] Received request to send quotation email');
   try {
-    const { to, customerName, leadCode, attachmentBase64, quotationFinalAmount } = req.body;
+    const { to, customerName, leadCode, attachmentBase64, quotationFinalAmount, provisionalItems } = req.body;
+    // Make or buy (2026-10-28): quoted while a price was provisional — kept on
+    // the lead's history so it can be looked back at.
+    const provisionalNote = Array.isArray(provisionalItems) && provisionalItems.length
+      ? ` Quoted on a provisional price: ${provisionalItems.map(String).join('; ')}.`
+      : '';
     const userCompanyId = req.user.companyId;
 
     // Fetch company name for branding
@@ -2356,7 +2361,7 @@ export const sendQuotationEmailHandler = async (req, res) => {
               $push: {
                 history: {
                   action: 'Quotation Sent',
-                  notes: `Quotation sent to ${to}. Final amount: ₹${quotationFinalAmount || 0}`,
+                  notes: `Quotation sent to ${to}. Final amount: ₹${quotationFinalAmount || 0}${provisionalNote}`,
                   performedBy: req.user._id,
                   timestamp: new Date()
                 }
@@ -2392,7 +2397,7 @@ export const sendQuotationEmailHandler = async (req, res) => {
       }
       res.json({ success: true, message: 'Quotation sent successfully' });
     } else {
-      res.status(500).json({ success: false, message: 'Failed to send quotation', error: result.error });
+      res.status(result.skipped ? 400 : 500).json({ success: false, message: result.skipped ? result.error : 'Failed to send quotation', error: result.error });
     }
   } catch (error) {
     console.error('❌ Error in sendQuotationEmailHandler:', error);

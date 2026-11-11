@@ -20,6 +20,9 @@ const ChildPartLineSchema = new mongoose.Schema({
   unitWeightKg: { type: Number, default: 0 },
   totalWeightKg: { type: Number, default: 0 },
   isDiscontinued: { type: Boolean, default: false },
+  // Make or buy (2026-10-28): see ChildPartBOM.js's Sub Child Part line.
+  bought: { type: Boolean, default: false },
+  pricePending: { type: Boolean, default: false },
 }, { timestamps: true });
 
 // A Machine's own new-flow BOM (see server/docs/bom-hierarchy-redesign-2026-09.md
@@ -51,7 +54,23 @@ const MachineBOMSchema = new mongoose.Schema({
   productionExpense: { type: Number, default: null, min: 0 },
   productionCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
   productionCostUpdatedAt: { type: Date, default: null },
-  company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
+  // Outsource v2 slice 4 (2026-10-24): the outsourced (job work) cost of one
+  // build, read from the Outsource Orders at the true last step (never typed).
+  jobWorkCost: { type: Number, default: null, min: 0 },
+  jobWorkCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
+  jobWorkCostUpdatedAt: { type: Date, default: null },
+  // Still waiting for a per minute / per hour time on these Outsource Orders.
+  jobWorkWaitingFor: { type: [String], default: [] },
+  // The build that last set the actual cost ("the latest build wins").
+  costFrom: {
+    orderId: { type: String, default: null },
+    unitIndex: { type: Number, default: null },
+    finishedAt: { type: Date, default: null },
+    // Its job work still waits for a per minute / per hour time (2026-10-27:
+    // a newer build still waiting doesn't replace a complete cost).
+    waiting: { type: Boolean, default: false },
+  },
+  company:{ type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, { timestamps: true });
 

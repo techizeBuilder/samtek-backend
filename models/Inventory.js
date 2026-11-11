@@ -209,6 +209,23 @@ const itemSchema = new mongoose.Schema({
     jobWorkCost: { type: Number, default: null, min: 0 },
     jobWorkCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
     jobWorkCostUpdatedAt: { type: Date, default: null },
+    // Outsource v2 slice 4 (2026-10-24): jobWorkCost above is now the
+    // OUTSOURCED money per piece (read from the Outsource Orders, never
+    // typed); Production's own in-house cost / expense for the batch, per
+    // piece, live here — same three numbers a Child Part / Machine BOM has.
+    productionCost: { type: Number, default: null, min: 0 },
+    productionExpense: { type: Number, default: null, min: 0 },
+    productionCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
+    productionCostUpdatedAt: { type: Date, default: null },
+    // The build that last set the actual cost ("the latest build wins").
+    costFrom: {
+      orderId: { type: String, default: null },
+      unitIndex: { type: Number, default: null },
+      finishedAt: { type: Date, default: null },
+      // Its job work still waits for a per minute / per hour time (2026-10-27:
+      // a newer build still waiting doesn't replace a complete cost).
+      waiting: { type: Boolean, default: false },
+    },
     // Average scrap cost for ONE Sub Child Part unit — computed server-side
     // whenever its Sheet Metal Plan is saved (see
     // subChildPartSheetPlanController.js), from the same
@@ -401,6 +418,47 @@ const itemSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Make or buy (2026-10-28, docs/make-or-buy-parts-2026-10.md). A Child Part
+  // / Sub Child Part is bought only when partSourcing is 'buy' — an explicit
+  // field, because purchase defaults to true on every Item, so a part created
+  // any other way would otherwise read as bought. Missing = made (no
+  // back-fill). The radio also sets purchase / internalManufacturing so the
+  // purchase screens treat a bought part like any purchasable item.
+  partSourcing: { type: String, enum: ['make', 'buy'], default: 'make' },
+  // Serial number work step 2 (2026-10-31): how R&D says this item is used in
+  // production — 'BuiltIn' (it ends up inside what we deliver; its serials are
+  // followed to the customer's Order) or 'UsedToMake' (used while building;
+  // its serials stop at the production order). Required on save for items
+  // counted in pieces; null on older items until R&D chooses (never defaulted).
+  productionUse: { type: String, enum: ['BuiltIn', 'UsedToMake', null], default: null },
+  // purchaseCostKind: what purchaseCost is — Accounts' estimate, or a real
+  // received PO line. pricePending: bought with no purchase cost yet (Accounts
+  // is asked for an estimate). priceProvisional.parts: on a Child Part /
+  // Machine, the pending parts its BOM price still leans on.
+  purchaseCostKind: { type: String, enum: ['estimate', 'actual', null], default: null },
+  purchaseCostAt: { type: Date, default: null },
+  pricePending: { type: Boolean, default: false },
+  priceProvisional: {
+    parts: { type: [String], default: [] },
+  },
+  // Set when R&D switches a part's make / buy: its QC List sign-off and
+  // Release were pulled back, and the Approval page flags it until it's
+  // released again (2026-10-29). null = nothing to redo.
+  approvalRedo: {
+    at: { type: Date, default: null },
+    from: { type: String, default: null },
+    to: { type: String, default: null },
+    byName: { type: String, default: '' },
+    // Set when the BOM was edited (2026-11-02): what changed. from / to stay null.
+    what: { type: String, default: '' },
+  },
+  makeBuyHistory: [{
+    from: { type: String, enum: ['make', 'buy', null], default: null },
+    to: { type: String, enum: ['make', 'buy'] },
+    at: { type: Date, default: Date.now },
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    byName: { type: String, default: '' },
+  }],
   purchase: {
     type: Boolean,
     default: true
@@ -506,6 +564,12 @@ const itemSchema = new mongoose.Schema({
     // Production transfer but must never be offered as a choice when Store
     // raises a Purchase Request (Purchase only reorders catalog sizes).
     isLeftover: { type: Boolean, default: false },
+    // A catalog size R&D has retired in Fabrication Master (2026-10-28,
+    // docs/fabrication-size-sync-2026-10.md): its stock can still be issued,
+    // an open PO for it still received, existing BOM lines keep working —
+    // but it's never offered for anything new (low-stock reorder, a purchase
+    // request, a new BOM line / Sub Child Part). Not a leftover.
+    isDiscontinued: { type: Boolean, default: false },
     // Material Flow — same High/Medium/Low reorder-point classification as
     // the top-level fields below, but per dimension size: Store cuts and
     // reorders each catalog size independently, so each one gets its own
@@ -567,6 +631,10 @@ const itemSchema = new mongoose.Schema({
   // receiving the order would immediately re-trigger the same request
   // (enforced in inventoryController.js's validateItemData).
   reorderQty: { type: Number, min: 0, default: 0 },
+  // Machines only (2026-11-06): days R&D expects a build to take. The low-stock
+  // sweep's order is due today + this; blank means today. Interim: the proper
+  // machine time estimate may replace it.
+  buildDays: { type: Number, min: 0, default: 0 },
   leadTime: {
     type: Number,
     min: 0,

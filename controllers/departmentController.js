@@ -3,6 +3,30 @@
 import Department from "../models/Department.js";
 import Branch from "../models/Branch.js";
 import { fixDepartmentBranchIds } from "../scripts/fixDepartmentBranchIds.js";
+import { departmentsFromRoles, addDepartmentsFromRoles } from "../services/departmentSeedService.js";
+
+const NO_COMPANY = "Departments from roles work inside one company, and this user has none.";
+
+/* FROM ROLES — the checklist on the Departments page. Always the user's own
+   company, whatever the request says. */
+export const getDepartmentsFromRoles = async (req, res) => {
+  try {
+    if (!req.user?.companyId) return res.status(400).json({ message: NO_COMPANY });
+    res.json({ success: true, data: await departmentsFromRoles(req.user.companyId) });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to load departments from roles", error: error.message });
+  }
+};
+
+export const postDepartmentsFromRoles = async (req, res) => {
+  try {
+    if (!req.user?.companyId) return res.status(400).json({ message: NO_COMPANY });
+    const added = await addDepartmentsFromRoles(req.user.companyId, req.body?.names);
+    res.status(201).json({ success: true, added });
+  } catch (error) {
+    res.status(400).json({ message: "Failed to add departments", error: error.message });
+  }
+};
 
 /* CREATE */
 export const createDepartment = async (req, res) => {

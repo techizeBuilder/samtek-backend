@@ -38,7 +38,13 @@ const purchaseInvoiceItemSchema = new mongoose.Schema({
         type: Number,
         required: true,
         min: 0
-    }
+    },
+    // Outsource bills (pricing types, 2026-10-22): how the row was priced
+    // ("2 pcs × 4 holes × ₹5 = ₹40", "₹300/h — time not entered yet") and
+    // which order line / step it is, so entering the time updates this row.
+    basis: { type: String, default: '' },
+    outsourceLineId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    stepName: { type: String, default: '' }
 });
 
 const purchaseInvoiceSchema = new mongoose.Schema({
@@ -53,6 +59,15 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     purchaseOrder: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Purchase',
+        default: null
+    },
+    // The Outsource Order this bill is for (outsource-v2 slice 3,
+    // 2026-10-20) — an outsource order is a bill the same way a PO is
+    // (advance, payable as the work passes QC, full payment after credit
+    // days). A bill has a purchaseOrder OR an outsourceOrder, never both.
+    outsourceOrder: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'OutsourceOrder',
         default: null
     },
     invoiceNo: {
@@ -139,6 +154,8 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     advancePaid: { type: Number, default: 0 },     // the advance part of paidAmount
     acceptedValue: { type: Number, default: 0 },   // material QC-passed so far, incl. GST
     fullyAcceptedAt: { type: Date, default: null },
+    // When the vendor was emailed "all material passed QC" (2026-10-29).
+    fullyAcceptedMailedAt: { type: Date, default: null },
     creditDays: { type: Number, default: null },
     overdueNotifiedAt: { type: Date, default: null }, // the full payment went overdue — Accounts told once
     stage: {
@@ -150,7 +167,7 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     // rejection the vendor won't replace…). The total itself is changed by
     // whoever adds an entry here; balanceAmount always follows from it.
     adjustments: [{
-        kind: { type: String, enum: ['ShortClose', 'Cancel', 'Rejection'], required: true },
+        kind: { type: String, enum: ['ShortClose', 'Cancel', 'Rejection', 'LostAtVendor'], required: true },
         amount: { type: Number, required: true }, // ₹ taken off (positive)
         reason: { type: String, default: '' },
         ref: { type: mongoose.Schema.Types.ObjectId, default: null },
@@ -166,12 +183,19 @@ purchaseInvoiceSchema.index({ vendor: 1, invoiceNo: 1 }, { unique: true });
 
 // Where a PO bill stands (null for a manual bill). Exported for the
 // controllers and tests.
+// A staged bill (PO or Outsource Order) has an advance / acceptance / full
+// payment; a manual bill has none of that.
+export const isStagedBill = (inv) => !!(inv?.purchaseOrder || inv?.outsourceOrder);
+
 export function billStage(inv) {
-    if (!inv.purchaseOrder) return null;
+    if (!isStagedBill(inv)) return null;
     if (inv.status === 'Cancelled') return 'Cancelled';
+    // Once everything is accepted the whole balance is due, advance or not —
+    // it stayed "Advance due" before (2026-10-23, OSO-0003), and the overdue
+    // sweep (stage 'Payable' only) never flagged it.
+    if (inv.fullyAcceptedAt) return (inv.totalAmount - (inv.paidAmount || 0)) > 0.005 ? 'Payable' : 'Paid';
     if ((inv.advanceAmount || 0) > 0 && (inv.advancePaid || 0) + 0.005 < inv.advanceAmount) return 'Advance due';
-    if (!inv.fullyAcceptedAt) return 'Awaiting material';
-    return (inv.totalAmount - (inv.paidAmount || 0)) > 0.005 ? 'Payable' : 'Paid';
+    return 'Awaiting material';
 }
 
 purchaseInvoiceSchema.pre('save', async function () {
@@ -181,7 +205,7 @@ purchaseInvoiceSchema.pre('save', async function () {
     // recorded on the PO's cancellation.
     if (this.status === 'Cancelled') {
         this.balanceAmount = 0;
-        if (this.purchaseOrder) this.stage = 'Cancelled';
+        if (isStagedBill(this)) this.stage = 'Cancelled';
         return;
     }
     this.balanceAmount = this.totalAmount - this.paidAmount;
@@ -192,7 +216,7 @@ purchaseInvoiceSchema.pre('save', async function () {
     } else {
         this.status = 'Unpaid';
     }
-    if (this.purchaseOrder) this.stage = billStage(this);
+    if (isStagedBill(this)) this.stage = billStage(this);
 });
 
 export default mongoose.model('PurchaseInvoice', purchaseInvoiceSchema);

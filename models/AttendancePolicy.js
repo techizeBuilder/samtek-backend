@@ -14,6 +14,9 @@ const AttendancePolicySchema = new Schema(
     earlyExitMinutes: { type: Number, default: 30 },
     overtimeEnabled: { type: Boolean, default: true },
     overtimeAfter: { type: Number, default: 8 },
+    // Weekly off days, 0 = Sunday … 6 = Saturday (2026-11-11). For people not on the
+    // device; the device's own WO counts for those on it. Not working days for payroll.
+    weeklyOffDays: { type: [Number], default: [0] },
     overtimeType: {
       type: String,
       enum: ["Paid", "Compensatory Off", "Unpaid"],

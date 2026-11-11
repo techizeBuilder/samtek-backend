@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samtek Price Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Figtree:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+  /* Same look as the daily report. One reading column: pipeline → each stage → rules → example → questions. */
+  :root {
+    --bg: #F3F5F7;
+    --surface: #FFFFFF;
+    --fg: #17202B;
+    --muted: #5A6576;
+    --line: #DDE2E8;
+    --accent: #0D6B65;
+    --accent-soft: #E0F0EE;
+    --good: #16703D;
+    --good-soft: #E2F2E7;
+    --warn: #975207;
+    --warn-soft: #FAEDDA;
+    --info: #2E5C99;
+    --info-soft: #E5EDF8;
+    --bad: #A1281F;
+    --bad-soft: #FBE5E2;
+    --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+    --body: "Figtree", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11161C; --surface: #19202A; --fg: #E5E9EF; --muted: #98A2B2; --line: #29313D;
+      --accent: #4CC0B5; --accent-soft: #15302E;
+      --good: #5CCB8A; --good-soft: #142E1F; --warn: #EFA64F; --warn-soft: #36260F;
+      --info: #8FB4EA; --info-soft: #18263A; --bad: #F08A7E; --bad-soft: #3A1A17;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #11161C; --surface: #19202A; --fg: #E5E9EF; --muted: #98A2B2; --line: #29313D;
+    --accent: #4CC0B5; --accent-soft: #15302E;
+    --good: #5CCB8A; --good-soft: #142E1F; --warn: #EFA64F; --warn-soft: #36260F;
+    --info: #8FB4EA; --info-soft: #18263A; --bad: #F08A7E; --bad-soft: #3A1A17;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.6;
+    padding-inline: 16px;
+    padding-block: 32px 64px;
+  }
+  .page { max-width: 760px; margin-inline: auto; display: grid; gap: 40px; }
+
+  header { display: grid; gap: 6px; }
+  .eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  h1, h2 { font-family: var(--display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+  h1 { font-size: clamp(30px, 6vw, 42px); line-height: 1.1; }
+  .lede { color: var(--muted); margin: 4px 0 0; max-width: 62ch; }
+
+  section { display: grid; gap: 14px; }
+  section > h2 { font-size: 24px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  section > h2 .en { font-family: var(--body); font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+  p { margin: 0; }
+  strong { font-weight: 600; }
+  code { font-family: var(--mono); font-size: 13px; background: var(--accent-soft); color: var(--fg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+
+  /* The pipeline strip */
+  .flow { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+  .stage { display: grid; grid-template-columns: 40px 1fr; gap: 14px; position: relative; padding-bottom: 18px; }
+  .stage:last-child { padding-bottom: 0; }
+  .stage::before { content: ""; position: absolute; left: 19px; top: 40px; bottom: 0; width: 2px; background: var(--line); }
+  .stage:last-child::before { display: none; }
+  .dot { width: 40px; height: 40px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-family: var(--mono); font-size: 14px; display: grid; place-items: center; }
+  .stage.end .dot { background: var(--accent); color: var(--surface); }
+  .stage-body { min-width: 0; padding-top: 7px; display: grid; gap: 2px; }
+  .stage-body b { font-family: var(--display); font-size: 17px; font-weight: 600; }
+  .stage-body span { color: var(--muted); font-size: 15px; }
+
+  /* Formula line */
+  .formula { font-family: var(--mono); font-size: 14px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 12px 14px; overflow-x: auto; white-space: pre; line-height: 1.7; }
+
+  .changes { list-style: none; margin: 0; padding: 0; display: grid; border-top: 1px solid var(--line); }
+  .change { display: grid; grid-template-columns: 56px 1fr; gap: 14px; padding-block: 18px; border-bottom: 1px solid var(--line); }
+  .num { font-family: var(--mono); font-size: 13px; color: var(--accent); padding-top: 3px; }
+  .change-body { min-width: 0; display: grid; gap: 8px; }
+  .change h3 { margin: 0; font-family: var(--display); font-size: 18px; line-height: 1.3; text-wrap: balance; }
+  .change ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  .change ul li::marker { color: var(--muted); }
+  .who { font-size: 13px; color: var(--muted); }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; min-width: 560px; }
+  th, td { text-align: left; padding: 12px 14px; vertical-align: top; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: 0; }
+  th { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  td.n { font-family: var(--mono); font-size: 13px; color: var(--accent); white-space: nowrap; }
+  td.r { font-family: var(--mono); font-size: 14px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr.total td { font-weight: 600; background: var(--accent-soft); }
+  .chip { display: inline-block; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; white-space: nowrap; }
+  .chip.good { background: var(--good-soft); color: var(--good); }
+  .chip.info { background: var(--info-soft); color: var(--info); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+
+  .box { border-radius: 12px; padding: 16px 18px; display: grid; gap: 8px; }
+  .box h3 { margin: 0; font-family: var(--display); font-size: 17px; }
+  .box ul, .box ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+  .box.pending { background: var(--warn-soft); }
+  .box.pending h3 { color: var(--warn); }
+  .box.bug { background: var(--bad-soft); }
+  .box.bug h3 { color: var(--bad); }
+  .box.next { background: var(--info-soft); }
+  .box.next h3 { color: var(--info); }
+  .box.good { background: var(--good-soft); }
+  .box.good h3 { color: var(--good); }
+
+  footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 14px; }
+
+  @media (max-width: 480px) {
+    body { font-size: 15px; }
+    .change { grid-template-columns: 1fr; gap: 4px; }
+  }
+</style>
+
+<div class="page">
+  <header>
+    <span class="eyebrow">Price Pipeline · Samtek ERP · 30 Oct 2026</span>
+    <h1>Kharid ke rate se Machine ke MRP tak</h1>
+    <p class="lede">Ek page me poora hisaab: raw material ka rate kaise banta hai, wo BOM me kaise jaata hai, outsource (job work) aur Production ka kharcha kaise judta hai, aur sab milkar Machine ka MRP / Sale Price kaise banta hai jo Sales dekhta hai. Ye sab <strong>apne aap</strong> hota hai: koi page kholna nahi padta. Aap har hissa padhkar bataiye ki ye aapki zaroorat se milta hai ya kuch badalna hai. Aapke sawaal sabse neeche hain.</p>
+  </header>
+
+  <section>
+    <h2>Ek nazar me <span class="en">The pipeline at a glance</span></h2>
+    <ol class="flow">
+      <li class="stage"><span class="dot">1</span><div class="stage-body"><b>Raw material ka rate</b><span>Store ne PO ka maal receive kiya → us PO line ka asli rate (GST ke bina + PO charges ka hissa)</span></div></li>
+      <li class="stage"><span class="dot">2</span><div class="stage-body"><b>BOM ki material line</b><span>qty × rate, ya fabrication me weight (kg) × ₹/kg</span></div></li>
+      <li class="stage"><span class="dot">3</span><div class="stage-body"><b>Sub Child Part (per piece)</b><span>material + scrap + (job work + Production cost + expense) ÷ bane hue pieces</span></div></li>
+      <li class="stage"><span class="dot">4</span><div class="stage-body"><b>Child Part</b><span>Sub Child Parts + apna material + job work + Production cost / expense</span></div></li>
+      <li class="stage"><span class="dot">5</span><div class="stage-body"><b>Machine ki cost</b><span>Child Parts + apna material + job work + Production cost / expense</span></div></li>
+      <li class="stage end"><span class="dot">₹</span><div class="stage-body"><b>MRP aur Sale Price</b><span>Pricing Value ka profit % aur discount % → Sales yahi padhta hai (quotation, order form)</span></div></li>
+    </ol>
+    <p>Job work ka paisa <strong>Outsource Order</strong> se apne aap aata hai, aur Production apna kharcha <strong>apne aakhri in-house step</strong> pe likhta hai. Neeche har step detail me.</p>
+  </section>
+
+  <section>
+    <h2>1. Raw material ka rate <span class="en">Purchase price</span></h2>
+    <div class="formula">Item ka rate = PO line ka rate (GST ke bina)
+            + us line ka PO charges me hissa (line ki value ke hisaab se, GST ke bina)
+            × unit conversion (jaise 1 sheet = 38.25 kg)</div>
+    <ul class="changes">
+      <li class="change">
+        <span class="num">Kab</span>
+        <div class="change-body">
+          <h3>Rate tab badalta hai jab maal aata hai, PO approve hone pe nahi</h3>
+          <ul>
+            <li><strong>Store ka receive</strong> jis PO line ko receive karta hai, rate usi line se banta hai. Purana PO baad me aaye to apna hi rate lagta hai, naye PO ka nahi.</li>
+            <li>PO approve hone se kuch re-price nahi hota.</li>
+            <li>Bina PO ka manual bill: us bill ka rate (pehle jaisa).</li>
+            <li>Accounts ka manual price aur ₹/kg screen: wo bhi turant upar push hota hai.</li>
+          </ul>
+        </div>
+      </li>
+      <li class="change">
+        <span class="num">GST</span>
+        <div class="change-body">
+          <h3>GST cost me nahi gina jaata (wo wapas claim hota hai)</h3>
+          <ul>
+            <li>"GST included" rate pe GST % poocha jaata hai aur rate se nikaal diya jaata hai: ₹200 incl. 18% → ₹169.49.</li>
+            <li>Purane quote jinka % pata nahi, wo jaise hain waise gine jaate hain (andaza nahi lagate).</li>
+            <li>Bill, PO total, GST, payment: <strong>kuch nahi badla</strong>. Ye sirf item ki cost ka hisaab hai.</li>
+          </ul>
+        </div>
+      </li>
+    </ul>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Asli test (26 Oct)</th><th>Hisaab</th><th style="text-align:right">Rate</th></tr></thead>
+        <tbody>
+          <tr><td>SS sheet, 382.5 kg × ₹200 incl. 18%, packing ₹300</td><td>200 ÷ 1.18 + 300 ÷ 382.5</td><td class="r">₹170.28 / kg</td></tr>
+          <tr><td>Ek sheet = 38.25 kg</td><td>38.25 × 170.28</td><td class="r">₹6,513.05 / sheet</td></tr>
+          <tr><td>Bolts 100 kg × ₹95, packing ka hissa</td><td>₹4.75 pehle → charges ke saath</td><td class="r">₹4.95 / piece</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. BOM ki material line <span class="en">Material lines</span></h2>
+    <ul class="changes">
+      <li class="change">
+        <span class="num">Line</span>
+        <div class="change-body">
+          <h3>Normal item: qty × rate. Fabrication item (sheet, pipe, angle): weight × ₹/kg</h3>
+          <ul>
+            <li>Fabrication line ka weight cut size aur density se banta hai, rate us item ka <strong>₹/kg</strong>.</li>
+            <li>Sheet Plan wale Sub Child Part ka <strong>scrap</strong> bhi usi ₹/kg pe: rate badla to scrap ki cost bhi badalti hai.</li>
+            <li>Fabrication Master me density / material badla (weight badla) → wo bhi price push chalata hai (28 Oct).</li>
+          </ul>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>3. Job work (outsource) ka kharcha <span class="en">Outsource cost</span></h2>
+    <p>Purchase ko receive pe kuch type nahi karna. Paisa pehle se <strong>Outsource Order</strong> me hai (per piece / poori line / per job work / per minute / per hour), wahi padha jaata hai.</p>
+    <div class="formula">Ek trip ka paisa = line amount ÷ line qty × QC me pass hue pieces   (GST ke bina)
+                + Outsource Order ke charges (packing, testing…) ka hissa, line amount ke hisaab se</div>
+    <ul class="changes">
+      <li class="change">
+        <span class="num">Niyam</span>
+        <div class="change-body">
+          <h3>Sirf accepted pieces ka paisa</h3>
+          <ul>
+            <li>QC ne jo reject kiye, wo bill se kat jaate hain, isliye cost me nahi.</li>
+            <li>Redo nayi trip hai, apne rate pe (vendor free me kare to ₹0).</li>
+            <li>Dispatch ki kiraye ki gaadi (freight) abhi cost me <strong>nahi</strong>, jaise PO ke maal me bhi nahi.</li>
+          </ul>
+        </div>
+      </li>
+      <li class="change">
+        <span class="num">Level</span>
+        <div class="change-body">
+          <h3>Child Part / Machine: har unit ka apna. Sub Child Part: poora batch ÷ bane pieces</h3>
+          <ul>
+            <li>Child Part / Machine ki har unit jitni trips pe gayi, sabka paisa jodti hai (units alag-alag step pe alag batch me ja sakti hain).</li>
+            <li>Sub Child Part: batch ki saari trips ka paisa ÷ jo pieces <strong>stock me gaye</strong>. Vendor ko paisa dene ke baad scrap hue pieces ki cost bache hue pieces pe bant jaati hai.</li>
+          </ul>
+        </div>
+      </li>
+      <li class="change">
+        <span class="num">Time</span>
+        <div class="change-body">
+          <h3>Per minute / per hour step ka time abhi nahi likha</h3>
+          <ul>
+            <li>Order aur stock pehle jaise poore hote hain; sirf part ki cost <strong>rukti</strong> hai.</li>
+            <li>BOM page pe dikhta hai "job-work cost waiting for the time on OSO-…".</li>
+            <li>Purchase time likhe (jab bill ki row bhi bharti hai) → cost turant update.</li>
+          </ul>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>4. Production ka apna kharcha <span class="en">Production cost and expense</span></h2>
+    <ul class="changes">
+      <li class="change">
+        <span class="num">Kab</span>
+        <div class="change-body">
+          <h3>Production apna cost + expense apne aakhri in-house step pe likhta hai</h3>
+          <ul>
+            <li>Aakhri step in-house hai → wahi step (pehle jaisa).</li>
+            <li>Aakhri step(s) outsource hain → unse pehle wala Production ka aakhri step.</li>
+            <li>Poora outsource (koi in-house step nahi) → koi nahi poochta, Production cost ₹0.</li>
+            <li>Sub Child Part: <strong>poore batch ka total</strong> ek baar; per piece me ÷ bane pieces.</li>
+          </ul>
+        </div>
+      </li>
+    </ul>
+    <p>Teeno number (job work, Production cost, Production expense) unit chalte waqt jama hote rehte hain aur <strong>BOM me ek saath</strong> tab jaate hain jab <strong>sach me aakhri step</strong> khatam hota hai. Kaun karta hai:</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Case</th><th>Kaun push karta hai</th><th>Kab</th></tr></thead>
+        <tbody>
+          <tr><td class="n">1</td><td>Aakhri step in-house, QC nahi</td><td>Production</td><td>Aakhri step complete kare (wahi cost + expense likhta hai)</td></tr>
+          <tr><td class="n">2</td><td>Aakhri step in-house, QC ke saath</td><td>QC Head</td><td>QC pass kare (cost Production ne QC bhejte waqt likha)</td></tr>
+          <tr><td class="n">3</td><td>Aakhri step outsource, QC nahi</td><td>Store</td><td>Vendor se wapas receive kare</td></tr>
+          <tr><td class="n">4</td><td>Aakhri step outsource, QC ke saath</td><td>QC Head</td><td>QC pass kare</td></tr>
+          <tr><td class="n">5</td><td>Poora outsource Child Part / Machine</td><td>Store ya QC Head</td><td>Upar 3 / 4 jaisa; Production cost ₹0</td></tr>
+          <tr><td class="n">6</td><td>Poora outsource Sub Child Part (job-work order)</td><td>Store ya QC Head</td><td>Aakhri trip receive, ya aakhri check pass</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="box next">
+      <h3>Naya build purane ki jagah leta hai</h3>
+      <ul>
+        <li><strong>Sabse naya poora build jeetta hai</strong>: har bana unit / batch part ki cost apni asli cost se badal deta hai (average nahi).</li>
+        <li>Lekin naya build jiska time (per minute / per hour) abhi baaki hai, wo pichhle <strong>poore</strong> build ki cost nahi hatata, taaki Sales ko kabhi kam price na dikhe. Time aate hi wo replace karta hai.</li>
+        <li>QC ne aakhri step reject kiya → redo pass hone tak koi push nahi.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>5. Teeno level ki cost <span class="en">Part costs</span></h2>
+    <div class="formula">Sub Child Part (1 piece) = material + scrap + (job work + Production cost + expense) ÷ bane pieces
+Child Part              = Sub Child Parts + apna material + job work + Production cost + expense
+Machine                 = Child Parts + apna material + job work + Production cost + expense
+MRP                     = Machine cost + profit %
+Sale Price              = MRP − discount %   (discount MRP pe lagta hai, cost pe nahi)</div>
+    <ul class="changes">
+      <li class="change">
+        <span class="num">Kahan</span>
+        <div class="change-body">
+          <h3>Kis number ko kaun padhta hai</h3>
+          <ul>
+            <li><strong>Machine:</strong> cost, MRP, Sale Price item pe save hote hain. Sales (Product Master, lead quotation, order form ka minimum bill) yahi padhta hai.</li>
+            <li><strong>Child Part:</strong> sirf cost save hoti hai (MRP nahi, kyunki abhi wo becha nahi jaata). Neeche sawaal 5 dekhiye.</li>
+            <li><strong>profit % / discount %:</strong> Company Admin → Pricing Value. Inhe badalne se sirf us item ka MRP / Sale Price dobara banta hai.</li>
+            <li>Profit / discount khaali ho to 0 maana jaata hai: MRP = cost.</li>
+          </ul>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>6. Price push: teen raaste upar <span class="en">The cascade</span></h2>
+    <p>Koi bhi cost badli to badlav <strong>har raaste</strong> se Machine ke price tak ek saath chadhta hai. Kisi ko BOM page kholne ki zaroorat nahi.</p>
+    <div class="formula">raw material ─┬─> uske bane Sub Child Parts ─> unhe use karne wale Child Parts ─> unki Machines
+              ├─> use seedha use karne wale Child Parts ──────────────────────> unki Machines
+              └─> use seedha use karne wali Machines
+Machine ─> cost / MRP / Sale Price  (Sales ko turant naya price)</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Kya hua</th><th>Push kahan se shuru</th></tr></thead>
+        <tbody>
+          <tr><td>Store ne PO ka maal receive kiya; manual bill; Accounts ka manual price / ₹/kg</td><td>Raw material → teeno raaste</td></tr>
+          <tr><td>Fabrication Master me weight badla (density / material)</td><td>Raw material → teeno raaste</td></tr>
+          <tr><td>Sub Child Part ka build poora; R&amp;D ne edit kiya; Sheet Plan save</td><td>Sub Child Part → Child Parts → Machines</td></tr>
+          <tr><td>Child Part ka build poora; R&amp;D ne BOM badla</td><td>Child Part → Machines</td></tr>
+          <tr><td>Machine ka build poora</td><td>Machine ka price</td></tr>
+          <tr><td>Make ↔ Buy switch, ya Accounts ka estimate</td><td>Wo part → upar sab</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="box good">
+      <h3>Push ke niyam</h3>
+      <ul>
+        <li>Sirf tab likhta hai jab number <strong>sach me badla</strong>.</li>
+        <li>Har part ek badlav me <strong>ek hi baar</strong> (kabhi ghoomta nahi).</li>
+        <li>Jis part ki abhi koi cost nahi, use chhod deta hai: <strong>kabhi ₹0 nahi karta</strong>.</li>
+        <li>Price me koi gadbad ho to bhi stock / QC / purchase ka kaam <strong>kabhi wapas nahi hota</strong>.</li>
+        <li>BOM page kholne pe bhi refresh hota hai (safety net).</li>
+        <li>Pehle bheji gayi quotations <strong>nahi</strong> badalti.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>7. Make or buy: khareeda hua part <span class="en">Bought parts</span></h2>
+    <p>Har Child Part / Sub Child Part ke <strong>do price</strong> hamesha rehte hain: <strong>made cost</strong> (BOM se, push se taaza) aur <strong>bought cost</strong> (aakhri asli kharid, step 1 jaisa, ya Accounts ka estimate). R&amp;D ka radio (Made / Bought) tay karta hai upar wala BOM kaunsa price use kare.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Case</th><th>Price jo use hota hai</th></tr></thead>
+        <tbody>
+          <tr><td>Made</td><td>Made cost</td></tr>
+          <tr><td>Make → Buy, kabhi khareeda nahi</td><td><span class="chip warn">Price pending</span> Made cost placeholder; Accounts ko estimate daalne ka notification + roz reminder</td></tr>
+          <tr><td>Accounts ne estimate daala</td><td>Estimate; pehli asli kharid aate hi wo replace</td></tr>
+          <tr><td>Make → Buy, pehle khareeda tha</td><td>Aakhri kharid ka rate (tareekh ke saath)</td></tr>
+          <tr><td>Buy → Make</td><td>Made cost, abhi ke rate se dobara</td></tr>
+          <tr><td>Switch ke baad purana PO / purana build aaya</td><td>Sirf doosra price update; jo use ho raha wo nahi hilta</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Price pending ho to Sales ko <strong>"Price provisional"</strong> chetavni dikhti hai (Product Master, quotation, order form), par quotation / order <strong>rukta nahi</strong>.</p>
+  </section>
+
+  <section>
+    <h2>8. Ek poora example <span class="en">Worked example</span></h2>
+    <p class="who">Test data (Fan / BP816), GST 18% bahar. Rate badalne ka asar neeche.</p>
+    <ul class="changes">
+      <li class="change">
+        <span class="num">SCP</span>
+        <div class="change-body">
+          <h3>Fan Blade (6 pcs) aur Fan Bush (2 pcs)</h3>
+          <ul>
+            <li><strong>Fan Bush</strong> (poora outsource): cutting ₹25 × 2 = ₹50 + drilling ₹5 × 4 hole × 2 = ₹40 → ₹90 ÷ 2 = <strong>₹45 / piece</strong> job work.</li>
+            <li><strong>Fan Blade</strong>: laser cutting poori line ₹90 ÷ 6 = ₹15 + Production ki drilling ₹60 ÷ 6 = ₹10 → <strong>₹25 / piece</strong> processing.</li>
+            <li>Fan Blade ka material: 0.024 kg × ₹170.28 = <strong>₹4.09</strong>; scrap 0.096 kg × ₹170.28 = <strong>₹16.35</strong> (SS sheet ke naye rate se apne aap).</li>
+          </ul>
+        </div>
+      </li>
+      <li class="change">
+        <span class="num">CP</span>
+        <div class="change-body">
+          <h3>Fan (Child Part, 1 unit)</h3>
+          <ul>
+            <li>Outsource: OSO-0005 welding ₹150 + grinding ₹100, OSO-0006 pre ₹80 + post ₹60 → job work <strong>₹390</strong>.</li>
+            <li>Coating Production ka aakhri in-house step → wahin cost ₹200 + expense ₹50 = <strong>₹250</strong>.</li>
+            <li>Fan = 6 × Fan Blade + 2 × Fan Bush + apna material + ₹390 + ₹250.</li>
+          </ul>
+        </div>
+      </li>
+      <li class="change">
+        <span class="num">M</span>
+        <div class="change-body">
+          <h3>BP816 (Machine): cost ₹4,000, profit 20% → MRP ₹4,800</h3>
+          <ul>
+            <li>Fan ki cost badli → BP816 ki cost aur MRP turant badalte hain, koi page khole bina.</li>
+          </ul>
+        </div>
+      </li>
+    </ul>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Steel ka rate +₹10 / kg (Machine me kul 4 kg, teeno raaston se)</th><th style="text-align:right">Pehle</th><th style="text-align:right">Baad me</th></tr></thead>
+        <tbody>
+          <tr><td>Machine ki cost</td><td class="r">₹4,000.00</td><td class="r">₹4,040.00</td></tr>
+          <tr><td>MRP (+20% profit)</td><td class="r">₹4,800.00</td><td class="r">₹4,848.00</td></tr>
+          <tr class="total"><td>Badlav</td><td class="r"></td><td class="r">+₹40 cost · +₹48 MRP</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Abhi kya nahi hota <span class="en">Not covered yet</span></h2>
+    <div class="box pending">
+      <h3>Ye jaan-boojhkar bahar rakha hai, aapka faisla chahiye</h3>
+      <ul>
+        <li><strong>Freight:</strong> PO ke maal aur outsource dono me apni / kiraye ki gaadi ka kharcha cost me nahi.</li>
+        <li><strong>GST cost me nahi</strong> (input credit maana hai).</li>
+        <li><strong>Purana data:</strong> push 24 Oct se chalta hai. Usse pehle badle rate upar nahi chadhe (jaise kuch BOM lines jo jodte waqt ke rate pe hain). Idea: ek baar "sab dobara price karo" run + button.</li>
+        <li><strong>Stock value:</strong> stock report qty × cost se value nikalti hai; Sub Child Parts aur khareede raw material wahan abhi ₹0 dikhte hain.</li>
+        <li><strong>Manpower cost:</strong> baad me. Production ka likha number tab ghante × rate banega; baaki pipeline wahi.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Aapse sawaal <span class="en">Please confirm</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Sawaal</th><th>Abhi kya hai</th></tr></thead>
+        <tbody>
+          <tr><td class="n">1</td><td>Raw material ka rate = PO line ka rate GST ke bina + PO charges ka hissa, receive pe. Theek hai?</td><td>Haan, aise bana hai</td></tr>
+          <tr><td class="n">2</td><td>Freight (gaadi ka kharcha) part ki cost me chahiye?</td><td>Nahi</td></tr>
+          <tr><td class="n">3</td><td>"Sabse naya poora build jeetta hai" theek hai, ya pichhle builds ka average chahiye?</td><td>Sabse naya</td></tr>
+          <tr><td class="n">4</td><td>Purane data ke liye ek baar re-price run karein? Uska button kise milna chahiye (Accounts, ya R&amp;D bhi)?</td><td>Abhi nahi bana</td></tr>
+          <tr><td class="n">5</td><td>Child Part spare ke roop me bikta hai? Tab uska MRP / Sale Price bhi chahiye.</td><td>Sirf cost</td></tr>
+          <tr><td class="n">6</td><td>Stock report me Sub Child Parts aur raw material ki value bhi dikhni chahiye?</td><td>₹0 dikhta hai</td></tr>
+          <tr><td class="n">7</td><td>Bheji hui quotation price badalne pe wahi rahe?</td><td>Haan, nahi badalti</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>Samtek ERP · price pipeline jaisa 30 Oct 2026 ko bana hua hai. Purchase cost: 26 Oct; outsource + Production cost aur price push: 24 Oct; make or buy aur Fabrication Master sync: 28 Oct.</footer>
+</div>

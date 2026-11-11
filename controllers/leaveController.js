@@ -6,12 +6,115 @@ import LeaveBalanceAdjustment from "../models/LeaveBalanceAdjustment.js";
 import User from "../models/User.js";
 import { sendCommonEmail, CommonEmailType } from "../utils/email.js";
 import mongoose from "mongoose";
+import { canApprove, isInMyCompany, isPlatformAdmin } from "../utils/companyScope.js";
 import notificationService from "../services/notificationService.js";
 
 // ================= HELPER =================
 const calculateDays = (from, to) => {
   const diff = new Date(to).getTime() - new Date(from).getTime();
   return Math.floor(diff / (1000 * 60 * 60 * 24)) + 1;
+};
+
+// The person's own company's leave type first, then one with no company. Matching
+// by name alone picked up another company's rules (2026-11-11).
+const findLeaveType = async (name, companyId) =>
+  (companyId && (await LeaveType.findOne({ name, companyId }))) ||
+  (await LeaveType.findOne({ name, $or: [{ companyId: { $exists: false } }, { companyId: null }] }));
+
+// Days of this type left: allowed + HR's adjustments − approved so far.
+const remainingLeave = async (employeeId, typeDoc, exceptLeaveId) => {
+  const employee = new mongoose.Types.ObjectId(String(employeeId));
+  const [used, adj] = await Promise.all([
+    Leave.aggregate([
+      { $match: { employee, leaveType: typeDoc.name, status: "APPROVED", ...(exceptLeaveId ? { _id: { $ne: exceptLeaveId } } : {}) } },
+      { $group: { _id: null, total: { $sum: "$totalDays" } } },
+    ]),
+    LeaveBalanceAdjustment.aggregate([
+      { $match: { employee, leaveType: typeDoc.name } },
+      { $group: { _id: null, total: { $sum: "$adjustment" } } },
+    ]),
+  ]);
+  return typeDoc.maxDays + (adj[0]?.total || 0) - (used[0]?.total || 0);
+};
+
+// ================= HR: ADD LEAVE FOR SOMEONE (2026-11-11) =================
+// For anyone in the company, with or without a login. HR decides as they enter
+// it, so it's saved approved. Never for yourself: that goes through Apply Leave.
+const LEAVE_HR_ROLES = ["HR-Admin", "Hr Admin", "Company Admin"];
+export const addLeaveForSomeone = async (req, res) => {
+  try {
+    const { employeeId, leaveType, fromDate, toDate, reason } = req.body;
+    if (!employeeId || !leaveType || !fromDate || !toDate || !reason || !String(reason).trim()) {
+      return res.status(400).json({ message: "All fields are required" });
+    }
+    if (!isPlatformAdmin(req.user) && !LEAVE_HR_ROLES.includes(req.user.role)) {
+      return res.status(403).json({ message: "Only HR can add leave for someone." });
+    }
+    if (String(employeeId) === String(req.user._id)) {
+      return res.status(400).json({ message: "For your own leave, use Apply Leave." });
+    }
+    if (!mongoose.isValidObjectId(employeeId) || !(await isInMyCompany(req.user, employeeId))) {
+      return res.status(404).json({ message: "Person not found" });
+    }
+    const person = await User.findById(employeeId).select("fullName username email companyId");
+
+    const totalDays = calculateDays(fromDate, toDate);
+    if (!(totalDays > 0)) {
+      return res.status(400).json({ message: "Invalid leave duration" });
+    }
+    const typeDoc = await findLeaveType(leaveType, person.companyId);
+    if (!typeDoc) {
+      return res.status(400).json({ message: "Invalid leave type" });
+    }
+    const clash = await Leave.exists({
+      employee: person._id,
+      status: { $in: ["PENDING", "APPROVED"] },
+      fromDate: { $lte: new Date(toDate) },
+      toDate: { $gte: new Date(fromDate) },
+    });
+    if (clash) {
+      return res.status(400).json({ message: "This person already has leave on some of these days." });
+    }
+    const remaining = await remainingLeave(person._id, typeDoc);
+    if (totalDays > remaining) {
+      return res.status(400).json({ message: `Only ${remaining} leave(s) remaining for ${typeDoc.name}` });
+    }
+
+    const leave = await Leave.create({
+      employee: person._id,
+      leaveType: typeDoc.name,
+      fromDate,
+      toDate,
+      totalDays,
+      reason: String(reason).trim(),
+      status: "APPROVED",
+      addedBy: req.user._id,
+    });
+
+    // Same as an approval: email (only if they have an address) and a notification.
+    if (person.email) {
+      try {
+        await sendCommonEmail({
+          type: CommonEmailType.LEAVE_APPROVED,
+          to: person.email,
+          name: person.fullName || person.username,
+          data: { from: leave.fromDate, to: leave.toDate, remark: "Added by HR" },
+        });
+      } catch (e) { console.error("Leave added email error:", e.message); }
+    }
+    try {
+      await notificationService.triggerHRMSNotification({
+        action: "leave_approved",
+        data: { employeeUserId: person._id, fromDate: leave.fromDate, toDate: leave.toDate, reason: "Added by HR", leaveId: leave._id },
+        targetCompanyId: person.companyId,
+      });
+    } catch (e) { console.error("Leave added notification error:", e); }
+
+    res.status(201).json(leave);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to add leave" });
+  }
 };
 
 // ================= APPLY LEAVE =================
@@ -31,7 +134,7 @@ export const applyLeave = async (req, res) => {
     }
 
     // 🔹 get leave type config
-    const leaveTypeDoc = await LeaveType.findOne({ name: leaveType });
+    const leaveTypeDoc = await findLeaveType(leaveType, req.user.companyId);
     if (!leaveTypeDoc) {
       return res.status(400).json({ message: "Invalid leave type" });
     }
@@ -166,7 +269,7 @@ export const updateLeave = async (req, res) => {
 
     const totalDays = calculateDays(fromDate, toDate);
 
-    const leaveTypeDoc = await LeaveType.findOne({ name: leaveType });
+    const leaveTypeDoc = await findLeaveType(leaveType, req.user.companyId);
     if (!leaveTypeDoc) {
       return res.status(400).json({ message: "Invalid leave type" });
     }
@@ -378,6 +481,14 @@ export const updateLeaveStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid status" });
     }
 
+    const current = await Leave.findById(id).select("employee").lean();
+    if (!current) {
+      return res.status(404).json({ message: "Leave not found" });
+    }
+    if (!(await canApprove(req.user, current.employee, { features: ["leaveRequests"] }))) {
+      return res.status(403).json({ message: "You can't decide on this person's request." });
+    }
+
     const leave = await Leave.findByIdAndUpdate(
       id,
       { status, remark },
@@ -390,20 +501,22 @@ export const updateLeaveStatus = async (req, res) => {
 
     const employee = leave.employee;
 
-    // 📧 SEND EMAIL
-    await sendCommonEmail({
-      type:
-        status === "APPROVED"
-          ? CommonEmailType.LEAVE_APPROVED
-          : CommonEmailType.LEAVE_REJECTED,
-      to: employee.email,
-      name: employee.name,
-      data: {
-        from: leave.fromDate,
-        to: leave.toDate,
-        remark,
-      },
-    });
+    // 📧 SEND EMAIL (someone with no login may have no address)
+    if (employee.email) {
+      await sendCommonEmail({
+        type:
+          status === "APPROVED"
+            ? CommonEmailType.LEAVE_APPROVED
+            : CommonEmailType.LEAVE_REJECTED,
+        to: employee.email,
+        name: employee.name,
+        data: {
+          from: leave.fromDate,
+          to: leave.toDate,
+          remark,
+        },
+      });
+    }
 
     // 🔔 Notify employee about leave decision
     try {

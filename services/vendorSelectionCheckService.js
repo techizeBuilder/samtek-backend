@@ -19,14 +19,21 @@
 //     An item another vendor quoted cheaper is only a HINT — buying everything
 //     from one vendor can be cheaper overall than splitting and paying charges
 //     twice (user decision).
+//  3. Quotations RECEIVED (2026-10-29, docs/procurement-v2/minimum-quotations-
+//     2026-10.md) — each line needs the company's "minimum quotations per
+//     item" valid quotes from different vendors. Short of it: if enough can
+//     still come (waiting replies, vendors not asked yet, expired quotes to
+//     re-ask) the PO is BLOCKED — no exception; if they can't, it's an
+//     exception like the two checks above.
 // A failed check needs a reason and Company Admin approval, whatever the PO
-// value (purchaseController.createPurchase).
+// value (purchaseController.createPurchase). A blocked one can't be made.
 import ItemQuoteGroup from '../models/ItemQuoteGroup.js';
 import VendorBid from '../models/VendorBid.js';
 import Supplier from '../models/Supplier.js';
 import { ELIGIBLE_VENDOR_FILTER } from './vendorApprovalService.js';
 import { isQuoteExpired, DEFAULT_QUOTE_VALIDITY_DAYS } from './quoteChecksService.js';
 import { quotationMadeAt } from './quotationCarryOverService.js';
+import { formatDims } from './fabricationDemandService.js';
 
 export const SELECTION_EXCEPTION_REASONS = [
   'Only vendor that can supply',
@@ -36,8 +43,18 @@ export const SELECTION_EXCEPTION_REASONS = [
   'Better payment terms',
   'Rate contract',
   "Others didn't reply in time",
+  'Not enough vendors can quote',
   'Other',
 ];
+
+// The reasons the PO review offers for THIS check: "Not enough vendors can
+// quote" only when a line really can't reach the minimum quotations (§60) —
+// otherwise it would be a reason for something that isn't happening
+// (2026-10-31, your browser test 6.2).
+export function exceptionReasonsFor(check) {
+  const short = (check?.quotations || []).some(q => q.status === 'short');
+  return SELECTION_EXCEPTION_REASONS.filter(r => short || r !== 'Not enough vendors can quote');
+}
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const inr = (n) => `₹${round2(n).toLocaleString('en-IN')}`;
@@ -54,15 +71,35 @@ export function lineLanded(quote, quantity) {
 /**
  * Pure core.
  * input = {
- *   vendorId, minVendorsPerItem,
+ *   vendorId, minVendorsPerItem, minQuotationsPerItem,
  *   lines: [{ groupId, itemName, quantity, availableVendorIds[], askedVendorIds[],
+ *             waitingVendorIds[] (asked, request still open), reaskVendorIds[] (their quote expired),
  *             quotes: [{ vendorId, vendorName, unitPrice, gstInclusive, gstPercent, quotationKey }] }],  // VALID quotes, one per vendor
  *   chargesByQuotation: { [quotationKey]: { amount: total incl. GST, at: quotation date } },
  * }
  */
-export function evaluateSelection({ vendorId, minVendorsPerItem = 3, lines = [], chargesByQuotation = {} }) {
+export function evaluateSelection({ vendorId, minVendorsPerItem = 3, minQuotationsPerItem = 1, lines = [], chargesByQuotation = {} }) {
   const me = String(vendorId);
   const failures = [];
+  const blockedReasons = [];
+
+  // 3. Quotations received, per line (§ header; minimum-quotations doc §4).
+  const required = Math.max(1, Number(minQuotationsPerItem) || 1);
+  const quotations = lines.map(l => {
+    const received = new Set((l.quotes || []).map(q => String(q.vendorId)));
+    const asked = new Set((l.askedVendorIds || []).map(String));
+    const possible = new Set([
+      ...received,
+      ...(l.waitingVendorIds || []).map(String),
+      ...(l.reaskVendorIds || []).map(String),
+      ...(l.availableVendorIds || []).map(String).filter(v => !asked.has(v)),
+    ]);
+    const status = received.size >= required ? 'ok' : possible.size >= required ? 'blocked' : 'short';
+    const more = required - received.size;
+    if (status === 'blocked') blockedReasons.push(`${l.itemName}: ${received.size} of ${required} quotations — ${more} more needed; wait for the replies or ask another vendor`);
+    if (status === 'short') failures.push(`${l.itemName}: ${received.size} of ${required} quotations, and only ${possible.size} vendor${possible.size === 1 ? '' : 's'} can still quote`);
+    return { groupId: l.groupId, itemName: l.itemName, required, received: received.size, possible: possible.size, status };
+  });
 
   // 1. Competition, per line.
   const competition = lines.map(l => {
@@ -127,6 +164,11 @@ export function evaluateSelection({ vendorId, minVendorsPerItem = 3, lines = [],
   return {
     passed: failures.length === 0,
     failures,
+    // A blocked item can't go on a PO at all — no exception (2026-10-29).
+    blocked: blockedReasons.length > 0,
+    blockedReasons,
+    quotations,
+    minQuotationsPerItem: required,
     competition,
     basket,
     thisVendor: mine,
@@ -148,7 +190,7 @@ export async function checkVendorSelection({ companyId, vendorId, groupIds, sett
   const vendors = await Supplier.find({ companyId, ...ELIGIBLE_VENDOR_FILTER, suppliedItems: { $in: itemIds } }).select('suppliedItems').lean();
   const bids = await VendorBid.find({ group: { $in: ids }, companyId })
     .select('group vendor vendorName status unitPrice gstInclusive gstPercent submittedAt createdAt quotationRequest manualQuotation')
-    .populate('quotationRequest', 'charges submittedAt')
+    .populate('quotationRequest', 'charges submittedAt status')
     .populate('manualQuotation', 'charges createdAt quoteDate')
     .sort({ createdAt: -1 })
     .lean();
@@ -172,17 +214,33 @@ export async function checkVendorSelection({ companyId, vendorId, groupIds, sett
         gstInclusive: !!b.gstInclusive, gstPercent: b.gstPercent, quotationKey: quotation?._id ? String(quotation._id) : null,
       });
     }
+    // Each asked vendor's newest answer (2026-10-29): still waiting (its
+    // request open), a quote that expired (can be asked again), or won't come
+    // ("can't supply", a request expired unanswered).
+    const newestByVendor = new Map();
+    for (const b of gBids) if (!newestByVendor.has(String(b.vendor))) newestByVendor.set(String(b.vendor), b);
+    const waitingVendorIds = [];
+    const reaskVendorIds = [];
+    for (const [vid, b] of newestByVendor) {
+      if (latestValid.has(vid)) continue;
+      if (b.status === 'Invited') { if (b.quotationRequest?.status !== 'Expired') waitingVendorIds.push(vid); }
+      else if (b.status !== 'Declined') reaskVendorIds.push(vid);
+    }
     return {
       groupId: String(g._id),
-      itemName: g.item?.name || 'Item',
+      // A fabrication card is one size — named, so lines of one item can be
+      // told apart in the check (2026-10-29).
+      itemName: g.sizeValues ? `${g.item?.name || 'Item'} (${formatDims(g.sizeValues)})` : (g.item?.name || 'Item'),
       quantity: g.quantity,
+      waitingVendorIds,
+      reaskVendorIds,
       availableVendorIds: vendors.filter(v => (v.suppliedItems || []).some(id => String(id) === String(g.item?._id))).map(v => String(v._id)),
       askedVendorIds: [...new Set(gBids.map(b => String(b.vendor)))],
       quotes: [...latestValid.values()],
     };
   });
 
-  return evaluateSelection({ vendorId, minVendorsPerItem: settings?.minVendorsPerItem || 3, lines, chargesByQuotation });
+  return evaluateSelection({ vendorId, minVendorsPerItem: settings?.minVendorsPerItem || 3, minQuotationsPerItem: settings?.minQuotationsPerItem || 1, lines, chargesByQuotation });
 }
 
 // Checks the reason Purchase gave for a failed check. Returns an error

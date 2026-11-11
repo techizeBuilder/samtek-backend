@@ -39,6 +39,15 @@ export const DEFAULT_WEIGHTS = { price: 25, quality: 30, delivery: 20, credit: 1
 export const DEFAULT_WATCHLIST_BELOW = 60;
 export const SEVERITIES = ['Minor', 'Major', 'Critical'];
 export const SEVERITY_FACTOR = { Minor: 1, Major: 1.5, Critical: 2 };
+
+// A rejection as score events (2026-10-30): a reject breakdown's lines each
+// with its own qty + severity (one REJ, several reasons); an older REJ is one
+// event. refused: the vendor refused the whole rejection.
+export function rejectionEvents(r, { withRefused = true } = {}) {
+  const refused = withRefused && r.outcome === 'refused';
+  const ev = (qty, severity) => (withRefused ? { qty: Number(qty) || 0, severity: severity || 'Major', refused } : { qty: Number(qty) || 0, severity: severity || 'Major' });
+  return (r.lines || []).length ? r.lines.map(l => ev(l.qty, l.severity)) : [ev(r.rejectedQty, r.severity)];
+}
 export const MIN_HISTORY_EVENTS = 5;            // delivery + quality events before the score is trusted
 export const WINDOW_DAYS = 365;
 const DAY = 24 * 60 * 60 * 1000;
@@ -206,7 +215,7 @@ export async function computeVendorScores({ companyId, vendorIds, now = new Date
       ? QCJob.find({ company: cid, source: 'Purchase', purchaseRequestId: { $in: received.map(p => p._id) }, status: { $in: ['Approved', 'Rejected'] } })
         .select('purchaseRequestId status quantity acceptedQty partialRejections failSeverity updatedAt qcJobId itemName').lean()
       : [],
-    PurchaseRejection.find({ companyId: cid, vendor: { $in: vids } }).select('vendor qcJob rejectedQty severity outcome value recordedAt replacement number').lean(),
+    PurchaseRejection.find({ companyId: cid, vendor: { $in: vids } }).select('vendor qcJob rejectedQty severity outcome value recordedAt replacement number lines.qty lines.severity').lean(),
   ]);
   const rejByJob = new Map();
   const rejById = new Map();
@@ -259,7 +268,7 @@ export async function computeVendorScores({ companyId, vendorIds, now = new Date
     // older one) falls back to the job's own record.
     const recs = rejByJob.get(String(job._id)) || [];
     const rejs = recs.length
-      ? recs.map(r => ({ qty: Number(r.rejectedQty) || 0, severity: r.severity || 'Major', refused: r.outcome === 'refused' }))
+      ? recs.flatMap(r => rejectionEvents(r))
       : [
         ...(job.partialRejections || []).map(p => ({ qty: Number(p.qty) || 0, severity: p.severity || 'Major' })),
         ...(job.status === 'Rejected' ? [{ qty: Number(job.quantity) || 0, severity: job.failSeverity || 'Major' }] : []),

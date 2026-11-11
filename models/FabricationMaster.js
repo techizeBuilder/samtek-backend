@@ -49,6 +49,11 @@ const FabricationMasterSchema = new mongoose.Schema({
     // keeps its old value instead of losing data on the next edit.
     pieces: { type: Number, default: 1 },
     pricePerKg: { type: Number, default: null },
+    // A size R&D has retired (2026-10-28, docs/fabrication-size-sync-2026-10.md):
+    // kept because something still uses it, but never offered for anything
+    // new (reorder, a purchase request, a new BOM line). Copied onto the
+    // inventory item's size by the sync.
+    isDiscontinued: { type: Boolean, default: false },
   }],
   isDiscontinued: { type: Boolean, default: false },
   // Purchase/Used/Receive Unit — same Type+Unit pairing Inventory's Add Item

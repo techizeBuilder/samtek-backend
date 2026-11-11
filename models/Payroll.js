@@ -44,6 +44,15 @@ const PayrollSchema = new Schema(
       default: 0,
     },
 
+    // Worked out on the server from attendance, leave and holidays (2026-11-11).
+    // Rows saved before then don't have these.
+    workingDays: { type: Number },
+    earned: { type: Number },
+    fixedDeduction: { type: Number },
+    lopAmount: { type: Number },
+    workedOnOff: { type: Number },
+    days: { type: Schema.Types.Mixed },
+
     rejectReason: {
       type: String,
     },

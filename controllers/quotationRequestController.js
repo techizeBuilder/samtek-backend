@@ -258,6 +258,16 @@ export function readVendorSubmission(requestItems, bidById, bodyItems) {
     }
     const days = Number(entry.deliveryDays);
     if (!(days >= 1)) return { error: `Enter the delivery time (days) for "${it.itemName}".` };
+    // The GST % — also when the price already includes GST (the % inside
+    // it, 2026-10-26). Was only checked on the page, never for an
+    // included-GST price.
+    const gst = entry.gstPercent === '' || entry.gstPercent == null ? NaN : Number(entry.gstPercent);
+    if (!Number.isFinite(gst)) {
+      return { error: entry.gstInclusive
+        ? `Enter the GST % included in the price for "${it.itemName}" (0 if none).`
+        : `Enter the GST % for "${it.itemName}" (0 if none), or tick "Price already includes GST".` };
+    }
+    if (gst < 0 || gst > 100) return { error: `GST % for "${it.itemName}" must be between 0 and 100.` };
     priced.push({ bid, entry, price, days: Math.round(days) });
   }
   if (!priced.length && !saidCantSupply) return { error: 'Enter a price for at least one item, or tick "Can\'t supply" on the items you can\'t supply.' };

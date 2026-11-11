@@ -32,7 +32,6 @@ import {
   generateInvoiceByDC,
   getTodayOrderItems
 } from '../controllers/dispatchController.js';
-import { getVendorPickupsForDispatch } from '../controllers/purchaseController.js';
 
 const router = express.Router();
 
@@ -86,11 +85,8 @@ router.post('/approve-product', deliveryChallanEdit, approveProduct);           
 router.post('/generate-invoice', deliveryChallanEdit, generateInvoice);              // POST /api/dispatches/generate-invoice
 router.post('/generate-invoice-by-dc', deliveryChallanEdit, generateInvoiceByDC);    // POST /api/dispatches/generate-invoice-by-dc
 
-// Must stay before /:id below, or Express matches "vendor-pickups" as an id.
-// Reuses dashboardView (the one permission every Dispatch-role user already
-// has) rather than a brand-new feature key — this is a minimal stub, not
-// worth its own permission-matrix entry yet (see getVendorPickupsForDispatch).
-router.get('/vendor-pickups', dashboardView, getVendorPickupsForDispatch);   // GET /api/dispatches/vendor-pickups
+// Vendor Pickups moved to /api/dispatch-trips (outsource-v2 slice 6); its old
+// read-only stub endpoint went in slice 8.
 
 router.get('/:id', activeDispatchesView, getDispatchById);                   // GET /api/dispatches/:id
 router.post('/', dispatchPlanningAdd, createDispatch);                  // POST /api/dispatches

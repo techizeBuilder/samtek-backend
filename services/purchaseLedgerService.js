@@ -19,6 +19,9 @@ import { Account, Transaction } from '../models/Account.js';
 
 export const SYSTEM_ACCOUNTS = {
   purchase: { name: 'Purchase', type: 'Expense', description: 'Material bought — posted when it passes QC' },
+  // Outsource Orders (outsource-v2 slice 3, 2026-10-20, OQ5) — job work told
+  // apart from material purchases.
+  job_work: { name: 'Job Work Charges', type: 'Expense', description: 'Outsourced job work — posted when the work passes QC' },
   input_cgst: { name: 'Input CGST', type: 'Asset', description: 'CGST paid on purchases (same-state vendors)' },
   input_sgst: { name: 'Input SGST', type: 'Asset', description: 'SGST paid on purchases (same-state vendors)' },
   input_igst: { name: 'Input IGST', type: 'Asset', description: 'IGST paid on purchases (other-state vendors)' },

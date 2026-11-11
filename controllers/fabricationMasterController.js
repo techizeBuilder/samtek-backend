@@ -7,6 +7,7 @@ import {
 } from '../utils/fabricationCategories.js';
 import { getSectionTable } from '../utils/steelSectionTables.js';
 import { calculateFabricationWeight, densityToKgM3 } from '../utils/fabricationWeightCalc.js';
+import { blockedRemovals, syncLinkedItems, linkedItems } from '../services/fabricationSyncService.js';
 
 export const getCategories = async (req, res) => {
   res.json({
@@ -178,6 +179,14 @@ export const suggestNextCode = async (req, res) => {
   }
 };
 
+// Each entry's linked inventory item code(s) — the page locks the Item Code
+// once one exists (2026-10-28, docs/fabrication-size-sync-2026-10.md §3).
+async function withLinkedCodes(entries, companyId) {
+  if (!entries.length) return entries;
+  const linked = await Item.find({ companyId, fabricationRef: { $in: entries.map(e => e._id) } }).select('code fabricationRef').lean();
+  return entries.map(e => ({ ...e, linkedItemCodes: linked.filter(i => String(i.fabricationRef) === String(e._id)).map(i => i.code) }));
+}
+
 export const getFabricationItems = async (req, res) => {
   try {
     const companyId = req.user.companyId;
@@ -222,11 +231,11 @@ export const getFabricationItems = async (req, res) => {
         FabricationMaster.find(query).sort({ createdAt: -1 }).skip((pageNum - 1) * limitNum).limit(limitNum).lean(),
         FabricationMaster.countDocuments(query),
       ]);
-      return res.json({ success: true, data: items, pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) } });
+      return res.json({ success: true, data: await withLinkedCodes(items, companyId), pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) } });
     }
 
     const items = await FabricationMaster.find(query).sort({ createdAt: -1 }).lean();
-    res.json({ success: true, data: items });
+    res.json({ success: true, data: await withLinkedCodes(items, companyId) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -251,6 +260,7 @@ const buildDimensionsForSave = (category, density, rawDimensions) => {
       weightPerPieceKg,
       pieces: dim.pieces !== undefined && dim.pieces !== null && dim.pieces !== '' ? Number(dim.pieces) || 1 : 1,
       pricePerKg: dim.pricePerKg !== undefined && dim.pricePerKg !== null && dim.pricePerKg !== '' ? Number(dim.pricePerKg) : null,
+      isDiscontinued: !!dim.isDiscontinued,
     };
   });
 };
@@ -357,6 +367,12 @@ export const updateFabricationItem = async (req, res) => {
     if (isSheetMetal !== undefined) update.isSheetMetal = !!isSheetMetal;
     if (itemCode !== undefined && itemCode.trim() && itemCode.trim() !== existing.itemCode) {
       const newCode = itemCode.trim();
+      // Locked once an inventory item exists (2026-10-28): BOM lines, demands
+      // and purchase documents find the item by its code.
+      const linked = await linkedItems(existing, req.user.companyId).select('code').lean();
+      if (linked.length) {
+        return res.status(400).json({ success: false, message: `The Item Code can't change — inventory item ${linked.map(i => i.code).join(', ')} is made from this entry.` });
+      }
       // Global checks — see createFabricationItem's matching comment.
       const [conflict, conflictItem] = await Promise.all([
         FabricationMaster.findOne({ itemCode: newCode, _id: { $ne: existing._id } }),
@@ -381,8 +397,22 @@ export const updateFabricationItem = async (req, res) => {
     }
     Object.assign(update, sanitizeUnitFields(req.body));
 
+    // A size removed in this save may leave the inventory item only when
+    // nothing uses it (docs/fabrication-size-sync-2026-10.md §3–§4).
+    if (update.dimensions) {
+      const blocked = await blockedRemovals(existing, update.dimensions, req.user.companyId);
+      if (blocked.length) {
+        const message = blocked.map(b => `${b.size} is in use (${b.reasons.join(' · ')})`).join('; ')
+          + '. Keep it and mark it Discontinued instead.';
+        return res.status(409).json({ success: false, message: `Can't remove: ${message}`, data: { blocked } });
+      }
+    }
+
+    const oldDimensions = existing.dimensions.map(d => d.toObject());
     const updated = await FabricationMaster.findByIdAndUpdate(existing._id, { $set: update }, { new: true });
-    res.json({ success: true, data: updated });
+    // The inventory item follows in the same step — no manual re-sync.
+    const sync = await syncLinkedItems(updated, oldDimensions, req.user.companyId);
+    res.json({ success: true, data: updated, sync });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

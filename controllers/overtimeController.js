@@ -2,6 +2,8 @@
 
 import Overtime from "../models/Overtime.js";
 import User from "../models/User.js";
+import { canApprove } from "../utils/companyScope.js";
+import { userHasPermission } from "../middleware/permissions.js";
 
 /* ================= CREATE ================= */
 export const createOvertime = async (req, res) => {
@@ -106,6 +108,9 @@ export const updateOvertime = async (req, res) => {
 
     // 🔹 MANAGER: can approve / reject
     if (req.user.role === "Manager") {
+      if (!userHasPermission(req.user, "hrms", "overtimeRequests", "edit") || !(await canApprove(req.user, overtime.employee))) {
+        return res.status(403).json({ message: "You can't decide on this person's request." });
+      }
       if (!["APPROVED", "REJECTED"].includes(status)) {
         return res.status(400).json({
           message: "Invalid status",

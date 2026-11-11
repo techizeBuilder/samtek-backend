@@ -8,9 +8,17 @@
 // once, referenced by code wherever a Child Part uses it (that reference
 // wiring is the next build pass, not this one).
 import { Item } from '../models/Inventory.js';
-import { buildFabricationBomDimensions, resolveFabricationWeight } from '../services/fabricationDemandService.js';
+import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSizeError } from '../services/fabricationDemandService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
 import { cleanProcessDefinition, validateProcessDefinition } from '../utils/processDefinitionValidation.js';
+import { invalidateBomApproval } from '../services/productApprovalService.js';
+
+// What a Sub Child Part is built from. The form sends every field on each save,
+// so an edit is told apart by comparing this before and after (2026-11-02).
+const buildShape = (item) => {
+  const d = item.subChildPartDetails || {};
+  return JSON.stringify([String(d.sourceItem || ''), Number(d.sourceQty) || 0, d.sourceUnit || '', String(d.sourceDimensionVariantId || ''), cleanProcessDefinition(JSON.parse(JSON.stringify(d.processDefinition || [])))]);
+};
 
 const pad3 = (n) => String(n).padStart(3, '0');
 
@@ -117,7 +125,7 @@ export const getSubChildParts = async (req, res) => {
       const limitNum = Math.max(1, parseInt(limit, 10) || 20);
       const [items, total] = await Promise.all([
         Item.find(query)
-          .select('name code image specification qty unit materialFlow minStock reorderQty isDiscontinued subChildPartDetails createdAt')
+          .select('name code image specification qty unit materialFlow minStock reorderQty isDiscontinued subChildPartDetails createdAt purchase internalManufacturing pricePending purchaseCost purchaseCostKind makeBuyHistory partSourcing approvalRedo')
           .populate('subChildPartDetails.sourceItem', populateSelect)
           .sort({ name: 1 }).skip((pageNum - 1) * limitNum).limit(limitNum).lean(),
         Item.countDocuments(query),
@@ -129,7 +137,7 @@ export const getSubChildParts = async (req, res) => {
     }
 
     const items = await Item.find(query)
-      .select('name code image specification qty unit materialFlow minStock reorderQty isDiscontinued subChildPartDetails createdAt')
+      .select('name code image specification qty unit materialFlow minStock reorderQty isDiscontinued subChildPartDetails createdAt purchase internalManufacturing pricePending purchaseCost purchaseCostKind makeBuyHistory partSourcing approvalRedo')
       .populate('subChildPartDetails.sourceItem', populateSelect)
       .sort({ name: 1 }).limit(500).lean();
     res.json({ success: true, data: items });
@@ -160,6 +168,12 @@ function validateBody(body, { requireImage }) {
   const { name, code, image, sourceItemId, sourceQty, processDefinition } = body;
   if (!name?.trim() || !code?.trim()) return 'name and code are required';
   if (requireImage && !image) return 'A Design File (image or PDF) is required.';
+  // Bought from a vendor from day one (2026-10-28): no source material or
+  // processes needed — they're asked for when it's switched to Made.
+  if (body.makeOrBuy === 'buy') {
+    if (sourceItemId && !(Number(sourceQty) > 0)) return 'sourceQty must be a positive number — how much of the source material one Sub Child Part unit consumes.';
+    return null;
+  }
   if (!sourceItemId) return 'A source raw material is required — a Sub Child Part is always exactly one material.';
   if (!(Number(sourceQty) > 0)) return 'sourceQty must be a positive number — how much of the source material one Sub Child Part unit consumes.';
   // Sub Child Part now picks its own QC steps too (QC multi-checkpoint
@@ -171,8 +185,10 @@ function validateBody(body, { requireImage }) {
 // size needs a real pick — mirrors the BOM material picker's own
 // FabricationVariantAmountFields, which auto-selects the sole variant when
 // there's only one, but requires a choice otherwise.
-function validateDimensionVariant(sourceItem, sourceDimensionVariantId) {
+function validateDimensionVariant(sourceItem, sourceDimensionVariantId, keepId = null) {
   if (!sourceItem.fabricationRef) return null;
+  const discErr = discontinuedSizeError(sourceItem, sourceDimensionVariantId, keepId);
+  if (discErr) return discErr;
   const variants = (sourceItem.dimensionVariants || []).filter(v => !v.isLeftover);
   if (variants.length > 1 && !sourceDimensionVariantId) {
     return 'This material has more than one catalog dimension size — pick which one this Sub Child Part is cut from.';
@@ -201,11 +217,16 @@ export const createSubChildPart = async (req, res) => {
       });
     }
 
-    const sourceItem = await Item.findOne({ _id: sourceItemId, companyId: req.user.companyId }).lean();
-    if (!sourceItem) return res.status(404).json({ success: false, message: 'Source raw material not found.' });
-    const dimErr = validateDimensionVariant(sourceItem, sourceDimensionVariantId);
-    if (dimErr) return res.status(400).json({ success: false, message: dimErr });
-    const { materialsCost, unitWeightKg } = await computeSourceMetrics(sourceItem, sourceQty, sourceUnit?.trim() || sourceItem.unit || '', sourceDimensionVariantId);
+    const bought = req.body.makeOrBuy === 'buy';
+    const sourceItem = sourceItemId ? await Item.findOne({ _id: sourceItemId, companyId: req.user.companyId }).lean() : null;
+    if (sourceItemId && !sourceItem) return res.status(404).json({ success: false, message: 'Source raw material not found.' });
+    if (sourceItem) {
+      const dimErr = validateDimensionVariant(sourceItem, sourceDimensionVariantId);
+      if (dimErr) return res.status(400).json({ success: false, message: dimErr });
+    }
+    const { materialsCost, unitWeightKg } = sourceItem
+      ? await computeSourceMetrics(sourceItem, sourceQty, sourceUnit?.trim() || sourceItem.unit || '', sourceDimensionVariantId)
+      : { materialsCost: 0, unitWeightKg: 0 };
 
     const newItem = await Item.create({
       name: name.trim(), code: codeTrim, image: image || '',
@@ -217,11 +238,15 @@ export const createSubChildPart = async (req, res) => {
       // bom-hierarchy-redesign-2026-09.md §3. Left at the schema default
       // (false) here deliberately; the reorder routing itself is the next
       // build pass, not this one.
-      purchase: false,
+      // Bought from day one (2026-10-28): price pending until Accounts enters
+      // an estimate.
+      purchase: bought,
+      partSourcing: bought ? 'buy' : 'make',
+      ...(bought ? { pricePending: true, makeBuyHistory: [{ from: null, to: 'buy', at: new Date(), by: req.user._id, byName: req.user.fullName || req.user.username || '' }] } : {}),
       subChildPartDetails: {
-        sourceItem: sourceItem._id,
-        sourceQty: Number(sourceQty),
-        sourceUnit: sourceUnit?.trim() || sourceItem.unit || '',
+        sourceItem: sourceItem?._id || null,
+        sourceQty: sourceItem ? Number(sourceQty) : null,
+        sourceUnit: sourceItem ? (sourceUnit?.trim() || sourceItem.unit || '') : '',
         materialsCost,
         unitWeightKg,
         sourceDimensionVariantId: sourceDimensionVariantId || null,
@@ -230,6 +255,10 @@ export const createSubChildPart = async (req, res) => {
       companyId: req.user.companyId, createdBy: req.user._id,
     });
 
+    if (bought) {
+      const { notifyBoughtNow } = await import('../services/makeBuyService.js');
+      await notifyBoughtNow(newItem);
+    }
     res.status(201).json({ success: true, data: newItem });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -245,6 +274,7 @@ export const updateSubChildPart = async (req, res) => {
   try {
     const item = await Item.findOne({ _id: req.params.id, companyId: req.user.companyId, productKind: 'SubChildPart' });
     if (!item) return res.status(404).json({ success: false, message: 'Sub Child Part not found.' });
+    const shapeBefore = buildShape(item);
 
     const { name, image, specification, sourceItemId, sourceQty, sourceUnit, sourceDimensionVariantId, processDefinition } = req.body;
     if (name !== undefined) item.name = name.trim();
@@ -266,7 +296,7 @@ export const updateSubChildPart = async (req, res) => {
       // just picked above, or the one already saved.
       const checkAgainst = sourceItem || await Item.findOne({ _id: item.subChildPartDetails.sourceItem }).lean();
       if (checkAgainst) {
-        const dimErr = validateDimensionVariant(checkAgainst, sourceDimensionVariantId);
+        const dimErr = validateDimensionVariant(checkAgainst, sourceDimensionVariantId, item.subChildPartDetails.sourceDimensionVariantId);
         if (dimErr) return res.status(400).json({ success: false, message: dimErr });
       }
       item.subChildPartDetails.sourceDimensionVariantId = sourceDimensionVariantId || null;
@@ -278,7 +308,9 @@ export const updateSubChildPart = async (req, res) => {
     if (sourceUnit !== undefined) item.subChildPartDetails.sourceUnit = sourceUnit.trim();
     if (processDefinition !== undefined) {
       const cleaned = cleanProcessDefinition(processDefinition);
-      const err = validateProcessDefinition(cleaned, { requireAtLeastOne: true, requireAtLeastOneQcStep: true });
+      // A bought part may have none yet — they're asked for when it's switched to Made.
+      const bought = item.partSourcing === 'buy';
+      const err = validateProcessDefinition(cleaned, { requireAtLeastOne: !bought, requireAtLeastOneQcStep: true });
       if (err) return res.status(400).json({ success: false, message: err });
       item.subChildPartDetails.processDefinition = cleaned;
     }
@@ -300,6 +332,11 @@ export const updateSubChildPart = async (req, res) => {
     }
 
     await item.save();
+    if (buildShape(item) !== shapeBefore) await invalidateBomApproval(item._id, req.user.companyId, { byName: req.user.fullName || req.user.username || '', what: 'source material or steps changed' });
+    // Slice 4 (2026-10-24): its cost may have changed — climb it to every
+    // Child Part / Machine using it (never fails the save).
+    const { onSubChildPartChanged } = await import('../services/priceCascadeService.js');
+    await onSubChildPartChanged(item._id, req.user.companyId);
     res.json({ success: true, data: item });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

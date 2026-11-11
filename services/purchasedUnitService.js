@@ -18,7 +18,7 @@ import '../models/PurchaseRejection.js'; // listUnits populates `rejections`
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
 
-const COUNTABLE = /^(pieces?|pcs?\.?|pc\.?|nos?\.?|numbers?|units?|sets?|each|ea)$/i;
+export const COUNTABLE = /^(pieces?|pcs?\.?|pc\.?|nos?\.?|numbers?|units?|sets?|each|ea)$/i;
 export const isCountableUnit = (unit) => COUNTABLE.test(String(unit || '').trim());
 
 export const serialKeyOf = (s) => String(s || '').trim().toUpperCase();
@@ -278,11 +278,38 @@ export async function markRejected(job, { unitIds = null, qty = 0, rejection = n
   }
 }
 
+// The customer's Order a purchase request was raised for ('' when for stock):
+// its sale item → the Sale → its Order's code.
+async function customerOrderOfRequest(prId) {
+  try {
+    const PurchaseRequest = (await import('../models/PurchaseRequest.js')).default;
+    const pr = await PurchaseRequest.findById(prId).select('saleItemId').lean();
+    if (!pr?.saleItemId) return '';
+    const Sale = (await import('../models/Sale.js')).default;
+    const sale = await Sale.findOne({ 'items._id': pr.saleItemId }).select('order').lean();
+    if (!sale?.order) return '';
+    const Order = (await import('../models/Order.js')).default;
+    const order = await Order.findById(sale.order).select('orderCode').lean();
+    return order?.orderCode || '';
+  } catch { return ''; }
+}
+
 // QC passed what was left of a purchase job. Never throws.
 export async function markAccepted(job) {
   try {
     if (!isPurchaseJob(job)) return;
-    await PurchasedUnit.updateMany({ purchaseRequest: job.purchaseRequestId, isLot: false, status: 'In QC' }, { $set: { status: 'Accepted', acceptedQty: 1 } });
+    // Serial number work step 2 (2026-10-31): an accepted unit is in Store's
+    // stock — its first place, and the start of its trail. Bought FOR a
+    // customer's order (the request names its sale item), it goes to that
+    // customer instead (§5.8).
+    const orderCode = await customerOrderOfRequest(job.purchaseRequestId);
+    const place = orderCode
+      ? { kind: 'Sold', order: null, orderNo: '', label: null, labelNo: '', customerOrderCode: orderCode }
+      : { kind: 'Stock', order: null, orderNo: '', label: null, labelNo: '', customerOrderCode: '' };
+    await PurchasedUnit.updateMany({ purchaseRequest: job.purchaseRequestId, isLot: false, status: 'In QC' }, {
+      $set: { status: 'Accepted', acceptedQty: 1, place },
+      $push: { trail: { at: new Date(), by: job.inspector || 'QC', what: orderCode ? 'Accepted — bought for the customer\'s order' : 'Accepted into stock', note: job.qcJobId || '' } },
+    });
     const lot = await PurchasedUnit.findOne({ purchaseRequest: job.purchaseRequestId, isLot: true });
     if (lot) {
       lot.acceptedQty = Number(job.acceptedQty ?? job.quantity) || 0;
@@ -299,6 +326,8 @@ export async function markAccepted(job) {
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export async function listUnits({ companyId, search = '', status = '', kind = '', page = 1, limit = 50 }) {
+  // Serial number work step 2 (2026-10-31): the stickers Store put on stock parts.
+  if (kind === 'sticker') return listStickers({ companyId, search, page, limit });
   const q = { companyId };
   if (status && status !== 'all') q.status = status;
   if (kind === 'serial') q.isLot = false;
@@ -319,5 +348,24 @@ export async function listUnits({ companyId, search = '', status = '', kind = ''
   const { claimsByUnit } = await import('./vendorWarrantyClaimService.js');
   const claims = await claimsByUnit(companyId, rows.map(r => r._id));
   for (const r of rows) r.claims = claims.get(String(r._id)) || null;
+  // Where each serial is now (serial number work step 2): its trail resolved.
+  const { trailOf } = await import('./serialTrailService.js');
+  for (const r of rows) if (!r.isLot && r.status === 'Accepted') r.where = await trailOf(r, companyId);
+  return { rows, total, page: pg, limit: lim };
+}
+
+async function listStickers({ companyId, search = '', page = 1, limit = 50 }) {
+  const PartLabel = (await import('../models/PartLabel.js')).default;
+  const q = { companyId, status: { $ne: 'Unlabelled' } };
+  const s = String(search || '').trim();
+  if (s) { const re = new RegExp(escapeRe(s), 'i'); q.$or = [{ labelNo: re }, { itemName: re }, { itemCode: re }, { 'builtIn.orderNo': re }]; }
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const pg = Math.max(Number(page) || 1, 1);
+  const [rows, total] = await Promise.all([
+    PartLabel.find(q).sort({ labelledAt: -1 }).skip((pg - 1) * lim).limit(lim).populate('contains.units', 'serialNumber itemName vendorName').populate('contains.labels', 'labelNo itemName').lean(),
+    PartLabel.countDocuments(q),
+  ]);
+  const { trailOf } = await import('./serialTrailService.js');
+  for (const r of rows) { r.isSticker = true; r.where = await trailOf(r, companyId); }
   return { rows, total, page: pg, limit: lim };
 }

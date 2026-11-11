@@ -18,6 +18,15 @@ const findUserModule = (modules, moduleName) => {
   return modules.find(m => (m.name || '').toLowerCase() === alternate) || null;
 };
 
+// The same question as checkPermission, for code that needs the answer rather
+// than a response (Super Admin passes, as there).
+export const userHasPermission = (user, module, feature, action) => {
+  if (!user) return false;
+  if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') return true;
+  const found = findUserModule(user.permissions?.modules, module);
+  return !!found?.features?.find((f) => f.key === feature)?.[action];
+};
+
 // Middleware to check action-level permissions
 export const checkPermission = (module, feature, action) => {
   return (req, res, next) => {

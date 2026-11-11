@@ -27,6 +27,21 @@ import { readRevisedDate, fmtDay } from './deliveryFollowUpService.js';
 import notificationService from './notificationService.js';
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// A replacement's sizes: the rejection's lines grouped by size (2026-10-30);
+// a rejection without sized lines → the original's size, all its pieces.
+function replacementSizes(orig, rejection) {
+  const sized = (rejection.lines || []).filter(l => l.sizeValues);
+  if (!sized.length) return [{ ...orig.fabricationDimensionLines[0], quantity: rejection.rejectedQty }];
+  const bySize = new Map();
+  for (const l of sized) {
+    const k = JSON.stringify(l.sizeValues);
+    bySize.set(k, { values: l.sizeValues, quantity: (bySize.get(k)?.quantity || 0) + (Number(l.qty) || 0) });
+  }
+  return [...bySize.values()];
+}
+// A replacement must come within a week of the answer (client, 2026-10-29).
+export const REPLACEMENT_MAX_DAYS = 7;
 export const OPEN_REJECTION_STATUSES = ['Awaiting vendor answer', 'Replacement expected'];
 export const OUTCOME_LABELS = {
   replace: 'Vendor will replace it',
@@ -45,6 +60,8 @@ export function readAnswer(body, now = new Date()) {
   if (outcome === 'replace') {
     const d = readRevisedDate({ date: body?.expectedDate, reason: 'replacement' }, now);
     if (d.error) return { error: d.error === 'Pick the new expected date.' ? 'Enter the date the vendor will send the replacement.' : d.error };
+    const last = new Date(now.getFullYear(), now.getMonth(), now.getDate() + REPLACEMENT_MAX_DAYS, 23, 59, 59);
+    if (d.date > last) return { error: `The replacement must come within ${REPLACEMENT_MAX_DAYS} days — by ${fmtDay(last)} at the latest.` };
     return { outcome, note, expectedDate: d.date };
   }
   if (outcome === 'refused' && !note) return { error: 'Add a note on what the vendor said — it counts against their score.' };
@@ -86,7 +103,10 @@ async function nextRequestId() {
 }
 
 // QC just failed `qty` of a purchase job (job already saved). Never throws.
-export async function onMaterialRejected(job, qty, user = null, req = null) {
+// evidence = { photos, failedChecks } of that decision (2026-10-30); a reject
+// breakdown line also gives its own severity, reason / remark, parameter, the
+// decisionId and the checklist snapshot.
+export async function onMaterialRejected(job, qty, user = null, req = null, evidence = {}) {
   try {
     if (!job || job.source !== 'Purchase') return null;
     const ctx = await jobContext(job);
@@ -113,12 +133,24 @@ export async function onMaterialRejected(job, qty, user = null, req = null) {
       itemName: line.itemName,
       rejectedQty,
       qtyUnit: job.unit || '',
-      reason: job.failReason || '',
-      severity: ['Minor', 'Major', 'Critical'].includes(job.failSeverity) ? job.failSeverity : 'Major',
+      reason: evidence.reason ?? job.failReason ?? '',
+      severity: ['Minor', 'Major', 'Critical'].includes(evidence.severity) ? evidence.severity
+        : ['Minor', 'Major', 'Critical'].includes(job.failSeverity) ? job.failSeverity : 'Major',
       value: money.value,
       net: money.net,
       gst: money.gst,
       replacementOf: parent?._id || null,
+      photos: Array.isArray(evidence.photos) ? evidence.photos : [],
+      failedChecks: Array.isArray(evidence.failedChecks) ? evidence.failedChecks : [],
+      lines: Array.isArray(evidence.lines) ? evidence.lines.map(l => ({
+        qty: l.qty, parameter: l.parameter, other: !!l.other, remark: l.remark, severity: l.severity,
+        sizeValues: l.sizeValues || null, photos: l.photos || [],
+      })) : [],
+      decisionId: evidence.decisionId || '',
+      parameter: evidence.parameter || '',
+      remark: evidence.remark || '',
+      checklistSnapshot: Array.isArray(evidence.checklistSnapshot) ? evidence.checklistSnapshot : [],
+      checklistApplies: typeof evidence.checklistApplies === 'boolean' ? evidence.checklistApplies : null,
     };
     // Numbered REJ-0001…; two rejections at the same moment can pick the
     // same number — the unique index refuses the second, so it takes the next.
@@ -141,14 +173,14 @@ export async function onMaterialRejected(job, qty, user = null, req = null) {
 
     await logPoEvent({
       po, user, req, action: 'qc_rejected',
-      summary: `QC rejected ${rejectedQty} ${job.unit || ''} of ${line.itemName}${parent ? ' (the replacement)' : ''} — ${job.failReason || 'no reason given'} (${inr(money.value)}). Waiting for the vendor's answer (${rejection.number}).`.replace(/\s+/g, ' '),
-      details: { rejection: String(rejection._id), number: rejection.number, qty: rejectedQty, value: money.value, reason: job.failReason },
+      summary: `QC rejected ${rejectedQty} ${job.unit || ''} of ${line.itemName}${parent ? ' (the replacement)' : ''} — ${rejection.parameter ? `${rejection.parameter}: ` : ''}${rejection.reason || 'no reason given'} (${inr(money.value)}). Waiting for the vendor's answer (${rejection.number}).`.replace(/\s+/g, ' '),
+      details: { rejection: String(rejection._id), number: rejection.number, qty: rejectedQty, value: money.value, reason: rejection.reason, parameter: rejection.parameter, decisionId: rejection.decisionId },
     });
     try {
       if (po.createdBy) {
         await notificationService.createNotification({
           title: 'QC rejected purchased material',
-          message: `${po.purchaseOrderNumber} (${rejection.vendorName}): ${rejectedQty} ${job.unit || ''} of ${line.itemName} rejected — ${job.failReason || 'no reason given'}. Ask the vendor and record their answer (${rejection.number}).`.replace(/\s+/g, ' '),
+          message: `${po.purchaseOrderNumber} (${rejection.vendorName}): ${rejectedQty} ${job.unit || ''} of ${line.itemName} rejected — ${rejection.parameter ? `${rejection.parameter}: ` : ''}${rejection.reason || 'no reason given'}. Ask the vendor and record their answer (${rejection.number}).`.replace(/\s+/g, ' '),
           type: 'purchase',
           targetUserId: po.createdBy,
           targetCompanyId: po.companyId,
@@ -233,7 +265,9 @@ export async function recordAnswer({ rejectionId, body, user, req = null }) {
       purchaseQuantity: orig.purchaseUnit && factor ? round2(rejection.rejectedQty * factor) : (orig.purchaseUnit ? rejection.rejectedQty : null),
       conversionFactor: orig.conversionFactor || null,
       warrantyMonths: orig.warrantyMonths || 0,
-      fabricationDimensionLines: fab ? [{ ...orig.fabricationDimensionLines[0], quantity: rejection.rejectedQty }] : [],
+      // Fabrication: the rejected pieces per size (a breakdown's lines say
+      // which size each was); otherwise the original's size.
+      fabricationDimensionLines: fab ? replacementSizes(orig, rejection) : [],
       replacementFor: rejection._id,
       notes: `Replacement for ${rejection.number} (${rejection.reason || 'QC rejected'}) — ${po.purchaseOrderNumber}`,
     });
@@ -390,7 +424,7 @@ export async function decideMoneyBack({ id, body, user, req = null }) {
       await postEntry({
         companyId: mb.companyId, unit: mb.unit,
         lines: [{ key: 'vendor_refund_due', debit: mb.amount }, { key: 'advance_to_vendors', credit: mb.amount }],
-        description: `${mb.poNumber} cancelled: ${mb.vendorName} to refund the advance ${inr(mb.amount)}`,
+        description: mb.source === 'Outsource' ? `${mb.poNumber}: ${mb.vendorName} to refund ${inr(mb.amount)} paid above the bill` : `${mb.poNumber} cancelled: ${mb.vendorName} to refund the advance ${inr(mb.amount)}`,
         reference: mb.poNumber, relatedDocument: 'PurchaseReturn', relatedDocumentId: mb._id, user, prefix: 'RFD',
       });
     } catch (err) {

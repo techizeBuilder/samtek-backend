@@ -1,4 +1,4 @@
-import PurchaseInvoice from '../models/PurchaseInvoice.js';
+import PurchaseInvoice, { isStagedBill } from '../models/PurchaseInvoice.js';
 import VendorPayment from '../models/VendorPayment.js';
 import PurchaseReturn from '../models/PurchaseReturn.js';
 import Supplier from '../models/Supplier.js';
@@ -10,6 +10,7 @@ import { postEntry, gstLines } from '../services/purchaseLedgerService.js';
 import { payBill, payableNow, owedNow } from '../services/purchaseBillService.js';
 import { Company } from '../models/Company.js';
 import { gstSplitFor } from '../services/gstStateService.js';
+import { removePaymentSlip, discardSlipUpload } from '../middleware/paymentSlipUpload.js';
 
 /**
  * GET /purchases/invoices/gst-type?vendorId= — CGST + SGST or IGST for a bill
@@ -73,10 +74,11 @@ export const createPurchaseInvoice = async (req, res) => {
             throw new Error(`Duplicate invoice number "${invoiceNo}" already exists for this vendor.`);
         }
 
-        // 2. Check if vendor is active
+        // 2. The vendor exists (the old Active / Inactive status was retired
+        // 2026-10-28; invoices are never gated by approval either).
         const vendor = await Supplier.findOne({ _id: vendorId, companyId });
-        if (!vendor || vendor.status === 'inactive') {
-            throw new Error('Vendor is inactive or not found');
+        if (!vendor) {
+            throw new Error('Vendor not found');
         }
 
         // 3. The figures — worked out here from the lines, not trusted.
@@ -152,6 +154,10 @@ export const getPurchaseInvoices = async (req, res) => {
         if (status && status !== 'All') query.status = status;
         // A PO bill's stage (2026-10-12): Advance due / Awaiting material / Payable / Paid / Cancelled.
         if (stage && stage !== 'All') query.stage = stage;
+        // Bill type (outsource-v2 slice 3): PO / Outsource / Without a PO.
+        if (req.query.type === 'po') query.purchaseOrder = { $ne: null };
+        else if (req.query.type === 'outsource') query.outsourceOrder = { $ne: null };
+        else if (req.query.type === 'manual') { query.purchaseOrder = null; query.outsourceOrder = null; }
         if (search) {
             query.$or = [
                 { invoiceNo: { $regex: search, $options: 'i' } },
@@ -166,6 +172,8 @@ export const getPurchaseInvoices = async (req, res) => {
             // ambiguous (20 what? pieces, kg, sheets?).
             .populate('items.item', 'purchaseUnit unit')
             .populate('purchaseOrder', 'purchaseOrderNumber status paymentTerms deliveryClock')
+            // An Outsource Order's bill (outsource-v2 slice 3, 2026-10-20).
+            .populate('outsourceOrder', 'orderNo status paymentTerms')
             .sort({ invoiceDate: -1 })
             .skip((page - 1) * limit)
             .limit(parseInt(limit));
@@ -187,7 +195,7 @@ export const getPurchaseInvoices = async (req, res) => {
         res.json({
             success: true,
             data: {
-                invoices: invoices.map(inv => ({ ...inv.toObject(), payableNow: inv.purchaseOrder ? payableNow(inv) : null, vendorInvoices: inv.purchaseOrder ? (vendorInvoicesByPo.get(String(inv.purchaseOrder._id)) || []) : [] })),
+                invoices: invoices.map(inv => ({ ...inv.toObject(), payableNow: isStagedBill(inv) ? payableNow(inv) : null, vendorInvoices: inv.purchaseOrder ? (vendorInvoicesByPo.get(String(inv.purchaseOrder._id)) || []) : [] })),
                 pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / limit) }
             }
         });
@@ -360,6 +368,7 @@ export const getVendorPayments = async (req, res) => {
             VendorPayment.find(query)
                 .populate('vendor', 'supplierName supplierCode')
                 .populate('purchaseOrder', 'purchaseOrderNumber')
+                .populate('outsourceOrder', 'orderNo')
                 .populate('bankAccount', 'accountName')
                 .populate('allocations.invoice', 'invoiceNo')
                 .populate('createdBy', 'fullName')
@@ -405,6 +414,15 @@ export const getVendorOutstanding = async (req, res) => {
                     as: 'poInfo'
                 }
             },
+            // An Outsource Order's bill (outsource-v2 slice 3): its number.
+            {
+                $lookup: {
+                    from: 'outsourceorders',
+                    localField: 'outsourceOrder',
+                    foreignField: '_id',
+                    as: 'osoInfo'
+                }
+            },
             {
                 $group: {
                     _id: '$vendor',
@@ -422,7 +440,9 @@ export const getVendorOutstanding = async (req, res) => {
                             // invoice and show it's a PO advance/settlement
                             // (2026-10) — see createVendorPayment's invoiceIds.
                             purchaseOrder: '$purchaseOrder',
-                            poNumber: { $arrayElemAt: ['$poInfo.purchaseOrderNumber', 0] },
+                            outsourceOrder: '$outsourceOrder',
+                            // The order number shown: the PO's, or the outsource order's.
+                            poNumber: { $ifNull: [{ $arrayElemAt: ['$poInfo.purchaseOrderNumber', 0] }, { $arrayElemAt: ['$osoInfo.orderNo', 0] }] },
                             // The PO bill (2026-10-12): where it stands and
                             // what can be paid now (filled in below).
                             advancePercent: '$advancePercent',
@@ -462,7 +482,7 @@ export const getVendorOutstanding = async (req, res) => {
         ]);
         for (const v of outstandingData) {
             v.invoices = v.invoices
-                .map(inv => ({ ...inv, payableNow: inv.purchaseOrder ? payableNow({ ...inv, totalAmount: inv.totalAmount }) : null, owedNow: owedNow({ ...inv, paidAmount: inv.paidAmount ?? (inv.totalAmount - inv.balance) }) }))
+                .map(inv => ({ ...inv, payableNow: isStagedBill(inv) ? payableNow({ ...inv, totalAmount: inv.totalAmount }) : null, owedNow: owedNow({ ...inv, paidAmount: inv.paidAmount ?? (inv.totalAmount - inv.balance) }) }))
                 .sort((a, b) => new Date(a.date) - new Date(b.date));
             // What we owe this vendor now and haven't paid — unpaid advances,
             // received + QC-passed material, bills without a PO; not material
@@ -470,9 +490,9 @@ export const getVendorOutstanding = async (req, res) => {
             const r2 = (n) => Math.round(n * 100) / 100;
             v.pending = {
                 total: r2(v.invoices.reduce((s, i) => s + i.owedNow.owed, 0)),
-                advance: r2(v.invoices.filter(i => i.purchaseOrder).reduce((s, i) => s + i.owedNow.advance, 0)),
-                material: r2(v.invoices.filter(i => i.purchaseOrder).reduce((s, i) => s + i.owedNow.material, 0)),
-                noPo: r2(v.invoices.filter(i => !i.purchaseOrder).reduce((s, i) => s + i.owedNow.owed, 0)),
+                advance: r2(v.invoices.filter(i => isStagedBill(i)).reduce((s, i) => s + i.owedNow.advance, 0)),
+                material: r2(v.invoices.filter(i => isStagedBill(i)).reduce((s, i) => s + i.owedNow.material, 0)),
+                noPo: r2(v.invoices.filter(i => !isStagedBill(i)).reduce((s, i) => s + i.owedNow.owed, 0)),
                 overdue: r2(v.invoices.reduce((s, i) => s + i.owedNow.overdue, 0)),
                 onOrder: r2(v.totalOutstanding - v.invoices.reduce((s, i) => s + i.owedNow.owed, 0)),
             };
@@ -1156,7 +1176,7 @@ export const createAutoPurchaseInvoice = async (purchaseOrder, user) => {
             // supplier in the whole database"), a real cross-tenant exposure
             // found while auditing the item-wise PR consolidation rework.
             const Supplier = mongoose.model('Supplier');
-            const fallbackSupplier = await Supplier.findOne({ status: 'active', companyId });
+            const fallbackSupplier = await Supplier.findOne({ companyId });
             if (fallbackSupplier) {
                 vendorId = fallbackSupplier._id;
             }
@@ -1260,7 +1280,9 @@ export const createAutoPurchaseInvoice = async (purchaseOrder, user) => {
 
         await invoice.save();
         console.log(`✅ [Auto Invoice] Purchase Invoice ${invoiceNo} recorded successfully.`);
-        recalcPricingForInvoiceItems(invoice).catch(e => console.error('❌ Pricing recalc error (createAutoPurchaseInvoice):', e));
+        // No re-price here (2026-10-26): a PO's bill is made when the PO is
+        // approved, before anything arrives — the price changes at the Store
+        // receive, from the line received (itemPricingService.poLineUnitCost).
 
         // No ledger entry here (2026-10-12): a PO is a promise to buy, not
         // money owed. The material is posted when it passes QC, the advance
@@ -1273,4 +1295,33 @@ export const createAutoPurchaseInvoice = async (purchaseOrder, user) => {
     }
 };
 
-
+/**
+ * POST /api/accounts/purchases/payments/:id/slip
+ * Upload a payment slip (bank screenshot, cheque photo, PDF) to an existing
+ * vendor payment. The file is stored in uploads/payment-slips/ by the
+ * paymentSlipUpload multer middleware configured in accountsRoutes.js.
+ * Added 2026-10-29.
+ */
+export const uploadVendorPaymentSlip = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const payment = await VendorPayment.findOne({ _id: id, companyId: req.user.companyId });
+        if (!payment) {
+            await discardSlipUpload(req);
+            return res.status(404).json({ success: false, message: 'Vendor payment not found.' });
+        }
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'No file uploaded.' });
+        }
+        // A replaced slip's old file is deleted once the new one is saved.
+        const oldSlipUrl = payment.slipUrl;
+        payment.slipUrl = `/uploads/payment-slips/${req.file.filename}`;
+        await payment.save();
+        if (oldSlipUrl && oldSlipUrl !== payment.slipUrl) await removePaymentSlip(oldSlipUrl);
+        res.json({ success: true, message: 'Slip uploaded successfully.', slipUrl: payment.slipUrl });
+    } catch (error) {
+        console.error('❌ Error in uploadVendorPaymentSlip:', error);
+        await discardSlipUpload(req);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};

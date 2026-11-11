@@ -2,6 +2,7 @@
 
 import Resignation from "../models/Resignation.js";
 import User from "../models/User.js";
+import { canApprove } from "../utils/companyScope.js";
 
 /* ================= EMPLOYEE: CREATE ================= */
 export const createResignation = async (req, res) => {
@@ -152,6 +153,9 @@ export const updateResignationStatus = async (req, res) => {
     const resignation = await Resignation.findById(id);
     if (!resignation) {
       return res.status(404).json({ message: "Resignation request not found" });
+    }
+    if (!(await canApprove(req.user, resignation.employee, { hrRoles: true }))) {
+      return res.status(403).json({ message: "You can't decide on this person's request." });
     }
 
     resignation.status = status;

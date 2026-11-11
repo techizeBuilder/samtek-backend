@@ -3,7 +3,7 @@
 // docs/product-approval-gate-redesign-discussion-2026-09.md.
 import { Item } from '../models/Inventory.js';
 import {
-  APPROVAL_KINDS, approvalOf, isPurchaseMachine,
+  APPROVAL_KINDS, approvalOf, isPurchaseMachine, isBoughtPart, isQcOnly,
   computeDesignReadiness, computeReleaseReadiness, computeQcReadiness, getPrototypeStatus,
   setDesignApproved, setBomApproved, setQcListApproved, setReleaseStatus, listApprovalItems,
 } from '../services/productApprovalService.js';
@@ -25,7 +25,7 @@ export const getApprovalItems = async (req, res) => {
     if (!APPROVAL_KINDS.includes(kind)) return res.status(400).json({ success: false, message: `kind must be one of ${APPROVAL_KINDS.join(', ')}` });
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const data = await listApprovalItems({ companyId: req.user.companyId, kind, search: search || '', page, limit });
+    const data = await listApprovalItems({ companyId: req.user.companyId, kind, search: search || '', page, limit, status: req.query.status || '' });
     res.json({ success: true, ...data });
   } catch (err) { fail500(res, err); }
 };
@@ -44,10 +44,12 @@ export const getApprovalItemDetail = async (req, res) => {
       data: {
         _id: String(item._id), code: item.code, name: item.name, category: item.category, description: item.description || '',
         productKind: item.productKind, purchaseMachine: isPurchaseMachine(item),
+        boughtPart: isBoughtPart(item), qcOnly: isQcOnly(item),
+        approvalRedo: item.approvalRedo?.at ? item.approvalRedo : null,
         ...approvalOf(item),
         designFiles,
         prototypeStatus: await getPrototypeStatus(item, companyId),
-        designReadiness: isPurchaseMachine(item) ? null : await computeDesignReadiness(item, companyId),
+        designReadiness: isQcOnly(item) ? null : await computeDesignReadiness(item, companyId),
         qcReadiness: await computeQcReadiness(item, companyId),
         releaseReadiness: await computeReleaseReadiness(item, companyId),
       },

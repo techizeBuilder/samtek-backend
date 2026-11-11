@@ -25,6 +25,11 @@ const holidaySchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // Paid unless HR marks it Unpaid (2026-11-11). Payroll pays a paid holiday.
+    paid: {
+      type: Boolean,
+      default: true,
+    },
     companyId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Company",

@@ -12,6 +12,7 @@ import {
   WATCHLIST_MIN_EVENTS, PROBATION_RECEIVED_PO_COUNT,
 } from '../services/vendorApprovalService.js';
 import { scoreSettingsOf } from '../services/vendorScoreService.js';
+import { documentTypesFor, docChecksFor, missingTypesFor, verifyTypesFor } from '../services/vendorDocumentRulesService.js';
 import { getOrCreateSettings } from './purchaseSettingsController.js';
 
 const REQUEST_TYPES = ['NewVendor', 'DetailsChange', 'Suspend', 'Blacklist', 'Reinstate'];
@@ -37,6 +38,12 @@ export const listRequests = async (req, res) => {
       .populate('requestedBy', 'fullName username')
       .populate('reviewedBy', 'fullName username')
       .lean();
+    // A vendor under review: which documents to tick, and which are still
+    // missing (2026-10-28, Company Admin's Vendor documents setting).
+    const types = await documentTypesFor(req.user.companyId);
+    for (const r of requests) {
+      if (r.type === 'NewVendor' && r.vendor?._id) r.docChecks = docChecksFor(r.vendor, types);
+    }
     res.json({ requests });
   } catch (error) {
     console.error('Error listing vendor approval requests:', error);
@@ -90,9 +97,13 @@ export const reviewRequest = async (req, res) => {
     }
 
     if (request.type === 'NewVendor') {
-      const v = verification || {};
-      const needGst = !!String(vendor.gstNumber || '').trim();
-      if ((needGst && !v.gstVerified) || !v.panVerified || !v.bankVerified || !v.documentsVerified) {
+      const types = await documentTypesFor(vendor.companyId);
+      const lacking = missingTypesFor(vendor, types);
+      if (lacking.length) {
+        return res.status(400).json({ message: `${lacking.map(t => t.name).join(', ')} ${lacking.length > 1 ? 'are' : 'is'} missing — reject it so Purchase can add ${lacking.length > 1 ? 'them' : 'it'}.` });
+      }
+      const ticked = new Set((verification?.checkedDocuments || []).map(String));
+      if (verifyTypesFor(vendor, types).some(t => !ticked.has(t.name))) {
         return res.status(400).json({ message: 'Tick every verification check before approving.' });
       }
     }

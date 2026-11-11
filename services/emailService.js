@@ -1,4 +1,4 @@
-import { DEPARTMENTS, getDeptMailer } from '../config/mailAccounts.js';
+import { DEPARTMENTS, getDeptMailer, mailboxMissingMessage } from '../config/mailAccounts.js';
 import { formatDims } from './fabricationDemandService.js';
 
 // Fabrication Master items only — read-only "this order covers ..." block
@@ -28,7 +28,7 @@ function fabricationBreakdownHtml(lines) {
 export const sendOtpEmail = async ({ to, otp, requestedByName, customerName }) => {
   const mailer = await getDeptMailer(DEPARTMENTS.CASH_ACCESS);
   if (!mailer) {
-    throw new Error('Cash Access SMTP is not configured (Admin Settings > SMTP Settings)');
+    throw new Error(mailboxMissingMessage(DEPARTMENTS.CASH_ACCESS));
   }
   const { transporter, fromAddress } = mailer;
   const subject = `🔐 Cash Access OTP: ${otp} — approval requested`;
@@ -77,7 +77,7 @@ export const sendPaymentReminderEmail = async ({ to, customerName, invoiceNo, to
   const mailer = await getDeptMailer(DEPARTMENTS.ACCOUNTS);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Accounts SMTP not configured. Would send reminder to: ${to}`);
-    return { success: false, skipped: true, error: 'Accounts email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
+    return { success: false, skipped: true, error: mailboxMissingMessage(DEPARTMENTS.ACCOUNTS) };
   }
   const { transporter, fromAddress } = mailer;
   const isOverdue = daysOverdue > 0;
@@ -163,7 +163,7 @@ export const sendQuotationEmail = async ({ to, customerName, leadCode, companyNa
   const mailer = await getDeptMailer(DEPARTMENTS.SALES);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Sales SMTP not configured. Would send quotation to: ${to}`);
-    return { success: false, skipped: true, error: 'Sales email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
+    return { success: false, skipped: true, error: mailboxMissingMessage(DEPARTMENTS.SALES) };
   }
   const { transporter, fromAddress } = mailer;
   const subject = `📄 Quotation from ${companyName} — Lead #${leadCode}`;
@@ -236,131 +236,120 @@ const day = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit'
 const td = 'padding: 8px; border: 1px solid #e5e7eb;';
 
 /**
- * Send a Purchase Order to the vendor (procurement-v2, 2026-10-08) — the
- * full order: every line with code, qty + unit, rate, GST, amount and its
- * own due date; the PO's charges (with their GST); payment terms; totals;
- * delivery address and transport. Sent automatically when a PO becomes a
- * real order (created directly, or approved by the Company Admin), and by
- * the "Send / Resend PO email" button.
+ * Send a Purchase Order to the vendor (procurement-v2, 2026-10-08). Since
+ * 2026-10-29 (client) the PO itself is the attached PDF — the same document
+ * Purchase downloads to send on WhatsApp (services/purchaseOrderPdf.js) — and
+ * the email is a short cover note: PO number, grand total, delivery, "quote
+ * the PO number on your invoice". Sent automatically when a PO becomes a real
+ * order (created directly, or approved by the Company Admin), and by the
+ * "Send / Resend PO email" button.
  *
  * Returns { success, error, notConfigured } — when the Purchase mailbox isn't
  * set up nothing is sent and success is FALSE (it used to report a mock
  * success, which wrongly marked the PO as "Sent").
  */
-export const sendPurchaseOrderEmail = async ({ mailer: givenMailer, to, vendorName, companyName, purchase }) => {
+export const sendPurchaseOrderEmail = async ({ mailer: givenMailer, to, vendorName, companyName, purchase, pdf }) => {
   const poNumber = purchase.purchaseOrderNumber;
   const mailer = givenMailer || await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send PO ${poNumber} to: ${to}`);
-    return { success: false, notConfigured: true, error: 'Purchase email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
+    return { success: false, notConfigured: true, error: mailboxMissingMessage(DEPARTMENTS.PURCHASE) };
   }
   const { transporter, fromAddress } = mailer;
   const subject = `🛒 Purchase Order ${poNumber} from ${companyName}`;
 
-  const lines = purchase.items || [];
-  // A PO with an advance: the delivery days start when the advance is paid
-  // (2026-10-12), so the email gives the days, not a date.
+  const lines = (purchase.items || []).filter(l => !l.cancelled?.at);
   const onAdvance = purchase.deliveryClock?.startsOn === 'advance' && !purchase.deliveryClock?.startedAt;
-  const deliverBy = (it) => (onAdvance
-    ? (Number(it.deliveryDays) > 0 ? `${it.deliveryDays} days after advance` : 'after advance')
-    : day(it.expectedDeliveryDate || purchase.expectedDeliveryDate));
-  const itemsRows = lines.map((it, i) => {
-    const code = it.item?.code ? ` <span style="color:#6b7280;font-size:12px;">(${esc(it.item.code)})</span>` : '';
-    const unit = it.purchaseUnit ? ` ${esc(it.purchaseUnit)}` : '';
-    const gst = it.gstInclusive ? 'incl.' : `${Number(it.gstRate) || 0}%`;
-    const amount = (Number(it.totalPrice) || 0) + (Number(it.gstAmount) || 0);
-    return `
-        <tr>
-          <td style="${td}">${i + 1}</td>
-          <td style="${td}">${esc(it.itemName)}${code}${(it.fabricationDimensionLines || []).length ? `<div style="color:#6b7280;font-size:12px;margin-top:4px;">${(it.fabricationDimensionLines || []).map(l => `${esc(formatDims(l.values))} × ${l.quantity} pcs`).join('<br/>')}</div>` : ''}</td>
-          <td style="${td} text-align:center;">${it.quantity}${unit}${(it.fabricationDimensionLines || []).length ? '<div style="color:#6b7280;font-size:11px;">(calculated weight)</div>' : ''}</td>
-          <td style="${td} text-align:right;">${money(it.unitPrice)}</td>
-          <td style="${td} text-align:center;">${gst}</td>
-          <td style="${td} text-align:right;">${money(amount)}</td>
-          <td style="${td} text-align:center;">${deliverBy(it)}</td>
-        </tr>`;
-  }).join('');
-
-  const charges = purchase.charges || [];
-  const chargesRows = charges.map(c => `
-        <tr>
-          <td style="padding: 4px 0; color:#374151;">${esc(c.label)}${c.gstPercent ? ` <span style="color:#6b7280;">(+${c.gstPercent}% GST)</span>` : ''}</td>
-          <td style="padding: 4px 0; text-align:right; color:#111827;">${money((Number(c.amount) || 0) + (Number(c.gstAmount) || 0))}</td>
-        </tr>`).join('');
-
-  const terms = purchase.paymentTerms || {};
-  const termItems = [
-    terms.advancePercent != null ? `<li>Advance: <strong>${terms.advancePercent}%</strong></li>` : '',
-    terms.creditDays != null ? `<li>Credit: <strong>${terms.creditDays} days</strong></li>` : '',
-    ...(terms.others || []).map(o => `<li>${esc(o.label)}: <strong>${esc(o.value)}</strong></li>`),
-  ].filter(Boolean).join('');
-
-  const goods = Number(purchase.totalAmount) || 0;
-  const gstTotal = (Number(purchase.taxAmount) || 0) + (Number(purchase.chargesGstTotal) || 0);
-  const chargesTotal = (Number(purchase.chargesTotal) || 0) + (Number(purchase.poChargesTotal) || 0);
-
   const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 720px; margin: 0 auto; background: #f9fafb; padding: 20px;">
-      <div style="background: #1e40af; padding: 26px; border-radius: 12px 12px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 22px;">🛒 Purchase Order ${esc(poNumber)}</h1>
-        <p style="color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px;">${esc(companyName)} · ${day(purchase.orderDate || purchase.createdAt)}</p>
+    <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: #1e40af; padding: 22px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 20px;">🛒 Purchase Order ${esc(poNumber)}</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0; font-size: 14px;">${esc(companyName)} · ${day(purchase.orderDate || purchase.createdAt)}</p>
       </div>
-      <div style="background: white; padding: 26px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+      <div style="background: white; padding: 24px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
         <p style="color: #374151; font-size: 15px;">Dear <strong>${esc(vendorName)}</strong>,</p>
-        <p style="color: #6b7280;">We are pleased to place the following purchase order with you. Please confirm receipt and deliver as per the ${onAdvance ? 'delivery times below — they count from the day we pay the advance' : 'dates below'}.</p>
-
-        <table style="width: 100%; border-collapse: collapse; font-size: 13px; margin: 18px 0;">
-          <thead>
-            <tr style="background: #f3f4f6;">
-              <th style="${td} text-align:left;">#</th>
-              <th style="${td} text-align:left;">Item</th>
-              <th style="${td} text-align:center;">Qty</th>
-              <th style="${td} text-align:right;">Rate</th>
-              <th style="${td} text-align:center;">GST</th>
-              <th style="${td} text-align:right;">Amount</th>
-              <th style="${td} text-align:center;">Deliver by</th>
-            </tr>
-          </thead>
-          <tbody>${itemsRows}</tbody>
-        </table>
-
-        ${charges.length ? `
-        <div style="margin: 12px 0;">
-          <p style="color:#111827; font-weight:bold; margin:0 0 6px;">Charges</p>
-          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">${chargesRows}</table>
-        </div>` : ''}
-
-        <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin: 14px 0; border-top: 2px solid #e5e7eb;">
-          <tr><td style="padding: 6px 0; color:#6b7280;">Goods</td><td style="padding: 6px 0; text-align:right;">${money(goods)}</td></tr>
-          ${chargesTotal ? `<tr><td style="padding: 6px 0; color:#6b7280;">Charges</td><td style="padding: 6px 0; text-align:right;">${money(chargesTotal)}</td></tr>` : ''}
-          ${purchase.gstSplit?.type === 'CGST_SGST'
-            ? `<tr><td style="padding: 6px 0; color:#6b7280;">CGST</td><td style="padding: 6px 0; text-align:right;">${money(gstTotal / 2)}</td></tr>
-          <tr><td style="padding: 6px 0; color:#6b7280;">SGST</td><td style="padding: 6px 0; text-align:right;">${money(gstTotal / 2)}</td></tr>`
-            : `<tr><td style="padding: 6px 0; color:#6b7280;">${purchase.gstSplit?.type === 'IGST' ? 'IGST' : 'GST'}</td><td style="padding: 6px 0; text-align:right;">${money(gstTotal)}</td></tr>`}
-          <tr style="font-weight:bold;"><td style="padding: 8px 0; color:#111827;">Grand Total</td><td style="padding: 8px 0; text-align:right; color:#1e40af; font-size:16px;">${money(purchase.grandTotal)}</td></tr>
-        </table>
-
-        ${termItems ? `
-        <div style="background:#f0f4ff; border-left:4px solid #1e40af; border-radius:4px; padding:14px 18px; margin:14px 0;">
-          <p style="color:#1e40af; font-weight:bold; margin:0 0 6px;">Payment terms</p>
-          <ul style="color:#374151; margin:0; padding-left:18px; line-height:1.8;">${termItems}</ul>
-        </div>` : ''}
-
-        <p style="color:#374151; font-size:13px; margin: 10px 0;"><strong>Deliver to:</strong> ${esc(purchase.deliveryAddress || '')}</p>
-        <p style="color:#374151; font-size:13px; margin: 6px 0;"><strong>Transport:</strong> ${purchase.transportBy === 'Company' ? 'We will collect the goods from you.' : 'Please deliver to the address above.'}</p>
-        ${purchase.notes ? `<p style="color:#374151; font-size:13px; margin: 6px 0;"><strong>Notes:</strong> ${esc(purchase.notes)}</p>` : ''}
-
-        <p style="color: #6b7280; font-size: 13px; margin-top: 20px;">Please quote PO number <strong>${esc(poNumber)}</strong> on your invoice and delivery challan.</p>
+        <p style="color: #4b5563; line-height: 1.6;">Please find our purchase order <strong>${esc(poNumber)}</strong> attached (PDF) — ${lines.length} item${lines.length === 1 ? '' : 's'}, grand total <strong>${money(purchase.grandTotal)}</strong>. Please confirm receipt and deliver as per the ${onAdvance ? 'delivery times in the PO — they count from the day we pay the advance' : 'dates in the PO'}.</p>
+        <p style="color: #374151; font-size: 13px; margin: 10px 0;"><strong>Deliver to:</strong> ${esc(purchase.deliveryAddress || '')}</p>
+        <p style="color: #6b7280; font-size: 13px; margin-top: 18px;">Please quote PO number <strong>${esc(poNumber)}</strong> on your invoice and delivery challan.</p>
         <p style="color: #111827; font-weight: bold;">— ${esc(companyName)} Procurement Team</p>
       </div>
     </div>`;
+  const attachments = pdf ? [{ filename: `${poNumber}.pdf`, content: pdf, contentType: 'application/pdf' }] : [];
 
   try {
-    const result = await transporter.sendMail({ from: `"${companyName} Procurement" <${fromAddress}>`, to, subject, html });
+    const result = await transporter.sendMail({ from: `"${companyName} Procurement" <${fromAddress}>`, to, subject, html, attachments });
     console.log(`✅ PO Email sent to ${to} for PO ${poNumber}`);
     return { success: true, messageId: result.messageId };
   } catch (error) {
     console.error(`❌ PO Email failed to ${to}:`, error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * The vendor's daily QC results for one PO (client, 2026-10-29;
+ * services/qcVendorEmailService.js): accepted material, material not accepted
+ * (QC's reason — our Purchase team settles it with them), what's still to
+ * come, and on the last day "all passed" with the payment due date. No
+ * amounts otherwise.
+ * accepted / notAccepted: [{ itemName, size, qty, unit, replacement?, reason? }]
+ * pending: [{ itemName, standing: 'to come' | 'with QC' }]
+ * allPassed: null | { balance, dueDate, creditDays }
+ */
+export const sendQcResultEmail = async ({ mailer: givenMailer, to, vendorName, companyName, poNumber, accepted = [], notAccepted = [], pending = [], allPassed = null, attachments = [], morePhotos = 0 }) => {
+  const mailer = givenMailer || await getDeptMailer(DEPARTMENTS.PURCHASE);
+  if (!mailer) return { success: false, notConfigured: true, error: mailboxMissingMessage(DEPARTMENTS.PURCHASE) };
+  const { transporter, fromAddress } = mailer;
+  const subject = allPassed
+    ? `✅ PO ${poNumber}: all material passed our quality check — ${companyName}`
+    : `PO ${poNumber}: quality check results — ${companyName}`;
+  const what = (r) => `<strong>${esc(r.itemName)}</strong>${r.size ? ` <span style="color:#6b7280;">(${esc(r.size)})</span>` : ''}`;
+  const qty = (r) => `${r.qty} ${esc(r.unit || '')}`.trim();
+  const row = (cells) => `<tr>${cells.map(c => `<td style="${td}">${c}</td>`).join('')}</tr>`;
+  const acceptedHtml = accepted.length ? `
+        <p style="color:#166534; font-weight:bold; margin:18px 0 6px;">✅ Accepted</p>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          ${accepted.map(r => row([`${what(r)}${r.replacement ? ' <span style="color:#6b7280;">— replacement</span>' : ''}`, qty(r)])).join('')}
+        </table>` : '';
+  const notAcceptedHtml = notAccepted.length ? `
+        <p style="color:#b91c1c; font-weight:bold; margin:18px 0 6px;">❌ Not accepted</p>
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          ${notAccepted.map(r => row([
+            what(r) + ((r.failedChecks || []).length ? `<div style="color:#b91c1c;font-size:12px;margin-top:4px;">Failed: ${r.failedChecks.map(esc).join('; ')}</div>` : ''),
+            qty(r),
+            esc(r.reason || 'Did not meet our quality check'),
+          ])).join('')}
+        </table>
+        ${attachments.length ? `<p style="color:#374151; font-size:13px; margin:6px 0 0;">Photos of the material not accepted are attached (${attachments.length})${morePhotos ? ` — ${morePhotos} more with our Purchase team` : ''}.</p>` : ''}
+        <p style="color:#6b7280; font-size:13px; margin:6px 0 0;">Our Purchase team will contact you about the material not accepted.</p>` : '';
+  const pendingHtml = !allPassed && pending.length ? `
+        <p style="color:#374151; font-weight:bold; margin:18px 0 6px;">Still to come / being checked on this PO</p>
+        <ul style="color:#374151; margin:0; padding-left:18px; line-height:1.7; font-size:13px;">
+          ${pending.map(p => `<li>${esc(p.itemName)} — ${p.standing === 'with QC' ? 'received, being checked' : 'not received yet'}</li>`).join('')}
+        </ul>` : '';
+  const allPassedHtml = allPassed ? `
+        <div style="background:#f0fdf4; border-left:4px solid #16a34a; border-radius:4px; padding:14px 18px; margin:18px 0 0;">
+          <p style="color:#166534; font-weight:bold; margin:0;">All material on PO ${esc(poNumber)} has passed our quality check.</p>
+          ${allPassed.balance > 0 ? `<p style="color:#374151; margin:6px 0 0;">${allPassed.creditDays ? `Payment is due by <strong>${day(allPassed.dueDate)}</strong> (${allPassed.creditDays} credit days).` : 'Payment will now be processed.'}</p>` : ''}
+        </div>` : '';
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; background: #f9fafb; padding: 20px;">
+      <div style="background: #1e40af; padding: 22px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 20px;">Quality check results</h1>
+        <p style="color: rgba(255,255,255,0.85); margin: 6px 0 0; font-size: 14px;">PO ${esc(poNumber)} · ${esc(companyName)}</p>
+      </div>
+      <div style="background: white; padding: 24px; border-radius: 0 0 12px 12px; border: 1px solid #e5e7eb;">
+        <p style="color: #374151; font-size: 15px;">Dear <strong>${esc(vendorName)}</strong>,</p>
+        <p style="color: #4b5563;">Our quality check has been done on material you supplied against PO <strong>${esc(poNumber)}</strong>:</p>
+        ${acceptedHtml}${notAcceptedHtml}${pendingHtml}${allPassedHtml}
+        <p style="color: #111827; font-weight: bold; margin-top: 22px;">— ${esc(companyName)} Procurement Team</p>
+      </div>
+    </div>`;
+  try {
+    const result = await transporter.sendMail({ from: `"${companyName} Procurement" <${fromAddress}>`, to, subject, html, attachments });
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    console.error(`❌ QC results email failed to ${to}:`, error.message);
     return { success: false, error: error.message };
   }
 };
@@ -374,7 +363,7 @@ export const sendPurchaseOrderCancellationEmail = async ({ to, vendorName, compa
   const mailer = await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!mailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send the cancellation of PO ${poNumber} to: ${to}`);
-    return { success: false, notConfigured: true, error: 'Purchase email is not configured yet.' };
+    return { success: false, notConfigured: true, error: mailboxMissingMessage(DEPARTMENTS.PURCHASE) };
   }
   const { transporter, fromAddress } = mailer;
   const subject = full
@@ -419,7 +408,7 @@ export const sendQuotationRequestEmail = async ({ mailer, to, vendorName, reques
   const resolvedMailer = mailer || await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!resolvedMailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send quotation request ${requestNo} to: ${to}`);
-    return { success: false, error: 'Purchase email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
+    return { success: false, error: mailboxMissingMessage(DEPARTMENTS.PURCHASE) };
   }
   const { transporter, fromAddress } = resolvedMailer;
   const subject = `${reminder ? 'Reminder: ' : ''}📋 Request for Quotation ${requestNo} — ${items.length} item${items.length === 1 ? '' : 's'} | ${companyName}`;
@@ -501,7 +490,7 @@ export const sendRFQEmail = async ({ mailer, to, vendorName, rfqNo, productName,
   const resolvedMailer = mailer || await getDeptMailer(DEPARTMENTS.PURCHASE);
   if (!resolvedMailer) {
     console.log(`[EMAIL SKIPPED] Purchase SMTP not configured. Would send RFQ ${rfqNo} to: ${to}`);
-    return { success: false, error: 'Purchase email is not configured yet. Ask your Super Admin to set it up in Admin Settings > SMTP Settings.' };
+    return { success: false, error: mailboxMissingMessage(DEPARTMENTS.PURCHASE) };
   }
   const { transporter, fromAddress } = resolvedMailer;
   const subject = `📋 Request for Quotation: ${rfqNo} — ${productName} | ${companyName}`;

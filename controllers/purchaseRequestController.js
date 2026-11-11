@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import notificationService from '../services/notificationService.js';
 import { Item } from '../models/Inventory.js';
-import { dimensionSignature, resolveFabricationWeight } from '../services/fabricationDemandService.js';
+import { dimensionSignature, resolveFabricationWeight, formatDims } from '../services/fabricationDemandService.js';
 import { MASS_UNIT_TO_KG_MULTIPLIER } from '../services/itemPricingService.js';
 import { resolveMasterItemId } from './purchaseQuoteController.js';
 import { isSerialised, wholePieces, splitWhole, planReceive, saveReceive, discardReceive, linkQcJob, recordLegacyReceive } from '../services/purchasedUnitService.js';
@@ -71,6 +71,20 @@ export async function resolveFabricationLines(masterItem, rawLines, { requireCat
   }
 
   return { lines, totalWeightKg, resolvedQuantity, resolvedUnit, isMassUnit };
+}
+
+// A size R&D discontinued in Fabrication Master is never bought anew
+// (2026-10-28, docs/fabrication-size-sync-2026-10.md §5) — throws for the
+// first one found. alreadyOn: sizes the request already had (an edit keeps
+// them). Receiving an open PO for it is untouched.
+export function refuseDiscontinuedSizes(masterItem, lines, alreadyOn = []) {
+  const had = new Set(alreadyOn.map(l => dimensionSignature(l?.values)));
+  for (const l of lines || []) {
+    const sig = dimensionSignature(l?.values);
+    if (had.has(sig)) continue;
+    const v = (masterItem?.dimensionVariants || []).find(dv => !dv.isLeftover && dv.isDiscontinued && dimensionSignature(dv.values) === sig);
+    if (v) throw new Error(`${masterItem.name}: size ${v.designation || formatDims(v.values)} is discontinued in Fabrication Master — pick its replacement size.`);
+  }
 }
 
 // One size per purchase request (procurement-v2, 2026-10-09). On RFQ/PO each
@@ -183,7 +197,9 @@ async function createPurchaseQCJob(request, req, quantityOverride = null, ctx = 
       sourceDepartment: 'Store',
       sentBy: req.user.fullName || req.user.username || 'Store Dept',
       itemName: request.productName,
-      itemCode: request.itemId || request.requestId,
+      // The item's own code (2026-10-30) — the request number was used when
+      // the request had no itemId, and then nothing found the item by it.
+      itemCode: inventoryItem?.code || request.itemId || request.requestId,
       category: qcCategory,
       // Converted base-unit qty when the order was placed in a purchase unit
       // (e.g. 20 kg received ÷ 1 kg/pc = 20 pcs) — QC approval adds this qty to inventory
@@ -226,6 +242,76 @@ async function createPurchaseQCJob(request, req, quantityOverride = null, ctx = 
 // vendorRatingService.js already documents for its own local copy). A PO
 // line can carry either the original singular purchaseRequest or the new
 // plural purchaseRequests (item-wise PR consolidation, 2026-10).
+// The PO line a one-request receive is on, for its price (2026-10-26 — the
+// receive prices from the line it received). null (no PO / line) → the price
+// comes from the newest bill, as before.
+async function poLineFor(request) {
+  const poId = request.purchaseOrder?._id || request.purchaseOrder;
+  if (!poId) return null;
+  const Purchase = (await import('../models/Purchase.js')).default;
+  const { poLineOfRequest } = await import('../services/itemPricingService.js');
+  const po = await Purchase.findById(poId).select('items charges poChargesTotal').lean();
+  const line = po ? poLineOfRequest(po, request._id) : null;
+  return line ? { po, line } : null;
+}
+
+// The item a receive is for (2026-11-05): the PO line's own link first, then the
+// request's id, code or name. A Child / Sub Child Part has no `store` field, so
+// the old name + store lookup alone never found it and a bought part's price
+// stayed unset. That lookup stays last for older items with no companyId.
+async function receivedItem(request, companyId, line = null) {
+  const company = { $or: [{ companyId }, { store: String(companyId) }] };
+  if (line?.item) {
+    const byLink = await Item.findOne({ _id: line.item, ...company });
+    if (byLink) return byLink;
+  }
+  if (request.itemId && /^[0-9a-fA-F]{24}$/.test(request.itemId)) {
+    const byId = await Item.findById(request.itemId);
+    if (byId) return byId;
+  }
+  const masterItemId = await resolveMasterItemId(request, companyId);
+  if (masterItemId) return Item.findById(masterItemId);
+  return Item.findOne({
+    name: { $regex: new RegExp(`^${(request.productName || '').trim()}$`, 'i') },
+    store: String(companyId),
+  });
+}
+
+// "We pick up" POs (2026-10-26): Store receives only a line that's on a
+// Dispatch pickup trip. Returns { found } (null for a "Vendor delivers" PO) or
+// { error }. Checked before anything is written; recordPickupReceived after.
+const NO_PICKUP_TRIP = 'This line isn\'t on a Dispatch pickup trip yet — Dispatch plans it (Vendor Pickups → Purchase), then receive.';
+async function pickupGate(po, lineId) {
+  if (!po || po.transportBy !== 'Company' || !lineId) return { found: null };
+  const { pickupForPoLine } = await import('../services/dispatchTripService.js');
+  const found = await pickupForPoLine(po.companyId, po._id, lineId);
+  return found ? { found } : { error: NO_PICKUP_TRIP };
+}
+async function recordPickupReceived(gate, user, opts) {
+  if (!gate?.found) return;
+  try {
+    const { recordPoLineReceived } = await import('../services/dispatchTripService.js');
+    await recordPoLineReceived(gate.found, user, opts);
+  } catch (e) { console.error('❌ Recording the pickup at Store\'s receive:', e.message); }
+}
+// The one-request receives: the request's PO line, and whether the whole
+// line is received once this request is.
+async function pickupGateForRequest(request) {
+  const poId = request.purchaseOrder?._id || request.purchaseOrder;
+  if (!poId) return { found: null };
+  const Purchase = (await import('../models/Purchase.js')).default;
+  const { poLineOfRequest } = await import('../services/itemPricingService.js');
+  const po = await Purchase.findById(poId).select('companyId transportBy items').lean();
+  const line = po ? poLineOfRequest(po, request._id) : null;
+  const gate = await pickupGate(po, line?._id);
+  return { ...gate, line };
+}
+async function lineFullyReceived(line) {
+  const ids = prIdsOf(line);
+  if (!ids.length) return true;
+  return (await PurchaseRequest.countDocuments({ _id: { $in: ids }, status: { $ne: 'Received' } })) === 0;
+}
+
 function prIdsOf(line) {
   if (Array.isArray(line?.purchaseRequests) && line.purchaseRequests.length) return line.purchaseRequests;
   if (line?.purchaseRequest) return [line.purchaseRequest];
@@ -247,24 +333,7 @@ function prIdsOf(line) {
 async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false, qcCtx = {} } = {}) {
   // ── Update matching Inventory item with serial + warranty info ───────────
   try {
-    const { Item } = await import('../models/Inventory.js');
-
-    // Item model uses `store` (string of companyId), NOT `companyId` field
-    const storeStr = request.companyId.toString();
-    let inventoryItem = null;
-
-    // Attempt 1: match by itemId (ObjectId reference — most reliable)
-    if (request.itemId && /^[0-9a-fA-F]{24}$/.test(request.itemId)) {
-      inventoryItem = await Item.findById(request.itemId);
-    }
-
-    // Attempt 2: match by name + store field
-    if (!inventoryItem) {
-      inventoryItem = await Item.findOne({
-        name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
-        store: storeStr
-      });
-    }
+    const inventoryItem = await receivedItem(request, request.companyId, (await poLineFor(request))?.line);
 
     if (inventoryItem) {
       // Serial numbers / warranty are no longer written onto the Item master
@@ -336,34 +405,22 @@ async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false
   }
 
   // 3. Re-resolve the item's purchase price NOW that the receive-time unit
-  //    conversion factor is known. The auto-invoice (and the recalc it fires)
-  //    is created at PO-generation time — BEFORE Store enters the conversion —
-  //    so that early recalc stores the raw purchase-unit price. This is the
-  //    authoritative "store received it" recalc with the factor available.
+  //    conversion factor is known — from this request's own PO line (rate
+  //    before GST + its share of the PO charges, 2026-10-26). The PO's bill
+  //    no longer re-prices anything when the PO is approved.
   if (!skipPricingRecalc) {
     try {
       const { recalculateItemPricing } = await import('../services/itemPricingService.js');
-      const { Item } = await import('../models/Inventory.js');
-      const storeStr = request.companyId.toString();
+      const fromPoLine = await poLineFor(request);
+      const pricingItem = await receivedItem(request, request.companyId, fromPoLine?.line);
 
-      let pricingItem = null;
-      if (request.itemId && /^[0-9a-fA-F]{24}$/.test(request.itemId)) {
-        pricingItem = await Item.findById(request.itemId);
-      }
-      if (!pricingItem) {
-        pricingItem = await Item.findOne({
-          name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') },
-          store: storeStr
-        });
-      }
-
-      if (pricingItem && pricingItem.purchase && !pricingItem.internalManufacturing) {
+      if (pricingItem && ((pricingItem.purchase && !pricingItem.internalManufacturing) || ['ChildPart', 'SubChildPart'].includes(pricingItem.productKind))) {
         // This exact receive's own conversionFactor, passed explicitly —
         // skips itemPricingService.js's fragile invoice-notes reverse-
         // lookup (which this receive's own inventoryItem.save() above
         // happened to make work by coincidence, but shouldn't be relied
         // on) in favor of the value this request already knows for sure.
-        await recalculateItemPricing(pricingItem, { knownConversionFactor: request.conversionFactor });
+        await recalculateItemPricing(pricingItem, { knownConversionFactor: request.conversionFactor, fromPoLine });
         console.log(`💰 [Purchase Receipt] Pricing re-resolved with unit conversion for "${pricingItem.code}"`);
       }
     } catch (pricingErr) {
@@ -436,7 +493,7 @@ async function applyFabricationReceiveSideEffects(request, masterItem, req, { qu
       // receive's own conversionFactor (the weighted-average kg/piece set
       // just above) is already known for certain, no need to make
       // resolvePurchaseItemCost go rediscover it from invoice notes text.
-      await recalculateItemPricing(masterItem, { knownConversionFactor: request.conversionFactor });
+      await recalculateItemPricing(masterItem, { knownConversionFactor: request.conversionFactor, fromPoLine: await poLineFor(request) });
     } catch (pricingErr) {
       console.error('❌ Error recalculating fabrication item pricing on receipt:', pricingErr);
     }
@@ -744,6 +801,7 @@ export const createBulkPurchaseRequests = async (req, res) => {
         validationErrors.push(`"${masterItem.name}" is flagged for Internal Manufacturing only.`);
         continue;
       }
+      try { refuseDiscontinuedSizes(masterItem, item.fabricationDimensionLines); } catch (e) { validationErrors.push(e.message); }
     }
 
     if (validationErrors.length > 0) {
@@ -906,6 +964,7 @@ export const createPurchaseRequest = async (req, res) => {
     let resolvedUnit = unit || null;
     if (Array.isArray(fabricationDimensionLines) && fabricationDimensionLines.length > 0) {
       try {
+        refuseDiscontinuedSizes(masterItem, fabricationDimensionLines);
         const resolved = await resolveFabricationLines(masterItem, fabricationDimensionLines);
         resolvedFabricationLines = resolved.lines;
         if (resolved.isMassUnit) {
@@ -1141,6 +1200,7 @@ export const editFabricationLines = async (req, res) => {
 
     let resolved;
     try {
+      refuseDiscontinuedSizes(masterItem, lines, request.fabricationDimensionLines);
       resolved = await resolveFabricationLines(masterItem, lines);
     } catch (dimErr) {
       return res.status(400).json({ success: false, message: dimErr.message });
@@ -1367,7 +1427,14 @@ export const updatePurchaseRequestStatus = async (req, res) => {
     }
 
     // ── Validate mandatory receive fields ──────────────────────────────────────
+    let pickup = null;
     if (status === 'Received' && request.status !== 'Received') {
+      // A "We pick up" PO: only a line on a Dispatch pickup trip (2026-10-26).
+      pickup = await pickupGateForRequest(request);
+      if (pickup.error) {
+        if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) { } }
+        return res.status(409).json({ success: false, message: pickup.error });
+      }
       const serialNumber = req.body.serialNumber?.trim();
       const warrantyPeriod = req.body.warrantyPeriod;
       const warrantyCard = req.file; // uploaded via multer
@@ -1481,6 +1548,7 @@ export const updatePurchaseRequestStatus = async (req, res) => {
     if (status === 'Received' && oldStatus !== 'Received') {
       await applyReceiveSideEffects(request, req);
       await recordLegacyReceive(request, req.user);
+      if (pickup?.found) await recordPickupReceived(pickup, req.user, { lineDone: await lineFullyReceived(pickup.line) });
       await logRequestReceived(request, req, `${request.receivedQuantity ?? request.quantity} ${request.purchaseUnit || request.unit || ''}`.trim());
     }
 
@@ -1541,6 +1609,9 @@ export const receiveFabricationPurchase = async (req, res) => {
     if (request.status !== 'Ordered') {
       return res.status(400).json({ success: false, message: 'Only an Ordered request can be received.' });
     }
+    // A "We pick up" PO: only a line on a Dispatch pickup trip (2026-10-26).
+    const pickup = await pickupGateForRequest(request);
+    if (pickup.error) return res.status(409).json({ success: false, message: pickup.error });
 
     const searchCriteria = [{ name: { $regex: new RegExp(`^${request.productName.trim()}$`, 'i') } }];
     if (request.materialCode) searchCriteria.push({ code: request.materialCode });
@@ -1586,6 +1657,7 @@ export const receiveFabricationPurchase = async (req, res) => {
       qcCtx: { receivedSizes: resolved.lines.map(l => ({ values: l.values, quantity: l.quantity })) },
     });
     await logRequestReceived(request, req, `${totalPieces} pcs`);
+    if (pickup.found) await recordPickupReceived(pickup, req.user, { lineDone: await lineFullyReceived(pickup.line) });
 
     res.status(200).json({ success: true, data: request });
   } catch (error) {
@@ -1671,6 +1743,40 @@ export const getPurchaseOrdersForStore = async (req, res) => {
   const asked = req.query.status ? String(req.query.status).split(',').map(s => s.trim()) : STORE_STATUSES;
   const allowed = asked.filter(s => STORE_STATUSES.includes(s));
   req.query.status = (allowed.length ? allowed : STORE_STATUSES).join(',');
+  // "We pick up" POs (2026-10-26): each line says whether it's on a Dispatch
+  // pickup trip (items[].pickup) — Store can't receive a line that isn't.
+  // Added to getPurchases' answer here, the shared handler stays as it is.
+  // Store only receives (2026-10-26): Purchase's vendor selection check and
+  // the quotation-terms check aren't sent to Store at all.
+  const send = res.json.bind(res);
+  res.json = (body) => {
+    const list = Array.isArray(body?.purchases) ? body.purchases : null;
+    if (!list) return send(body);
+    return (async () => {
+      let state = {};
+      try {
+        const ids = list.filter(p => p?.transportBy === 'Company').map(p => p._id);
+        if (ids.length) {
+          const { pickupStateForPos } = await import('../services/dispatchTripService.js');
+          state = await pickupStateForPos(req.user.companyId, ids);
+        }
+      } catch (e) { console.error('❌ Pickup state for Store\'s PO list:', e.message); }
+      // No money either (2026-10-26): rates, totals, GST, charges, payment and terms.
+      const PO_MONEY = ['selectionCheck', 'quoteTermsCheck', 'totalAmount', 'taxAmount', 'grandTotal', 'charges', 'chargesTotal',
+        'chargesGstTotal', 'poCharges', 'poChargesTotal', 'paymentTerms', 'paymentStatus', 'gstSplit', 'paidAmount', 'balanceAmount'];
+      const LINE_MONEY = ['unitPrice', 'totalPrice', 'gstAmount', 'gstRate', 'gstInclusive', 'itemCharges', 'itemChargesTotal'];
+      const strip = (obj, keys) => { for (const k of keys) delete obj[k]; return obj; };
+      body.purchases = list.map(p => {
+        const o = strip(JSON.parse(JSON.stringify(p)), PO_MONEY);
+        o.items = (o.items || []).map(l => strip({
+          ...l,
+          ...(o.transportBy === 'Company' ? { pickup: state[String(l._id)] || state[`po:${o._id}`] || null } : {}),
+        }, LINE_MONEY));
+        return o;
+      });
+      return send(body);
+    })();
+  };
   return getPurchases(req, res);
 };
 
@@ -1713,6 +1819,10 @@ export const receiveLineItems = async (req, res) => {
     if (purchase.status === 'Cancelled' || line.cancelled?.at) {
       return res.status(409).json({ success: false, message: purchase.status === 'Cancelled' ? 'This PO is cancelled — nothing can be received on it.' : 'This line was cancelled (short close) — it can\'t be received.' });
     }
+
+    // A "We pick up" PO: only a line on a Dispatch pickup trip (2026-10-26).
+    const pickup = await pickupGate(purchase, line._id);
+    if (pickup.error) return res.status(409).json({ success: false, message: pickup.error });
 
     const prIds = prIdsOf(line);
     if (!prIds.length) {
@@ -1864,24 +1974,17 @@ export const receiveLineItems = async (req, res) => {
     // applyReceiveSideEffects's own comment on why this is hoisted out.
     try {
       const { recalculateItemPricing } = await import('../services/itemPricingService.js');
-      const storeStr = companyId.toString();
-      let pricingItem = null;
-      if (samplePr.itemId && /^[0-9a-fA-F]{24}$/.test(samplePr.itemId)) {
-        pricingItem = await Item.findById(samplePr.itemId);
-      }
-      if (!pricingItem) {
-        pricingItem = await Item.findOne({
-          name: { $regex: new RegExp(`^${samplePr.productName.trim()}$`, 'i') },
-          store: storeStr
-        });
-      }
-      if (pricingItem && pricingItem.purchase && !pricingItem.internalManufacturing) {
-        await recalculateItemPricing(pricingItem, { knownConversionFactor: conversionFactor });
+      const pricingItem = await receivedItem(samplePr, companyId, line);
+      if (pricingItem && ((pricingItem.purchase && !pricingItem.internalManufacturing) || ['ChildPart', 'SubChildPart'].includes(pricingItem.productKind))) {
+        await recalculateItemPricing(pricingItem, { knownConversionFactor: conversionFactor, fromPoLine: { po: purchase, line } });
         console.log(`💰 [Purchase Receipt] Pricing re-resolved once for line receive, "${pricingItem.code}"`);
       }
     } catch (pricingErr) {
       console.error('❌ Error recalculating item pricing on line receipt:', pricingErr);
     }
+
+    // Dispatch's pickup is recorded too, if Dispatch hadn't pressed it (2026-10-26).
+    await recordPickupReceived(pickup, req.user);
 
     // Audit log (gap 17).
     await logLineReceived({ po: purchase, line, user: req.user, req, text: (combinedReceivedQuantity != null ? `${combinedReceivedQuantity} ${samplePr.purchaseUnit || ''}`.trim() : `${totalOrdered} ${samplePr.unit || ''}`.trim()) + (serialCount ? ` — ${serialCount} serial numbers` : '') + (vendorInv.invoice ? ` — vendor invoice ${vendorInv.invoice.number}` : '') });
@@ -1933,6 +2036,10 @@ export const receiveLineFabrication = async (req, res) => {
     if (purchase.status === 'Cancelled' || line.cancelled?.at) {
       return res.status(409).json({ success: false, message: purchase.status === 'Cancelled' ? 'This PO is cancelled — nothing can be received on it.' : 'This line was cancelled (short close) — it can\'t be received.' });
     }
+
+    // A "We pick up" PO: only a line on a Dispatch pickup trip (2026-10-26).
+    const pickup = await pickupGate(purchase, line._id);
+    if (pickup.error) return res.status(409).json({ success: false, message: pickup.error });
 
     const prIds = prIdsOf(line);
     if (!prIds.length) {
@@ -2016,10 +2123,13 @@ export const receiveLineFabrication = async (req, res) => {
 
     try {
       const { recalculateItemPricing } = await import('../services/itemPricingService.js');
-      await recalculateItemPricing(masterItem, { knownConversionFactor: conversionFactor });
+      await recalculateItemPricing(masterItem, { knownConversionFactor: conversionFactor, fromPoLine: { po: purchase, line } });
     } catch (pricingErr) {
       console.error('❌ Error recalculating fabrication item pricing on line receipt:', pricingErr);
     }
+
+    // Dispatch's pickup is recorded too, if Dispatch hadn't pressed it (2026-10-26).
+    await recordPickupReceived(pickup, req.user);
 
     // Audit log (gap 17).
     await logLineReceived({ po: purchase, line, user: req.user, req, text: `${totalPieces} pcs${vendorInv.invoice ? ` — vendor invoice ${vendorInv.invoice.number}` : ''}` });

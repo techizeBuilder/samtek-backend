@@ -164,8 +164,32 @@ export async function reviseLineDate({ po, lineId, body, user, req = null }) {
   return { line, from, to: read.date };
 }
 
-// Daily: every late line not yet alerted for its current date → one alert per
-// PO to whoever created it, an audit entry, and the line stamped.
+// Who hears about a delivery due tomorrow / overdue (client, 2026-10-29):
+// the purchaser who made the PO (follows up with the vendor), the Accounts
+// Head, and Store (expects the goods).
+const DUE_ALERT_ROLES = ['Accounts Head', 'Store Head', 'Store Employee'];
+
+async function sendDueAlert(po, { title, message, data }) {
+  try {
+    const base = { title, message, type: 'purchase', targetCompanyId: po.companyId, data: { purchaseId: String(po._id), ...data } };
+    if (po.createdBy) await notificationService.createNotification({ ...base, targetUserId: po.createdBy });
+    await notificationService.notifyRoles(DUE_ALERT_ROLES, base);
+  } catch (err) {
+    console.error(`${title} notification failed:`, err.message);
+  }
+}
+
+// A line due tomorrow (calendar days) — the heads-up.
+export function dueTomorrow(line, po, received = lineIsReceived, now = new Date()) {
+  const b = lineDueBucket(line, po, received, now);
+  if (!b || b.bucket !== 'soon') return null;
+  return Math.round((startOfDay(b.date) - startOfDay(now)) / DAY_MS) === 1 ? b : null;
+}
+
+// Daily (9:30): every line due TOMORROW and every LATE line not yet alerted
+// for its current date → one alert per PO for each, to the PO creator, the
+// Accounts Head and Store; the line stamped so a date alerts once. Overdue
+// also goes in the PO's History. A revised / newly started date alerts again.
 export async function runOverdueDeliverySweep(now = new Date(), { companyId = null } = {}) {
   const Purchase = mongoose.model('Purchase');
   const query = { status: { $in: OPEN_PO_STATUSES } };
@@ -175,7 +199,29 @@ export async function runOverdueDeliverySweep(now = new Date(), { companyId = nu
     .populate('items.purchaseRequest', 'status')
     .populate('items.purchaseRequests', 'status');
   let alerted = 0;
+  let headsUp = 0;
   for (const po of pos) {
+    const vendorName = po.supplier?.supplierName || 'the vendor';
+    const soon = [];
+    for (const line of po.items) {
+      const b = dueTomorrow(line, po, lineIsReceived, now);
+      if (!b) continue;
+      if (line.dueTomorrowNotifiedFor && dayKey(line.dueTomorrowNotifiedFor) === dayKey(b.date)) continue;
+      soon.push({ line, ...b });
+    }
+    if (soon.length) {
+      await sendDueAlert(po, {
+        title: 'Delivery due tomorrow',
+        message: `${po.purchaseOrderNumber} from ${vendorName}: ${soon.map(x => x.line.itemName).join(', ')} — due ${fmtDay(soon[0].date)}.`,
+        data: { dueTomorrow: true },
+      });
+      await Purchase.updateOne(
+        { _id: po._id },
+        { $set: Object.fromEntries(soon.map(x => [`items.${po.items.indexOf(x.line)}.dueTomorrowNotifiedFor`, x.date])) }
+      );
+      headsUp += 1;
+    }
+
     const late = [];
     for (const line of po.items) {
       const b = lineDueBucket(line, po, lineIsReceived, now);
@@ -185,20 +231,11 @@ export async function runOverdueDeliverySweep(now = new Date(), { companyId = nu
     }
     if (!late.length) continue;
     const text = late.map(x => `${x.line.itemName} (due ${fmtDay(x.date)}, ${x.daysLate} day${x.daysLate === 1 ? '' : 's'} late)`).join(', ');
-    try {
-      if (po.createdBy) {
-        await notificationService.createNotification({
-          title: 'Delivery overdue',
-          message: `${po.purchaseOrderNumber} from ${po.supplier?.supplierName || 'the vendor'} is late: ${text}. Follow up with the vendor and record the new date on Purchase Orders.`,
-          type: 'purchase',
-          targetUserId: po.createdBy,
-          targetCompanyId: po.companyId,
-          data: { purchaseId: String(po._id), overdue: true },
-        });
-      }
-    } catch (err) {
-      console.error('Overdue delivery notification failed:', err.message);
-    }
+    await sendDueAlert(po, {
+      title: 'Delivery overdue',
+      message: `${po.purchaseOrderNumber} from ${vendorName} is late: ${text}. Follow up with the vendor and record the new date on Purchase Orders.`,
+      data: { overdue: true },
+    });
     await logPoEvent({
       po, user: null, action: 'delivery_overdue',
       summary: `Delivery overdue: ${text}.`,
@@ -212,5 +249,5 @@ export async function runOverdueDeliverySweep(now = new Date(), { companyId = nu
     );
     alerted += 1;
   }
-  return { checked: pos.length, alerted };
+  return { checked: pos.length, alerted, headsUp };
 }

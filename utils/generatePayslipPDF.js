@@ -141,15 +141,23 @@ const generatePayslipPDF = async (res, payslip) => {
     GREEN
   );
 
+  // The payroll's deduction is the fixed items plus the pay for days not paid
+  // (loss of pay, days before joining, unpaid holidays). Show that part as its own
+  // line, so the deductions add up to what was taken off (2026-11-11).
+  const fixedRows = [
+    ["Employee PF", payslip.pf],
+    ["Professional Tax", payslip.professionalTax],
+    ["Income Tax (TDS)", payslip.tds],
+    ["Advance", payslip.advance],
+    ["Others", payslip.others],
+  ];
+  const fixedTotal = fixedRows.reduce((t, [, v]) => t + Number(v || 0), 0);
+  const notPaid = Math.max(0, Math.round(Number(payslip.deduction || 0) - fixedTotal));
   const deductions = renderTable(
     "Deductions",
-    [
-      ["Employee PF", payslip.pf],
-      ["Professional Tax", payslip.professionalTax],
-      ["Income Tax (TDS)", payslip.tds],
-      ["Advance", payslip.advance],
-      ["Others", payslip.others],
-    ],
+    notPaid > 0
+      ? [...fixedRows, [`Days not paid${payslip.lopDays ? ` (LOP ${payslip.lopDays})` : ""}`, notPaid]]
+      : fixedRows,
     L + colW + 20,
     RED
   );

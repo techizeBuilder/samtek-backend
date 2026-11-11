@@ -8,6 +8,8 @@ import '../models/QuotationRequest.js'; // registered for populate (createPurcha
 import '../models/ManualQuotation.js';
 import { Company } from '../models/Company.js';
 import { sendPurchaseOrderEmail } from '../services/emailService.js';
+import { purchaseOrderPdfFor } from '../services/purchaseOrderPdf.js';
+import { DEPARTMENTS, reportMissingMailbox } from '../config/mailAccounts.js';
 import { USER_ROLES } from '../shared/schema.js';
 import { applyPricingToItem, cascadeRecalculateToConsumers } from '../services/itemPricingService.js';
 import notificationService from '../services/notificationService.js';
@@ -440,25 +442,36 @@ export async function finalizePurchase(purchase, user, req = null) {
   await notifyStoreOfIncomingPO(purchase);
 }
 
-// Emails the full PO to its vendor (procurement-v2, 2026-10-08) — items with
-// GST and due dates, charges, payment terms, totals, delivery address. Used
+// Emails the PO to its vendor (procurement-v2, 2026-10-08) — since 2026-10-29
+// the PO PDF (the same one "Download PO" gives) attached to a short note. Used
 // automatically by finalizePurchase (a PO created directly, or approved by
 // the Company Admin) and by the "Send / Resend PO email" button. Only a real
 // send moves a Draft PO to 'Sent'; nothing else about the PO changes, and a
 // failure never undoes the PO — Purchase can resend from Purchase Orders.
+const PO_PDF_SUPPLIER_FIELDS = 'supplierName email phone contactPerson address gstNumber';
+
 export async function sendPurchaseOrderToVendor(purchase) {
   const po = await Purchase.findById(purchase._id)
-    .populate('supplier', 'supplierName email')
+    .populate('supplier', PO_PDF_SUPPLIER_FIELDS)
     .populate('items.item', 'code name');
   if (!po) return { success: false, error: 'Purchase order not found' };
   if (!po.supplier?.email) return { success: false, error: 'The vendor has no email address in Vendor Master.' };
   const company = await Company.findById(po.companyId).select('name').lean();
+  let pdf;
+  try {
+    pdf = await purchaseOrderPdfFor(po);
+  } catch (err) {
+    console.error(`PO PDF failed for ${po.purchaseOrderNumber}:`, err);
+    return { success: false, error: `Couldn't make the PO PDF: ${err.message}` };
+  }
   const result = await sendPurchaseOrderEmail({
     to: po.supplier.email,
     vendorName: po.supplier.supplierName || 'Vendor',
     companyName: company?.name || 'Samtek',
     purchase: po,
+    pdf,
   });
+  if (result.notConfigured) await reportMissingMailbox(DEPARTMENTS.PURCHASE, { companyId: po.companyId, what: `PO ${po.purchaseOrderNumber} to the vendor` });
   if (result.success && po.status === 'Draft') {
     po.status = 'Sent';
     await po.save();
@@ -624,6 +637,11 @@ export const createPurchase = async (req, res) => {
         groupIds: groupLineChecks.map(it => String(it.itemQuoteGroup)),
       });
       if (check) {
+        // Not enough quotations yet, while more can still come — no PO, no
+        // exception (minimum quotations, 2026-10-29).
+        if (check.blocked) {
+          return res.status(400).json({ message: `Not enough quotations yet — ${check.blockedReasons.join('; ')}.`, selectionCheck: check });
+        }
         let exception = null;
         if (!check.passed) {
           exception = readSelectionException(req.body.selectionException);
@@ -650,11 +668,13 @@ export const createPurchase = async (req, res) => {
     let lineGstTotal = 0;
     const purchaseItems = [];
     const orderDate = new Date();
-    // With an advance, the vendor's delivery days count from the day the
-    // advance is paid (client, 2026-10-12) — the lines get no date yet.
-    // Without one, they count from the order, as before.
+    // The vendor's delivery days count from the order — or, when Purchase
+    // ticks "the vendor sends only after the advance is paid", from the day
+    // the advance is paid (the lines get no date yet). An advance alone no
+    // longer means waiting: on credit terms the vendor ships straight away
+    // (client, 2026-10-29; was "any advance = wait", 2026-10-12).
     const poPaymentTerms = cleanPaymentTerms(paymentTermsBody);
-    const clockOnAdvance = Number(poPaymentTerms.advancePercent) > 0;
+    const clockOnAdvance = Number(poPaymentTerms.advancePercent) > 0 && req.body.waitForAdvance === true;
 
     for (const item of items) {
       const inventoryItem = await Item.findById(item.item);
@@ -1117,7 +1137,9 @@ export const getPurchaseItems = async (req, res) => {
 // same Item collection R&D uses, bucketed by productKind, restricted to
 // items flagged purchase:true. Purpose here is narrow — list + let
 // Purchase set/update purchaseCost per item — not full item CRUD.
-const PURCHASE_INVENTORY_KIND_PARAMS = ['none', 'Machine', 'Motor'];
+// ChildPart / SubChildPart (2026-10-28): bought parts, so Accounts can enter
+// an estimated vendor price before the first purchase.
+const PURCHASE_INVENTORY_KIND_PARAMS = ['none', 'Machine', 'Motor', 'ChildPart', 'SubChildPart'];
 
 const purchaseInventoryProductKindFilter = (productKind) => {
   const kind = PURCHASE_INVENTORY_KIND_PARAMS.includes(productKind) ? productKind : 'none';
@@ -1159,7 +1181,9 @@ export const getPurchaseInventoryItems = async (req, res) => {
     const filter = {
       ...scope,
       purchase: true,
-      productKind: purchaseInventoryProductKindFilter(productKind)
+      productKind: purchaseInventoryProductKindFilter(productKind),
+      // A Child Part / Sub Child Part only once R&D marked it bought (make or buy).
+      ...(['ChildPart', 'SubChildPart'].includes(productKind) ? { partSourcing: 'buy' } : {}),
     };
 
     if (search) {
@@ -1172,7 +1196,7 @@ export const getPurchaseInventoryItems = async (req, res) => {
     }
 
     const items = await Item.find(filter)
-      .select('_id name code category subCategory unit qty purchaseCost weightUnitPrice fabricationRef dimensionVariants mrp salePrice profitPercent discountPercent productKind updatedAt')
+      .select('_id name code category subCategory unit qty purchaseCost weightUnitPrice fabricationRef dimensionVariants mrp salePrice profitPercent discountPercent productKind updatedAt pricePending purchaseCostKind purchaseCostAt')
       .sort({ name: 1 })
       .lean();
 
@@ -1207,6 +1231,9 @@ export const updatePurchaseItemCost = async (req, res) => {
     // profitPercent/discountPercent (Company Admin > Pricing Value) in one
     // step — same formula every other purchase-cost-driven recalculation
     // uses (see itemPricingService.js).
+    // Accounts' typed price is an estimate until a real receive replaces it;
+    // it clears "price pending" (make or buy, 2026-10-28).
+    if (Number(purchaseCost) > 0) Object.assign(item, { purchaseCostKind: 'estimate', purchaseCostAt: new Date(), pricePending: false });
     const updated = await applyPricingToItem(item, Number(purchaseCost), 'Purchase');
     // This bypasses recalculateItemPricing (which would re-derive cost from
     // the latest invoice, overriding Accounts' manually-typed value), so the
@@ -1266,6 +1293,9 @@ export const updateWeightUnitPrice = async (req, res) => {
 
     item.weightUnitPrice = Math.round(Number(weightUnitPrice) * 100) / 100;
     await item.save();
+    // Slice 4 (2026-10-24): ₹/kg prices every fabrication BOM line and Sub
+    // Child Part made from it — climb it up to the Machines' prices.
+    await cascadeRecalculateToConsumers(item);
 
     res.json({
       success: true,
@@ -1329,29 +1359,30 @@ export const sendPOToVendor = async (req, res) => {
   }
 };
 
-// GET /api/dispatches/vendor-pickups — Dispatch stub (2026-10). Transport
-// decision (Purchase.transportBy) is made by Purchase at batch time (By
-// Vendor tab); when it's 'Company', Logistics/Dispatch needs to arrange
-// the pickup themselves instead of the vendor delivering. "Just show the
-// request" — purely read-only visibility (PO, vendor, items, expected
-// date) for now, no assign-vehicle/driver/status workflow yet; that's
-// explicitly deferred to a later pass once this proves out.
-export const getVendorPickupsForDispatch = async (req, res) => {
+// "Download PO" (client, 2026-10-29) — the PO PDF Purchase sends by WhatsApp
+// or any other way; the same document the PO email attaches. Only a real
+// order: a PO still waiting for the Company Admin (or rejected / cancelled)
+// can't reach a vendor this way either.
+export const downloadPurchaseOrderPdf = async (req, res) => {
   try {
-    // Real orders only — a PO waiting for / refused Company Admin approval
-    // (procurement-v2) isn't something Dispatch should go and collect.
-    const query = { transportBy: 'Company', status: { $nin: ['Pending Approval', 'Rejected', 'Cancelled'] } };
-    if (req.user.role !== USER_ROLES.SUPER_USER) {
-      query.companyId = req.user.companyId;
-      query.unit = req.user.unit;
+    const po = await Purchase.findById(req.params.id)
+      .populate('supplier', PO_PDF_SUPPLIER_FIELDS)
+      .populate('items.item', 'code name');
+    if (!po) return res.status(404).json({ success: false, message: 'Purchase Order not found' });
+    if (req.user.role !== USER_ROLES.SUPER_USER && (po.unit !== req.user.unit || String(po.companyId) !== String(req.user.companyId))) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
     }
-    const purchases = await Purchase.find(query)
-      .populate('supplier', 'supplierName contactPerson email phone address')
-      .select('purchaseOrderNumber supplier items orderDate expectedDeliveryDate deliveryClock status grandTotal')
-      .sort({ expectedDeliveryDate: 1 });
-    res.json({ success: true, data: purchases });
+    if (['Pending Approval', 'Rejected', 'Cancelled'].includes(po.status)) {
+      return res.status(409).json({ success: false, message: `This PO is ${po.status} — it can't be sent to the vendor.` });
+    }
+    const pdf = await purchaseOrderPdfFor(po);
+    await logPoEvent({ po, user: req.user, req, action: 'downloaded', summary: 'PO PDF downloaded.', details: {} });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${po.purchaseOrderNumber}.pdf"`);
+    res.send(pdf);
   } catch (error) {
-    console.error('getVendorPickupsForDispatch error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Error making the PO PDF:', error);
+    res.status(500).json({ success: false, message: 'Could not make the PO PDF', error: error.message });
   }
 };
+

@@ -2,6 +2,7 @@ import Task from "../models/taskManagement.js";
 import fs from "fs";
 import path from "path";
 import { sendTaskEmail } from "../utils/taskEmail.js";
+import { DEPARTMENTS, mailboxWarning } from "../config/mailAccounts.js";
 import notificationService from "../services/notificationService.js";
 
 // --- ROLE HIERARCHY & HELPERS ---
@@ -157,9 +158,12 @@ export const createTask = async (req, res) => {
       Promise.allSettled(notifPromises);
     }
 
+    // No HR mailbox → the task is saved; the reply says the emails didn't go (2026-10-29).
+    const emailWarning = populatedTask.assignedTo?.some(a => a.email) ? await mailboxWarning(DEPARTMENTS.HR) : null;
     return res.status(201).json({
       success: true,
       message: "Task created and locked successfully",
+      emailWarning,
       data: populatedTask
     });
   } catch (error) {

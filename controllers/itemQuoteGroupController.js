@@ -16,7 +16,7 @@ import { getOrCreateSettings } from './purchaseSettingsController.js';
 import {
   quoteValidUntil, isQuoteExpired, loadPriceSamples, summarizePrices, DEFAULT_QUOTE_VALIDITY_DAYS,
 } from '../services/quoteChecksService.js';
-import { checkVendorSelection, SELECTION_EXCEPTION_REASONS } from '../services/vendorSelectionCheckService.js';
+import { checkVendorSelection, exceptionReasonsFor } from '../services/vendorSelectionCheckService.js';
 
 // procurement-v2: an item group on a PO that's waiting for Company Admin
 // approval is locked — no selection / quantity / quote changes until that PO
@@ -653,6 +653,10 @@ export async function buildQuoteHistory({ companyId, groupIds = [], purchaseId =
     itemCode: g.item?.code || '',
     quantity: g.quantity,
     purchaseUnit: g.purchaseUnit,
+    // A fabrication item's card is one size (2026-10-29): which size, so two
+    // cards of the same item can be told apart, as on RFQ/PO.
+    sizeValues: g.sizeValues || null,
+    pieces: g.pieces ?? g.requestedPieces ?? null,
     quotes: bids.filter(b => b.group && String(b.group) === String(g._id)).map(shape),
   }));
   if (legacyPrIds.length) {
@@ -697,7 +701,7 @@ export const getSelectionCheck = async (req, res) => {
     if (!/^[a-f0-9]{24}$/i.test(vendorId) || !groupIds.length) return res.status(400).json({ success: false, message: 'Pass vendor and groups' });
     const settings = await getOrCreateSettings(companyId);
     const check = await checkVendorSelection({ companyId, vendorId, groupIds, settings });
-    res.json({ success: true, data: { ...check, exceptionReasons: SELECTION_EXCEPTION_REASONS } });
+    res.json({ success: true, data: { ...check, exceptionReasons: exceptionReasonsFor(check) } });
   } catch (error) {
     console.error('getSelectionCheck error:', error);
     res.status(500).json({ success: false, message: error.message });

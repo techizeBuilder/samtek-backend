@@ -37,6 +37,7 @@ const vendorWarrantyClaimSchema = new mongoose.Schema({
   // The complaint.
   customerName: { type: String, default: '' },
   ticketRef: { type: String, default: '' },                       // free text, not linked
+  orderCode: { type: String, default: '', trim: true },           // the customer's Order, when known (2026-11-03)
   problem: { type: String, required: true },
   defectType: { type: String, enum: DEFECT_TYPES, default: 'Other' },
   severity: { type: String, enum: SEVERITIES, default: 'Major' },

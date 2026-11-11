@@ -79,7 +79,7 @@ export const sendTrainingEmail = async (companyId, to, type, data) => {
             return false;
     }
 
-    const mailer = await getDeptMailer(companyId, DEPARTMENTS.HR);
+    const mailer = await getDeptMailer(DEPARTMENTS.HR);
     if (!mailer) {
         console.log(`[EMAIL SKIPPED] HR SMTP not configured. Would send training email to: ${to}`);
         return false;

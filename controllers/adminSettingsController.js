@@ -272,6 +272,11 @@ export const getGlobalSmtp = async (req, res) => {
 export const addGlobalSmtp = async (req, res) => {
   try {
     const settings = await getOrCreateGlobalSmtp();
+    // One mailbox per department (2026-10-29) — a second one was never used
+    // (the first active one always wins), e.g. accounts@ saved under Sales.
+    if ((settings.smtp || []).some(s => s.department === req.body?.department)) {
+      return res.status(409).json({ success: false, message: `${req.body.department} already has a mailbox — delete it first to replace it.` });
+    }
     settings.smtp.push(req.body);
     await settings.save();
     res.json({ success: true, smtp: settings.smtp });
@@ -286,6 +291,10 @@ export const updateGlobalSmtp = async (req, res) => {
     const settings = await getOrCreateGlobalSmtp();
     const item = settings.smtp.id(id);
     if (!item) return res.status(404).json({ success: false, message: 'SMTP config not found' });
+    if (req.body?.department && req.body.department !== item.department
+      && (settings.smtp || []).some(s => s.department === req.body.department && String(s._id) !== String(id))) {
+      return res.status(409).json({ success: false, message: `${req.body.department} already has a mailbox — delete it first to replace it.` });
+    }
     Object.assign(item, req.body);
     await settings.save();
     res.json({ success: true, smtp: settings.smtp });

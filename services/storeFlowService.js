@@ -1,12 +1,14 @@
 import mongoose from 'mongoose';
 import Sale, { ITEM_READY_STATUSES } from '../models/Sale.js';
 import Order from '../models/Order.js';
+import OrderForm from '../models/OrderForm.js';
 import QCJob from '../models/QCJob.js';
 import ProductionOrder from '../models/ProductionOrder.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import { Item } from '../models/Inventory.js';
 import { checkMachineAssemblyMaterialAvailability, resolveMachineOrderProcesses } from './machineReorderService.js';
 import { releaseReservationsForOrder, getFreeQty } from './materialReservationService.js';
+import { detachCascadeChildren } from './cascadeDeliveryService.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Multi-item Store flow service
@@ -22,6 +24,18 @@ import { releaseReservationsForOrder, getFreeQty } from './materialReservationSe
 // ─────────────────────────────────────────────────────────────────────────────
 
 const today = () => new Date().toISOString().split('T')[0];
+
+// The delivery date promised to the customer — the submitted Order Form's
+// (Leads → Order Form). A production order made for that order is due then;
+// null when the form has none (the caller falls back to today). Fixed
+// 2026-10-21: production orders always got today, so a fresh order showed
+// as overdue straight away.
+async function promisedDeliveryDate(order) {
+  if (!order?._id) return null;
+  const form = await OrderForm.findOne({ orderId: order._id }).select('deliveryDate').lean();
+  const d = form?.deliveryDate ? new Date(form.deliveryDate) : null;
+  return d && !Number.isNaN(d.getTime()) ? d.toISOString().split('T')[0] : null;
+}
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -186,6 +200,10 @@ async function releasePendingProductionOrderReservations(itemScope, companyId) {
   for (const doc of stray) {
     await releaseReservationsForOrder(doc._id);
   }
+  // Serial number work step 1 (2026-10-31, P2): the cascade orders these
+  // raised would otherwise point at a deleted order — they become stock
+  // orders (their output goes to stock).
+  await detachCascadeChildren(stray, companyId);
 }
 
 // ── Per-item automation (the old whole-order 3-case block, scoped to one item) ──
@@ -358,7 +376,7 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
         machineName: saleItem.productName,
         priority: order?.priority === 'High' ? 'Urgent' : 'Normal',
         receivedDate: today(),
-        deliveryDate: today(),
+        deliveryDate: (await promisedDeliveryDate(order)) || today(),
         status: 'Pending',
         source: 'Store',
         ...itemScope,
@@ -381,6 +399,13 @@ export async function applyStoreDecisionToItem({ sale, order, saleItem, decision
         await checkMachineAssemblyMaterialAvailability(machineOrder, companyId);
       } catch (e) {
         console.error(`❌ [Store/${orderCode}] Machine assembly material check error for "${saleItem.productName}":`, e);
+      }
+      // 2026-10-22 (client change): a first Out Source step goes to Purchase at once.
+      try {
+        const { autoRequestFirstOutsourceRun } = await import('../controllers/outsourceWorkController.js');
+        await autoRequestFirstOutsourceRun(machineOrder);
+      } catch (e) {
+        console.error(`❌ [Store/${orderCode}] Auto outsource request error for "${saleItem.productName}":`, e);
       }
     }
 

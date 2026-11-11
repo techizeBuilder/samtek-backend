@@ -16,7 +16,7 @@ import mongoose from 'mongoose';
 import '../models/PurchaseRejection.js';
 import PurchaseInvoice from '../models/PurchaseInvoice.js';
 import { postEntry, gstLines } from './purchaseLedgerService.js';
-import { fullDueDate, poPaymentStatus } from './purchaseBillService.js';
+import { fullDueDate, poPaymentStatus, startOfDay } from './purchaseBillService.js';
 import { logPoEvent, inr } from './purchaseAuditService.js';
 import { fmtDay } from './deliveryFollowUpService.js';
 import notificationService from './notificationService.js';
@@ -262,12 +262,32 @@ export async function settleIfFullyAccepted(po, bill, user = null, req = null) {
 // Daily: PO bills past their full-payment date and not paid → the PO shows
 // Overdue, and Accounts hears once per bill.
 export async function runPaymentOverdueSweep(now = new Date(), { companyId = null, unit = null } = {}) {
-  const query = { purchaseOrder: { $ne: null }, stage: 'Payable', dueDate: { $lt: now }, overdueNotifiedAt: null };
+  // PO bills and (outsource-v2 slice 3, 2026-10-20) Outsource Order bills.
+  const query = { $or: [{ purchaseOrder: { $ne: null } }, { outsourceOrder: { $ne: null } }], stage: 'Payable', dueDate: { $lt: startOfDay(now) }, overdueNotifiedAt: null }; // the due day has ended (2026-10-24)
   if (companyId) query.companyId = companyId;
   if (unit) query.unit = unit;
-  const bills = await PurchaseInvoice.find(query).populate({ path: 'purchaseOrder', select: 'purchaseOrderNumber companyId supplier', populate: { path: 'supplier', select: 'supplierName' } });
+  const bills = await PurchaseInvoice.find(query)
+    .populate({ path: 'purchaseOrder', select: 'purchaseOrderNumber companyId supplier', populate: { path: 'supplier', select: 'supplierName' } })
+    .populate({ path: 'outsourceOrder', select: 'orderNo vendorName' });
   let flagged = 0;
   for (const b of bills) {
+    const oso = b.outsourceOrder;
+    if (oso) {
+      await PurchaseInvoice.updateOne({ _id: b._id }, { overdueNotifiedAt: now });
+      try {
+        await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], {
+          title: 'Outsource payment overdue',
+          message: `${oso.orderNo} from ${oso.vendorName || 'the vendor'}: ${inr(b.totalAmount - b.paidAmount)} was due ${fmtDay(b.dueDate)}.`,
+          type: 'purchase',
+          targetCompanyId: b.companyId,
+          data: { outsourceOrderId: String(oso._id), billId: String(b._id), paymentOverdue: true },
+        });
+      } catch (err) {
+        console.error('Outsource payment overdue notification failed:', err.message);
+      }
+      flagged += 1;
+      continue;
+    }
     const po = b.purchaseOrder;
     if (!po) continue;
     await mongoose.model('Purchase').updateOne({ _id: po._id }, { paymentStatus: 'Overdue' });

@@ -22,7 +22,46 @@ const ChecklistItemSchema = new mongoose.Schema({
   // ARE QC's own record, exactly as before this change.
   qcStatus: { type: String, enum: ['Pending', 'Pass', 'Fail'], default: 'Pending' },
   qcRemarks: { type: String, default: '' },
+  // Who checked this row and when — from the login, stamped only when the
+  // row's result / value / remark actually changed (2026-10-30: several QC
+  // people may work on one checklist).
+  checkedBy: { type: String, default: '' },
+  checkedAt: { type: Date, default: null },
 }, { _id: true });
+
+// What a rejection carries (2026-10-30, client): QC's photos of the rejected
+// material, and the checks that failed in that decision (with QC's remark and
+// who checked them). docs/qc-rejection-photos-2026-10.md.
+const RejectionPhotoSchema = new mongoose.Schema({
+  url: { type: String, required: true },
+  name: { type: String, default: '' },
+}, { _id: false });
+const FailedCheckSchema = new mongoose.Schema({
+  parameter: { type: String, default: '' },
+  standardValue: { type: String, default: '' },
+  actualValue: { type: String, default: '' },
+  remarks: { type: String, default: '' },
+  checkedBy: { type: String, default: '' },
+  checkedAt: { type: Date, default: null },
+}, { _id: false });
+const rejectionEvidence = () => ({
+  photos: { type: [RejectionPhotoSchema], default: [] },
+  failedChecks: { type: [FailedCheckSchema], default: [] },
+});
+// One line of a reject breakdown (2026-10-30, docs/qc-reject-breakdown-2026-10.md):
+// how many failed, what failed (a checklist parameter or typed "Other"), the
+// remark, its severity, size, serials and photos. One REJ per line.
+const RejectLineSchema = new mongoose.Schema({
+  qty: { type: Number, required: true },
+  parameter: { type: String, default: '' },
+  other: { type: Boolean, default: false },
+  remark: { type: String, default: '' },
+  severity: { type: String, enum: ['Minor', 'Major', 'Critical'], default: 'Major' },
+  sizeValues: { type: mongoose.Schema.Types.Mixed, default: null },
+  serials: { type: [String], default: [] },
+  decisionId: { type: String, default: '' },
+  ...rejectionEvidence(),
+}, { _id: false });
 
 // One entry per Sub Child Part of an in-house/outsource-manufactured
 // product's BOM (see qc-module-restructure-client-request.md's 2026-09-01
@@ -62,6 +101,7 @@ const PartQCEntrySchema = new mongoose.Schema({
   qcBy: { type: String, default: '' },
   qcDate: { type: String, default: null },
   rejectReason: { type: String, default: '' },
+  ...rejectionEvidence(), // the latest rejection's photos + failed checks (2026-10-30)
 }, { timestamps: true });
 
 // QC multi-checkpoint redesign (2026-09-26, slice 2 — see
@@ -81,6 +121,8 @@ const QCFilledRowSchema = new mongoose.Schema({
   status: { type: String, enum: ['Pending', 'Pass', 'Fail'], default: 'Pending' },
   remarks: { type: String, default: '' },
   source: { type: String, enum: ['process', 'final'], default: 'process' },
+  checkedBy: { type: String, default: '' },   // see ChecklistItemSchema (2026-10-30)
+  checkedAt: { type: Date, default: null },
 }, { _id: false });
 
 // One submit-then-decide cycle on a single QC-flagged step, for a Child
@@ -97,6 +139,7 @@ const StepAttemptSchema = new mongoose.Schema({
   decidedBy: { type: String, default: '' },
   decision: { type: String, enum: ['', 'Pass', 'Reject'], default: '' },
   rejectReason: { type: String, default: '' },
+  ...rejectionEvidence(), // on a Reject (2026-10-30)
 }, { _id: true, timestamps: true });
 
 // One QC-flagged BOM step's own history, for one unit. A unit can now have
@@ -192,6 +235,7 @@ const BatchStepAttemptSchema = new mongoose.Schema({
   reworkQty: { type: Number, default: null },
   scrapQty: { type: Number, default: null },
   reason: { type: String, default: '' },
+  ...rejectionEvidence(), // when anything goes to rework / scrap (2026-10-30)
 }, { _id: true, timestamps: true });
 
 // One QC-flagged BOM step's own history, for a Sub Child Part order's whole
@@ -296,6 +340,16 @@ const QCJobSchema = new mongoose.Schema({
   // How bad a failed purchase is (2026-10-13, vendor score): Minor / Major / Critical.
   failSeverity: { type: String, enum: ['Minor', 'Major', 'Critical', null], default: null },
   inspectorRemarks: { type: String, default: '' },
+  // Who made the job's decision (from the login, 2026-10-30) — `inspector`
+  // is whoever started the inspection.
+  decidedBy: { type: String, default: '' },
+  decidedAt: { type: Date, default: null },
+  // A whole-job reject's photos + failed checks (2026-10-30).
+  rejectionPhotos: { type: [RejectionPhotoSchema], default: [] },
+  failedChecks: { type: [FailedCheckSchema], default: [] },
+  // A whole-job reject made of breakdown lines (2026-10-30) — a partial one
+  // keeps its lines as partialRejections entries instead.
+  rejectLines: { type: [RejectLineSchema], default: [] },
 
   // Attachments
   attachments: [{ url: String, type: { type: String, enum: ['Image', 'Video', 'Document'] }, label: String }],
@@ -333,6 +387,9 @@ const QCJobSchema = new mongoose.Schema({
   // purchaseRequestId/saleId above, used to credit stock back onto the
   // right Sub Child Part Item and close out the order on approval/rejection.
   subChildPartJobWorkOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'SubChildPartJobWorkOrder', default: null },
+  // Which trip (round) of that order this check is for (2026-10-22, per-step
+  // QC). The order's final check (order.qcJobId) also carries its round.
+  jobWorkRoundId: { type: mongoose.Schema.Types.ObjectId, default: null },
   // The customer-facing sales Order.orderCode this job traces back to
   // (e.g. "ORD-0043") — lets QC screens group jobs of the same order.
   orderCode: { type: String, default: '', trim: true },
@@ -350,9 +407,15 @@ const QCJobSchema = new mongoose.Schema({
     reason: { type: String, default: '' },
     rejectedAt: { type: Date, default: Date.now },
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    rejectedByName: { type: String, default: '' },
+    // A reject breakdown line (2026-10-30): what failed, and the QC decision it came from.
+    parameter: { type: String, default: '' },
+    other: { type: Boolean, default: false },
+    decisionId: { type: String, default: '' },
     severity: { type: String, enum: ['Minor', 'Major', 'Critical', null], default: null },
     // Fabrication: which size the rejected pieces were (2026-10-15).
     sizeValues: { type: mongoose.Schema.Types.Mixed, default: null },
+    ...rejectionEvidence(), // 2026-10-30
   }],
 
   // Purchase jobs (2026-10-12 — purchase money, accounts Slice 2): how much
@@ -363,6 +426,8 @@ const QCJobSchema = new mongoose.Schema({
   acceptance: {
     value: { type: Number, default: null },     // ₹ incl. GST added to the bill's accepted value
     postedAt: { type: Date, default: null },
+    // When the vendor's daily QC results email carried this pass (2026-10-29).
+    vendorMailedAt: { type: Date, default: null },
   },
 
   notes: { type: String, default: '' },

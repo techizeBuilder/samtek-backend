@@ -1,4 +1,5 @@
 import { Item } from '../models/Inventory.js';
+import { isReleased } from '../services/productApprovalService.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import QCJob from '../models/QCJob.js';
 import PurchaseRejection from '../models/PurchaseRejection.js';
@@ -89,7 +90,8 @@ async function checkPlainItem(item, stats, inQcRequestIds) {
   const request = await PurchaseRequest.create({
     requestId,
     productName: item.name,
-    quantity: item.reorderQty,
+    // A machine: Order Quantity or 1, same as its build sweep (2026-11-06).
+    quantity: item.productKind === 'Machine' ? (item.reorderQty || 1) : item.reorderQty,
     requestFromDepartment: 'Store',
     priority: 'Medium',
     companyId: item.companyId,
@@ -114,7 +116,7 @@ async function checkFabricationVariants(item, stats, inQcRequestIds) {
   // reserved for orders of that size.
   const flagged = [];
   for (const dv of item.dimensionVariants || []) {
-    if (dv.isLeftover || !dv.materialFlow) continue;
+    if (dv.isLeftover || dv.isDiscontinued || !dv.materialFlow) continue; // discontinued: never reordered (2026-10-28)
     const free = await getFreeQty(item._id, dv.subStock || 0, item.companyId, { variantId: dv._id });
     if (free <= (dv.minStock || 0)) flagged.push(dv);
   }
@@ -186,6 +188,14 @@ export async function runLowStockReorderSweep({ companyId = null } = {}) {
     ...(companyId ? { companyId } : {}),
     isDiscontinued: { $ne: true },
     purchase: true,
+    // A made Child Part / Sub Child Part is built, never bought (make or buy,
+    // 2026-10-28) — even if its purchase flag is on from the Item default.
+    // Likewise a machine with Forward on: it's built, through the machine sweep
+    // (2026-11-06), even when its Purchasable flag is on too.
+    $nor: [
+      { productKind: { $in: ['ChildPart', 'SubChildPart'] }, partSourcing: { $ne: 'buy' } },
+      { productKind: 'Machine', 'machineDetails.forwardToNextPhase': true },
+    ],
     $or: [
       { materialFlow: { $in: ['High Flow', 'Medium Flow', 'Low Flow'] } },
       { 'dimensionVariants.materialFlow': { $in: ['High Flow', 'Medium Flow', 'Low Flow'] } },
@@ -195,6 +205,9 @@ export async function runLowStockReorderSweep({ companyId = null } = {}) {
   for (const item of items) {
     stats.scanned++;
     try {
+      // A bought Child Part / Sub Child Part / Machine is reordered only once
+      // R&D has released it (the same gate as build orders, 2026-10-29).
+      if (['ChildPart', 'SubChildPart', 'Machine'].includes(item.productKind) && !isReleased(item)) continue;
       if (item.fabricationRef) {
         await checkFabricationVariants(item, stats, inQcRequestIds);
       } else {

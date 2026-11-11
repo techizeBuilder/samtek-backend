@@ -3,6 +3,7 @@
 import Expense from "../models/ExpenseRequest.js";
 import User from "../models/User.js";
 import notificationService from "../services/notificationService.js";
+import { canApprove, isInMyCompany } from "../utils/companyScope.js";
 
 /* ================= EMPLOYEE: CREATE EXPENSE ================= */
 export const createExpense = async (req, res) => {
@@ -144,6 +145,9 @@ export const updateExpenseStatus = async (req, res) => {
     }
 
     const expense = await Expense.findById(req.params.id);
+    if (expense && !(await canApprove(req.user, expense.employee, { features: ["expenseRequests"] }))) {
+      return res.status(403).json({ message: "You can't decide on this person's request." });
+    }
 
     if (!expense) {
       return res.status(404).json({ message: "Expense not found" });
@@ -276,6 +280,9 @@ export const payExpenseRequest = async (req, res) => {
     const expenseRequestId = req.params.id;
 
     const expenseRequest = await Expense.findById(expenseRequestId).populate("employee");
+    if (expenseRequest && !(await isInMyCompany(req.user, expenseRequest.employee?._id))) {
+      return res.status(404).json({ message: "Expense request not found" });
+    }
     if (!expenseRequest) {
       return res.status(404).json({ message: "Expense request not found" });
     }

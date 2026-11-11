@@ -8,6 +8,7 @@ import Sale from '../models/Sale.js';
 import ProductionBatch from '../models/ProductionBatch.js';
 import { Item } from '../models/Inventory.js';
 import DispatchOrder from '../models/DispatchOrder.js';
+import { seedCompanyDepartments } from '../services/departmentSeedService.js';
 import ServiceTicket from '../models/ComplaintServiceModel.js';
 
 // Helper function to check company permissions
@@ -268,6 +269,13 @@ export const createCompany = async (req, res) => {
 
     // Create company
     const company = await Company.create(companyData);
+
+    // Departments from roles (2026-11-06): never stops the company being created.
+    try {
+      await seedCompanyDepartments(company._id);
+    } catch (seedError) {
+      console.error('Department seed failed for new company:', seedError.message);
+    }
 
     // Create Company Admin if requested
     if (companyData.createAdmin === 'true' || companyData.createAdmin === true) {

@@ -1,6 +1,7 @@
 /** @format */
 
 import JobOpenings from "../models/JobOpenings.js";
+import { companyMatch } from "../utils/companyScope.js";
 
 /**
  * ➕ Add Job Opening
@@ -95,7 +96,7 @@ export const getAllJobOpenings = async (req, res) => {
  */
 export const getJobOpeningById = async (req, res) => {
   try {
-    const job = await JobOpenings.findById(req.params.id).populate("recruitingManager", "fullName username email");
+    const job = await JobOpenings.findOne({ _id: req.params.id, ...companyMatch(req.user) }).populate("recruitingManager", "fullName username email");
 
     if (!job) {
       return res.status(404).json({ message: "Job opening not found" });
@@ -129,7 +130,7 @@ export const updateJobOpening = async (req, res) => {
       updateData.jobDocument = req.file.path.replace(/\\/g, "/");
     }
 
-    const job = await JobOpenings.findByIdAndUpdate(req.params.id, updateData, {
+    const job = await JobOpenings.findOneAndUpdate({ _id: req.params.id, ...companyMatch(req.user) }, updateData, {
       new: true,
     });
 
@@ -154,8 +155,8 @@ export const updateJobOpening = async (req, res) => {
  */
 export const closeJobOpening = async (req, res) => {
   try {
-    const job = await JobOpenings.findByIdAndUpdate(
-      req.params.id,
+    const job = await JobOpenings.findOneAndUpdate(
+      { _id: req.params.id, ...companyMatch(req.user) },
       { status: "Closed" },
       { new: true }
     );
@@ -181,7 +182,7 @@ export const closeJobOpening = async (req, res) => {
  */
 export const deleteJobOpeningById = async (req, res) => {
   try {
-    const job = await JobOpenings.findByIdAndDelete(req.params.id);
+    const job = await JobOpenings.findOneAndDelete({ _id: req.params.id, ...companyMatch(req.user) });
 
     if (!job) {
       return res.status(404).json({ message: "Job opening not found" });

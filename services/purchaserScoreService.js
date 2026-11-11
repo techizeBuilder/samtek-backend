@@ -26,7 +26,7 @@ import VendorBid from '../models/VendorBid.js';
 import QuotationRequest from '../models/QuotationRequest.js';
 import ManualQuotation from '../models/ManualQuotation.js';
 import PurchaseAuditLog from '../models/PurchaseAuditLog.js';
-import { qualityEvent, recencyWeight, weightedMean, daysLate } from './vendorScoreService.js';
+import { qualityEvent, recencyWeight, weightedMean, daysLate, rejectionEvents } from './vendorScoreService.js';
 import { prIdsOfLine, acceptedMoney } from './purchaseAcceptanceService.js';
 
 export const P_PARTS = ['coverage', 'completeness', 'savings', 'followUp', 'quality', 'documentation', 'poAccuracy', 'relationship', 'policy'];
@@ -210,7 +210,7 @@ export async function computePurchaserScores({ companyId, userIds = null, month 
   const [jobs, rejections] = await Promise.all([
     received.length ? QCJob.find({ company: cid, source: 'Purchase', purchaseRequestId: { $in: received.map(p => p._id) }, status: { $in: ['Approved', 'Rejected'] } })
       .select('purchaseRequestId status quantity acceptedQty partialRejections failSeverity updatedAt qcJobId').lean() : [],
-    pos.length ? PurchaseRejection.find({ companyId: cid, purchaseOrder: { $in: pos.map(p => p._id) } }).select('purchaseOrder qcJob number itemName rejectedQty severity createdAt recordedAt outcome replacement').lean() : [],
+    pos.length ? PurchaseRejection.find({ companyId: cid, purchaseOrder: { $in: pos.map(p => p._id) } }).select('purchaseOrder qcJob number itemName rejectedQty severity createdAt recordedAt outcome replacement lines.qty lines.severity').lean() : [],
   ]);
   const rejByJob = new Map();
   const rejById = new Map();
@@ -276,7 +276,7 @@ export async function computePurchaserScores({ companyId, userIds = null, month 
     if (!ctx || !mine(ctx.po.createdBy)) continue;
     const recs = rejByJob.get(String(job._id)) || [];
     const rejs = recs.length
-      ? recs.map(r => ({ qty: Number(r.rejectedQty) || 0, severity: r.severity || 'Major' }))
+      ? recs.flatMap(r => rejectionEvents(r, { withRefused: false }))
       : [
         ...(job.partialRejections || []).map(p => ({ qty: Number(p.qty) || 0, severity: p.severity || 'Major' })),
         ...(job.status === 'Rejected' ? [{ qty: Number(job.quantity) || 0, severity: job.failSeverity || 'Major' }] : []),

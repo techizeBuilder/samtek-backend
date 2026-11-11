@@ -2847,6 +2847,16 @@ decision). The design is in **`purchase-dashboard-design-2026-10.md`**, written 
 3. **The vendor check counts one set of charges.** Only the **newest** quotation behind the PO's
    lines counts, the same one PO review fills in from. PO review is unchanged.
 
+> **Changed 2026-10-30 (your browser test, PR055):** a fresh quotation for a new request pre-filled
+> rahul's "packing ₹400" from MQ-0007 — a charge the vendor may not ask for this time, easy to miss and
+> carry onto a PO. Now charges and terms carry over **only from a quotation round that is still open**:
+> a quote on a card still being quoted (a re-quote / price change — the case above). Once a card goes
+> onto a PO **with any vendor**, that round is over for everyone and its charges no longer carry; a
+> quotation whose cards are partly ordered still carries (part of the round is running). Both the manual
+> dialog and the vendor's email page. "A price already on a PO counts" (above) no longer applies.
+> `quotationCarryOverService.pickCarryOver` / `vendorCarryOver`. **Tested:** 7 cases + rahul on test-1
+> read-only (his new quotation opens empty).
+
 **Technical notes:**
 - **New `services/quotationCarryOverService.js`:**
   - `quotationMadeAt`, `pickCarryOver` (pure), `vendorCarryOver`
@@ -3935,6 +3945,476 @@ The frontend builds.
 
 ---
 
+## 56. A bought item's cost = what the received PO line really cost (2026-10-26)
+
+**Why (your check):** outsource job work counts its charges but not GST. A raw material's price
+didn't follow the same rule.
+
+**What was wrong:**
+
+| Gap | Example |
+|---|---|
+| The PO's charges were left out of the item's price | 100 kg × ₹95 + ₹500 packing stayed ₹95/kg |
+| A "GST included" rate kept its GST. The quote forms never asked the %, so it couldn't be taken out | 28 quotes and 7 POs in dev, all with the rate unknown |
+| The price was read from the newest bill for the item, and a bill is made when a PO is approved | the price moved before anything arrived; an older PO received later took the newer PO's rate |
+
+**Now** (logic doc `purchase-cost-logic-2026-10.md`):
+- **The Store receive prices from the PO line it receives:** rate before GST + the line's share
+  of the PO charges (by line value), × the unit conversion. A fabrication item's ₹/kg is landed
+  the same way.
+- **Approving a PO doesn't re-price anything.** A manual bill (no PO) still does.
+- **The GST % is asked also when the rate includes GST:** "GST % included" on the vendor's email
+  page (checked on the server too) and the manual quotation. The PO copies it as before.
+  - Screens show "incl. 18% GST".
+  - An old quote with no % is costed at its rate as is (never guessed).
+- **Unchanged:** bill and PO totals, GST on bills, payments, stock.
+- **Kept open:** GST as a cost, and our own vehicle freight. Added only if the client asks.
+
+**Example:** bolts 100 kg × ₹95 and angle 50 kg × ₹118 incl. 18%, packing ₹600.
+
+| | Before | Now |
+|---|---|---|
+| Bolts | ₹4.75 / piece | **₹4.95 / piece** |
+| Angle | ₹118/kg | **₹104.14/kg** |
+| Bill | ₹17,818 | ₹17,818 |
+
+**Code:**
+- `itemPricingService`: `poLineUnitCost`, `poLineOfRequest`, `recalculateItemPricing({ fromPoLine })`
+- `purchaseRequestController`: the 4 receive paths pass their PO line (`poLineFor` for the
+  one-request ones)
+- `purchaseInvoiceController.createAutoPurchaseInvoice`: no re-price
+- `manualQuotationController.readManualItems` / `quotationRequestController.readVendorSubmission`:
+  GST % required
+- **Frontend:**
+  - `VendorQuotationForm.jsx`, `rfqShared.jsx`: the box stays open
+  - "incl. x% GST" on `PoReviewDialog`, `PoApprovalsTab`, `QuoteHistoryDialog`,
+    `QuoteComparison`, `RfqVendorList`, `PurchaseOrderList`
+
+**Checked:**
+- 13/13 real-handler tests, 0 left
+- slice 4 cost 29/29, slice 3 bills 29/29
+- the screens build
+
+**Browser test (you, 2026-10-26):** ss sheet, sujeet, 382.5 kg × ₹200 incl. 18% + packing ₹300,
+We pick up.
+- **Approved:** the price didn't move (₹220/kg).
+- **Received:** **₹170.28/kg** (200 ÷ 1.18 + 300 ÷ 382.5), ₹6,513.05 per 38.25 kg sheet.
+- **Price push:** Fan Blade material ₹4.09 (0.024 kg), Fan Bush ₹12.26.
+
+**A gap found and fixed during that test:** the price push re-priced a Sub Child Part's material
+but not its **Sheet Plan scrap**, which is priced at the same ₹/kg. Fan Blade's scrap was still at
+an old ₹150/kg (₹14.40).
+- **Now** route 1 of `priceCascadeService.onRawMaterialChanged` also re-reads the plan's scrap
+  (`subChildPartSheetPlanController.costBreakdownFor`, now exported).
+- **Re-run on test-1:** Fan Blade scrap ₹16.35 (0.096 kg × 170.28), Fan Bush ₹8.17.
+
+---
+
+## 57. Vendor Master: three small changes from the client meeting (2026-10-28)
+
+**Where:** Accounts → Purchase & Outsource → Vendors (`/accounts/purchases/vendors`), the
+vendor form.
+
+1. **"Same as phone" on WhatsApp Number.** A small link above the WhatsApp box copies whatever
+   is in Phone, so the same number isn't typed twice. It can still be changed by hand.
+2. **Entity Type is a list Purchase edits.** It was fixed in the code (Individual, HUF,
+   Company, Firm, Others).
+   - The list now lives in **Purchase & Outsource → Settings → Vendor entity types** (add,
+     rename, remove; own Save button; at least one must stay). Same permission as the other
+     purchase settings.
+   - Every company starts with the old five.
+   - A vendor already saved with a type that's later removed keeps it (the form still shows
+     it for that vendor).
+   - A new vendor starts at "— Select —" instead of "Others".
+3. **Status (Active / Inactive) removed.** It was the old on/off switch, from before vendor
+   approval.
+   - **Who can be quoted or ordered from is decided by approval alone:** Approved yes;
+     Draft, Pending, Rejected, Suspended or Blacklisted no.
+   - **Gone:** the Status field, the "Inactive" badge on vendor cards and on the Company Admin's
+     low-coverage list, and the bill check that refused an "inactive" vendor (bills were never
+     meant to be gated).
+   - **The field stays in the database** so old records load, but nothing reads it. All 9 dev
+     vendors were Active, so nothing changes for them.
+
+**Tested (6 checks, made-up company):** an old settings record shows the old five; the list
+saves trimmed with duplicates dropped; an empty list is refused; a vendor saves with a new type
+(LLP); an approved vendor still marked "inactive" can be ordered from; a blacklisted one can't.
+
+## 58. Vendor documents: the Company Admin decides what's needed, and Documents get their own step (2026-10-28)
+
+**Why (client meeting):** which documents a vendor must have, and which the Company Admin must
+verify, was fixed in the code (PAN card, bank proof, GST certificate when a GSTIN is entered),
+and so was the list of document types. Documents also couldn't be added when creating a vendor —
+Purchase had to save it and then open Edit. Logic doc: `vendor-documents-design-2026-10.md`.
+
+**What changed:**
+
+1. **Company Admin → Purchase & Vendor Approval → Settings → "Vendor documents".**
+   Every document type with one choice: **Not required**, **Required** (the vendor can't be
+   submitted without it) or **Required and verified** (also ticked by the Company Admin before
+   approving).
+   - **Starting choices = today's rules:** PAN Card, GST Certificate (only when the vendor has
+     a GSTIN) and Cancelled Cheque / Bank Proof are Required and verified; the rest are Not
+     required.
+   - **The nine original types are permanent:** they can't be renamed or deleted, only their
+     choice changes.
+   - **Other is outside the setting** (fix 2026-10-29): it's for any extra document without a title
+     of its own — always offered last when uploading, never required or ticked, not on the
+     settings card.
+   - **The Company Admin adds their own types**, and can rename and delete them. Renaming also
+     renames the documents already uploaded. A type that's still Required can't be deleted
+     (make it Not required first); after deleting, documents already uploaded keep the old
+     name and the type is no longer offered. A name can't repeat another (any case).
+2. **Submit for approval** asks for exactly the required documents ("PAN Card document",
+   "MSME/Udyam Certificate document" …). The other checks are unchanged.
+3. **The approval page has one tick per Required-and-verified document the vendor has**, in
+   place of the four fixed ticks. The three old wordings stay (GSTIN against the certificate,
+   PAN against the card, bank details against the cheque); any other type reads "<Type> —
+   genuine and in date". The general tick "Documents are genuine and in date" is gone — each
+   document's tick covers it. With nothing to verify there are no ticks.
+   - **If a required document is missing** (the admin added a rule while the vendor was
+     waiting), approving is refused: "Product Certificate is missing — reject it so Purchase
+     can add it". The approval page shows it in red.
+4. **Documents have their own dialog,** like Products & Services:
+   - after **creating** a vendor the flow is **Step 2 Documents → Step 3 Products & Services**
+     (each can be skipped with "Later");
+   - a **Documents (n)** button on every vendor card opens it any time;
+   - it shows **Needed for approval** with a tick or "— missing" per document, so Purchase sees
+     what's left; the type dropdown is the company's list and opens on the first missing one;
+   - uploads and removals save straight away, as before. The edit form keeps its Documents
+     section, now with the same list.
+5. **The vendor remembers what was ticked** (`verification.checkedDocuments`); the old four
+   flags are still filled for the three original types, so nothing reading them breaks.
+
+**Not affected:** vendors already approved; document expiry reminders; the rest of the
+approval flow (suspend, blacklist, reinstate, detail changes).
+
+**Tested (31 checks, made-up company, real handlers):** an untouched company gets today's rules
+(3 documents, GST only with a GSTIN); saving choices and an own type; a repeat name (any case)
+and an unknown choice refused; upload accepts a listed type only; submit lists the required
+documents; the approval ticks and their wording; one tick short refused; a requirement added
+while a vendor waits blocks approval and shows on the page; approval records the ticks and the
+old flags; rename updates the vendor's documents; delete refused while Required, allowed after,
+old upload keeps its name; Not required lets a vendor with no documents be submitted and
+approved with no ticks.
+
+## 59. RFQ/PO vendor card: Select all (2026-10-29)
+
+**Why (client):** ticking every item under a vendor one by one, before a quotation request or the
+PO review, was slow.
+
+**Now:** each vendor card's footer has a **Select all** checkbox ("Select all · 3 of 5 ticked"):
+- one click ticks every item that can be ticked on that card; clicking again unticks them all;
+- when only some are ticked it shows a dash (partly selected);
+- it ticks only what the card's own ticks allow (not, e.g., an item the vendor can't supply) —
+  the buttons work as before: Email quotation request / Manual quotation for the ticked items,
+  Review & create PO for the ticked items with a valid quote.
+
+Frontend only (`RfqVendorList.jsx`); builds.
+
+## 60. Minimum quotations per item before a PO (2026-10-29)
+
+**Why (client):** "Minimum vendors per item" only counts vendors **asked**. Purchase could ask 3,
+get one price back and order with no reason. The client wants a minimum number of quotations
+**received** from different vendors before an item can go on a PO. Logic doc:
+`minimum-quotations-2026-10.md`.
+
+**Now:**
+- **Company Admin → Purchase & Vendor Approval → Settings → "Minimum quotations per item"**, below
+  minimum vendors. It can't be higher than minimum vendors (refused on save). Starts at **1** = no
+  change until the Company Admin raises it.
+- **A quotation** = a submitted quote with a price (email or manual) from a different vendor,
+  still within validity. "Can't supply", expired quotes and waiting requests don't count.
+- **Per item on the PO:**
+  - **enough received → fine**, nothing more is waited for;
+  - **short, but more can still come** (waiting replies, vendors not asked yet, expired quotes to
+    ask again) → **the PO can't be made** — no exception. The PO review shows "Can't create this PO
+    yet — not enough quotations" and **Create PO is disabled**; the server refuses it too;
+  - **short, and the minimum can't be reached** (too few vendors supply it, "can't supply",
+    requests expired unanswered) → **exception**: a reason (new reason "Not enough vendors can
+    quote") and the PO goes to the Company Admin whatever its value.
+- **RFQ/PO item card:** "Quotations 1 of 2" (green when met, amber when short).
+- **The vendor selection check** (PO review, PO list, Company Admin's PO approval) lists each
+  item's quotations received.
+- **Low Vendor Coverage:** an extra red flag "Below N quotations — PO needs an exception" on items
+  with fewer approved vendors than the minimum quotations.
+
+**Tested:** the 8 worked-example cases (pure); 11 checks with real handlers on a made-up company —
+the setting saved / refused (both ways), blocked with waiting / not-asked vendors, `createPurchase`
+refuses a blocked PO (no PO made), a request expired unanswered → exception with the new reason, an
+expired quote not counted, two valid quotes pass, the coverage flag; 0 left.
+
+## 61. All quotes: the size, and attachments open from the quote (2026-10-29)
+
+**Where:** the **All quotes** dialog (RFQ/PO vendor card, Purchase Orders, the Company Admin's PO
+approval).
+
+1. **The size of a fabrication item.** Requests for different sizes of one item are separate cards
+   on RFQ/PO, but All quotes showed only "Angle (ANG-001)" for each — no way to tell which size.
+   Each section now shows the size next to the name (e.g. "legLength: 20mm, thickness: 4mm,
+   length: 10mm") and the pieces ("5 pcs → 0.057 Kilogram"). The Evidence cards' "For:" line
+   names the size too.
+2. **The paperclip on a manual quote opens its file.** It was only an icon; the files were at the
+   bottom under Evidence, hard to match to a quote. Now one file opens straight from the paperclip
+   (new tab); several show a count and a small list on that row. The Evidence section stays.
+
+**Checked:** real dev data — ss sheet and Angle sections come back with their size and pieces, and
+the manual quotes with their files. Builds.
+
+## 62. Company Admin: the vendor on a PO, and a Vendor Ratings tab (2026-10-29)
+
+**Why (you):** RFQ/PO shows each vendor's score and badges, but the Company Admin's PO approval
+card showed only the price — they couldn't review the vendor choice on anything else. And the
+Company Admin had a Purchaser Score tab but no Vendor Ratings.
+
+**Now:**
+1. **PO Approvals card:** under the vendor's name, the same line as the RFQ/PO vendor card — score
+   /100, on time n/m, QC accepted %, Watchlist / Probationary and the risk class ("No history yet"
+   for a new vendor).
+2. **Purchase & Vendor Approval → Vendors → Vendor Ratings:** Purchase's Vendor Ratings tab, read-only,
+   for the Company Admin (expand a vendor to see every event behind the score). The Company Admin sees
+   vendors of every unit; Purchase's own view is unchanged.
+3. **Sizes on the PO card** (same gap as §61): each line of a fabrication item shows its size and pieces
+   (five "Angle" lines can be told apart), and the vendor selection check names the size in its
+   messages (checks saved on older POs keep their old wording).
+
+4. **Warranty on the PO card** (you asked): each line the vendor quoted a warranty on shows
+   "12 months warranty", and the card header says "Warranty on n of m lines". It was on the PO
+   (carried from the quote) but not shown.
+   The same chip is now on Purchase's **Review & create PO** dialog and on every PO line in the
+   **Purchase Orders** tab (approved, pending and the rest).
+
+**Backend:** the two vendor-rating endpoints accept the Company Admin (they were Purchase-only).
+**Checked:** real dev data — the Company Admin gets all 6 vendors with scores and standing; PO lines
+carry their sizes. Builds.
+
+## 63. Download PO (PDF with logo + watermark); the PO email attaches it (2026-10-29)
+
+**Why (client):** after a PO becomes a real order (created within limits, or approved by the
+Company Admin) it is emailed to the vendor. Purchase also wants to send it other ways (WhatsApp) — so
+a downloadable PO document, with the company logo and a watermark, and the email must send the
+**same** document.
+
+**Now:**
+1. **One PO PDF** (A4), made on the server: the company logo, name, address, GSTIN, phone / email;
+   "PURCHASE ORDER" with PO number and date; the vendor (name, address, GSTIN, contact); deliver-to
+   address and transport; every line — code, fabrication size × pieces ("calc. weight"), qty + unit,
+   rate, GST, amount, due date (or "n days after advance"), warranty; charges, Goods, CGST + SGST or
+   IGST, Grand Total and the amount in words; payment terms, notes, "quote the PO number on your
+   invoice"; "For <company>" with the company stamp and Authorised Signatory.
+   **Watermark:** the company name, large, faded, diagonal, on every page; "PO no · Page n of N" at the
+   foot. A long PO runs onto more pages with the table header repeated.
+2. **Purchase Orders → Download PO** (next to Send / Resend PO email) on any real order, open or
+   finished. Not on a PO waiting for the Company Admin, rejected or cancelled (the server refuses it
+   too). Each download is in the PO's History ("PO downloaded").
+3. **The PO email** (automatic + Send / Resend) is now a short note — PO number, number of items,
+   grand total, deliver-to, "quote the PO number" — with the PDF attached as `<PO number>.pdf`.
+   The full table is in the PDF only, so the vendor gets one version.
+
+**Notes:** amounts are written "Rs." (the PDF's built-in font has no ₹ sign). A logo uploaded as WEBP
+can't be drawn in the PDF — the company name shows alone; JPG / PNG logos are drawn. Cancelled lines
+of a short-closed PO are left out of the PDF.
+
+**Fix after your first look (same day):** the signature block ("For <company>", stamp, Authorised
+Signatory) sat alone on page 2 though page 1 had room — it now goes on the right, beside Payment terms.
+The logo at the top was missing: test-1's saved logo file isn't on the server, so the PDF now falls
+back to the default Samtek logo (as Quotation / the Sidebar do), keeps a wide logo's shape (up to
+120 × 60), and looks for uploads in the server folder whatever folder the server was started from.
+The image at the bottom is the company **stamp** (My Company → stamp), not the logo.
+A long PO still runs onto as many pages as it needs; the logo is at the top of page 1.
+
+**GST-inclusive rates (2026-10-30, found in your browser test):** a PO whose rates include GST
+printed "IGST Rs. 0.00" — right by the numbers, but it reads as "no tax". Now the line shows "18% incl.",
+the totals "Goods (incl. GST)" and, in light italics, "IGST included in rates (Rs. 722.56)" (CGST / SGST
+halves for an in-state vendor) — information only, the grand total is unchanged. POs with GST on top
+print exactly as before.
+
+**Crash fix (same day):** the dev server (\`nodemon --exec ts-node index.js\`) wouldn't start —
+"exports is not defined in ES module scope" in \`purchaseOrderPdf.js\`. Cause: \`import.meta.url\`
+(used to find the server folder) makes Node treat the file as an ES module, which clashes with
+ts-node's CommonJS output. Now the folder is worked out from the working directory, like the rest of
+the code; checked by loading the routes through ts-node.
+
+**Backend:** `services/purchaseOrderPdf.js` (new); `GET /api/accounts/purchases/orders/:id/pdf`
+(`downloadPurchaseOrderPdf`, same roles / unit check as Send PO email); `sendPurchaseOrderToVendor`
+builds the PDF and `sendPurchaseOrderEmail` attaches it; audit action `downloaded`.
+**Frontend:** `PurchaseOrdersTab.jsx` (Download PO), `AuditLog.jsx` (label).
+**Tested:** made-up company — a real order downloads a PDF (named by PO number, logged in History);
+waiting-for-approval refused (409); another unit refused (403); the email has exactly one PDF
+attachment and no table in the body; a WEBP logo doesn't break it; 8 checks, 0 left. The PDF itself
+was looked at (one page with sizes / warranty / charges / CGST-SGST adding up to the grand total, and
+a 34-line PO over two pages with IGST and "days after advance").
+
+## 64. Delivery dates: "vendor waits for the advance" is a tick; due-tomorrow alerts (2026-10-29)
+
+**Why (client):** since 2026-10-12 any PO with an advance had no delivery dates until the advance was
+paid (Store saw "Waiting for advance"). The client: that's not how it works — with credit terms the
+vendor doesn't wait for the advance. And deliveries coming due should be flagged automatically,
+not by Store telling Purchase.
+
+**What was there (checked first):** a daily 9:30 sweep already sent "Delivery overdue" — but only once
+a line was late, and only to the PO's creator. The 3-days / 1-day-before alerts in the workflow doc
+were never built.
+
+**Now:**
+1. **Review & create PO → Payment terms:** when Advance % is above 0, a tick **"Vendor sends only
+   after the advance is paid"** — **unticked by default**.
+   - Unticked → delivery days count from the order (approval day for a PO that needed approval);
+     Store sees the dates at once.
+   - Ticked → as before: no dates until the advance is fully paid, then payment day + the quoted days.
+   - No advance → no tick; dates from the order.
+   The rest already followed the PO's own setting: Store's page, the PO list chips, the PO PDF / email
+   ("n days after advance"), the vendor score.
+2. **Daily 9:30 alerts** to **the PO's creator, the Accounts Head and Store (Head + Employee)**:
+   - **"Delivery due tomorrow"** — the day before a line is due (new);
+   - **"Delivery overdue"** — the day after (as before, now also to the Accounts Head and Store; still
+     written in the PO's History).
+   Each date alerts once; a revised date (or the advance starting the clock) alerts again for the new
+   date. A PO still waiting for its advance, or received / cancelled lines, get none.
+
+**Existing POs:** unchanged — those already waiting for their advance keep waiting.
+
+**Backend:** `createPurchase` reads `waitForAdvance` (only with advance > 0); line field
+`dueTomorrowNotifiedFor`; `runOverdueDeliverySweep` sends both alerts (`DUE_ALERT_ROLES`).
+**Frontend:** `PoReviewDialog.jsx` (the tick; the Advance % hint no longer says the days start on payment).
+**Tested:** made-up company — 30% advance unticked → dates from the order; ticked → no dates, waits;
+no advance + tick → from the order; old page without the tick → from the order; due tomorrow → 4
+alerts (creator, Accounts Head, Store Head, Store Employee), not the line due later; overdue → same
+people + History; run twice → nothing repeated; revised date → heads-up again; waiting for advance →
+nothing. 11 checks, 0 left. (Part 1 went through the real PO creation, which emailed the made-up
+vendor address `a@v.t` via the dev Purchase mailbox — no real vendor.)
+
+## 65. QC rejection: a replacement within one week (2026-10-29)
+
+**Why (client):** on Purchase Orders → QC Rejections → Record vendor's answer → "Vendor will replace
+it", the replacement date could be any future date (only past dates were refused). The client wants
+the replacement within a week.
+
+**Now:** the date starts filled in as **today + 7 days**; only **today … today + 7** can be picked
+(later dates greyed out, "(within a week)" beside the label). The server refuses a later date too:
+"The replacement must come within 7 days — by <date> at the latest." Refund / credit / refused need
+no date, as before. Replacements already recorded keep their dates.
+
+**Backend:** `purchaseRejectionService.readAnswer` (`REPLACEMENT_MAX_DAYS = 7`).
+**Frontend:** `QcRejections.jsx` (`RejectionAnswerDialog`: pre-fill + max).
+**Tested:** today and +7 accepted; +8 and two months out refused with the message; yesterday refused;
+refund needs no date — 6 checks. Builds.
+
+## 66. QC results emailed to the vendor — one summary per PO per day (2026-10-29)
+
+**Why (client):** the vendor should hear when QC passes their material. Per item = too many emails;
+only when the whole PO passes = nothing for weeks on a partial delivery. Before this, nothing went to
+the vendor about QC at all (not even rejections — Purchase phones and records the answer). Logic doc:
+`qc-result-vendor-email-2026-10.md`.
+
+**Now — daily at 6 pm**, one email per PO that has QC results the vendor hasn't been told about:
+- **✅ Accepted** — item, size, qty ("— replacement" for a replacement that passed);
+- **❌ Not accepted** — qty, QC's reason, "Our Purchase team will contact you about the material not
+  accepted" (QC Rejections works as before; Purchase still records the vendor's answer);
+- **Still to come / being checked** — the PO's other lines ("not received yet" / "received, being
+  checked");
+- the day the PO becomes **fully accepted**: subject "✅ PO …: all material passed our quality check",
+  and "Payment is due by <date> (n credit days)" (or "Payment will now be processed").
+- No amounts otherwise. No results that day → no email.
+- Each result is stamped when its email goes — never twice. If the email can't go (mailbox not set
+  up, mail server down) nothing is stamped and the next day's email carries it. A vendor with no email
+  address gets nothing (nothing stamped).
+- **Go-live:** only results from **30 Oct 2026** on — older passes / rejections are never emailed.
+- Each email is in the PO's History: "QC results emailed".
+
+**Backend:** `services/qcVendorEmailService.js` (`runQcVendorEmailSweep`, `QC_VENDOR_EMAIL_FROM`),
+`emailService.sendQcResultEmail`; stamps `QCJob.acceptance.vendorMailedAt`,
+`PurchaseRejection.vendorMailedAt`, `PurchaseInvoice.fullyAcceptedMailedAt`; audit action
+`qc_results_emailed`; cron 18:00 in index.js. **Frontend:** the History label only.
+**Tested** (fake mailer — no real email): the worked example day by day — Mon Bolt passes → one email,
+still-to-come listed, no amounts, pre-go-live pass left out, vendor without email skipped, run again →
+nothing; Tue Angle 18 passed (with size) + 2 not accepted with QC's reason, Bolt not repeated; Thu
+mail server down → nothing stamped, next run sends Bearing + "all passed" + due 05 Dec (30 credit days),
+once; 3 History entries. 15 checks, 0 left.
+
+## 67. QC rejections carry photos + failed checkpoints; who checked what (2026-10-30)
+
+**Why (client):** Purchase had only QC's typed reason to give the vendor. QC now uploads **photos** of
+the rejected material and the rejection carries the **checks that failed** (with QC's remark). Also the
+inspector is taken from the **login** (no picking someone else's name) and every check row records
+**who checked it** — several QC people may work on one checklist. Logic doc:
+`docs/qc-rejection-photos-2026-10.md` (whole QC change; this section is the Purchase side).
+
+**Now (Purchase side):**
+- A purchase rejection **needs at least one photo** (up to 5; JPG / PNG / WEBP, 10 MB) — refused
+  otherwise, nothing saved, no file left.
+- **Purchase Orders → QC Rejections:** each rejection shows "Failed checks" (check — QC's remark ·
+  who checked it) and the photos (open full size, **Download**, **Download all**, named by REJ number);
+  the same in "Record vendor's answer". Older rejections: "No photos or failed checks recorded."
+- A PO-line rejection gives every request's REJ the same photos + failed checks.
+- **6 pm QC results email (§66):** each "Not accepted" line lists its failed checks; the photos are
+  attached (`REJ-0012-1.jpg` …, at most 10 per email — "n more with our Purchase team"); a missing file
+  is skipped, never blocks the email.
+
+**QC side (same change, all QC jobs):** purchase / store / Final Check jobs use the production-style
+step row with **Review** (each check Pass / Fail + **Remarks on every row**, then the decision —
+**Save checks** or **Save Decision** in one go) and **History**; the inspector dropdown is gone (**Start
+Inspection** = you); every row shows "checked by … · when"; production unit / batch / Sub Child Part
+reviews got the same rows, Save checks and optional photos; Production sees the photos + failed checks
+next to the reject / rework reason.
+
+**Backend:** `middleware/qcRejectionPhotoUpload.js` (new) on the four QC decision routes;
+`qcController` (`applyRowResults`, `ensureInspector`, `failedChecksOf`, Save-checks endpoints, the
+photo rule); `QCJob` (`checkedBy/At`, `decidedBy/At`, photos + failedChecks on the job, partial
+rejections, parts, step / batch attempts); `PurchaseRejection` photos + failedChecks;
+`ProductionOrder` rework photos + failed checks; `qcVendorEmailService` / `sendQcResultEmail`.
+**Tested:** 13 + 9 + 6 checks (+ §66's 15 re-run), 0 left.
+
+## 68. QC reject breakdown — qty × what failed × remark, one REJ per line (2026-10-30)
+
+**Why (your browser test of §67):** REJ-0007 showed the photo and "shorter length" but no failed check
+— a delivery is checked as a batch (the checklist is mostly Pass), and the rejected pieces don't all
+fail for the same reason. Logic doc: `docs/qc-reject-breakdown-2026-10.md`.
+
+**Now:**
+- **QC Review → Fail, more than one piece (purchase / store):** the reject qty box, size boxes, serial
+  picker, single severity and photo picker are replaced by **lines** — qty (or the serials), **what
+  failed** (a check on the job's list, or Other — typed), **what was wrong** (required), **severity**
+  (purchase), **size** (fabrication with several), and **its own photos**. "Rejecting 3 of 10 in QC";
+  the reject qty is the lines' total. A purchase rejection needs at least one photo in all.
+- **One piece:** the checklist's **Fail rows** are the rejection — at least one, or "what failed"
+  typed when it isn't a check.
+- **One REJ per QC decision, the lines inside it** (changed the same day after your browser test — the
+  vendor answers for the whole rejection; the lines are the reasons): total qty, money, all the photos,
+  overall severity = the worst line; **one Record vendor's answer**; a "replace" makes **one** replacement
+  for all its pieces (per size); a refusal counts once; the vendor / purchaser score still weighs **each
+  line** by its own severity. It keeps the **checklist as it stood** at that decision. A PO line's
+  decision makes one REJ per request (sharing a decision id) — "Record answer for all" answers them
+  together.
+- **A PO line with several requests:** the lines follow today's share-out (stock first, then
+  production, sales orders last) — a line is split where a request's share ends; serial lines go to the
+  request owning each serial.
+- **Purchase Orders → QC Rejections:** one card per rejection — "QC-… · date · 3 pcs of ms pipe
+  rejected · PO · vendor · **View QC checklist**", its lines highlighted ("**2 × Rust** (Major) — rust
+  patches", each with its photos) and one Record vendor's answer. Older REJs show as before.
+- **QC History:** "Rejected 2 pcs — Rust (Major)" per line; a whole reject lists its lines.
+- **Vendor email:** each "Not accepted" line reads "Rust — rust patches" with its photos.
+- Production batch rework / scrap gets lines later (agreed).
+
+**Also fixed (found in this test):** a QC job's item code was the request number (PR053) when the
+min-stock reorder raised the request without an itemId, so the checklist was never found — the job's
+item link is used first now (checklist, stock on Pass), new jobs get the item's real code, and an
+existing job shows it once opened. And the PO PDF's GST on GST-inclusive rates (§63 note).
+**And (your test, the REJ-0007 replacement):** Store's fabrication receive form pre-filled the PO line's
+ordered pieces (10) for a 3-piece replacement — the serial-item fix of §24 (only the requests still to
+come) had reached the plain receive form but not the fabrication one. A later delivery on a line now
+pre-fills from the arriving requests' own pieces (3).
+
+**Backend:** `qcLineAllocation` (`readRejectLines`, `shareLines`), `qcController` (`decideJob`,
+`decideLine`, `recordPurchaseRejections`), `purchaseRejectionService`, models (`QCJob.rejectLines`,
+partial-rejection parameter / decisionId, `PurchaseRejection` decisionId / parameter / remark /
+checklistSnapshot), photo upload up to 15 per decision. **Frontend:** `RejectBreakdownEditor.jsx` (new),
+`QCInspection.jsx`, `QcRejections.jsx`.
+**Tested:** pure 16 (every refusal; sharing across 2 requests, serials, sizes); 18 handler checks with
+real photo uploads (the worked example 10 → 2 Rust Major + 1 length Critical → 2 REJs, 7 stay, money
+35.40 = the old single-REJ value; refusals save nothing, leave no file; a full reject of lines; qty 1
+Fail rows; a PO line 9 → stock 4 Rust, sales 1 Rust + 4 length; a store job); 0 left.
+
 ## Quick summary
 
 | # | Change | Status |
@@ -3974,6 +4454,19 @@ The frontend builds.
 | 33 | Browser testing slice 2 fixes: the vendor's quotation page adds charges by choice ("+ Add a charge…", like payment terms) instead of listing every template charge; vendor cards on RFQ/PO tick rows with a valid price on load and when a new price arrives (email or manual) | Done; builds; re-check in the browser |
 | 34 | Vendor page accepts "Can't supply" on every item (needs a price or a can't-supply); a vendor's charges + payment terms carry over from their last quotation (with valid prices) into each new one — email page and manual dialog, with a note to change / remove what's different; the vendor check counts only the newest quotation's charges (no double freight) | Done; 16 tests + real read-only run; builds; re-check in the browser |
 | 35 | PO review: GST read-only from the quote (the "all lines" box gone) and the server takes rate / GST / warranty from the quote, never the page; manual quotations need GST; any change to the quotation's charges / terms needs a reason (saved, shown to the Company Admin, audit log); charges above the quotation → Company Admin approval ("Charges above quotation"); our template terms added by choice | Done; 14 + 10 real-handler tests pass; builds; check in the browser (slice 3) |
+| 68 | QC reject breakdown: lines (qty / serials × what failed × remark × severity × size × photos) inside ONE REJ per decision (one answer, one replacement; score per line), checklist snapshot; qty 1 = Fail rows; QC Rejections card with highlighted lines; also the QC job item-link fix (PR053) and the fabrication replacement receive | Done; 16 + 21 checks; QC side checked in the browser |
+| 67 | QC rejections: photos (required on purchase) + failed checkpoints on every rejection; Purchase's QC Rejections shows / downloads them; the 6 pm vendor email lists failed checks and attaches photos; inspector from the login, "checked by" on every row, one-go Review with Save checks | Done; 13 + 9 + 6 checks; browser check pending |
+| 66 | QC results emailed to the vendor: one summary per PO per day at 6 pm — accepted / not accepted (QC's reason) / still to come; "all passed" + payment due date on the last one; stamped so never twice, retried when mail fails; only results from 30 Oct 2026 on | Done; 15 checks (fake mailer); live check pending |
+| 65 | QC rejection "Vendor will replace it": the date starts at today + 7 and can't be later than that (page + server) | Done; 6 checks; browser check pending |
+| 64 | Delivery dates: a "vendor sends only after the advance is paid" tick at PO creation (shown when advance > 0, unticked = dates from the order); daily "Delivery due tomorrow" + "Delivery overdue" alerts to the PO creator, Accounts Head and Store | Done; 11 checks; browser check pending |
+| 63 | Download PO: one PO PDF (logo, company details, vendor, lines with size / warranty / due, charges, CGST-SGST or IGST, amount in words, terms, stamp; company-name watermark on every page) on Purchase Orders for any real order; the PO email is now a short note with the same PDF attached | Done; 8 checks, PDF looked at; browser check pending |
+| 62 | Company Admin: the PO approval card shows the vendor's score / on-time / QC / standing / risk (as on RFQ/PO); a read-only Vendor Ratings tab under Vendors; PO lines and selection-check messages name the fabrication size; each line shows the vendor's quoted warranty (+ a header count) | Done; checked on real data; builds; check in the browser |
+| 61 | All quotes: each section shows the fabrication size + pieces (Evidence "For:" too); the paperclip on a manual quote opens its file (several → a list on the row) | Done; checked on real data; builds; check in the browser |
+| 60 | Minimum quotations per item (Company Admin setting, ≤ minimum vendors): short while more can still come → PO blocked (no exception); minimum unreachable → reason + Company Admin; RFQ/PO "Quotations n of N" chip; quotations in the vendor selection check; Low Vendor Coverage flag | Done; 8 + 11 tests; builds; check in the browser |
+| 59 | RFQ/PO vendor card: a Select all checkbox in the footer — ticks / unticks every tickable item on that vendor for the quotation request or PO review; shows partly selected | Done; builds; check in the browser |
+| 58 | Vendor documents (client meeting 28 Oct): the Company Admin chooses per document type — Not required / Required / Required and verified — in Purchase & Vendor Approval → Settings; the nine original types are permanent, the admin adds / renames / deletes their own; submit and the approval ticks follow the setting; Documents get their own step after creating a vendor (Step 2, then Products & Services) and a card button | Done; 31 tests; builds; check in the browser |
+| 57 | Vendor Master (client meeting 28 Oct): "Same as phone" button for WhatsApp; Entity Type choices from a list Purchase edits (Purchase & Outsource → Settings, starts with the old five); the old Active / Inactive status removed — approval, suspend and blacklist alone decide who can be quoted or ordered from | Done; 6 tests; builds; check in the browser |
+| 56 | A bought item's cost = the received PO line: rate before GST (GST % now asked also when "included") + its share of the PO charges, priced at the Store receive from that line; approving a PO no longer moves the price; bills unchanged | Done; 13 tests + slice 4 / slice 3 suites; builds; check in the browser |
 | 55 | Vendor Ratings tables: "Showing the newest 40 of N" when cut off; rows older than 12 months greyed "lifetime only" (the score always used every event) | Done; 4 checks; builds |
 | 54 | Paging / search audit of the procurement pages: Vendor Ratings paged + server search / sort + 60 s cache; RFQ/PO asks for open requests only (it could lose open ones past 500); PRs and PO lists filter / page in the DB (they loaded everything each call); Recent payments pager; Out Source Work + bill item search debounced; server page-size caps | Done; 25 old-vs-new comparisons on real data identical; builds; check in the browser |
 | 53 | Old purchase back doors retired (410): the PO edit (B3), RFQ select-vendor → PO (B4), and the whole-PO receive that added stock skipping QC (B15) | Done; loads; 410 checked |

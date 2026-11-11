@@ -118,3 +118,127 @@ export function allocateRejection({ jobs, rejectQty = null, bySize = null, whole
   }
   return { perJob, total: round3(total) };
 }
+
+// ── Reject breakdown (2026-10-30, docs/qc-reject-breakdown-2026-10.md) ────
+// QC rejects a batch as LINES — qty (or serials) × what failed × remark — each
+// with its own severity, photos and (fabrication) size. One REJ per line.
+
+export const SEVERITIES = ['Minor', 'Major', 'Critical'];
+export const LINE_PHOTO_MAX = 5;
+
+// raw = [{ qty, serials, parameter, other, otherText, remark, severity, size, photoIndexes }]
+// ctx = { inQc, whole, isFabrication, sizes: [{ values, quantity }] in QC,
+//   serialIds: null | ids of the pieces in QC, checklistParams: [names], photos: [{ url, name }] }
+// Returns { error } or { lines: [{ qty, serials, sizeValues, parameter, other, remark,
+//   severity, photos }], total, bySize: [{ values, qty }], serials: [ids] }.
+export function readRejectLines(raw, ctx) {
+  const list = Array.isArray(raw) ? raw.filter(Boolean) : [];
+  if (!list.length) return { error: 'Add the reject lines — how many, what failed, and what was wrong.' };
+  const isWhole = (n) => Math.abs(n - Math.round(n)) < 1e-6;
+  const params = new Set((ctx.checklistParams || []).map(p => String(p).trim()));
+  const sizes = (ctx.sizes || []).filter(s => Number(s.quantity) > EPS);
+  const serialMode = Array.isArray(ctx.serialIds);
+  const inQcSerials = serialMode ? new Set(ctx.serialIds.map(String)) : null;
+  const usedSerials = new Set();
+  const photos = ctx.photos || [];
+  const lines = [];
+  for (const l of list) {
+    const remark = String(l.remark || '').trim();
+    if (!remark) return { error: 'Say what was wrong on each line.' };
+    const other = !!l.other;
+    const parameter = String(other ? (l.otherText || l.parameter || '') : (l.parameter || '')).trim();
+    if (!parameter) return { error: other ? 'Type what failed on the "Other" line.' : 'Pick what failed on each line — a check, or Other.' };
+    if (!other && params.size && !params.has(parameter)) return { error: `"${parameter}" isn't on this job's checklist — pick a check, or Other.` };
+    const severity = SEVERITIES.includes(l.severity) ? l.severity : 'Major';
+    let qty;
+    let serials = null;
+    if (serialMode) {
+      serials = [...new Set((Array.isArray(l.serials) ? l.serials : []).map(String))];
+      if (!serials.length) return { error: 'Tick the serial numbers on each line.' };
+      if (serials.some(s => !inQcSerials.has(s))) return { error: 'One of the ticked serial numbers isn\'t waiting for QC — refresh the page.' };
+      if (serials.some(s => usedSerials.has(s))) return { error: 'A serial number is on two lines — each piece fails for one reason.' };
+      serials.forEach(s => usedSerials.add(s));
+      qty = serials.length;
+    } else {
+      qty = Number(l.qty);
+      if (!(qty > 0)) return { error: 'Each line needs how many were rejected.' };
+      if (ctx.whole && !isWhole(qty)) return { error: 'Rejected pieces must be a whole number.' };
+    }
+    let sizeValues = null;
+    if (ctx.isFabrication) {
+      if (sizes.length > 1) {
+        const hit = l.size && sizes.find(s => dimensionSignature(s.values) === dimensionSignature(l.size));
+        if (!hit) return { error: 'Pick the size on each line — this delivery has several.' };
+        sizeValues = hit.values;
+      } else if (sizes.length === 1) {
+        sizeValues = sizes[0].values;
+      }
+    }
+    const idx = Array.isArray(l.photoIndexes) ? [...new Set(l.photoIndexes.map(Number))].filter(i => Number.isInteger(i) && photos[i]) : [];
+    if (idx.length > LINE_PHOTO_MAX) return { error: `Up to ${LINE_PHOTO_MAX} photos on each line.` };
+    lines.push({ qty: round3(qty), serials, sizeValues, parameter, other, remark, severity, photos: idx.map(i => photos[i]) });
+  }
+  const total = round3(lines.reduce((s, l) => s + l.qty, 0));
+  if (total > Number(ctx.inQc) + EPS) return { error: `Only ${round3(ctx.inQc)} are in QC — the lines add up to ${total}.` };
+  const bySizeMap = new Map();
+  for (const l of lines) {
+    if (!l.sizeValues) continue;
+    const sig = dimensionSignature(l.sizeValues);
+    const cur = bySizeMap.get(sig) || { values: l.sizeValues, qty: 0 };
+    cur.qty = round3(cur.qty + l.qty);
+    bySizeMap.set(sig, cur);
+  }
+  for (const b of bySizeMap.values()) {
+    const have = sizes.filter(s => dimensionSignature(s.values) === dimensionSignature(b.values)).reduce((t, s) => t + Number(s.quantity), 0);
+    if (b.qty > have + EPS) return { error: `Only ${have} pieces of that size are in QC.` };
+  }
+  return { lines, total, bySize: [...bySizeMap.values()], serials: serialMode ? [...usedSerials] : [] };
+}
+
+// A PO line decided as one: each request takes its share of the rejection
+// (allocateRejection's plan, in pickOrder). Walk the lines in the same order
+// and split a line where a request's share ends — so each request's REJs get
+// their own lines and nothing is counted twice. Serial lines go to the request
+// that owns each serial (serialOwner: Map serialId → jobId).
+// plan = Map jobId → { qty, sizes: [{ values, qty }] }; jobs = [{ id, kind, createdAt }].
+// Returns Map jobId → lines.
+export function shareLines(lines, { plan = null, jobs = [], serialOwner = null } = {}) {
+  const out = new Map();
+  const put = (id, line) => { const k = String(id); if (!out.has(k)) out.set(k, []); out.get(k).push(line); };
+  if (serialOwner) {
+    for (const l of lines) {
+      const byJob = new Map();
+      for (const s of l.serials || []) {
+        const owner = serialOwner.get(String(s));
+        if (!owner) continue;
+        if (!byJob.has(owner)) byJob.set(owner, []);
+        byJob.get(owner).push(s);
+      }
+      for (const [id, serials] of byJob) put(id, { ...l, serials, qty: serials.length });
+    }
+    return out;
+  }
+  const order = pickOrder(jobs.map(j => ({ ...j, qty: 1 }))).map(j => String(j.id));
+  // Each request's room, per size (fabrication) or one pool.
+  const sized = [...(plan || new Map()).values()].some(p => p.sizes?.length);
+  const room = new Map();
+  const key = (id, values) => `${id}|${values ? dimensionSignature(values) : '*'}`;
+  for (const [id, p] of plan || []) {
+    if (sized) for (const s of p.sizes || []) room.set(key(id, s.values), round3((room.get(key(id, s.values)) || 0) + Number(s.qty)));
+    else room.set(key(id, null), round3(Number(p.qty)));
+  }
+  for (const l of lines) {
+    let left = l.qty;
+    for (const id of order) {
+      if (left <= EPS) break;
+      const k = key(id, sized ? l.sizeValues : null);
+      const free = room.get(k) || 0;
+      if (free <= EPS) continue;
+      const take = round3(Math.min(free, left));
+      room.set(k, round3(free - take));
+      left = round3(left - take);
+      put(id, { ...l, qty: take });
+    }
+  }
+  return out;
+}

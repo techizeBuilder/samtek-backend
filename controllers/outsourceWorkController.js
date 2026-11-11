@@ -2,27 +2,21 @@
 // Machine, and hybrid Sub Child Part orders (see
 // server/docs/process-inhouse-outsource-redesign-discussion-2026-09.md and
 // the Phase 2 plan's Stage 3). Deliberately separate from
-// subChildPartJobWorkOrderController.js, which stays untouched — a PURE
-// Out Source Sub Child Part order still flows through SubChildPartJobWorkOrder
-// exactly as before; this controller only ever touches ProductionOrder's own
-// new outsourceHandoffs[] field (see ProductionOrder.js's OutsourceHandoffSchema).
+// subChildPartJobWorkOrderController.js — a PURE Out Source Sub Child Part
+// order flows through SubChildPartJobWorkOrder, visible to Purchase only;
+// this controller only ever touches ProductionOrder's own outsourceHandoffs[]
+// field (see ProductionOrder.js's OutsourceHandoffSchema). The Out Source
+// Work list (listOutsourceWork) shows both.
 //
-// Scope note (honest, not a placeholder — updated 2026-09-23, see the
-// discussion doc's "First-step outsource material send — testing bridge"
-// section): a hand-off covering the literal FIRST step of the whole order
-// needs a real Store pull once the actual Logistics/vendor handshake exists
-// — that real build is still deferred. Until then, getHandoffMaterialInfo/
-// sendOutsourceHandoffRound run a TESTING BRIDGE for this one case: the same
-// proven material determination SubChildPartJobWorkOrder's own send flow
-// already has (reused as-is for Sub Child Part) or a straightforward
-// per-`materialRefs`-line lookup (Child Part/Machine) is shown to Purchase,
-// selecting it is entirely optional, and — regardless of whether a
-// selection is made — real Store inventory (Item.qty/dimensionVariants[].
-// subStock) is NEVER touched by this path (see rawMaterial.dummy on
-// OutsourceHandoffSchema). Every OTHER hand-off (any step after the first,
-// any level) still needs no Store write at all, dummy or otherwise — see
-// this file's own comment on sendOutsourceHandoffRound for why.
+// Material (outsource-v2 slices 5–8): every trip goes out through a Dispatch
+// trip, moved by the request's material plan — Store hands its part to
+// Dispatch (the real stock movement, dispatchTripService.storeHandover) and
+// Production its part. The send itself (sendHandoffTrip) moves no stock.
+// The Child Part / Machine "dummy" first send and Purchase's temporary send
+// with its material picker are gone (slice 8).
+import mongoose from 'mongoose';
 import ProductionOrder from '../models/ProductionOrder.js';
+import { lostBetween, lostOnHandoff } from '../utils/lostAtVendor.js';
 import QCJob from '../models/QCJob.js';
 import SubChildPartJobWorkOrder from '../models/SubChildPartJobWorkOrder.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
@@ -32,15 +26,13 @@ import notificationService from '../services/notificationService.js';
 import { resolveStepMaterialLines, commitStepMaterialConsumption, completeMachineUnit, allUnitsCompleted, ensureQCJobForOrder, qcJobSourceForOrder } from './productionMfgController.js';
 import { getQcStepIndices, submitBatchStepForQC, submitUnitStepForQC, markJobApproved } from '../services/qcStepService.js';
 import { buildFreshUnitProcesses } from '../services/processStepBuilderService.js';
-import { computeSubChildPartRawMaterialAvailabilityLive } from '../services/subChildPartOrderService.js';
-import { resolveCatalogVariant, wholeSheetTargets } from './subChildPartJobWorkOrderController.js';
-import { dimensionSignature } from '../services/fabricationDemandService.js';
+import { HttpError, captureFinalLeftover } from '../services/subChildPartMaterialSendService.js';
+import { rowDemandUnits } from '../services/outsourceEarmarkService.js';
+import { getCategoryByKey } from '../utils/fabricationCategories.js';
+// Serial number work step 1 (2026-10-31): a finished cascade part goes to its parent order, else stock.
+import { deliverFinishedParts } from '../services/cascadeDeliveryService.js';
 
 const today = () => new Date().toISOString().split('T')[0];
-
-class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
 
 // Resolves which processes[] array a given unitIndex refers to — same
 // 0-based-on-top-level-then-extraUnits convention productionMfgController.js's
@@ -134,11 +126,112 @@ function getEligibleUnitsForRun(order, referenceUnitIndex, stepIndices) {
   return eligible;
 }
 
+// ── Automatic requests (client change, 2026-10-22) ────────────────────────
+// docs/outsource-v2/auto-outsource-requests-2026-10.md. Production no longer
+// clicks "Send for Outsourcing" when there's nothing for it to do:
+//   - an order whose FIRST step is Out Source (all three levels) — requested
+//     when the order is created, all units in one request;
+//   - units back from a vendor, waiting at Store, whose NEXT step is Out
+//     Source again (a fully outsourced Child Part / Machine, or two outsource
+//     runs in a row) — requested once their QC passes.
+// Each request covers the whole run of consecutive Out Source steps; Purchase
+// still picks how many go on each Outsource Order. In-house → Out Source is
+// unchanged: Production sends it (it has the work in hand).
+
+// The next run of consecutive, not-yet-requested Out Source steps on one
+// unit's processes, starting at its first unfinished step — or null.
+export function nextOutsourceRun(procs) {
+  if (!procs?.length) return null;
+  const start = procs.findIndex(p => p.status !== 'Completed');
+  if (start < 0) return null;
+  const run = [];
+  for (let i = start; i < procs.length; i++) {
+    if (procs[i].type !== 'Outsourcing' || procs[i].outsourceStatus !== 'NotStarted') break;
+    run.push(i);
+  }
+  return run.length ? run : null;
+}
+
+// Requests the next Out Source run for the given units — units on the same
+// run (same step indices and names) share one request. Mutates the order;
+// the caller saves it, then calls notifyAutoRequests. Returns what it made.
+export function autoRequestOutsourceRuns(order, unitIndices) {
+  const units = order.orderKind === 'SubChildPart' ? [0] : [...new Set(unitIndices.map(Number))];
+  const groups = new Map();
+  for (const u of units) {
+    const procs = resolveUnitProcesses(order, u);
+    const run = nextOutsourceRun(procs);
+    if (!run) continue;
+    const names = run.map(i => procs[i].step);
+    const k = `${run.join(',')}|${names.join('›')}`;
+    if (!groups.has(k)) groups.set(k, { run, names, units: [] });
+    groups.get(k).units.push(u);
+  }
+  const made = [];
+  for (const g of groups.values()) {
+    order.outsourceHandoffs.push({
+      unitIndices: g.units, stepIndices: g.run, stepNames: g.names,
+      isFirstStepOfOrder: g.run[0] === 0, subChildPartQty: null,
+      status: 'Requested', requestedAt: new Date(), requestedBy: null, autoRequested: true,
+    });
+    for (const u of g.units) {
+      const procs = resolveUnitProcesses(order, u);
+      for (const idx of g.run) procs[idx].outsourceStatus = 'Requested';
+    }
+    made.push({ stepNames: g.names, units: g.units });
+  }
+  return made;
+}
+
+export async function notifyAutoRequests(order, made) {
+  for (const m of made) {
+    try {
+      await notificationService.triggerAccountsNotification({
+        action: 'outsource_handoff_requested',
+        data: { orderCode: order.orderId, orderId: order._id, machineName: order.machineName, stepNames: m.stepNames },
+        targetCompanyId: order.company,
+      });
+    } catch (e) { console.error('[OutsourceWork] auto-request notification error:', e); }
+  }
+}
+
+// At order creation: if the first step is Out Source, request it for every
+// unit (Sub Child Part: the batch). Saves the order when something was made.
+export async function autoRequestFirstOutsourceRun(order) {
+  if (order.processes?.[0]?.type !== 'Outsourcing') return [];
+  const qty = order.orderKind === 'SubChildPart' ? 1 : Math.max(1, Number(order.orderQuantity) || 1);
+  const made = autoRequestOutsourceRuns(order, Array.from({ length: qty }, (_, i) => i));
+  if (made.length) {
+    await order.save();
+    await notifyAutoRequests(order, made);
+  }
+  return made;
+}
+
 // GET /api/outsource-work/orders/:id/eligible-units?stepIndices=0,1 —
 // Production action, queried before sending a hand-off to populate the
 // multi-unit picker. Returns every unit index currently eligible for the
 // given step run (see getEligibleUnitsForRun above) — the caller decides
 // whether to show a picker at all (a single eligible unit needs no popup).
+// GET /orders/:id/rework?stepIndex=N — is this Sub Child Part step a QC
+// rework resend, and for how many pieces (2026-10-27)? Production's Send
+// dialog shows the quantity and offers only this step.
+export const getReworkInfo = async (req, res) => {
+  try {
+    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    const idx = Number(req.query.stepIndex);
+    const proc = order.processes[idx];
+    if (order.orderKind !== 'SubChildPart' || !proc || !getQcStepIndices(order, order.processes).includes(idx)) return res.json({ success: true, data: { rework: false } });
+    const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: order.company }).lean();
+    const entry = qcJob?.batchSteps?.find(b => b.category === proc.category && b.stepName === proc.step);
+    const rework = !!entry && entry.attempts.length > 0 && entry.reworkPendingQty > 0;
+    res.json({ success: true, data: { rework, qty: rework ? entry.reworkPendingQty : null, passedQty: entry?.passedQty ?? null } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const getEligibleUnits = async (req, res) => {
   try {
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
@@ -178,6 +271,11 @@ export const requestOutsourceHandoff = async (req, res) => {
 
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    // A Sub Child Part goes out as ONE batch (its whole quantity) — never per
+    // unit; only Child Part / Machine orders are unit-wise (2026-10-22).
+    if (order.orderKind === 'SubChildPart' && units.some(u => u !== 0)) {
+      return res.status(400).json({ success: false, message: 'A Sub Child Part is sent as one batch (its whole quantity), not unit by unit.' });
+    }
 
     // Every included unit must independently pass the same contiguous-run
     // check against the SAME stepIndices — same-step-INDEX batching, per
@@ -226,7 +324,17 @@ export const requestOutsourceHandoff = async (req, res) => {
         const proc = order.processes[qcStepIdx];
         const qcJob = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: order.company });
         const entry = qcJob?.batchSteps?.find(b => b.category === proc.category && b.stepName === proc.step);
-        if (entry && entry.attempts.length > 0) subChildPartQty = entry.reworkPendingQty;
+        if (entry && entry.attempts.length > 0) {
+          subChildPartQty = entry.reworkPendingQty;
+          // A rework resend carries only the rework pieces — a later step on
+          // it would go out for those alone and leave the passed pieces stuck
+          // (it'd be marked sent). Later steps go out afterwards with the
+          // whole batch (2026-10-27, found in browser testing).
+          const later = sorted.filter(idx => idx > qcStepIdx);
+          if (later.length) {
+            return res.status(400).json({ success: false, message: `This is a rework of "${proc.step}" (${entry.reworkPendingQty} pcs) — send only "${proc.step}". "${later.map(i => order.processes[i].step).join('", "')}" goes out later with the whole batch.` });
+          }
+        }
       }
     }
 
@@ -263,198 +371,245 @@ export const requestOutsourceHandoff = async (req, res) => {
   }
 };
 
-// GET /api/outsource-work/orders/:id/handoffs/:handoffId/material-info —
-// Testing bridge (2026-09-23). Read-only: shows Purchase what material a
-// FIRST-STEP hand-off nominally needs, before they optionally choose
-// something and send. Only ever meaningful before the first round (material
-// only ever moves once, on round 1) — returns kind:'none' otherwise so the
-// frontend knows there's nothing to show.
-export const getHandoffMaterialInfo = async (req, res) => {
-  try {
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId }).lean();
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    const handoff = (order.outsourceHandoffs || []).find(h => String(h._id) === req.params.handoffId);
-    if (!handoff) return res.status(404).json({ success: false, message: 'Hand-off not found' });
-    if (!handoff.isFirstStepOfOrder || (handoff.rounds || []).length > 0) {
-      return res.json({ success: true, data: { kind: 'none' } });
-    }
+// ── One trip out and back (outsource-v2 slice 2, 2026-10-20) ──────────────
+// A round is one trip: Ordered (claimed by an Outsource Order) → Sent →
+// Received. These two core functions do the work; the Outsource Order
+// (outsourceOrderController.js, through outsourceRequestService.js) calls
+// them. Neither saves the order — the caller does.
 
-    if (order.orderKind === 'SubChildPart') {
-      const item = await Item.findById(order.subChildPartItem);
-      const sourceItem = item ? await Item.findById(item.subChildPartDetails?.sourceItem) : null;
-      if (!item || !sourceItem) return res.status(404).json({ success: false, message: 'Sub Child Part or its source material Item no longer exists.' });
-      const availability = await computeSubChildPartRawMaterialAvailabilityLive(item, sourceItem, order);
+const GONE_OUT = ['Sent', 'Received'];
 
-      if (!sourceItem.fabricationRef) {
-        return res.json({ success: true, data: { kind: 'plain', availability, sourceItem: { _id: sourceItem._id, code: sourceItem.code, name: sourceItem.name, qty: sourceItem.qty, unit: sourceItem.unit } } });
-      }
+// The hand-off's step positions this round covers (stepNames is aligned with
+// stepIndices — requestOutsourceHandoff builds both from the same run).
+// Partial returns, 3c (2026-10-26 — docs/outsource-v2/partial-returns-2026-10.md):
+// only some of a Child Part / Machine hand-off's units came back. The rest
+// becomes a hand-off of its own — same steps, a copy of every trip so far (its
+// current one still Sent, on the same Outsource Order line) — so the units
+// that came are received now and the rest are collected later. Returns the
+// new hand-off and old → new round ids. The caller saves the order.
+export function splitHandoffByUnits(order, handoff, keepUnitIdxs) {
+  const keep = handoff.unitIndices.filter(i => keepUnitIdxs.includes(i));
+  const rest = handoff.unitIndices.filter(i => !keepUnitIdxs.includes(i));
+  if (!keep.length || !rest.length) throw new HttpError(400, 'Pick the units that came back — some, not all.');
+  const src = handoff.toObject();
+  const roundIdMap = new Map();
+  const rounds = (src.rounds || []).map(r => {
+    const id = new mongoose.Types.ObjectId();
+    roundIdMap.set(String(r._id), id);
+    return { ...r, _id: id };
+  });
+  order.outsourceHandoffs.push({ ...src, _id: new mongoose.Types.ObjectId(), unitIndices: rest, rounds });
+  handoff.unitIndices = keep;
+  return { handoff: order.outsourceHandoffs[order.outsourceHandoffs.length - 1], roundIdMap };
+}
 
-      const catalogVariant = resolveCatalogVariant(item, sourceItem);
-      const leftovers = (sourceItem.dimensionVariants || []).filter(v => v.isLeftover);
+export function roundStepIndices(handoff, round) {
+  return (handoff.stepIndices || []).filter((idx, k) => (round.coveredSteps || []).includes(handoff.stepNames[k]));
+}
 
-      if (availability.kind === 'sheet') {
-        const { plan, targets } = await wholeSheetTargets(item, catalogVariant);
-        const targetSigs = new Set(targets.map(t => dimensionSignature(t)));
-        const leftoverOptions = leftovers.map(v => {
-          const area = (Number(v.values?.width) || 0) * (Number(v.values?.length) || 0);
-          return { _id: v._id, values: v.values, subStock: v.subStock, matchesWholeSheet: targetSigs.has(dimensionSignature(v.values)), cutCapacityAreaMm2: area };
-        });
-        return res.json({ success: true, data: {
-          kind: 'sheet', availability, sheetPlan: plan,
-          catalogVariant: catalogVariant && { _id: catalogVariant._id, values: catalogVariant.values, subStock: catalogVariant.subStock },
-          leftoverOptions,
-        } });
-      }
-
-      const leftoverOptions = leftovers.map(v => ({
-        _id: v._id, values: v.values, subStock: v.subStock,
-        matchesRemainder: availability.remainderMm > 0 && Number(v.values?.length) === availability.remainderMm,
-      }));
-      return res.json({ success: true, data: {
-        kind: 'length', availability,
-        catalogVariant: catalogVariant && { _id: catalogVariant._id, values: catalogVariant.values, subStock: catalogVariant.subStock },
-        leftoverOptions,
-      } });
-    }
-
-    // Child Part / Machine — a straightforward per-referenced-line lookup,
-    // informational only (no cut/whole/catalog/leftover picker — the
-    // sheet-metal/length-fabrication resolution that would need lives in
-    // bomMaterialGroupsService.js/SheetMetalPlan and is a bigger lift than
-    // this testing bridge calls for, since selecting anything here is
-    // optional and nothing gets applied to real stock either way).
-    // Any one unit in the hand-off's own unitIndices works to read
-    // materialRefs from — every included unit shares the same stepIndices
-    // run by construction (same-step-INDEX batching, requestOutsourceHandoff's
-    // own validation), so their materialRefs at that step are identical.
-    const repUnitIndex = (handoff.unitIndices || [0])[0];
-    const procs = repUnitIndex ? order.extraUnits?.[repUnitIndex - 1]?.processes : order.processes;
-    const proc = procs?.[handoff.stepIndices[0]];
-    const materialRefs = (proc?.materialRefs || []).map(String);
-    if (!materialRefs.length) return res.json({ success: true, data: { kind: 'multi', lines: [] } });
-
-    let bom = null;
-    if (order.orderKind === 'ChildPart') {
-      bom = await ChildPartBOM.findOne({ childPart: order.subChildPartItem, company: order.company }).lean();
-    } else {
-      const mfgItem = await Item.findOne({ $or: [{ code: order.machineCode }, { name: order.machineName }], companyId: order.company }).lean();
-      if (mfgItem) bom = await MachineBOM.findOne({ machine: mfgItem._id, company: order.company }).lean();
-    }
-    const lines = (bom?.materials || []).filter(m => materialRefs.includes(String(m._id)));
-    const codes = lines.map(m => m.code).filter(Boolean);
-    const stockItems = codes.length ? await Item.find({ code: { $in: codes }, companyId: order.company }).lean() : [];
-    const itemByCode = new Map(stockItems.map(i => [i.code, i]));
-    // Scaled by how many units THIS hand-off actually covers, not the whole
-    // order's build quantity (2026-09-25 fix — the same order-qty-vs-
-    // handoff-scope bug the Purchase list's Qty column had, here too: a
-    // hand-off sent for 2 of an order's 5 units needs 2x material, not 5x).
-    const buildQty = Math.max(1, (handoff.unitIndices || []).length || Number(order.orderQuantity) || 1);
-    const infoLines = lines.map(m => {
-      const stockItem = itemByCode.get(m.code);
-      const perUnitQty = Number(m.quantity) || 0;
-      return {
-        itemCode: m.code, itemName: m.item, unit: m.unit,
-        perUnitQty, neededQty: perUnitQty * buildQty,
-        availableQty: stockItem ? (stockItem.qty || 0) : null,
-      };
-    });
-    res.json({ success: true, data: { kind: 'multi', lines: infoLines } });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+// Dispatch delivered a trip (slice 6). `round` is the Ordered round an
+// Outsource Order claimed; it becomes Sent. No stock moves here: Store and
+// Production already handed the material to Dispatch through the request's
+// material plan (slice 5). With a plan, Production's planned part of each
+// material line counts as used now (it left Production's floor); the Store
+// part never touches Production's figures, and receive records no material
+// use again (receiveHandoffTrip).
+export async function sendHandoffTrip({ order, handoff, materialPlan = null, user, round }) {
+  if (!round) throw new HttpError(400, 'Trips go out through an Outsource Order and Dispatch.');
+  if (handoff.status === 'Completed') throw new HttpError(400, 'This hand-off is already completed.');
+  if (round && round.status !== 'Ordered') throw new HttpError(400, 'This trip has already been sent.');
+  const requested = [...round.coveredSteps];
+  if (!requested.length) throw new HttpError(400, 'This trip covers no step.');
+  const onOtherTrips = new Set(handoff.rounds.filter(r => r !== round && GONE_OUT.includes(r.status)).flatMap(r => r.coveredSteps));
+  const invalid = requested.filter(s => !handoff.stepNames.includes(s) || onOtherTrips.has(s));
+  if (invalid.length) {
+    throw new HttpError(400, `These steps can't be sent: ${invalid.join(', ')} (not on this hand-off, or already sent).`);
   }
-};
 
-// POST /api/outsource-work/orders/:id/handoffs/:handoffId/rounds —
-// Purchase's "Send Round", generalized from SubChildPartJobWorkOrder's own.
-//
-// Material resolution splits into two genuinely different cases (confirmed
-// 2026-09-22, testing bridge added 2026-09-23):
-// 1. handoff.isFirstStepOfOrder — real fresh-from-Store pull, once the real
-//    Logistics/vendor handshake exists (still deferred). Until then this is
-//    a TESTING BRIDGE: req.body.materialSelection is entirely optional (see
-//    getHandoffMaterialInfo above for what Purchase can see beforehand) —
-//    whatever's chosen, if anything, is only ever recorded on
-//    handoff.rawMaterial for reference (rawMaterial.dummy: true), never
-//    applied against real Item.qty/dimensionVariants[].subStock.
-// 2. Every other hand-off — no Store write at all, dummy or otherwise. The
-//    physical material is either the literal AssembledPart (whatever
-//    Production built — nothing to move) or an ExplicitMaterials pick
-//    Production must have already issued to itself through the existing,
-//    unchanged Material List "Issue" mechanism. This is a pure
-//    status-transition action.
-export const sendOutsourceHandoffRound = async (req, res) => {
-  try {
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    const handoff = order.outsourceHandoffs.id(req.params.handoffId);
-    if (!handoff) return res.status(404).json({ success: false, message: 'Hand-off not found' });
-    if (handoff.status === 'Completed') return res.status(400).json({ success: false, message: 'This hand-off is already completed.' });
-
-    const requested = Array.isArray(req.body.coveredSteps) ? req.body.coveredSteps.filter(Boolean) : [];
-    if (!requested.length) return res.status(400).json({ success: false, message: 'Select at least one step to send.' });
-    const alreadyCovered = new Set(handoff.rounds.filter(r => r.status === 'Received').flatMap(r => r.coveredSteps));
-    const invalid = requested.filter(s => !handoff.stepNames.includes(s) || alreadyCovered.has(s));
-    if (invalid.length) {
-      return res.status(400).json({ success: false, message: `These steps can't be sent: ${invalid.join(', ')} (not on this hand-off, or already received).` });
-    }
-
-    if (handoff.rounds.length === 0 && handoff.isFirstStepOfOrder) {
-      // Testing bridge — see this function's own header comment and the
-      // discussion doc. Recording a selection is entirely optional and
-      // purely informational; nothing here ever touches real Store stock.
-      const selection = req.body.materialSelection;
-      handoff.rawMaterial = handoff.rawMaterial || {};
-      handoff.rawMaterial.dummy = true;
+  const firstSend = handoff.isFirstStepOfOrder && !handoff.rounds.some(r => r !== round && GONE_OUT.includes(r.status));
+  if (firstSend) {
+    handoff.rawMaterial = handoff.rawMaterial || {};
+    handoff.rawMaterial.dummy = false;
+    if (!handoff.rawMaterial.sentAt) {
       handoff.rawMaterial.sentAt = new Date();
-      handoff.rawMaterial.sentBy = req.user._id;
-      if (selection && typeof selection === 'object') {
-        if (selection.materialCase) handoff.rawMaterial.sentCase = selection.materialCase;
-        if (selection.dimensionVariantId) handoff.rawMaterial.sentDimensionVariantId = String(selection.dimensionVariantId);
-        if (selection.leftoverVariantId) handoff.rawMaterial.sentLeftoverUsedVariantId = String(selection.leftoverVariantId);
-        if (selection.notes) handoff.rawMaterial.leftoverValues = { notes: selection.notes };
-      }
+      handoff.rawMaterial.sentBy = user._id;
     }
-
-    handoff.rounds.push({
-      roundNumber: handoff.rounds.length + 1,
-      coveredSteps: requested,
-      status: 'Sent',
-      sentAt: new Date(),
-      sentBy: req.user._id,
-    });
-    if (handoff.status === 'Requested') handoff.status = 'InProgress';
-    // Stamp every unit this hand-off covers, not just one (2026-09-25 —
-    // multi-unit batching; OutsourceHandoffRoundSchema itself stays
-    // per-hand-off, not per-unit, per the confirmed atomic-once-created design).
-    for (const unitIndex of handoff.unitIndices) {
-      const procsForSend = resolveUnitProcesses(order, unitIndex);
-      for (const idx of handoff.stepIndices) {
-        if (requested.includes(procsForSend[idx].step)) procsForSend[idx].outsourceStatus = 'Sent';
-      }
-    }
-    await order.save();
-    res.json({ success: true, data: order });
-  } catch (err) {
-    if (err instanceof HttpError) return res.status(err.status).json({ success: false, message: err.message });
-    res.status(500).json({ success: false, message: err.message });
   }
+
+  round.status = 'Sent';
+  round.sentAt = new Date();
+  round.sentBy = user._id;
+  if (Array.isArray(materialPlan) && order.orderKind !== 'SubChildPart') {
+    const byKey = new Map((order.materialDemands || []).map(d => [d.materialCode, d]));
+    for (const row of materialPlan) {
+      const used = rowDemandUnits(row).production;
+      const d = byKey.get(row.demandKey);
+      if (d && used > 0) d.consumedQuantity = Math.round(((d.consumedQuantity || 0) + used) * 10000) / 10000;
+    }
+  }
+  if (handoff.status === 'Requested') handoff.status = 'InProgress';
+  // Stamp every unit this hand-off covers, not just one (2026-09-25 —
+  // multi-unit batching; a round has no per-unit state).
+  for (const unitIndex of handoff.unitIndices) {
+    const procsForSend = resolveUnitProcesses(order, unitIndex);
+    for (const idx of handoff.stepIndices) {
+      if (requested.includes(procsForSend[idx].step)) procsForSend[idx].outsourceStatus = 'Sent';
+    }
+  }
+}
+
+// Purchase receives a trip back. Since outsource-v2 slice 2 (2026-10-20)
+// only THIS round's own steps are processed (roundStepIndices), on every unit
+// of this hand-off — before, nothing happened until every step of the
+// hand-off was back, so a step received in round 1 never completed or
+// reached QC. The hand-off is Completed once every step is received.
+//
+// Every QC-flagged step submits straight to the order's QC job (batchSteps
+// for Sub Child Part, unitChecks[].steps for Child Part/Machine) the moment
+// it's received — no self-check phase. A non-QC step completes straight
+// through; if it's the true last step, it credits stock/Sale directly
+// (Item.qty for Sub Child Part/Child Part, completeMachineUnit for Machine).
+// A Child Part / Machine order whose BOM has no QC step at all is refused
+// before anything changes.
+export async function receiveHandoffTrip({ order, handoff, round, body = {}, materialPlan = null, user }) {
+  // A planned trip's material was settled when it went out (sendHandoffTrip).
+  const planned = Array.isArray(materialPlan);
+  if (round.status !== 'Sent') throw new HttpError(400, round.status === 'Received' ? 'This round has already been received.' : 'This trip hasn\'t been sent yet.');
+  const isUnitKind = order.orderKind === 'ChildPart' || order.orderKind === 'Machine';
+  if (isUnitKind && getQcStepIndices(order, order.processes).length === 0) {
+    throw new HttpError(400, `${order.machineName || order.orderId} has no QC step configured on its BOM — ask R&D to flag at least one step before outsourcing work for it.`);
+  }
+  if (order.orderKind !== 'SubChildPart' && !isUnitKind) {
+    throw new HttpError(400, `${order.machineName || order.orderId} has no QC step configured on its BOM — ask R&D to flag at least one step before outsourcing work for it.`);
+  }
+  const actor = user.fullName || user.username;
+
+  // A Sub Child Part's "whole sheet / piece" real first send: the measured
+  // leftover comes back with the first trip home (outsource-v2, 2026-10-20).
+  // Validated before anything below changes.
+  if (order.orderKind === 'SubChildPart') {
+    const needsLeftover = handoff.rawMaterial?.sentCase === 'whole' && !handoff.rawMaterial.leftoverCaptured && !handoff.rawMaterial.dummy;
+    if (needsLeftover) {
+      const item = await Item.findOne({ _id: order.subChildPartItem, companyId: order.company });
+      const sourceItem = item ? await Item.findOne({ _id: item.subChildPartDetails?.sourceItem, companyId: order.company }) : null;
+      if (!item || !sourceItem) throw new HttpError(404, 'Sub Child Part or its source material Item no longer exists.');
+      await captureFinalLeftover({ company: order.company, rawMaterial: handoff.rawMaterial }, sourceItem, body);
+    }
+  }
+
+  round.status = 'Received';
+  round.receivedAt = new Date();
+  round.receivedBy = user._id;
+  const stepIdxs = roundStepIndices(handoff, round);
+
+  if (order.orderKind === 'SubChildPart') {
+    // A Sub Child Part hand-off's unitIndices is always [0] (one whole
+    // batch), so this works directly on order.processes. A QC-flagged step
+    // submits to the batchSteps mechanic (submitBatchStepForQC) — two QC
+    // steps in one round still chain their quantity there.
+    const procs = order.processes;
+    const qcStepIndices = getQcStepIndices(order, procs);
+    let qcJob = null;
+    for (const idx of stepIdxs) {
+      const proc = procs[idx];
+      proc.outsourceStatus = 'Received';
+      if (!planned) {
+        const materialLines = await resolveStepMaterialLines(order, proc, order.company);
+        if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
+      }
+
+      if (qcStepIndices.includes(idx)) {
+        if (!qcJob) qcJob = await ensureQCJobForOrder(order, actor, user._id);
+        // Quantity is never typed — the whole batch on a first send, or the
+        // rework quantity snapshotted at request time on a resend.
+        // A rework resend: its quantity, less any pieces lost at the vendor on
+        // this trip (partial returns, 2026-10-26 — taken off as scrap already).
+        submitBatchStepForQC(qcJob, order, procs, idx, actor || 'Purchase (Outsourced)', { qtyOverride: handoff.subChildPartQty != null ? Math.max(0, handoff.subChildPartQty - lostOnHandoff(order, handoff._id)) : undefined });
+      } else {
+        proc.status = 'Completed';
+        proc.endDate = today();
+        proc.completedAt = new Date();
+        // True last step with no QC flag: whoever finishes it runs the
+        // finishing logic (whatever survived the last QC step).
+        if (idx === procs.length - 1 && order.subChildPartItem) {
+          let survivedQty = Math.max(1, Number(order.orderQuantity) || 1);
+          let lastQcIdx = -1;
+          if (qcStepIndices.length) {
+            lastQcIdx = Math.max(...qcStepIndices);
+            const lastQcStep = procs[lastQcIdx];
+            if (!qcJob) qcJob = await ensureQCJobForOrder(order, actor, user._id);
+            const batchEntry = qcJob.batchSteps.find(b => b.category === lastQcStep.category && b.stepName === lastQcStep.step);
+            survivedQty = batchEntry?.passedQty ?? survivedQty;
+          }
+          // Pieces lost at a vendor after the last QC step aren't here (2026-10-26).
+          survivedQty = Math.max(0, survivedQty - lostBetween(order, lastQcIdx, procs.length - 1));
+          await deliverFinishedParts({ order, itemId: order.subChildPartItem, qty: survivedQty, by: actor || '' });
+          order.status = 'Completed';
+        }
+      }
+    }
+    if (qcJob) await qcJob.save();
+  } else {
+    // Child Part / Machine — per unit. Every QC-flagged step goes to its own
+    // per-unit QC entry (submitUnitStepForQC). A non-QC true last step
+    // credits stock/Sale for that unit. No cost here (vendor cost comes with
+    // slice 4).
+    let qcJob = null;
+    for (const unitIndex of handoff.unitIndices) {
+      const procs = resolveUnitProcesses(order, unitIndex);
+      const qcStepIndices = getQcStepIndices(order, procs);
+      for (const idx of stepIdxs) {
+        const proc = procs[idx];
+        proc.outsourceStatus = 'Received';
+        if (!planned) {
+          const materialLines = await resolveStepMaterialLines(order, proc, order.company);
+          if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
+        }
+
+        if (qcStepIndices.includes(idx)) {
+          if (!qcJob) qcJob = await ensureQCJobForOrder(order, actor, user._id);
+          const unit = qcJob.unitChecks.find(u => u.unitNumber === unitIndex + 1);
+          submitUnitStepForQC(qcJob, unit, proc, actor || 'Purchase (Outsourced)');
+        } else {
+          proc.status = 'Completed';
+          proc.endDate = today();
+          proc.completedAt = new Date();
+          if (idx === procs.length - 1) {
+            if (order.subChildPartItem) {
+              await deliverFinishedParts({ order, itemId: order.subChildPartItem, qty: 1, by: actor || '' });
+              if (allUnitsCompleted(order)) {
+                order.status = 'Completed';
+                if (!qcJob) qcJob = await ensureQCJobForOrder(order, actor, user._id);
+                markJobApproved(qcJob);
+              }
+            } else if (order.orderKind === 'Machine') {
+              if (!qcJob) qcJob = await ensureQCJobForOrder(order, actor, user._id);
+              await completeMachineUnit(order, qcJob, unitIndex + 1, { actorName: actor, userId: user._id });
+            }
+          }
+        }
+      }
+    }
+    if (qcJob) await qcJob.save();
+  }
+
+  const covered = new Set(handoff.rounds.filter(r => r.status === 'Received').flatMap(r => r.coveredSteps));
+  if (handoff.stepNames.every(s => covered.has(s))) {
+    handoff.status = 'Completed';
+    handoff.completedAt = new Date();
+  }
+}
+
+// POST /api/outsource-work/orders/:id/handoffs/:handoffId/rounds — the old
+// direct "Send Round". Closed (outsource-v2 slice 2, user decision Q1): every
+// trip now goes through an Outsource Order (a vendor, a price, approval).
+export const sendOutsourceHandoffRound = async (req, res) => {
+  res.status(400).json({ success: false, message: 'Make an Outsource Order for this request — trips are sent from the order.' });
 };
 
 // PUT /api/outsource-work/orders/:id/handoffs/:handoffId/rounds/:roundId/receive
-// — Purchase's "Receive Round". Once every step on this hand-off has been
-// received, the hand-off completes and each covered step is marked done.
-//
-// Every QC-flagged step (Sub Child Part, Child Part, Machine — all three,
-// as of slice 4/2026-09-28) submits straight to the job (batchSteps for Sub
-// Child Part, unitChecks[].steps for Child Part/Machine) the moment it's
-// received — no self-check phase, no waiting for a separate submit click.
-// See each order kind's own branch inside this function for the detail. A
-// non-QC step completes straight through; if it's the true last step, it
-// credits stock/Sale directly (Item.qty for Sub Child Part/Child Part,
-// completeMachineUnit for Machine). The old single-checkpoint fallback
-// (qcCheckpointIndex, QcCheckpointPanel) is gone — an order for an item
-// whose BOM genuinely has no QC flag anywhere refuses cleanly instead
-// (see the final `else` below).
+// — receive one trip. Still open for a round sent before slice 2 (no order);
+// a round on an Outsource Order is collected by Dispatch and received by Store.
 export const receiveOutsourceHandoffRound = async (req, res) => {
   try {
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
@@ -463,154 +618,8 @@ export const receiveOutsourceHandoffRound = async (req, res) => {
     if (!handoff) return res.status(404).json({ success: false, message: 'Hand-off not found' });
     const round = handoff.rounds.id(req.params.roundId);
     if (!round) return res.status(404).json({ success: false, message: 'Round not found' });
-    if (round.status !== 'Sent') return res.status(400).json({ success: false, message: 'This round has already been received.' });
-
-    round.status = 'Received';
-    round.receivedAt = new Date();
-    round.receivedBy = req.user._id;
-
-    const covered = new Set(handoff.rounds.filter(r => r.status === 'Received').flatMap(r => r.coveredSteps));
-    const nowComplete = handoff.stepNames.every(s => covered.has(s));
-    if (nowComplete) {
-      handoff.status = 'Completed';
-      handoff.completedAt = new Date();
-
-      if (order.orderKind === 'SubChildPart') {
-        // QC multi-checkpoint redesign, slice 3 (2026-09-26) — a Sub Child
-        // Part hand-off's unitIndices is always [0] (confirmed via
-        // normalizeHandoffRow's own comment: never independently-progressing
-        // units), so this operates directly on order.processes instead of
-        // going through the per-unit loop the ChildPart/Machine branch below
-        // uses. A QC-flagged step submits to the same batchSteps
-        // mechanic Production's own submitBatchQcStep uses (see
-        // submitBatchStepForQC, qcStepService.js) — receiving the round back
-        // IS the submission trigger here, there's no separate self-check
-        // phase to wait through. A non-QC step still completes straight
-        // through, unchanged from before.
-        const procs = order.processes;
-        const qcStepIndices = getQcStepIndices(order, procs);
-        let qcJob = null;
-        for (const idx of handoff.stepIndices) {
-          const proc = procs[idx];
-          proc.outsourceStatus = 'Received';
-          const materialLines = await resolveStepMaterialLines(order, proc, req.user.companyId);
-          if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
-
-          if (qcStepIndices.includes(idx)) {
-            if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-            // Quantity is never typed by Purchase either — falls back to
-            // auto-compute (the whole order) on a first-ever send, or uses
-            // the exact rework quantity snapshotted at request time
-            // (requestOutsourceHandoff) on a resend.
-            submitBatchStepForQC(qcJob, order, procs, idx, req.user.fullName || req.user.username || 'Purchase (Outsourced)', { qtyOverride: handoff.subChildPartQty ?? undefined });
-          } else {
-            proc.status = 'Completed';
-            proc.endDate = today();
-            proc.completedAt = new Date();
-            // True last step with no QC flag anywhere in the pipeline
-            // (design section 10's rare case) — whoever finishes it runs
-            // the finishing logic; mirrors completeFinalProcessStep's Sub
-            // Child Part branch exactly (whatever survived every earlier
-            // QC step's scrap is that step's own final passedQty).
-            if (idx === procs.length - 1 && order.subChildPartItem) {
-              let survivedQty = Math.max(1, Number(order.orderQuantity) || 1);
-              if (qcStepIndices.length) {
-                const lastQcStep = procs[Math.max(...qcStepIndices)];
-                if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-                const batchEntry = qcJob.batchSteps.find(b => b.category === lastQcStep.category && b.stepName === lastQcStep.step);
-                survivedQty = batchEntry?.passedQty ?? survivedQty;
-              }
-              await Item.updateOne({ _id: order.subChildPartItem, companyId: order.company }, { $inc: { qty: survivedQty } });
-              order.status = 'Completed';
-            }
-          }
-        }
-        if (qcJob) await qcJob.save();
-      } else if ((order.orderKind === 'ChildPart' || order.orderKind === 'Machine') && getQcStepIndices(order, order.processes).length > 0) {
-        // QC multi-checkpoint redesign — Child Part's own outsourced QC steps
-        // (2026-09-28, the direct per-unit counterpart of the Sub Child Part
-        // branch above), broadened to Machine the same night once the
-        // pattern was confirmed live on Child Part. A dynamic order (a real
-        // Process Definition configured, so at least one step is
-        // qcRequired/finalQc per slice 1's own rule) no longer uses the old
-        // single-checkpoint self-check at all for its outsourced steps —
-        // every QC-flagged step in this hand-off's stepIndices submits
-        // independently to the same per-step QC job Production's own
-        // in-house submit uses (Stage B, submitUnitStepForQC) — bundling two
-        // QC steps into one round submits BOTH, each its own entry, each its
-        // own decision; no quantity to chain between them (unlike Sub Child
-        // Part's whole-batch model) since Pass/Reject is per unit per step
-        // here. A non-QC step (e.g. a plain "painting" pass after the QC
-        // gate already passed) still completes straight through, crediting
-        // stock/Sale itself if it's the true last step of this unit — the
-        // outsourced counterpart of completeFinalProcessStep's Child
-        // Part/Machine branches, since an Outsourcing step never reaches
-        // that endpoint (Production has no button for one at all).
-        // Deliberately does NOT apply any cost here (no Production-side form
-        // exists for an Outsourcing step) — decideChildPartUnitStep's own
-        // true-last-step Pass branch already treats a null
-        // pendingProductionCost/Expense as "skip cost recalc, still credit
-        // qty", the same "vendor cost capture still deferred" convention
-        // already used everywhere else outsourced steps touch cost in this
-        // file; Machine's own build cost (applyManufacturedFinalCost) is a
-        // separate, old-Final-Testing-only concept, untouched here too.
-        let qcJob = null;
-        for (const unitIndex of handoff.unitIndices) {
-          const procs = resolveUnitProcesses(order, unitIndex);
-          const qcStepIndices = getQcStepIndices(order, procs);
-          for (const idx of handoff.stepIndices) {
-            const proc = procs[idx];
-            proc.outsourceStatus = 'Received';
-            const materialLines = await resolveStepMaterialLines(order, proc, req.user.companyId);
-            if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
-
-            if (qcStepIndices.includes(idx)) {
-              if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-              const unit = qcJob.unitChecks.find(u => u.unitNumber === unitIndex + 1);
-              submitUnitStepForQC(qcJob, unit, proc, req.user.fullName || req.user.username || 'Purchase (Outsourced)');
-            } else {
-              proc.status = 'Completed';
-              proc.endDate = today();
-              proc.completedAt = new Date();
-              if (idx === procs.length - 1) {
-                if (order.subChildPartItem) {
-                  await Item.updateOne({ _id: order.subChildPartItem, companyId: order.company }, { $inc: { qty: 1 } });
-                  if (allUnitsCompleted(order)) {
-                    order.status = 'Completed';
-                    if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-                    markJobApproved(qcJob);
-                  }
-                } else if (order.orderKind === 'Machine') {
-                  // completeMachineUnit already handles the Sale-vs-stock
-                  // credit, entry.readyAt, job-Approved, and
-                  // allUnitsCompleted/order.status/finalizeMachineOrderCompletion
-                  // internally — same function the in-house true-last-step
-                  // path (decideChildPartUnitStep) and the old Final Testing
-                  // flow (completeFinalProcessStep) both already reuse.
-                  if (!qcJob) qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
-                  await completeMachineUnit(order, qcJob, unitIndex + 1, {
-                    actorName: req.user.fullName || req.user.username, userId: req.user._id,
-                  });
-                }
-              }
-            }
-          }
-        }
-        if (qcJob) await qcJob.save();
-      } else {
-        // Slice 4 cleanup (2026-09-28): the old single-checkpoint fallback
-        // (qcCheckpointIndex) is removed — every real order for Child Part,
-        // Machine, and hybrid Sub Child Part is confirmed dynamic (flagged)
-        // at every level as of tonight. Only reachable now if an order gets
-        // created for an item whose BOM genuinely has no qcRequired/finalQc
-        // flag anywhere (e.g. M-311, SCP-004/005/006 before R&D flags them)
-        // — refuse clearly rather than silently misbehave with no QC
-        // mechanism at all.
-        throw new HttpError(400, `${order.machineName || order.orderId} has no QC step configured on its BOM — ask R&D to flag at least one step before outsourcing work for it.`);
-      }
-    }
-
-
+    if (round.outsourceOrder) return res.status(400).json({ success: false, message: 'This trip is on an Outsource Order — Dispatch collects it and Store receives it (Material Transfers → From Outsource).' });
+    await receiveHandoffTrip({ order, handoff, round, body: req.body, user: req.user });
     await order.save();
     res.json({ success: true, data: order });
   } catch (err) {
@@ -699,6 +708,11 @@ function normalizeHandoffRow(order, handoff) {
     rounds: handoff.rounds || [],
     status: HANDOFF_STATUS_MAP[handoff.status] || 'Pending',
     isFirstStepOfOrder: handoff.isFirstStepOfOrder,
+    // outsource-v2 (2026-10-20) — the receive that completes this hand-off
+    // asks for the measured leftover (receiveOutsourceHandoffRound's Sub
+    // Child Part branch).
+    leftoverRequired: order.orderKind === 'SubChildPart' && handoff.rawMaterial?.sentCase === 'whole'
+      && !handoff.rawMaterial?.leftoverCaptured && !handoff.rawMaterial?.dummy,
     qcRejectedQty: 0,
     createdAt: handoff.requestedAt || order.createdAt,
     raw: { handoff },
@@ -751,6 +765,19 @@ export const listOutsourceWork = async (req, res) => {
       ...scpOrders.map(normalizeJobWorkOrderRow),
       ...poOrders.flatMap(o => (o.outsourceHandoffs || []).map(h => normalizeHandoffRow(o, h))),
     ];
+
+    // A leftover still to be measured: is it sheet metal (needs a width
+    // too)? Read from the size that was sent (captureFinalLeftover's rule).
+    const leftoverRows = rows.filter(r => r.leftoverRequired && r.raw.handoff.rawMaterial?.sourceItem);
+    if (leftoverRows.length) {
+      const sources = await Item.find({ _id: { $in: leftoverRows.map(r => r.raw.handoff.rawMaterial.sourceItem) } }).select('dimensionVariants').lean();
+      const byId = new Map(sources.map(s => [String(s._id), s]));
+      for (const r of leftoverRows) {
+        const rm = r.raw.handoff.rawMaterial;
+        const variant = (byId.get(String(rm.sourceItem))?.dimensionVariants || []).find(v => String(v._id) === String(rm.sentDimensionVariantId));
+        r.leftoverIsSheet = getCategoryByKey(variant?.category)?.calcType === 'sheet';
+      }
+    }
     const summary = computeOutsourceWorkSummary(rows);
 
     if (status && status !== 'all' && status !== 'QC Rejected') rows = rows.filter(r => r.status === status);

@@ -343,7 +343,7 @@ export const saveItemChecklist = async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
     // Product Approval Gate: editing the checklist voids R&D's QC List sign-off.
-    await invalidateQcApproval(doc.item, req.user.companyId);
+    await invalidateQcApproval(doc.item, req.user.companyId, target.stage);
     res.json({ success: true, data: doc });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -496,7 +496,7 @@ export const saveItemStepChecklist = async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
     // Product Approval Gate: editing the checklist voids R&D's QC List sign-off.
-    await invalidateQcApproval(doc.item, req.user.companyId);
+    await invalidateQcApproval(doc.item, req.user.companyId, filter.stage);
     res.json({ success: true, data: doc });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -512,7 +512,7 @@ export const deleteItemStepChecklist = async (req, res) => {
     const filter = stepFilter(req, res, target);
     if (!filter) return;
     await QCItemChecklist.deleteOne(filter);
-    await invalidateQcApproval(filter.item, req.user.companyId);
+    await invalidateQcApproval(filter.item, req.user.companyId, filter.stage);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -615,7 +615,7 @@ export const getChildPartQCList = async (req, res) => {
   try {
     const companyId = req.user.companyId;
     const items = await Item.find({ companyId, productKind: 'ChildPart' })
-      .select('code name image isDiscontinued').sort({ name: 1 }).lean();
+      .select('code name image isDiscontinued purchase internalManufacturing partSourcing').sort({ name: 1 }).lean();
     if (!items.length) return res.json({ success: true, data: [] });
 
     const ids = items.map(i => i._id);

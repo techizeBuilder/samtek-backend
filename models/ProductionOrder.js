@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { releaseReservationsForOrder } from '../services/materialReservationService.js';
+import { StepOperationSchema } from './ProcessDefinitionSchema.js';
 
 const PROCESS_STEPS = ['Job Work', 'Fabrication', 'Assembly', 'Painting', 'Re-Assembly', 'Final Testing'];
 // Child Part's own pipeline shape — Job Work dropped (2026-09-16): a Sub
@@ -38,6 +39,10 @@ const ReworkSchema = new mongoose.Schema({
   date: { type: String, default: null },
   reason: { type: String, default: '' },
   rejectedBy: { type: String, default: '' },
+  // QC's photos of what it rejected (urls) and the failed checks' names +
+  // remarks (2026-10-30) — Production sees why next to the reason.
+  photos: { type: [String], default: [] },
+  failedChecks: { type: [String], default: [] },
 }, { _id: false });
 
 const SubEntrySchema = new mongoose.Schema({
@@ -77,6 +82,9 @@ const ProcessStepSchema = new mongoose.Schema({
   // checkpoint redesign, 2026-09-25). Carried onto orders now; read from
   // slice 2 of that redesign onward.
   finalQc: { type: Boolean, default: false },
+  // Operations per piece (2026-10-22, outsource "per job work" pricing) —
+  // snapshot of the BOM step's own, so a later BOM edit doesn't change it.
+  operation: { type: StepOperationSchema, default: null },
   // Only meaningful when type === 'Outsourcing' — drives the "waiting on
   // outsource" vs "send for outsourcing" UI (ProcessExecution.jsx, Stage 5).
   // Advanced by outsourceWorkController.js (Stage 3), never by the generic
@@ -121,12 +129,19 @@ const OutsourceHandoffRoundSchema = new mongoose.Schema({
   // SubChildPartJobWorkRoundSchema.jobWorkTypes exactly, just renamed since
   // these are named process steps now, not job-work-type strings.
   coveredSteps: { type: [String], required: true },
-  status: { type: String, enum: ['Sent', 'Received'], default: 'Sent' },
+  // 'Ordered' (outsource-v2 slice 2, 2026-10-20): an Outsource Order claimed
+  // this trip — the steps are taken, nothing has gone out yet. Then Sent
+  // (out to the vendor) → Received.
+  status: { type: String, enum: ['Ordered', 'Sent', 'Received'], default: 'Sent' },
   sentAt: { type: Date, default: Date.now },
   sentBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   receivedAt: { type: Date, default: null },
   receivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   notes: { type: String, default: '' },
+  // The Outsource Order (and its line) this trip belongs to — null for a
+  // round sent before slice 2.
+  outsourceOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'OutsourceOrder', default: null },
+  lineId: { type: mongoose.Schema.Types.ObjectId, default: null },
 }, { _id: true });
 
 const OutsourceHandoffSchema = new mongoose.Schema({
@@ -164,6 +179,9 @@ const OutsourceHandoffSchema = new mongoose.Schema({
   status: { type: String, enum: ['AwaitingRequest', 'Requested', 'InProgress', 'Completed'], default: 'AwaitingRequest' },
   requestedAt: { type: Date, default: null },
   requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  // Made by the system, not Production's click (2026-10-22): the order's
+  // first step, or the next run while the units wait at Store.
+  autoRequested: { type: Boolean, default: false },
   // Only ever populated for a first-step-of-order hand-off — stays entirely
   // unset for every other case, since nothing is sourced fresh from Store
   // there. Same shape as SubChildPartJobWorkOrder.rawMaterial, reused as-is.
@@ -190,6 +208,9 @@ const OutsourceHandoffSchema = new mongoose.Schema({
     // informational only and was never applied against real Store
     // inventory. Lets a later pass tell a dummy send apart from a real one
     // once the actual Store-deduction build lands.
+    // LEGACY since outsource-v2 slice 8 (2026-10-21): never set true any more
+    // (every send goes through Dispatch with Store's real handover); still
+    // read so an old dummy send isn't asked for a leftover at its receive.
     dummy: { type: Boolean, default: false },
   },
   rounds: { type: [OutsourceHandoffRoundSchema], default: [] },
@@ -319,12 +340,15 @@ const MaterialDemandSchema = new mongoose.Schema({
   returnPendingQuantity: { type: Number, default: 0, min: 0 },
   transferredQuantity: { type: Number, default: 0, min: 0 }, // Store sent it
   issuedQuantity: { type: Number, default: 0, min: 0 },      // Production received it
-  // Sub Child Part orders only — how much of what was received has actually
-  // been used up building units so far. Committed when a unit's Fabrication
-  // starts (issuedQuantity − consumedQuantity − returnPendingQuantity is
-  // "still on the floor"); a QC rejection does NOT release it (Production
-  // reworks with what's there). Stays 0 for a machine order.
+  // How much of what was received has been used up so far. Committed when a
+  // step using it starts, or when its vendor trip goes out (issuedQuantity −
+  // consumedQuantity − returnPendingQuantity is "still on the floor"); a QC
+  // rejection does NOT release it (Production reworks with what's there). Stays
+  // 0 on a Sub Child Part batch order, whose source material isn't a step line.
   consumedQuantity: { type: Number, default: 0, min: 0 },
+  // Part of quantity / transferred / issued that came straight from this
+  // order's own cascade order (serial number work step 1) — not from Store.
+  cascadeDeliveredQuantity: { type: Number, default: 0, min: 0 },
   // Store's own free-text entry at transfer time — who they physically
   // handed the material to (mirrors ProcessStepSchema.qcBy's pattern: plain
   // typed text, not a User ref, since the recipient may be a floor worker
@@ -435,6 +459,53 @@ const ProductionOrderSchema = new mongoose.Schema({
   // SubChildPartJobWorkOrder entirely, untouched — see the Phase 2 plan's
   // own "Architecture decision" section).
   outsourceHandoffs: { type: [OutsourceHandoffSchema], default: [] },
+  // outsource-v2 slice 7 (2026-10-21, R2/R4/T8): a unit's outsourced work that
+  // Store received and still holds — until Store hands it to Production (next
+  // step in-house) or to Dispatch (next step outsourced / a rework). While a
+  // unit is here, Production can't give its next step to a team.
+  // unitIndex: 0 = unit 1 (a Sub Child Part batch is always 0).
+  workAtStore: {
+    type: [{
+      unitIndex: { type: Number, required: true },
+      handoffId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      roundId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      outsourceOrderNo: { type: String, default: '' },
+      since: { type: Date, default: Date.now },
+    }],
+    default: [],
+  },
+  workHandovers: {
+    type: [{
+      unitIndex: { type: Number, required: true },
+      to: { type: String, enum: ['Production', 'Dispatch'], required: true },
+      at: { type: Date, default: Date.now },
+      by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      byName: { type: String, default: '' },
+      note: { type: String, default: '' },
+    }],
+    default: [],
+  },
+  // Outsource v2 slice 4 (2026-10-24): each unit's build cost (a Sub Child
+  // Part batch is unitIndex 0). Production types its own cost / expense at
+  // the unit's LAST IN-HOUSE step; the outsourced money is read from the
+  // Outsource Orders. All three go to the BOM once, when the true last step
+  // finishes (partCostService.pushPartCost) — again if a late time / QC
+  // pass changes the outsourced money.
+  unitCosts: {
+    type: [{
+      unitIndex: { type: Number, required: true },
+      productionCost: { type: Number, default: null },
+      productionExpense: { type: Number, default: null },
+      enteredAt: { type: Date, default: null },
+      enteredBy: { type: String, default: '' },
+      finishedAt: { type: Date, default: null },
+      finishedQty: { type: Number, default: null },
+      jobWorkCost: { type: Number, default: null },
+      waitingFor: { type: [String], default: [] },
+      pushedAt: { type: Date, default: null },
+    }],
+    default: [],
+  },
   // NEW: Store the snapshot of the design URLs
   designDocuments: [{
     name: { type: String },
@@ -473,6 +544,73 @@ const ProductionOrderSchema = new mongoose.Schema({
   // not one; without this, the second one's cascade was silently dropped
   // (confirmed bug, 2026-09-17).
   demandRefId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProductionOrder', default: null },
+  // Serial number work step 1 (2026-10-31, docs/serial number work/
+  // cascade-to-parent-logic-2026-10.md): a cascade order raised under the new
+  // rule delivers its finished parts STRAIGHT to its parent order (demandRefId)
+  // instead of stock. False on every order made before — they still go to stock.
+  deliverToParent: { type: Boolean, default: false },
+  deliveredToParentQty: { type: Number, default: 0 },
+  parentOrderNo: { type: String, default: '' }, // the parent's order number, for display
+  // The parent side: per part this order's cascades build for it (the shortfall
+  // after free stock), and how much has been delivered so far. Read by the
+  // Material List (issue cap: only the stock part is issued by Store) and by
+  // cascadeDeliveryService.
+  cascadeCovers: {
+    type: [{
+      partItem: { type: mongoose.Schema.Types.ObjectId, ref: 'Item' },
+      partCode: String, partName: String, unit: String,
+      qty: { type: Number, default: 0 },
+      delivered: { type: Number, default: 0 },
+      // The part's own last step is outsourced (or it's a job-work order): it
+      // comes back through Store + QC, not from Production's floor (2 Nov review).
+      viaStore: { type: Boolean, default: false },
+      orders: [{ model: String, orderRef: mongoose.Schema.Types.ObjectId, orderNo: String, _id: false }],
+      // atStore: this delivery waits at Store for the parent's outsourced step.
+      deliveries: [{ orderNo: String, qty: Number, at: Date, by: String, atStore: Boolean, _id: false }],
+      _id: false,
+    }],
+    default: [],
+  },
+  // Partial returns (2026-10-26 — docs/outsource-v2/partial-returns-2026-10.md):
+  // pieces written off at an outsource vendor ("not coming" — lost, or kept by
+  // the vendor). orderQuantity stays what was ordered; every "how many pieces"
+  // place uses orderQuantity − these. stepIndex: the first step of the trip
+  // they were lost on (a production order); onRework: lost on a rework resend
+  // (already taken off the batch as scrap at that QC step).
+  // Every piece was lost at the vendor, nothing left to build (2026-11-04,
+  // docs/outsource-v2/all-lost-at-vendor-logic-2026-11.md): Completed with 0 made.
+  closedAllLost: { type: Boolean, default: false },
+  lostAtVendor: {
+    type: [{
+      qty: { type: Number, required: true },
+      stepIndex: { type: Number, default: null },
+      jobWorkTypes: { type: [String], default: undefined },
+      handoffId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      onRework: { type: Boolean, default: false },
+      reason: { type: String, default: '' },
+      at: { type: Date, default: Date.now }, byName: { type: String, default: '' },
+      outsourceOrderNo: { type: String, default: '' },
+      replacementOrderId: { type: mongoose.Schema.Types.ObjectId, default: null },
+      replacementOrderCode: { type: String, default: '' },
+    }],
+    default: undefined,
+  },
+  // A replacement for pieces lost at a vendor on another order (same demand).
+  replacesLostOf: {
+    orderId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    orderCode: { type: String, default: '' },
+    why: { type: String, default: '' }, // "Lost at the vendor" / "Scrapped at QC (laser cutting)"
+  },
+  // Replacement orders raised for this order's pieces that won't reach stock
+  // (QC scrap / reject, 2026-10-27 — a lost-at-vendor one is on lostAtVendor).
+  replacements: {
+    type: [{
+      qty: { type: Number, required: true }, why: { type: String, default: '' },
+      orderId: { type: mongoose.Schema.Types.ObjectId, default: null }, orderCode: { type: String, default: '' },
+      at: { type: Date, default: Date.now },
+    }],
+    default: undefined,
+  },
   startedAt: { type: Date, default: null },
   completedAt: { type: Date, default: null },
 }, { timestamps: true });

@@ -10,6 +10,10 @@ import {
   startInspection,
   updateChecklistItem,
   submitDecision,
+  saveJobChecks,
+  saveUnitStepChecks,
+  saveBatchStepChecks,
+  savePartChecks,
   addChecklistItem,
   removeChecklistItem,
   syncRDToQCJob,
@@ -18,6 +22,7 @@ import {
   submitBatchQcDecision,
   getQcDepartmentUsers,
 } from '../controllers/qcController.js';
+import { qcRejectionPhotoUpload } from '../middleware/qcRejectionPhotoUpload.js';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -61,14 +66,20 @@ router.put('/jobs/:id/start', qcInspectionEdit, startInspection);
 router.put('/jobs/:id/checklist/:itemId', qcInspectionEdit, updateChecklistItem);
 router.post('/jobs/:id/checklist', qcInspectionAdd, addChecklistItem);
 router.delete('/jobs/:id/checklist/:itemId', qcInspectionDelete, removeChecklistItem);
-router.put('/jobs/:id/decision', qcInspectionEdit, submitDecision);
+// Photos of rejected material ride on the decision (multipart, 2026-10-30).
+router.put('/jobs/:id/decision', qcInspectionEdit, qcRejectionPhotoUpload, submitDecision);
+// "Save checks" — the rows QC checked, no decision (2026-10-30).
+router.put('/jobs/:id/checks', qcInspectionEdit, saveJobChecks);
+router.put('/jobs/:id/units/:unitNumber/checks', qcInspectionEdit, saveUnitStepChecks);
+router.put('/jobs/:id/batch-steps/checks', qcInspectionEdit, saveBatchStepChecks);
+router.put('/jobs/:id/parts/:partCheckId/checks', qcInspectionEdit, savePartChecks);
 // Sub Child Part review, in-house/outsource manufactured products only —
 // same qcInspection gate as everything else on the job detail page.
-router.put('/jobs/:id/parts/:partCheckId/decision', qcInspectionEdit, decidePartCheck);
+router.put('/jobs/:id/parts/:partCheckId/decision', qcInspectionEdit, qcRejectionPhotoUpload, decidePartCheck);
 // Child Part per-unit review (2026-09-16) — same gate, sibling shape.
-router.put('/jobs/:id/units/:unitNumber/decision', qcInspectionEdit, decideChildPartUnit);
+router.put('/jobs/:id/units/:unitNumber/decision', qcInspectionEdit, qcRejectionPhotoUpload, decideChildPartUnit);
 // QC multi-checkpoint redesign (slice 2, 2026-09-26) — Sub Child Part's own
 // whole-batch decision, a quantity split not a per-unit Pass/Reject.
-router.put('/jobs/:id/batch-steps/decision', qcInspectionEdit, submitBatchQcDecision);
+router.put('/jobs/:id/batch-steps/decision', qcInspectionEdit, qcRejectionPhotoUpload, submitBatchQcDecision);
 
 export default router;

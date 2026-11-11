@@ -8,6 +8,9 @@ import RDDocument from '../models/RDDocument.js';
 import RDMasterOption from '../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../models/RDCustomFieldTemplate.js';
 import RDPlant from '../models/RDPlant.js';
+import ProductionOrder from '../models/ProductionOrder.js';
+import PartLabel from '../models/PartLabel.js';
+import { machineStockRoute } from '../services/productApprovalService.js';
 import { getMachineBillingBOMCost } from '../services/itemPricingService.js';
 import MachineBOM from '../models/MachineBOM.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
@@ -109,6 +112,9 @@ const toMachineResponse = (item) => ({
   // sellable/purchasable Item now, so this is the only place to set them.
   purchase: item.purchase !== false,
   internalManufacturing: !!item.internalManufacturing,
+  // Make or buy (2026-10-28): price provisional — Sales is warned.
+  pricePending: !!item.pricePending,
+  priceProvisionalParts: item.priceProvisional?.parts || [],
   stdCost: item.stdCost ?? 0,
   purchaseCost: item.purchaseCost ?? 0,
   salePrice: item.salePrice ?? 0,
@@ -117,6 +123,9 @@ const toMachineResponse = (item) => ({
   hsn: item.hsn || '',
   qty: item.qty ?? 0,
   minStock: item.minStock ?? 0,
+  materialFlow: item.materialFlow || '',
+  reorderQty: item.reorderQty ?? 0,
+  buildDays: item.buildDays ?? 0,
   costSource: item.costSource || 'Manual',
   costResolvedAt: item.costResolvedAt || null,
   costResolutionIssue: item.costResolutionIssue || null,
@@ -253,6 +262,36 @@ export async function buildMachineDesignFiles(machineId, companyId) {
   return files;
 }
 
+const STOCK_FLOWS = ['High Flow', 'Medium Flow', 'Low Flow'];
+
+// route: built / bought / none. low: switched on and at or below Min Stock.
+// openBuilds: open stock orders, from the sweep or the form. A sales order isn't
+// one: those machines never reach stock. waitingForSticker: built pieces in stock
+// that Label carriers hasn't labelled yet.
+async function machineStockInfo(machines, companyId) {
+  const cid = new mongoose.Types.ObjectId(String(companyId));
+  const [orders, waiting] = await Promise.all([
+    ProductionOrder.find({
+      company: cid,
+      source: 'Stock',
+      orderKind: { $in: ['Machine', null] },
+      status: { $nin: ['Completed', 'Cancelled'] },
+      machineCode: { $in: machines.map(m => m.code) },
+    }).select('orderId machineCode orderQuantity').sort({ createdAt: 1 }).lean(),
+    PartLabel.aggregate([
+      { $match: { companyId: cid, item: { $in: machines.map(m => m._id) }, status: 'Unlabelled', 'place.kind': 'Stock' } },
+      { $group: { _id: '$item', n: { $sum: 1 } } },
+    ]),
+  ]);
+  const waitingOf = new Map(waiting.map(w => [String(w._id), w.n]));
+  return (m) => ({
+    route: machineStockRoute(m),
+    low: STOCK_FLOWS.includes(m.materialFlow) && (m.minStock || 0) > 0 && (m.qty || 0) <= m.minStock,
+    openBuilds: orders.filter(o => o.machineCode === m.code).map(o => ({ orderId: o.orderId, qty: o.orderQuantity || 1 })),
+    waitingForSticker: waitingOf.get(String(m._id)) || 0,
+  });
+}
+
 export const getMachines = async (req, res) => {
   try {
     const companyId = req.user.companyId;
@@ -261,7 +300,7 @@ export const getMachines = async (req, res) => {
     // rely on this endpoint returning the FULL unfiltered array with no
     // params — only paginate/filter when page/limit is explicitly sent
     // (Product Master's list view, Design Approval's queue).
-    const { page, limit, search, designStatus, releaseStatus, discontinued, forwardToNextPhase, withStatusCounts, pType, category, pSourceType, materialGrade } = req.query;
+    const { page, limit, search, designStatus, releaseStatus, discontinued, forwardToNextPhase, withStatusCounts, pType, category, pSourceType, materialGrade, lowStock, stockInfo } = req.query;
     const isPaginated = !!(page || limit);
 
     // Base filter excludes designStatus so status-count aggregates below can
@@ -280,6 +319,13 @@ export const getMachines = async (req, res) => {
     // Material Grade filter (client request, 2026-10-17) — independent of the
     // classification chain above.
     if (materialGrade) baseQuery.materialGrade = materialGrade;
+    // Low stock (2026-11-06): switched on by Material Flow and at or below Min
+    // Stock. In the database, so paging stays right.
+    if (lowStock === 'true') {
+      baseQuery.materialFlow = { $in: STOCK_FLOWS };
+      baseQuery.minStock = { $gt: 0 };
+      baseQuery.$expr = { $lte: [{ $ifNull: ['$qty', 0] }, '$minStock'] };
+    }
     if (search) {
       baseQuery.$or = [
         { code: { $regex: search, $options: 'i' } },
@@ -385,10 +431,17 @@ export const getMachines = async (req, res) => {
       });
     }
 
+    // Low stock (2026-11-06): what R&D's Machines tab and Store's Product Master
+    // tab show beside the stock figure, for this page's rows in one batch.
+    const stockInfoOf = stockInfo === 'true' ? await machineStockInfo(machines, companyId) : null;
+
     // 4. Attach the grouped documents to their respective machines, then translate to the response shape
-    const enrichedMachines = machines.map(machine => toMachineResponse({
-      ...machine,
-      designFiles: docsByMachine[machine._id.toString()] || []
+    const enrichedMachines = machines.map(machine => ({
+      ...toMachineResponse({
+        ...machine,
+        designFiles: docsByMachine[machine._id.toString()] || []
+      }),
+      ...(stockInfoOf ? { stockInfo: stockInfoOf(machine) } : {}),
     }));
 
     res.json({
@@ -538,6 +591,9 @@ export const updateMachine = async (req, res) => {
     if (purchase !== undefined && internalManufacturing !== undefined && !!purchase === !!internalManufacturing) {
       return res.status(400).json({ success: false, message: 'Choose either Purchasable (Vendor) or Internal Manufacturing.' });
     }
+    const before = (purchase !== undefined || internalManufacturing !== undefined)
+      ? await Item.findOne({ _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' }).select('purchase internalManufacturing').lean()
+      : null;
     // Backfills `store` on save if it was missing (see createMachine) — lets
     // editing an older machine self-heal without needing a separate migration.
     const machine = await Item.findOneAndUpdate(
@@ -546,6 +602,12 @@ export const updateMachine = async (req, res) => {
       { new: true }
     ).lean();
     if (!machine) return res.status(404).json({ success: false, message: 'Machine not found' });
+    // Make or buy (2026-10-28): switched to bought with no purchase price →
+    // pending + Accounts asked; switched to made → priced from its BOM.
+    if (before) {
+      const { afterMachineSourcingChange } = await import('../services/makeBuyService.js');
+      await afterMachineSourcingChange(before, machine, req.user);
+    }
     res.json({ success: true, data: toMachineResponse(machine) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -1200,7 +1262,8 @@ export const getBOMCostByMachineCode = async (req, res) => {
     const companyId = req.user.companyId;
 
     const result = await getMachineBillingBOMCost(code, companyId);
-    res.json({ success: true, data: result.found ? result : null });
+    const provisional = result.provisional?.pending || result.provisional?.parts?.length;
+    res.json({ success: true, data: result.found || provisional ? result : null });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1385,6 +1448,7 @@ export const createChangeRequest = async (req, res) => {
 export const resolveChangeRequest = async (req, res) => {
   try {
     const { approved, notes } = req.body;
+    const before = await RDChangeRequest.findOne({ _id: req.params.id, company: req.user.companyId }).select('status').lean();
     const cr = await RDChangeRequest.findOneAndUpdate(
       { _id: req.params.id, company: req.user.companyId },
       { status: approved ? 'Approved' : 'Rejected', rdNotes: notes || '', resolvedAt: today() },
@@ -1392,14 +1456,16 @@ export const resolveChangeRequest = async (req, res) => {
     );
     if (!cr) return res.status(404).json({ success: false, message: 'Change request not found' });
 
-    // Approving a change request used to also unlock the old RDBOM (the
-    // ONLY way to edit a locked one) — that model is gone along with the
-    // Legacy BOM Management tab, so there's nothing left to unlock here.
-    // MachineBOM has its own `isLocked`/`lockMachineBOM`, with no
-    // unlock-via-Change-Request path of its own yet (pre-existing gap,
-    // not introduced by this removal).
+    // Approving a change request is the only way to edit a locked Machine BOM
+    // (it used to unlock the old RDBOM; restored for MachineBOM 2026-11-02).
+    // R&D locks it again from BOM Management when the edit is done.
+    let bomUnlocked = false;
+    if (approved && before?.status !== 'Approved') {
+      const r = await MachineBOM.updateOne({ machine: cr.machine, company: req.user.companyId, isLocked: true }, { $set: { isLocked: false, lockedAt: null } });
+      bomUnlocked = r.modifiedCount > 0;
+    }
 
-    res.json({ success: true, data: cr });
+    res.json({ success: true, data: cr, bomUnlocked });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

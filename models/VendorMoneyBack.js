@@ -21,7 +21,10 @@ const vendorMoneyBackSchema = new mongoose.Schema({
   vendorName: { type: String, default: '' },
   purchaseOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase', default: null },
   poNumber: { type: String, default: '' },
-  source: { type: String, enum: ['Rejection', 'Cancellation'], required: true },
+  // Outsource (2026-11-04, docs/outsource-v2/all-lost-at-vendor-logic-2026-11.md):
+  // an Outsource Order's bill fell below what was paid. poNumber holds its OSO no.
+  outsourceOrder: { type: mongoose.Schema.Types.ObjectId, ref: 'OutsourceOrder', default: null },
+  source: { type: String, enum: ['Rejection', 'Cancellation', 'Outsource'], required: true },
   rejection: { type: mongoose.Schema.Types.ObjectId, ref: 'PurchaseRejection', default: null },
   amount: { type: Number, required: true, min: 0 },
   mode: { type: String, enum: ['Refund', 'Credit', 'WrittenOff', null], default: null },

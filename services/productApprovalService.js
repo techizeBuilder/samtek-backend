@@ -22,6 +22,7 @@ import MachineBOM from '../models/MachineBOM.js';
 import QCItemChecklist from '../models/QCItemChecklist.js';
 import RDPrototype from '../models/RDPrototype.js';
 import { flattenProcessDefinition } from './processStepBuilderService.js';
+import { isPart, isBought } from './makeBuyService.js';
 
 export const APPROVAL_KINDS = ['SubChildPart', 'ChildPart', 'Machine'];
 
@@ -59,6 +60,22 @@ export const isPurchaseMachine = (item) =>
 
 export const isReleased = (item) => approvalOf(item).releaseStatus === 'Released';
 
+// Low-stock for machines (2026-11-06, docs/client-features-2026-11): which
+// automatic reorder a machine takes. Forward on = built (the machine sweep);
+// off with Purchasable on = bought (the purchase sweep); otherwise neither.
+export const machineStockRoute = (item) => {
+  if (item?.machineDetails?.forwardToNextPhase) return 'built';
+  return item?.purchase === true ? 'bought' : 'none';
+};
+
+// A Child Part / Sub Child Part bought from a vendor (make or buy,
+// 2026-10-29): like a Purchase Machine it has no Design or BOM stage — only
+// its Incoming (bought) QC List, then Release. For a parent above it, it
+// counts as passing Design / BOM (it has neither); it must still be Released.
+export const isBoughtPart = (item) => isPart(item) && isBought(item);
+// No Design / BOM (/ Prototype) stage: a Purchase Machine or a bought part.
+export const isQcOnly = (item) => isPurchaseMachine(item) || isBoughtPart(item);
+
 const brief = (it, reason) => ({
   _id: String(it._id), code: it.code, name: it.name, productKind: it.productKind, reason,
 });
@@ -85,6 +102,7 @@ export async function computeDesignReadiness(item, companyId, visited = new Set(
   if (visited.has(key)) return { ok: true, blockers: [] };
   visited.add(key);
 
+  if (isBoughtPart(item)) return { ok: true, blockers: [] };
   const blockers = [];
   const own = approvalOf(item).designStatus;
   if (own !== 'Approved') blockers.push(brief(item, `Design is ${own}`));
@@ -130,20 +148,25 @@ async function bomProcessDefinition(item, companyId) {
 // stage" is therefore covered: any stage doc that exists must be non-empty.
 export async function computeQcReadiness(item, companyId) {
   const module = QC_MODULE[item.productKind];
-  const docs = await QCItemChecklist.find({ company: companyId, item: item._id, module }).lean();
+  // A part's two paths have their own lists: bought → its Incoming list only;
+  // made → its build lists only (an empty Incoming list never blocks it).
+  const bought = isBoughtPart(item);
+  const docs = (await QCItemChecklist.find({ company: companyId, item: item._id, module }).lean())
+    .filter(d => (isPart(item) ? (d.stage === 'incoming') === bought : true));
   const problems = [];
+  if (bought && !docs.some(d => (d.selectedItems || []).length > 0)) problems.push('The Incoming (bought) checklist has no rows — set it on R&D → QC');
 
   const empty = docs.filter(d => (d.selectedItems || []).length === 0);
   empty.forEach(d => problems.push(`${d.stepName ? `${d.stepCategory} › ${d.stepName}` : `${d.stage} checklist`} has no rows selected`));
 
-  if (!isPurchaseMachine(item)) {
+  if (!isQcOnly(item)) {
     const steps = flattenProcessDefinition(await bomProcessDefinition(item, companyId)).filter(s => s.qcRequired);
     for (const s of steps) {
       const doc = docs.find(d => d.stepCategory === s.category && d.stepName === s.name);
       if (!doc || (doc.selectedItems || []).length === 0) problems.push(`QC step "${s.category} › ${s.name}" has no checklist configured`);
     }
   }
-  if (!docs.some(d => (d.selectedItems || []).length > 0)) problems.push('No QC checklist is configured for this item');
+  if (!bought && !docs.some(d => (d.selectedItems || []).length > 0)) problems.push('No QC checklist is configured for this item');
   return { ok: problems.length === 0, problems };
 }
 
@@ -166,7 +189,7 @@ export async function computeReleaseReadiness(item, companyId) {
   if (!a.qcListApproved) missing.push('QC List not approved');
   if (!qc.ok && !a.qcListApproved) missing.push(...qc.problems);
 
-  if (!isPurchaseMachine(item)) {
+  if (!isQcOnly(item)) {
     const design = await computeDesignReadiness(item, companyId);
     if (!design.ok) {
       missing.push('Design not approved (including every part underneath)');
@@ -211,6 +234,7 @@ export async function setDesignApproved({ id, companyId, userId, approved }) {
   const item = await loadItem(id, companyId);
   if (!item) return fail(404, 'Item not found');
   if (isPurchaseMachine(item)) return fail(400, 'A Purchase Machine has no Design stage');
+  if (isBoughtPart(item)) return fail(400, 'A bought part has no Design stage — only its Incoming QC List and Release');
 
   if (approved) {
     const sub = [];
@@ -231,9 +255,11 @@ export async function setBomApproved({ id, companyId, userId, approved }) {
   const item = await loadItem(id, companyId);
   if (!item) return fail(404, 'Item not found');
   if (isPurchaseMachine(item)) return fail(400, 'A Purchase Machine has no BOM stage');
+  if (isBoughtPart(item)) return fail(400, 'A bought part has no BOM stage — only its Incoming QC List and Release');
   if (approved) {
     if (!(await hasBomContent(item, companyId))) return fail(400, 'This BOM is empty — there is nothing to approve');
-    const blocked = await childrenFailing(item, companyId, p => approvalOf(p).bomApproved, 'BOM not approved');
+    // A bought part underneath has no BOM to approve — it passes.
+    const blocked = await childrenFailing(item, companyId, p => approvalOf(p).bomApproved || isBoughtPart(p), 'BOM not approved');
     if (blocked.length) return fail(409, 'Approve the parts underneath first — their BOMs are not approved yet', blocked);
   }
   const fields = approved
@@ -267,6 +293,8 @@ export async function setReleaseStatus({ id, companyId, userId, status }) {
   if (status === 'Released') {
     const r = await computeReleaseReadiness(item, companyId);
     if (!r.ready) return fail(409, `Can't release yet: ${r.missing.join('; ')}`, r.blockers);
+    // Released again after a make / buy switch or a BOM edit → nothing left to redo.
+    if (item.approvalRedo?.at) await Item.updateOne({ _id: item._id }, { $set: { 'approvalRedo.at': null, 'approvalRedo.from': null, 'approvalRedo.to': null, 'approvalRedo.byName': '', 'approvalRedo.what': '' } });
     return { ok: true, item: await setFields(item, { releaseStatus: 'Released', releasedAt: new Date(), releasedBy: userId }) };
   }
   return { ok: true, item: await setFields(item, { releaseStatus: 'Not Released', releasedAt: null, releasedBy: null }) };
@@ -275,40 +303,77 @@ export async function setReleaseStatus({ id, companyId, userId, status }) {
 // Called whenever an item's QC checklist is edited — the sign-off no longer
 // matches what was approved, so it resets (and a Release rests on it, so that
 // is pulled back too).
-export async function invalidateQcApproval(itemId, companyId) {
-  const item = await Item.findOne({ _id: itemId, companyId, productKind: { $in: APPROVAL_KINDS } }).select('productKind machineDetails childPartDetails subChildPartDetails').lean();
+// stage: the edited list's stage — a part's list for the OTHER make / buy path
+// doesn't touch the sign-off in use (2026-10-29).
+export async function invalidateQcApproval(itemId, companyId, stage = null) {
+  const item = await Item.findOne({ _id: itemId, companyId, productKind: { $in: APPROVAL_KINDS } }).select('productKind partSourcing purchase internalManufacturing machineDetails childPartDetails subChildPartDetails').lean();
   if (!item || !approvalOf(item).qcListApproved) return;
+  if (stage && isPart(item) && (stage === 'incoming') !== isBoughtPart(item)) return;
   await setFields(item, {
     qcListApproved: false, qcListApprovedAt: null, qcListApprovedBy: null,
     releaseStatus: 'Not Released', releasedAt: null, releasedBy: null,
   });
 }
 
+// R&D edited a BOM that was approved: what was signed off is no longer what's
+// on it, so the BOM approval and Release are pulled back and the Approval page
+// flags it (2026-11-02). Design and QC List stand. A parent above it isn't
+// touched, as with a checklist edit. Open orders carry on as they are.
+export async function invalidateBomApproval(itemId, companyId, { byName = '', what = '' } = {}) {
+  const item = await loadItem(itemId, companyId);
+  if (!item || !detailsKey(item) || isQcOnly(item) || !approvalOf(item).bomApproved) return false;
+  await setFields(item, {
+    bomApproved: false, bomApprovedAt: null, bomApprovedBy: null,
+    releaseStatus: 'Not Released', releasedAt: null, releasedBy: null,
+  });
+  // A make / buy flag already there says more: it stays until the next Release.
+  if (!item.approvalRedo?.at) await Item.updateOne({ _id: item._id }, { $set: { approvalRedo: { at: new Date(), from: null, to: null, byName, what } } });
+  return true;
+}
+
 // One row per item for the Approval page: status + live readiness.
-export async function listApprovalItems({ companyId, kind, search, page = 1, limit = 20 }) {
-  const query = { companyId, productKind: kind, isDiscontinued: { $ne: true } };
+// status: 'redo' = flagged "needs re-approval" after a make / buy switch or a BOM edit;
+// 'notApproved' = not Released and not flagged, so the two never overlap.
+// redoCounts: how many are flagged, per tier (for the tabs). counts: this tier
+// under the current search, for the filter.
+export async function listApprovalItems({ companyId, kind, search, page = 1, limit = 20, status = '' }) {
+  const base = { companyId, productKind: kind, isDiscontinued: { $ne: true } };
   if (search) {
     const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    query.$or = [{ name: rx }, { code: rx }];
+    base.$or = [{ name: rx }, { code: rx }];
   }
-  const [items, total] = await Promise.all([
+  const redoQuery = { ...base, 'approvalRedo.at': { $ne: null } };
+  const notApprovedQuery = { ...base, [`${DETAILS_KEY[kind]}.releaseStatus`]: { $ne: 'Released' }, 'approvalRedo.at': null };
+  const query = status === 'redo' ? redoQuery : status === 'notApproved' ? notApprovedQuery : base;
+  const [items, total, all, redoN, notApprovedN, redo] = await Promise.all([
     Item.find(query).sort({ code: 1 }).skip((page - 1) * limit).limit(limit).lean(),
     Item.countDocuments(query),
+    Item.countDocuments(base),
+    Item.countDocuments(redoQuery),
+    Item.countDocuments(notApprovedQuery),
+    Item.aggregate([
+      { $match: { companyId: new Item.base.Types.ObjectId(String(companyId)), productKind: { $in: APPROVAL_KINDS }, isDiscontinued: { $ne: true }, 'approvalRedo.at': { $ne: null } } },
+      { $group: { _id: '$productKind', n: { $sum: 1 } } },
+    ]),
   ]);
+  const redoCounts = Object.fromEntries(redo.map(r => [r._id, r.n]));
   const rows = [];
   for (const item of items) {
     const a = approvalOf(item);
     const purchase = isPurchaseMachine(item);
+    const qcOnly = isQcOnly(item);
     const release = await computeReleaseReadiness(item, companyId);
     rows.push({
       _id: String(item._id), code: item.code, name: item.name, category: item.category,
       productKind: item.productKind, image: item.image || '',
       purchaseMachine: purchase,
+      boughtPart: isBoughtPart(item), qcOnly,
+      approvalRedo: item.approvalRedo?.at ? item.approvalRedo : null,
       ...a,
       prototypeStatus: await getPrototypeStatus(item, companyId),
-      designReadiness: purchase ? null : await computeDesignReadiness(item, companyId),
+      designReadiness: qcOnly ? null : await computeDesignReadiness(item, companyId),
       releaseReadiness: release,
     });
   }
-  return { rows, total, page, pages: Math.max(1, Math.ceil(total / limit)) };
+  return { rows, total, page, pages: Math.max(1, Math.ceil(total / limit)), redoCounts, counts: { all, notApproved: notApprovedN, redo: redoN } };
 }

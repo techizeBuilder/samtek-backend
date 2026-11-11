@@ -40,7 +40,7 @@ const text = (v, max) => String(v ?? '').trim().slice(0, max);
 // { error } or { fields }.
 export function readClaimInput(body, now = new Date()) {
   const f = {};
-  for (const [k, max] of [['problem', 2000], ['customerName', 120], ['ticketRef', 60], ['vendorResponse', 2000], ['notes', 2000]]) {
+  for (const [k, max] of [['problem', 2000], ['customerName', 120], ['ticketRef', 60], ['orderCode', 60], ['vendorResponse', 2000], ['notes', 2000]]) {
     if (has(body, k)) f[k] = text(body[k], max);
   }
   const pick = (k, list, label) => {
@@ -121,6 +121,52 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const userName = (u) => u?.fullName || u?.username || '';
 const evidenceOf = (files = []) => files.map(f => ({ url: `/uploads/warranty-claims/${f.filename}`, name: f.originalname || f.filename, at: new Date() }));
 
+async function customerOfOrder(companyId, orderCode) {
+  if (!orderCode) return '';
+  const Order = (await import('../models/Order.js')).default;
+  const Customer = (await import('../models/Customer.js')).default;
+  const order = await Order.findOne({ companyId, orderCode }).select('customer').lean();
+  if (!order?.customer) return '';
+  return (await Customer.findById(order.customer).select('name').lean())?.name || '';
+}
+
+// A mobile number or order number → the vendor parts traced into that
+// customer's orders (2026-11-03, serial tracking logic §6.1): the list Customer
+// Records shows, so a claim can start without the serial.
+export async function partsForClaim(companyId, q) {
+  const s = String(q || '').trim();
+  const none = { found: false, byMobile: false, customerName: '', mobile: '', orders: [], serviceParts: [] };
+  if (!s) return none;
+  const Order = (await import('../models/Order.js')).default;
+  const Customer = (await import('../models/Customer.js')).default;
+  const { unitsInCustomerOrder, orderDeliveredOn, unitsFittedOnVisits } = await import('./serialTrailService.js');
+
+  const byMobile = /^\d{10}$/.test(s);
+  let customerName = '', orderCodes = [], serviceParts = [];
+  if (byMobile) {
+    const customer = await Customer.findOne({ mobile: s, companyId }).select('name').lean();
+    serviceParts = await unitsFittedOnVisits(companyId, s);
+    if (!customer && !serviceParts.length) return none;
+    customerName = customer?.name || '';
+    if (customer) {
+      const orders = await Order.find({ customer: customer._id, companyId, status: { $nin: ['cancelled', 'rejected'] } }).select('orderCode').sort({ createdAt: -1 }).limit(20).lean();
+      orderCodes = orders.map(o => o.orderCode).filter(Boolean);
+    }
+  } else {
+    const order = await Order.findOne({ companyId, orderCode: new RegExp(`^${escapeRe(s)}$`, 'i') }).select('orderCode').lean();
+    if (!order) return none;
+    orderCodes = [order.orderCode];
+    customerName = await customerOfOrder(companyId, order.orderCode);
+  }
+
+  const orders = [];
+  for (const orderCode of orderCodes) {
+    const parts = await unitsInCustomerOrder(companyId, orderCode);
+    if (parts.length) orders.push({ orderCode, deliveredAt: await orderDeliveredOn(companyId, orderCode), parts });
+  }
+  return { found: true, byMobile, customerName, mobile: byMobile ? s : '', orders, serviceParts };
+}
+
 // The serial a customer gave → our received units with it (several items
 // can share a serial), each with the claims already made on that serial.
 export async function lookupSerial(companyId, serial) {
@@ -129,7 +175,16 @@ export async function lookupSerial(companyId, serial) {
   const units = await PurchasedUnit.find({ companyId, serialKey: key }).sort({ receivedAt: -1 }).limit(20).lean();
   const claims = await VendorWarrantyClaim.find({ companyId, serialKey: key })
     .select('number itemName vendorName status outcome reportedToVendorAt satisfaction purchasedUnit').sort({ createdAt: -1 }).lean();
-  return units.map(u => ({
+  // Serial number work step 2 (2026-10-31, §6): where each unit went — the
+  // production order, the part it's in, the customer's Order.
+  const { trailOf, orderDeliveredOn } = await import('./serialTrailService.js');
+  const trails = await Promise.all(units.map(u => (u.isLot ? null : trailOf(u, companyId))));
+  const delivered = await Promise.all(trails.map(t => orderDeliveredOn(companyId, t?.customerOrderCode)));
+  const customers = await Promise.all(trails.map(t => customerOfOrder(companyId, t?.customerOrderCode)));
+  return units.map((u, i) => ({
+    trail: trails[i],
+    deliveredAt: delivered[i],
+    customerName: customers[i],
     _id: u._id, serialNumber: u.serialNumber, isLot: u.isLot, lotQty: u.lotQty, qtyUnit: u.qtyUnit,
     item: u.item, itemName: u.itemName, vendor: u.vendor, vendorName: u.vendorName,
     purchaseOrder: u.purchaseOrder, poNumber: u.poNumber, receivedAt: u.receivedAt,
@@ -200,6 +255,7 @@ export async function createClaim({ companyId, user, body = {}, files = [], now 
     underWarranty: f.underWarranty || 'Unsure',
     customerName: f.customerName || '',
     ticketRef: f.ticketRef || '',
+    orderCode: f.orderCode || '',
     reportedToVendorAt: f.reportedToVendorAt || null,
     vendorRespondedAt: f.vendorRespondedAt || null,
     vendorResponse: f.vendorResponse || '',
@@ -272,7 +328,7 @@ export async function listClaims({ companyId, status = '', search = '', vendorId
   const s = String(search || '').trim();
   if (s) {
     const re = new RegExp(escapeRe(s), 'i');
-    q.$or = [{ number: re }, { serialKey: new RegExp(escapeRe(s.toUpperCase())) }, { vendorName: re }, { itemName: re }, { customerName: re }, { ticketRef: re }];
+    q.$or = [{ number: re }, { serialKey: new RegExp(escapeRe(s.toUpperCase())) }, { vendorName: re }, { itemName: re }, { customerName: re }, { ticketRef: re }, { orderCode: re }];
   }
   const lim = Math.min(Math.max(Number(limit) || 30, 1), 100);
   const pg = Math.max(Number(page) || 1, 1);

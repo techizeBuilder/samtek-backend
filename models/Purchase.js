@@ -215,6 +215,8 @@ const purchaseItemSchema = new mongoose.Schema({
     default: []
   },
   overdueNotifiedFor: { type: Date, default: null },
+  // The date the "due tomorrow" heads-up already went out for (2026-10-29).
+  dueTomorrowNotifiedFor: { type: Date, default: null },
   // Set when this line was cancelled (gap 13, 2026-10-09) — the whole PO, or
   // a short close of what wasn't received. null = a live line. A cancelled
   // line stays on the PO for the record but can't be received.

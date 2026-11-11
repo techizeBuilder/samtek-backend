@@ -11,7 +11,9 @@ import {
   deleteUser,
   resetUserPassword,
   updateUserPassword,
-  getNextEmployeeId
+  getNextEmployeeId,
+  createManpower,
+  giveLogin
 } from './controllers/userController.js';
 import {
   getSettings,
@@ -36,7 +38,7 @@ import {
   getProductsByBrand
 } from './controllers/productController.js';
 import bcrypt from 'bcryptjs';
-import { profileUpload } from './middleware/upload.js';
+import { profileUpload, manpowerUpload } from './middleware/upload.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -116,7 +118,6 @@ router.get('/cleanup-permissions', async (req, res) => {
 router.post('/auth/login', async (req, res) => {
   try {
     console.log('=== LOGIN ROUTE HIT ===');
-    console.log('Request body:', req.body);
 
     const { username, password } = req.body;
 
@@ -125,10 +126,6 @@ router.post('/auth/login', async (req, res) => {
     }
 
     console.log('Looking for user with username:', username);
-
-    // Check all users first
-    const allUsers = await User.find({}, 'username email role');
-    console.log('All users in database:', allUsers);
 
     const user = await User.findOne({
       $or: [
@@ -147,7 +144,6 @@ router.post('/auth/login', async (req, res) => {
         isActive: user.isActive,
         companyId: user.companyId?._id,
         companyLocation: user.companyId ? `${user.companyId.city}, ${user.companyId.state}` : 'No company assigned',
-        passwordHash: user.password.substring(0, 20) + '...'
       });
 
       // Auto-assign company if user doesn't have one (for development/testing)
@@ -179,6 +175,11 @@ router.post('/auth/login', async (req, res) => {
 
     if (!user) {
       console.log('User not found');
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    // Manpower (2026-11-06): in the system for work only, with no password to check.
+    if (user.canLogin === false) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
@@ -396,6 +397,9 @@ router.get('/users/generate-employee-id', verifyToken, getNextEmployeeId);
 router.get('/users/:id', verifyToken, getUserById);
 // profileUpload.single() parses multipart/form-data so req.body is populated
 router.post('/users', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementAdd, profileUpload.single('profilePicture'), createUser);
+// Manpower (2026-11-06): same checks as Add Employee, and the Aadhaar comes with it.
+router.post('/users/manpower', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementAdd, manpowerUpload, createManpower);
+router.post('/users/:id/give-login', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementEdit, giveLogin);
 router.put('/users/:id', verifyToken, gateEmployeeEdit, profileUpload.single('profilePicture'), updateUser);
 router.patch('/users/:id', verifyToken, gateEmployeeEdit, profileUpload.single('profilePicture'), updateUser);
 router.patch('/users/:id/profile-picture', verifyToken, profileUpload.single('profilePicture'), updateUser);

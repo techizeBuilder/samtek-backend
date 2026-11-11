@@ -103,6 +103,12 @@ const companySchema = new mongoose.Schema({
     trim: true,
     default: null
   },
+  // When this company's departments-from-roles seed ran (once only — see
+  // services/departmentSeedService.js).
+  departmentsSeededAt: {
+    type: Date,
+    default: null
+  },
   // Uploaded by the Company Admin on the My Company page — shown at the top
   // of the Sidebar for every user of this company. Falls back to the default
   // Samtek logo (frontend-side) when null.

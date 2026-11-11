@@ -17,6 +17,7 @@
 //    reduced (never deleted) with a ledger reversal only if it was ever
 //    posted; an advance already paid is recorded as a vendor credit; the
 //    vendor is emailed.
+import { DEPARTMENTS, reportMissingMailbox } from '../config/mailAccounts.js';
 import { PO_CANCEL_REASONS } from '../models/Purchase.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
 import ItemQuoteGroup from '../models/ItemQuoteGroup.js';
@@ -410,6 +411,7 @@ export async function applyCancellation(po, request, reviewer, remarks = '', req
         reason: reasonText,
       });
       request.emailSent = !!sent.success;
+      if (sent.notConfigured) await reportMissingMailbox(DEPARTMENTS.PURCHASE, { companyId: po.companyId, what: `The cancellation of PO ${po.purchaseOrderNumber}` });
       await po.save();
     }
   } catch (err) {

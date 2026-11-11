@@ -95,6 +95,16 @@ export function dimensionSignature(dims) {
     .join(',');
 }
 
+// A new pick of a size R&D discontinued in Fabrication Master is refused
+// (2026-10-28, docs/fabrication-size-sync-2026-10.md §5); keepId = the size
+// the line / part already had (it keeps working). Message, or null.
+export function discontinuedSizeError(sourceItem, variantId, keepId = null) {
+  if (!variantId || String(variantId) === String(keepId)) return null;
+  const v = (sourceItem?.dimensionVariants || []).find(x => String(x._id) === String(variantId));
+  if (!v?.isDiscontinued) return null;
+  return `Size ${v.designation || formatDims(v.values)} is discontinued in Fabrication Master — pick its replacement size.`;
+}
+
 // Human-readable "key: valuemm, key: valuemm" summary of a dimension set —
 // mirrors the frontend's identical helper (client/src/lib/fabricationDims.js)
 // for server-rendered surfaces (RFQ/vendor-confirmation emails).

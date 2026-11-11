@@ -10,13 +10,31 @@ import { resolveSelectedChecklist } from '../controllers/qcChecklistController.j
 // internalManufacturing radio, which isn't kept in sync with this.
 const MANUFACTURING_SOURCE_TYPES = ['In House Manufacturing', 'Out Source Manufactured'];
 
+// Only a production order's job can have Production's Final checklist to wait
+// for (2026-11-05). A machine sold from stock or bought from a vendor has no
+// Production work behind its job, so QC checks its Final checklist straight away.
+const PRODUCTION_JOB_SOURCES = ['Production', 'Stock', 'QC_Rejected'];
+export const waitsForProductionFinal = (job, item) =>
+  PRODUCTION_JOB_SOURCES.includes(job.source)
+  && item?.productKind === 'Machine'
+  && MANUFACTURING_SOURCE_TYPES.includes(item.productSourceType);
+
 // A QCJob's itemCode is set inconsistently by its 4 creation sites — a real
 // Item.code for Purchase/Production/Stock jobs, but the Item's own ObjectId
 // string for Store-sourced ones (see storeFlowService.js's own comment on
 // why). Try both so this resolver works regardless of which source created
 // the job, rather than requiring every future creation site to remember a
 // convention this file doesn't otherwise enforce.
+// 2026-10-30 (found in the browser test): a purchase job knows its item for
+// sure — `job.item`, the PO line's item (since 2026-10-15) — while its
+// itemCode could be the request number ("PR053") when the request had no
+// itemId, so the checklist was never found. The item link wins.
 async function resolveItemForJob(job, companyId) {
+  const linked = job.item?._id || job.item;
+  if (linked && mongoose.Types.ObjectId.isValid(String(linked))) {
+    const byLink = await Item.findOne({ _id: linked, companyId }).lean();
+    if (byLink) return byLink;
+  }
   if (!job.itemCode) return null;
   if (mongoose.Types.ObjectId.isValid(job.itemCode)) {
     const byId = await Item.findOne({ _id: job.itemCode, companyId }).lean();
@@ -30,6 +48,11 @@ async function resolveItemForJob(job, companyId) {
 // item's Final check regardless of purchase vs manufactured, see
 // QCJob.js's own comment) should pull from.
 function flatModuleStageForItem(item) {
+  // A bought Child Part / Sub Child Part arrives finished: its own incoming
+  // checklist, never the build-step ones (make or buy, 2026-10-28).
+  if (['ChildPart', 'SubChildPart'].includes(item.productKind) && item.partSourcing === 'buy') {
+    return { module: item.productKind === 'ChildPart' ? 'childPart' : 'subChildPart', stage: 'incoming' };
+  }
   if (item.productKind === 'Motor') return { module: 'motorMaster', stage: 'default' };
   if (item.productKind === 'Machine') return { module: 'productMaster', stage: 'final' };
   if (item.productKind === 'SubChildPart') return { module: 'subChildPart', stage: 'default' };

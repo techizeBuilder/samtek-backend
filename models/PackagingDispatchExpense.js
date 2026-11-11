@@ -47,6 +47,13 @@ const packagingDispatchExpenseSchema = new mongoose.Schema({
     ref: 'User',
     required: true,
   },
+  // A vendor trip's freight (outsource-v2 slice 6) — created and removed with
+  // the trip.
+  dispatchTrip: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'DispatchTrip',
+    default: null,
+  },
 }, {
   timestamps: true, // createdAt = exact date+time this expense was logged
 });

@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import User from '../models/User.js';
 import { Item } from '../models/Inventory.js';
 import { sendSupportEmail } from '../utils/serviceEmail.js';
+import { DEPARTMENTS, mailboxWarning } from '../config/mailAccounts.js';
 import { generateServiceInvoicePDF } from '../utils/servicePdfGenerator.js';
 import Customer from '../models/Customer.js';
 import Order from '../models/Order.js';
@@ -41,6 +42,11 @@ export const getCustomerHistory = async (req, res) => {
         }
 
         let pastPurchases = [];
+        // Serial number work step 2 (2026-10-31, §6): per customer Order, every
+        // vendor serial traced into it — for a vendor warranty claim.
+        const vendorParts = [];
+        const { unitsFittedOnVisits, orderDeliveredOn } = await import('../services/serialTrailService.js');
+        const serviceParts = await unitsFittedOnVisits(req.user.companyId, mobileNumber);
 
         // 4. If Customer exists, pull their actual machines from DispatchOrder
         // — the one per-machine record the dispatch flow already creates,
@@ -102,6 +108,7 @@ export const getCustomerHistory = async (req, res) => {
                     // category, which depends on machineCode matching an Item
                     // that may not exist under that exact code.
                     pastPurchases.push({
+                        orderCode: d.orderId,
                         machineType: d.machineName || item?.category || 'Unknown',
                         model: item?.name || d.machineName || '',
                         serialNumber: d.serialNumber,
@@ -111,6 +118,20 @@ export const getCustomerHistory = async (req, res) => {
                         amcDocumentUrl: d.amcDocumentUrl || null
                     });
                 });
+            }
+            if (orderCodes.length) {
+                const { unitsInCustomerOrder } = await import('../services/serialTrailService.js');
+                for (const code of orderCodes.slice(0, 20)) {
+                    const parts = await unitsInCustomerOrder(req.user.companyId, code);
+                    if (parts.length) vendorParts.push({
+                        orderCode: code,
+                        deliveredAt: await orderDeliveredOn(req.user.companyId, code),
+                        parts: parts.map(p => ({
+                            _id: p._id, serialNumber: p.serialNumber, itemName: p.itemName, vendorName: p.vendorName,
+                            poNumber: p.poNumber, receivedAt: p.receivedAt, vendorWarrantyMonths: p.vendorWarrantyMonths, inPart: p.inPart,
+                        })),
+                    });
+                }
             }
         }
 
@@ -132,6 +153,8 @@ export const getCustomerHistory = async (req, res) => {
                 address: fullAddress,
                 email: customer ? (customer.email || "") : "",
                 pastPurchases: pastPurchases,
+                vendorParts,
+                serviceParts,
                 previousComplaints: previousTickets
             }
         });
@@ -313,6 +336,7 @@ export const createSupportTicket = async (req, res) => {
 
         res.status(201).json({
             success: true,
+            emailWarning: await mailboxWarning(DEPARTMENTS.INFO),
             message: 'Ticket created successfully',
             data: newTicket
         });
@@ -591,6 +615,7 @@ export const assignTicket = async (req, res) => {
 
         res.status(200).json({
             success: true,
+            emailWarning: await mailboxWarning(DEPARTMENTS.INFO),
             message: actionText,
             data: responseData
         });
@@ -750,6 +775,7 @@ export const cancelTicket = async (req, res) => {
 
         res.status(200).json({
             success: true,
+            emailWarning: await mailboxWarning(DEPARTMENTS.INFO),
             message: 'Ticket successfully cancelled.',
             data: responseData
         });
@@ -817,6 +843,7 @@ export const sendVerificationEmail = async (req, res) => {
 
         res.status(200).json({
             success: true,
+            emailWarning: await mailboxWarning(DEPARTMENTS.INFO),
             message: 'Verification link sent successfully to the customer.',
             data: ticket
         });
@@ -1243,6 +1270,35 @@ export const completeVisit = async (req, res) => {
             }
         }
 
+        // Serial number work (2 Nov review): the technician says which serial /
+        // sticker each part is. partSerials = { [itemId]: { unitIds, labelIds } }.
+        const { stockTracked, unlabelledInStock, unlabelledProblem, untrackedCount, checkPicked, pickRule, pickProblem, move, IN_STOCK, noSerialCheck, acknowledged, confirmBody, logSkippedSerials } = await import('../services/serialTrailService.js');
+        let partSerials = req.body.partSerials;
+        if (typeof partSerials === 'string') {
+            try { partSerials = JSON.parse(partSerials); } catch { partSerials = {}; }
+        }
+        const partPicks = [];
+        const partSkips = [];
+        for (const part of formattedParts) {
+            const stockItem = await Item.findOne({ _id: part.item, companyId: req.user.companyId }).select('qty name').lean();
+            const waiting = await unlabelledInStock(req.user.companyId, part.item);
+            const blocked = unlabelledProblem({ qty: part.quantity, stock: stockItem?.qty, unlabelled: waiting, name: stockItem?.name });
+            if (blocked) return res.status(400).json({ success: false, message: blocked });
+            const tracked = await stockTracked(req.user.companyId, part.item);
+            const given = partSerials?.[String(part.item)] || {};
+            if (tracked.count > 0 || given.unitIds?.length || given.labelIds?.length) {
+                const checked = checkPicked(given, tracked);
+                if (checked.error) return res.status(400).json({ success: false, message: `${stockItem?.name}: ${checked.error}` });
+                const rule = pickRule({ qty: part.quantity, tracked: tracked.count, untracked: untrackedCount(stockItem?.qty, tracked.count, waiting) });
+                const problem = pickProblem(checked.unitIds.length + checked.labelIds.length, rule);
+                if (problem) return res.status(400).json({ success: false, message: `${stockItem?.name}: ${problem}` });
+                partPicks.push(checked);
+                const skip = noSerialCheck({ itemId: part.item, name: stockItem?.name, picked: checked.unitIds.length + checked.labelIds.length, rule, tracked: tracked.count });
+                if (skip) partSkips.push(skip);
+            }
+        }
+        if (partSkips.length && !acknowledged(req.body.acknowledgeWarnings)) return res.status(409).json(confirmBody(partSkips));
+
         const mediaUrls = [];
         if (req.files && req.files.length > 0) {
             req.files.forEach(file => {
@@ -1293,6 +1349,21 @@ export const completeVisit = async (req, res) => {
         });
 
         await ticket.save();
+
+        // The serials went to this customer + ticket. The visit is already saved,
+        // so a failure here is logged rather than undoing it.
+        try {
+            for (const pick of partPicks) {
+                await move({
+                    unitIds: pick.unitIds, labelIds: pick.labelIds,
+                    place: { kind: 'Sold', ticketNo: ticket.tokenId, customerMobile: ticket.customer?.mobileNumber },
+                    what: `Fitted on service visit ${ticket.tokenId}`, by: req.user.fullName || req.user.username || 'Technician', from: IN_STOCK,
+                });
+            }
+        } catch (e) {
+            console.error('Recording a service visit\'s serials failed:', e.message);
+        }
+        await logSkippedSerials(req.user.companyId, partSkips, { screen: 'Service visit', reference: ticket.tokenId, by: req.user.fullName || req.user.username || 'Technician' });
 
         // Free up the technician so they appear 'Available' to the dispatcher
         await User.findByIdAndUpdate(req.user._id, { currentStatus: 'Available' });

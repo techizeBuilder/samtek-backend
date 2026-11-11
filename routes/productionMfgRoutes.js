@@ -1,14 +1,16 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
-import { checkPermission } from '../middleware/permissions.js';
+import { checkPermission, userHasPermission } from '../middleware/permissions.js';
 import {
   getOrders,
   getActiveOrders,
   getTeamOrderHistory,
   createOrder,
+  getStockOrderItems,
   verifyBOM,
   verifyDesign,
   getBomDesignStatus,
+  getUnitCost,
   getSubChildPartMaterialList,
   requestSubChildPartMaterialController,
   getMachineMaterialList,
@@ -25,6 +27,9 @@ import {
   updateProcessNotes,
   getTeams,
   createTeam,
+  getTeamPeople,
+  updateTeam,
+  retireTeam,
   receiveMaterialInProduction,
   getMaterialList,
   issueMaterialToStore,
@@ -83,14 +88,21 @@ const repairEdit = checkPermission('production', 'repairProduction', 'edit');
 // Tracking page) — a clearly more specific fit than 'orders'.
 const manpowerView = checkPermission('production', 'manpower', 'view');
 const manpowerAdd = checkPermission('production', 'manpower', 'add');
+const manpowerEdit = checkPermission('production', 'manpower', 'edit');
+const manpowerDelete = checkPermission('production', 'manpower', 'delete');
+// The team picker: anyone who can add or edit a team.
+const manpowerPick = (req, res, next) => (['add', 'edit'].some((a) => userHasPermission(req.user, 'production', 'manpower', a))
+  ? next() : res.status(403).json({ success: false, message: 'Access denied' }));
 
 // ── Orders ──────────────────────────────────────────────────────────────────
 router.get('/orders', ordersView, getOrders);
 router.get('/orders/active', ordersView, getActiveOrders);
 router.post('/orders', ordersAdd, createOrder);
+router.get('/stock-order-items', ordersView, getStockOrderItems);
 router.put('/orders/:id/verify-bom', ordersEdit, verifyBOM);
 router.put('/orders/:id/verify-design', ordersEdit, verifyDesign);
 router.get('/orders/:id/bom-design-status', ordersView, getBomDesignStatus);
+router.get('/orders/:id/unit-cost', ordersView, getUnitCost); // slice 4 (2026-10-24): build cost so far
 router.get('/orders/:id/sub-child-part-material-list', ordersView, getSubChildPartMaterialList);
 router.post('/orders/:id/sub-child-part-material/request', ordersAdd, requestSubChildPartMaterialController);
 // Machine order Material List (2026-09-17) — new paths, the existing
@@ -177,5 +189,9 @@ router.put('/orders/:id/child-part/:unitNumber/:stage', ordersEdit, saveChildPar
 router.get('/teams', manpowerView, getTeams);
 router.get('/teams/:teamId/history', manpowerView, getTeamOrderHistory);
 router.post('/teams', manpowerAdd, createTeam);
+// Teams from people (2026-11-11): the picker, edit and retire.
+router.get('/teams/people', manpowerPick, getTeamPeople);
+router.put('/teams/:teamId', manpowerEdit, updateTeam);
+router.delete('/teams/:teamId', manpowerDelete, retireTeam);
 
 export default router;
