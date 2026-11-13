@@ -3,6 +3,12 @@
 import JobOpenings from "../models/JobOpenings.js";
 import { companyMatch } from "../utils/companyScope.js";
 
+// Public callers paste these ids from a browser/Postman — a trailing
+// newline or space from copy-paste is common and would otherwise reach
+// Mongoose as part of the id, crashing the query with a raw CastError
+// instead of a clean 400 (found live: 2026-11-12, trailing \n in companyId).
+const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
+
 /**
  * ➕ Add Job Opening
  */
@@ -96,9 +102,12 @@ export const getAllJobOpenings = async (req, res) => {
  */
 export const getPublicJobOpenings = async (req, res) => {
   try {
-    const { companyId } = req.query;
+    const companyId = (req.query.companyId || "").trim();
     if (!companyId) {
       return res.status(400).json({ success: false, message: "companyId is required" });
+    }
+    if (!isValidObjectId(companyId)) {
+      return res.status(400).json({ success: false, message: "companyId is not a valid id — check for an extra space or line break from copy-paste" });
     }
 
     const jobs = await JobOpenings.find({ companyId, status: "Open" })
@@ -127,7 +136,12 @@ export const getPublicJobOpenings = async (req, res) => {
  */
 export const getPublicJobOpeningById = async (req, res) => {
   try {
-    const job = await JobOpenings.findById(req.params.id)
+    const id = (req.params.id || "").trim();
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: "jobId is not a valid id — check for an extra space or line break from copy-paste" });
+    }
+
+    const job = await JobOpenings.findById(id)
       .select("jobTitle department location openings status jobDocument createdAt");
 
     if (!job) {
