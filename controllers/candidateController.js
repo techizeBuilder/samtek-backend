@@ -49,7 +49,14 @@ export const addCandidate = async (req, res) => {
  */
 export const applyToJob = async (req, res) => {
   try {
-    const job = await JobOpening.findById(req.params.jobId);
+    // Pasted from a browser/Postman — strip stray whitespace/newlines before
+    // it reaches Mongoose, same fix as the public job-openings endpoints.
+    const jobId = (req.params.jobId || "").trim();
+    if (!/^[0-9a-fA-F]{24}$/.test(jobId)) {
+      return res.status(400).json({ success: false, message: "jobId is not a valid id — check for an extra space or line break from copy-paste" });
+    }
+
+    const job = await JobOpening.findById(jobId);
     if (!job) {
       return res.status(404).json({ success: false, message: "Job opening not found" });
     }
