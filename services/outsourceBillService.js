@@ -29,7 +29,7 @@ import { postEntry, gstLines } from './purchaseLedgerService.js';
 import { fullDueDate } from './purchaseBillService.js';
 import { advanceOf, priceTypeOf, stepAmount, priceBasis } from './outsourcePricingService.js';
 import { getQcStepIndices } from './qcStepService.js';
-import notificationService from './notificationService.js';
+import notificationService, { HOLDERS } from './notificationService.js';
 import { HttpError } from './subChildPartMaterialSendService.js';
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -108,6 +108,14 @@ export async function createOutsourceBill(order, user) {
     notes: `Outsource order ${order.orderNo} — ${order.vendorName}`,
   });
   await bill.save();
+  // The order is real with an advance: Accounts pays it (2026-11-16, Purchase separated from Accounts).
+  if (bill.advanceAmount > 0) {
+    const { notifyAdvanceToPay } = await import('./moneyNotices.js');
+    await notifyAdvanceToPay({
+      companyId: order.company, number: order.orderNo, vendorName: order.vendorName, amount: bill.advanceAmount,
+      percent: advancePercent || null, data: { outsourceOrderId: String(order._id), billId: String(bill._id), vendorId: String(order.vendor || '') },
+    });
+  }
   return bill;
 }
 
@@ -382,11 +390,11 @@ async function settleIfFullyAccepted(order, bill, user) {
     : 'Every trip accepted — nothing left to pay.');
   if (balance > 0) {
     try {
-      await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], {
+      await notificationService.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.vendorPayments, {
         title: 'Outsource order ready for full payment',
         message: `${order.orderNo} from ${order.vendorName}: every trip is accepted — ${inr(balance)} due ${due}.`,
         type: 'purchase', targetCompanyId: order.company,
-        data: { outsourceOrderId: String(order._id), orderNo: order.orderNo, billId: String(doc._id), fullyAccepted: true },
+        data: { outsourceOrderId: String(order._id), orderNo: order.orderNo, billId: String(doc._id), vendorId: String(order.vendor || ''), fullyAccepted: true },
       });
     } catch (err) {
       console.error('[OutsourceBill] notify Accounts failed:', err.message);

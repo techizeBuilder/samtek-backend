@@ -52,4 +52,15 @@ const vendorMoneyBackSchema = new mongoose.Schema({
   decidedAt: { type: Date, default: null },
 }, { timestamps: true });
 
+// Accounts hears about every new money-back record (2026-11-16, Purchase separated
+// from Accounts): a cancellation, a QC rejection or a loss at an outsource vendor
+// can each create one, so the notice lives here rather than at each call site.
+// No `next` here: this Mongoose passes none to a pre hook (calling it threw and
+// blocked every save — caught by purchsep-test, 2026-11-16).
+vendorMoneyBackSchema.pre('save', function markNew() { this.$locals.wasNew = this.isNew; });
+vendorMoneyBackSchema.post('save', function noticeNew(doc) {
+  if (!doc.$locals?.wasNew) return;
+  import('../services/moneyNotices.js').then(({ notifyMoneyBack }) => notifyMoneyBack(doc)).catch((e) => console.error('Money-back notice failed:', e.message));
+});
+
 export default mongoose.model('VendorMoneyBack', vendorMoneyBackSchema);

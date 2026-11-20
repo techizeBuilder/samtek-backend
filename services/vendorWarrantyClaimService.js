@@ -10,7 +10,7 @@
 import mongoose from 'mongoose';
 import VendorWarrantyClaim, { DEFECT_TYPES, SEVERITIES, UNDER_WARRANTY, CLAIM_OUTCOMES } from '../models/VendorWarrantyClaim.js';
 import PurchasedUnit from '../models/PurchasedUnit.js';
-import notificationService from './notificationService.js';
+import notificationService, { HOLDERS } from './notificationService.js';
 import { serialKeyOf } from './purchasedUnitService.js';
 
 export const MAX_EVIDENCE = 5;
@@ -281,7 +281,7 @@ export async function createClaim({ companyId, user, body = {}, files = [], now 
     const po = saved.purchaseOrder ? await mongoose.model('Purchase').findById(saved.purchaseOrder).select('createdBy').lean() : null;
     const notif = { title: 'Vendor warranty claim raised', message, type: 'purchase', targetCompanyId: companyId, data: { claimId: String(saved._id), vendorId: String(saved.vendor) } };
     if (po?.createdBy) await notificationService.createNotification({ ...notif, targetUserId: po.createdBy });
-    else await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], notif);
+    else await notificationService.notifyHolders(companyId, HOLDERS.purchase, notif);
   } catch (e) {
     console.error('Notify Purchase of a warranty claim failed:', e.message);
   }

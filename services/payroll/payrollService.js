@@ -12,6 +12,7 @@ import { AttendancePolicy } from '../../models/AttendancePolicy.js';
 import { indiaDate } from '../deviceSync/deviceProcess.js';
 import { dayKinds, computePay, monthDates, monthFinished } from './payrollCalc.js';
 import { isPlatformAdmin, isInMyCompany } from '../../utils/companyScope.js';
+import { approvedForMonth } from '../incentiveService.js';
 
 export class PayrollError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -40,20 +41,27 @@ export async function weeklyOffDaysFor(companyId) {
 export async function loadCompanyInputs(companyId, month, { userIds } = {}) {
   const dates = monthDates(month);
   const first = dates[0], last = dates.at(-1);
-  const userQuery = { companyId, ...(userIds ? { _id: { $in: userIds } } : {}) };
+  // One person or some people: as asked. The whole company: active people, and
+  // anyone deactivated during or after this month (a record is updated when it's
+  // deactivated), never everyone who ever worked here (17 Nov 2026).
+  const monthStart = new Date(`${first}T00:00:00+05:30`);
+  const userQuery = userIds
+    ? { companyId, _id: { $in: userIds } }
+    : { companyId, $or: [{ isActive: { $ne: false } }, { updatedAt: { $gte: monthStart } }] };
   const users = await User.find(userQuery)
     .select('fullName username employeeId deviceCode joiningDate isActive canLogin role')
     .lean();
   const ids = users.map((u) => u._id);
   const startAt = new Date(`${first}T00:00:00+05:30`), endAt = new Date(`${last}T23:59:59.999+05:30`);
 
-  const [salaries, attendance, leaves, types, holidays, weeklyOffDays] = await Promise.all([
+  const [salaries, attendance, leaves, types, holidays, weeklyOffDays, incentiveOf] = await Promise.all([
     SalaryStructure.find({ employee: { $in: ids } }).lean(),
     Attendance.find({ user: { $in: ids }, date: { $gte: first, $lte: last } }).lean(),
     Leave.find({ employee: { $in: ids }, status: 'APPROVED', fromDate: { $lte: endAt }, toDate: { $gte: startAt } }).lean(),
     LeaveType.find({ $or: [{ companyId }, { companyId: { $exists: false } }, { companyId: null }] }).lean(),
     Holiday.find({ companyId, isActive: { $ne: false }, date: { $gte: new Date(startAt.getTime() - 86400000), $lte: new Date(endAt.getTime() + 86400000) } }).lean(),
     weeklyOffDaysFor(companyId),
+    approvedForMonth(ids, month), // feature 10: approved incentives, paid with this month
   ]);
 
   // The company's own leave type wins over one with no company.
@@ -72,6 +80,7 @@ export async function loadCompanyInputs(companyId, month, { userIds } = {}) {
     leavePaid: (n) => paidByName.get(n) === true,
     holidays: holidays.map((h) => ({ date: indiaDate(h.date), paid: h.paid !== false })).filter((h) => h.date >= first && h.date <= last),
     weeklyOffDays,
+    incentiveOf,
   };
 }
 
@@ -87,7 +96,7 @@ export function payFor(inputs, user, today = indiaDate()) {
     holidays: inputs.holidays,
     weeklyOffDays: inputs.weeklyOffDays,
   });
-  return { days, pay: computePay(days, inputs.salaryOf.get(id)) };
+  return { days, pay: computePay(days, inputs.salaryOf.get(id), inputs.incentiveOf?.get(id) || 0) };
 }
 
 // Paid this month: has a salary, joined by the month's end, and still here or paid something.
@@ -111,7 +120,7 @@ const payrollFields = (pay) => ({
   gross: pay.gross, deduction: pay.deduction, net: pay.net,
   payDays: pay.payDays, lopDays: pay.lopDays,
   workingDays: pay.workingDays, earned: pay.earned, fixedDeduction: pay.fixedDeduction,
-  lopAmount: pay.lopAmount, workedOnOff: pay.workedOnOff, days: pay.days,
+  lopAmount: pay.lopAmount, workedOnOff: pay.workedOnOff, days: pay.days, incentive: pay.incentive || 0,
 });
 
 /** The Payroll Run table: a saved row where there is one, otherwise the calculation. Paged here. */

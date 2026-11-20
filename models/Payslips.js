@@ -40,6 +40,9 @@ const PayslipSchema = new Schema(
       default: 0,
     },
 
+    // Feature 10 (2026-11-13): approved incentives paid with this month.
+    incentive: { type: Number, default: 0 },
+
     /* ===== Deductions ===== */
     deduction: {
       type: Number,

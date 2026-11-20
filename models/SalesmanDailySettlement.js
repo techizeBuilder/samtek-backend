@@ -79,7 +79,9 @@ const salesmanDailySettlementSchema = new mongoose.Schema({
 });
 
 // Calculate status and difference before saving
-salesmanDailySettlementSchema.pre('save', function (next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+salesmanDailySettlementSchema.pre('save', function () {
     this.difference = this.actualCash - this.expectedCash;
 
     if (this.difference < 0) {
@@ -90,7 +92,6 @@ salesmanDailySettlementSchema.pre('save', function (next) {
         this.status = 'Clear';
     }
 
-    next();
 });
 
 const SalesmanDailySettlement = mongoose.model('SalesmanDailySettlement', salesmanDailySettlementSchema);

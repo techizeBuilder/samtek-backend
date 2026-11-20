@@ -12,6 +12,8 @@ import {
 } from '../controllers/outsourceOrderController.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
+// Purchase separated from Accounts (2026-11-16): docs/purchase-separation/01-logic.md.
+import { purchaseGate, buyOrPayView, purchaseOrStorePairs, purchaseSettingsGate, purchaseAuditGate } from '../middleware/purchaseGates.js';
 
 const router = express.Router();
 
@@ -23,8 +25,8 @@ const ordersView = checkPermission('production', 'orders', 'view');
 const ordersEdit = checkPermission('production', 'orders', 'edit');
 // Purchase views/sends/receives a hand-off — same module/feature
 // subChildPartJobWorkOrderRoutes.js already gates.
-const purchasesView = checkPermission('accounts', 'purchases', 'view');
-const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
+const purchasesView = purchaseGate('view');
+const purchasesEdit = purchaseGate('edit');
 
 router.get('/', purchasesView, listOutsourceWork);
 // Multi-unit outsource handoff batching (2026-09-25) — queried by

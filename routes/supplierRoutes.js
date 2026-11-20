@@ -1,6 +1,8 @@
 import express from 'express';
 import { authenticateToken as auth } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
+// Purchase separated from Accounts (2026-11-16): docs/purchase-separation/01-logic.md.
+import { purchaseGate, buyOrPayView, purchaseOrStorePairs, purchaseSettingsGate, purchaseAuditGate } from '../middleware/purchaseGates.js';
 import {
   getSuppliers,
   getSupplierById,
@@ -24,10 +26,10 @@ import { vendorDocumentUpload } from '../middleware/vendorDocumentUpload.js';
 
 const router = express.Router();
 
-const purchasesView = checkPermission('accounts', 'purchases', 'view');
-const purchasesAdd = checkPermission('accounts', 'purchases', 'add');
-const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
-const purchasesDelete = checkPermission('accounts', 'purchases', 'delete');
+const purchasesView = buyOrPayView;
+const purchasesAdd = purchaseGate('add');
+const purchasesEdit = purchaseGate('edit');
+const purchasesDelete = purchaseGate('delete');
 // Vendor ratings are read by the Company Admin too (PO approval cards, their
 // own Vendor Ratings tab — 2026-10-29), not only by Purchase.
 const COMPANY_ADMIN_ROLES = ['Company Admin', 'Super Admin'];

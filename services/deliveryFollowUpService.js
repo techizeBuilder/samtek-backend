@@ -7,7 +7,7 @@
 //  - Purchase gets one alert per late line per date, and records a revised
 //    date (with the vendor's reason) — kept in the line's delivery history.
 import mongoose from 'mongoose';
-import notificationService from './notificationService.js';
+import notificationService, { HOLDERS } from './notificationService.js';
 import { logPoEvent } from './purchaseAuditService.js';
 
 export const OPEN_PO_STATUSES = ['Draft', 'Sent', 'Acknowledged', 'Partially Received'];
@@ -165,15 +165,17 @@ export async function reviseLineDate({ po, lineId, body, user, req = null }) {
 }
 
 // Who hears about a delivery due tomorrow / overdue (client, 2026-10-29):
-// the purchaser who made the PO (follows up with the vendor), the Accounts
-// Head, and Store (expects the goods).
+// the purchaser who made the PO (follows up with the vendor), Purchase (the
+// people holding the Purchase module, 2026-11-16: it was the Accounts Head role),
+// and Store (expects the goods).
 const DUE_ALERT_ROLES = ['Accounts Head', 'Store Head', 'Store Employee'];
 
 async function sendDueAlert(po, { title, message, data }) {
   try {
     const base = { title, message, type: 'purchase', targetCompanyId: po.companyId, data: { purchaseId: String(po._id), ...data } };
     if (po.createdBy) await notificationService.createNotification({ ...base, targetUserId: po.createdBy });
-    await notificationService.notifyRoles(DUE_ALERT_ROLES, base);
+    // The creator already has their copy: skip them among the Purchase holders.
+    await notificationService.notifyRolesAnd(DUE_ALERT_ROLES, HOLDERS.purchase, base, { except: [po.createdBy] });
   } catch (err) {
     console.error(`${title} notification failed:`, err.message);
   }

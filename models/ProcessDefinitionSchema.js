@@ -100,6 +100,9 @@ const InternalProcessSchema = new mongoose.Schema({
   qcRequired: { type: Boolean, default: false },
   finalQc: { type: Boolean, default: false },
   operation: { type: StepOperationSchema, default: null },
+  // Delivery estimate (2026-11-18, decision D): R&D's usual hours per piece for an
+  // In-House step, used until the step has 3 finished runs. null = not typed.
+  usualHoursPerPiece: { type: Number, default: null, min: 0 },
 }, { _id: true, timestamps: false });
 
 const ProcessCategorySchema = new mongoose.Schema({

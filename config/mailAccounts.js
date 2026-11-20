@@ -56,15 +56,19 @@ export async function reportMissingMailbox(department, { companyId = null, what 
     const key = `${department}|${companyId}`;
     if (reported.get(key) === day) return;
     reported.set(key, day);
-    const { default: notificationService } = await import('../services/notificationService.js');
-    await notificationService.notifyRoles(DEPARTMENT_HEADS[department] || ['Company Admin'], {
+    const { default: notificationService, HOLDERS } = await import('../services/notificationService.js');
+    const notice = {
       title: `${DEPARTMENT_LABELS[department] || department} email not set up`,
       message: `${what} couldn't be sent. ${mailboxMissingMessage(department)}`,
       type: 'system',
       priority: 'high',
       targetCompanyId: companyId,
       data: { mailboxMissing: department },
-    });
+    };
+    // Purchase separated from Accounts (2026-11-16): the Purchase mailbox is the
+    // Purchase Head's to fix — whoever holds that tick, not the Accounts Head role.
+    if (department === DEPARTMENTS.PURCHASE) await notificationService.notifyHolders(companyId, HOLDERS.purchaseHead, notice);
+    else await notificationService.notifyRoles(DEPARTMENT_HEADS[department] || ['Company Admin'], notice);
   } catch (err) {
     console.error('Reporting a missing mailbox failed:', err.message);
   }

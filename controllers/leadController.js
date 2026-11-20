@@ -400,7 +400,7 @@ export const getLeads = async (req, res) => {
 
     const [leadsDocs, total] = await Promise.all([
       Lead.find(query)
-        .select('-quotation')
+        .select('-quotation -deliveryEstimateHistory') // the estimate history is only for the estimate dialog (2026-11-18)
         .populate('assignedTo', 'fullName username')
         .populate('observer', 'fullName username')
         .populate('history.performedBy', 'fullName username')

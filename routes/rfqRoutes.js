@@ -1,6 +1,8 @@
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
+// Purchase separated from Accounts (2026-11-16): docs/purchase-separation/01-logic.md.
+import { purchaseGate, buyOrPayView, purchaseOrStorePairs, purchaseSettingsGate, purchaseAuditGate } from '../middleware/purchaseGates.js';
 import {
   getRFQs,
   createRFQ,
@@ -22,9 +24,9 @@ router.post('/bid/:token', submitBidByToken);
 // ── Protected routes (Accounts / Admin only) ──────────────────────────────────
 router.use(authenticateToken);
 
-const purchasesView = checkPermission('accounts', 'purchases', 'view');
-const purchasesAdd = checkPermission('accounts', 'purchases', 'add');
-const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
+const purchasesView = purchaseGate('view');
+const purchasesAdd = purchaseGate('add');
+const purchasesEdit = purchaseGate('edit');
 
 router.get('/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getRFQStats);
 router.get('/vendors-for-rfq', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorsForRFQ);

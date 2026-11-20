@@ -125,7 +125,9 @@ const returnSchema = new mongoose.Schema({
 });
 
 // Calculate totals before saving
-returnSchema.pre('save', function (next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+returnSchema.pre('save', function () {
   if (this.items && this.items.length > 0) {
     this.totalAmount = this.items.reduce((sum, item) => sum + (item.pricePerUnit * item.quantity), 0);
     this.totalQuantity = this.items.reduce((sum, item) => sum + item.quantity, 0);
@@ -135,7 +137,6 @@ returnSchema.pre('save', function (next) {
       item.totalAmount = item.pricePerUnit * item.quantity;
     });
   }
-  next();
 });
 
 // Indexes for better performance

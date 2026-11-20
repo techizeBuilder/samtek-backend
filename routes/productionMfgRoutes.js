@@ -30,6 +30,22 @@ import {
   getTeamPeople,
   updateTeam,
   retireTeam,
+  getTeamSkills,
+  setTeamPersonSkills,
+  getStepCrew,
+  getStepCrewCandidates,
+  getStepCrewTeamMembers,
+  addStepCrew,
+  removeStepCrew,
+  setStepPlannedHours,
+  confirmStepLunch,
+  getTeamsToday,
+  getPlanningBoard,
+  getTeamSkillMatrix,
+  getTeamsScores,
+  getTeamsScorePerson,
+  requestPersonIncentive,
+  getProductionIncentives,
   receiveMaterialInProduction,
   getMaterialList,
   issueMaterialToStore,
@@ -55,6 +71,8 @@ import {
   submitBatchQcStep,
   submitUnitQcStep,
 } from '../controllers/productionMfgController.js';
+import { getProductionConductNotes, postProductionConductNote, getProductionConductFile } from '../controllers/scorecardController.js';
+import { conductNoteUpload } from '../middleware/conductNoteUpload.js';
 import {
   assignSubChildPartOrderTeam,
   startSubChildPartOrder,
@@ -73,10 +91,11 @@ router.use(authenticateToken);
 // issuance, QC rework/repair decisions, process-step execution & team
 // assignment) maps to the 'orders' feature — the closest general fit per the
 // 'production' module's grantable catalogue (orders, repairProduction,
-// workPlanning, processQc, jobCards, manpower, expenses, lms). WorkPlanning /
-// ProcessExecution / JobCards frontend pages all share this same
-// ProductionContext and these same endpoints rather than owning dedicated
-// routes of their own, so there is no more specific key to split them into.
+// workPlanning, processQc, manpower, expenses, lms). The ProcessExecution page
+// shares ProductionContext and these same endpoints rather than owning dedicated
+// routes of its own, so there is no more specific key to split it into. Work
+// Planning's board has its own route (planningView, feature 11); Job Cards was
+// retired 2026-11-14.
 const ordersView = checkPermission('production', 'orders', 'view');
 const ordersAdd = checkPermission('production', 'orders', 'add');
 const ordersEdit = checkPermission('production', 'orders', 'edit');
@@ -87,6 +106,8 @@ const repairEdit = checkPermission('production', 'repairProduction', 'edit');
 // Teams = production manpower/workforce groups (managed from the Manpower
 // Tracking page) — a clearly more specific fit than 'orders'.
 const manpowerView = checkPermission('production', 'manpower', 'view');
+// Work Planning board (feature 11, 2026-11-14).
+const planningView = checkPermission('production', 'workPlanning', 'view');
 const manpowerAdd = checkPermission('production', 'manpower', 'add');
 const manpowerEdit = checkPermission('production', 'manpower', 'edit');
 const manpowerDelete = checkPermission('production', 'manpower', 'delete');
@@ -146,6 +167,14 @@ router.put('/orders/:id/sub-child-part/checklist', ordersEdit, saveSubChildPartC
 router.put('/orders/:id/sub-child-part/submit-qc', ordersEdit, submitSubChildPartOrderToQC);
 
 router.put('/orders/:id/processes/:stepIndex/assign-team', ordersEdit, assignTeam);
+// Stage 5 (2026-11-12): the crew on a step, planned hours, lunch confirmation.
+router.get('/orders/:id/processes/:stepIndex/crew', ordersView, getStepCrew);
+router.get('/orders/:id/processes/:stepIndex/crew/candidates', ordersView, getStepCrewCandidates);
+router.get('/orders/:id/processes/:stepIndex/crew/team-members', ordersView, getStepCrewTeamMembers);
+router.post('/orders/:id/processes/:stepIndex/crew', ordersEdit, addStepCrew);
+router.delete('/orders/:id/processes/:stepIndex/crew/:personId', ordersEdit, removeStepCrew);
+router.put('/orders/:id/processes/:stepIndex/planned-hours', ordersEdit, setStepPlannedHours);
+router.put('/orders/:id/processes/:stepIndex/lunch', ordersEdit, confirmStepLunch);
 router.put('/orders/:id/processes/:stepIndex/start', ordersEdit, startProcess);
 router.put('/orders/:id/processes/:stepIndex/complete', ordersEdit, markProcessComplete);
 router.put('/orders/:id/processes/:stepIndex/approve-qc', ordersEdit, approveQC);
@@ -192,6 +221,21 @@ router.post('/teams', manpowerAdd, createTeam);
 // Teams from people (2026-11-11): the picker, edit and retire.
 router.get('/teams/people', manpowerPick, getTeamPeople);
 router.put('/teams/:teamId', manpowerEdit, updateTeam);
+// Skills per person, from the Process Templates (2026-11-12).
+router.get('/teams/skills', manpowerView, getTeamSkills);
+router.put('/teams/people/:userId/skills', manpowerEdit, setTeamPersonSkills);
+router.get('/teams/today', manpowerView, getTeamsToday);
+router.get('/planning/board', planningView, getPlanningBoard);
+router.get('/teams/matrix', manpowerView, getTeamSkillMatrix);
+// Performance scores + incentive requests (feature 10, 2026-11-13; replaced /teams/efficiency).
+router.get('/teams/scores', manpowerView, getTeamsScores);
+router.get('/teams/scores/person/:personId', manpowerView, getTeamsScorePerson);
+router.get('/incentives', manpowerView, getProductionIncentives);
+router.post('/incentives', manpowerEdit, requestPersonIncentive);
+// Conduct notes (feature 13, 2026-11-17): Production notes its own people; HR verifies.
+router.get('/conduct-notes', manpowerView, getProductionConductNotes);
+router.get('/conduct-notes/:id/file', manpowerView, getProductionConductFile);
+router.post('/conduct-notes', manpowerEdit, conductNoteUpload, postProductionConductNote);
 router.delete('/teams/:teamId', manpowerDelete, retireTeam);
 
 export default router;

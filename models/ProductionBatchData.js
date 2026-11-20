@@ -57,9 +57,10 @@ ProductionBatchDataSchema.index({ groupId: 1, batchNumber: 1 });
 ProductionBatchDataSchema.index({ company: 1, groupId: 1 });
 
 // Update the updatedAt field before saving
-ProductionBatchDataSchema.pre('save', function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+ProductionBatchDataSchema.pre('save', function () {
   this.updatedAt = new Date();
-  next();
 });
 
 const ProductionBatchData = mongoose.model('ProductionBatchData', ProductionBatchDataSchema);

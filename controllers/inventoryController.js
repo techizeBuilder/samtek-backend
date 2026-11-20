@@ -1,4 +1,5 @@
 import { Item, Category, CustomerCategory, Group, UnitType } from '../models/Inventory.js';
+import { findCodeHolder, codeTakenMessage, freeCode, exactRe, duplicateKeyMessage, findActiveTwin, reactivateTwinMessage, inventoryTwinQuery } from '../services/itemCodeService.js';
 import InventoryMasterOption from '../models/InventoryMasterOption.js';
 import { Company } from '../models/Company.js';
 import ProductDailySummary from '../models/ProductDailySummary.js';
@@ -855,18 +856,12 @@ export const createItem = async (req, res) => {
 
     itemData.code = itemData.code.trim();
 
-    // Check if R&D's defined code already exists in the company
-    const codeQuery = { code: itemData.code };
-    if (req.user.companyId) {
-      codeQuery.companyId = req.user.companyId;
-    }
-
-    const existingCode = await Item.findOne(codeQuery);
-    if (existingCode) {
-      return res.status(400).json({
-        success: false,
-        message: `Coding Conflict: The Item Code "${itemData.code}" is already assigned to "${existingCode.name}". R&D must assign a unique ERP code.`
-      });
+    // Item codes are unique across the whole database (every company, discontinued
+    // items too), in any letter case (2026-11-16). This used to check this company
+    // only, in exact case, so a taken code could pass and then fail in the database.
+    const codeHolder = await findCodeHolder(req.user.companyId, itemData.code);
+    if (codeHolder) {
+      return res.status(400).json({ success: false, message: `Coding Conflict: ${codeTakenMessage(itemData.code, codeHolder, 'The Item Code')}` });
     }
 
     // Check for duplicate item name (case-insensitive) within location
@@ -878,28 +873,20 @@ export const createItem = async (req, res) => {
         companyIdForCheck = itemData.store;
       }
 
-      const escapedName = trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const query = {
-        name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
-        category: itemData.category,
-        type: itemData.type
-      };
-
-      if (companyIdForCheck) {
-        query.$or = [
-          { companyId: companyIdForCheck },
-          { store: companyIdForCheck }
-        ];
-      } else if (itemData.store) {
-        query.store = itemData.store;
-      }
-
-      const existingItemByName = await Item.findOne(query);
+      // Same name + Item Type + record type among ACTIVE items (2026-11-16, shared
+      // with Edit and Reactivate: inventoryTwinQuery). This compared a legacy
+      // `category` the form never sends, so it matched nothing and "Sheet 8x16" was
+      // saved twice. A discontinued item doesn't block; Reactivate checks instead.
+      const existingItemByName = await Item.findOne({
+        ...inventoryTwinQuery({ companyId: companyIdForCheck, name: trimmedName, itemType: itemData.itemType, type: itemData.type || 'Material' }),
+        isDiscontinued: { $ne: true },
+      });
 
       if (existingItemByName) {
+        const kindText = String(itemData.itemType || '').trim() ? ` as Item Type "${String(itemData.itemType).trim()}"` : '';
         return res.status(400).json({
           success: false,
-          message: `Duplicate item detected! Item "${trimmedName}" already exists in category "${itemData.category}" (Code: ${existingItemByName.code}).`,
+          message: `Duplicate item detected! Item "${trimmedName}" already exists${kindText} (Code: ${existingItemByName.code}). Edit that one instead.`,
           duplicateItem: {
             name: existingItemByName.name,
             code: existingItemByName.code,
@@ -990,7 +977,21 @@ export const createItem = async (req, res) => {
     });
   } catch (error) {
     console.error('Create item error:', error);
+    const dup = duplicateKeyMessage(error, 'Item Code');
+    if (dup) return res.status(400).json({ success: false, message: dup });
     res.status(500).json({ message: error.message || 'Internal server error' });
+  }
+};
+
+// GET /api/items/free-code?base=S8X16 → { code, taken }: the base if no item uses it,
+// else base-2, base-3 … (Inventory / Motor Master's Generate button, 2026-11-16).
+export const getFreeItemCode = async (req, res) => {
+  try {
+    const r = await freeCode(req.query.base);
+    if (!r) return res.status(400).json({ success: false, message: req.query.base ? 'Too many items share this code: type one by hand.' : 'Type the Item Name first.' });
+    res.json({ success: true, ...r });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -1031,17 +1032,50 @@ export const updateItem = async (req, res) => {
       if ('productionUse' in itemData) itemData.productionUse = merged.productionUse;
     }
 
-    // Check if code is being changed and if it already exists
+    // Check if code is being changed and if it already exists (any company, any
+    // letter case; a readable message, 2026-11-16).
     if (itemData.code && itemData.code.trim() !== '') {
-      const existingItem = await Item.findOne({
-        code: itemData.code.trim(),
-        _id: { $ne: id }
-      });
-      if (existingItem) {
-        return res.status(400).json({
-          message: 'Validation failed',
-          errors: { code: 'Item code already exists' }
-        });
+      const holder = await findCodeHolder(req.user.companyId, itemData.code, id);
+      if (holder) {
+        const msg = codeTakenMessage(itemData.code, holder, 'Item Code');
+        return res.status(400).json({ message: msg, errors: { code: msg } });
+      }
+    }
+
+    // The same item twice (2026-11-16): renaming an Inventory / Motor item, or
+    // changing its Item Type or record type, into another ACTIVE item's (the rule
+    // Add uses: inventoryTwinQuery). Checked only when one of those three changes,
+    // so items already duplicated stay editable. Product Master, Child Part and Sub
+    // Child Part check renames in their own routes.
+    if (['name', 'itemType', 'type'].some((k) => itemData[k] !== undefined)) {
+      const cur = await Item.findOne({ _id: id }).select('name itemType type companyId store productKind isDiscontinued').lean();
+      if (cur && !['Machine', 'SubChildPart', 'ChildPart'].includes(cur.productKind) && !cur.isDiscontinued) {
+        const next = { name: itemData.name ?? cur.name, itemType: itemData.itemType ?? cur.itemType, type: itemData.type ?? cur.type };
+        const norm = (v) => String(v ?? '').trim().toLowerCase();
+        if (norm(next.name) && (norm(next.name) !== norm(cur.name) || norm(next.itemType) !== norm(cur.itemType) || norm(next.type) !== norm(cur.type))) {
+          const twin = await Item.findOne({
+            ...inventoryTwinQuery({ companyId: cur.companyId || req.user.companyId, ...next }, id),
+            isDiscontinued: { $ne: true },
+          }).select('name code').lean();
+          if (twin) {
+            const kindText = String(next.itemType || '').trim() ? ` as Item Type "${String(next.itemType).trim()}"` : '';
+            const msg = `Duplicate item: "${twin.name}" already exists${kindText} (Code: ${twin.code}). Edit that one instead.`;
+            return res.status(400).json({ message: msg, errors: { name: msg } });
+          }
+        }
+      }
+    }
+
+    // Reactivating (2026-11-16): not if the same item is active again under another
+    // code (Inventory, Motor, Child Part, Sub Child Part all reactivate through here).
+    if (itemData.isDiscontinued === false || itemData.isDiscontinued === 'false') {
+      const cur = await Item.findOne({ _id: id }).lean();
+      if (cur?.isDiscontinued) {
+        const twin = await findActiveTwin({ ...cur, name: itemData.name ?? cur.name, category: itemData.category ?? cur.category, type: itemData.type ?? cur.type });
+        if (twin) {
+          const msg = reactivateTwinMessage(twin);
+          return res.status(400).json({ message: msg, errors: { isDiscontinued: msg } });
+        }
       }
     }
 
@@ -1161,9 +1195,10 @@ export const updateItem = async (req, res) => {
     console.error('Update item error:', error);
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern)[0];
+      const msg = field === 'code' ? duplicateKeyMessage(error, 'Item Code') : `${field} already exists`;
       res.status(400).json({
-        message: 'Validation failed',
-        errors: { [field]: `${field} already exists` }
+        message: msg,
+        errors: { [field]: msg }
       });
     } else if (error.name === 'ValidationError') {
       const errors = {};

@@ -1,6 +1,8 @@
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
+// Purchase separated from Accounts (2026-11-16): docs/purchase-separation/01-logic.md.
+import { purchaseGate, buyOrPayView, purchaseOrStorePairs, purchaseSettingsGate, purchaseAuditGate } from '../middleware/purchaseGates.js';
 import {
   getSettings, updateApprovalRules, updateTemplates, updateQuoteRules, updateEntityTypes, updateVendorDocumentTypes, getLowCoverageItems, updateVendorScoreSettings, updatePurchaserScoreSettings,
 } from '../controllers/purchaseSettingsController.js';
@@ -18,16 +20,16 @@ const isCompanyAdmin = (req) => COMPANY_ADMIN_ROLES.includes(req.user?.role);
 
 // Readable by the Company Admin, and by anyone who can view Purchases (the
 // RFQ/PO page needs the min-vendor number, threshold and templates).
-const purchasesView = checkPermission('accounts', 'purchases', 'view');
+const purchasesView = buyOrPayView;
 const companyAdminOrPurchasesView = (req, res, next) =>
   isCompanyAdmin(req) ? next() : purchasesView(req, res, next);
 
 router.get('/', companyAdminOrPurchasesView, getSettings);
 router.put('/approval-rules', authorizeRoles(...COMPANY_ADMIN_ROLES), updateApprovalRules);
-router.put('/templates', checkPermission('accounts', 'purchaseSettings', 'edit'), updateTemplates);
+router.put('/templates', purchaseSettingsGate('edit'), updateTemplates);
 // Quote validity (days) + price-rise warning (%) — same Purchase permission.
-router.put('/quote-rules', checkPermission('accounts', 'purchaseSettings', 'edit'), updateQuoteRules);
-router.put('/entity-types', checkPermission('accounts', 'purchaseSettings', 'edit'), updateEntityTypes);
+router.put('/quote-rules', purchaseSettingsGate('edit'), updateQuoteRules);
+router.put('/entity-types', purchaseSettingsGate('edit'), updateEntityTypes);
 // Which vendor documents are required / verified + the type list — the Company Admin's.
 router.put('/vendor-documents', authorizeRoles(...COMPANY_ADMIN_ROLES), updateVendorDocumentTypes);
 router.get('/low-coverage-items', authorizeRoles(...COMPANY_ADMIN_ROLES), getLowCoverageItems);

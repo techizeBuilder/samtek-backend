@@ -8,19 +8,29 @@
 // once, referenced by code wherever a Child Part uses it (that reference
 // wiring is the next build pass, not this one).
 import { Item } from '../models/Inventory.js';
+import { findCodeHolder, codeTakenMessage, nextSequentialCode, exactRe, duplicateKeyMessage } from '../services/itemCodeService.js';
 import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSizeError } from '../services/fabricationDemandService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
-import { cleanProcessDefinition, validateProcessDefinition } from '../utils/processDefinitionValidation.js';
+import { cleanProcessDefinition, validateProcessDefinition, stepsForChangeCheck, cleanUsualPeople } from '../utils/processDefinitionValidation.js';
 import { invalidateBomApproval } from '../services/productApprovalService.js';
 
 // What a Sub Child Part is built from. The form sends every field on each save,
 // so an edit is told apart by comparing this before and after (2026-11-02).
 const buildShape = (item) => {
   const d = item.subChildPartDetails || {};
-  return JSON.stringify([String(d.sourceItem || ''), Number(d.sourceQty) || 0, d.sourceUnit || '', String(d.sourceDimensionVariantId || ''), cleanProcessDefinition(JSON.parse(JSON.stringify(d.processDefinition || [])))]);
+  // Usual hours (delivery estimate, 2026-11-18) left out: typing them isn't an edit to how it's built.
+  return JSON.stringify([String(d.sourceItem || ''), Number(d.sourceQty) || 0, d.sourceUnit || '', String(d.sourceDimensionVariantId || ''), stepsForChangeCheck(cleanProcessDefinition(JSON.parse(JSON.stringify(d.processDefinition || []))))]);
 };
 
 const pad3 = (n) => String(n).padStart(3, '0');
+
+// The same Sub Child Part twice (2026-11-16): an active one with the same name,
+// ignoring upper / lower case and spaces.
+const sameNameSubChildPart = (companyId, name, excludeId = null) => Item.findOne({
+  companyId, productKind: 'SubChildPart', isDiscontinued: { $ne: true }, name: exactRe(name),
+  ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+}).select('name code').lean();
+const subChildPartExistsMessage = (hit) => `A Sub Child Part named "${hit.name}" already exists (code ${hit.code}). Edit that one instead.`;
 
 // Same "does this need an Amount field instead of a bare Quantity" rule the
 // BOM material picker uses (rdController.js's own itemNeedsAmount) — a
@@ -85,8 +95,9 @@ export async function captureSubChildPartActualCost(item, sourceItem, totalCost,
 // GET /api/rd/sub-child-parts/generate-code
 export const generateSubChildPartMasterCode = async (req, res) => {
   try {
-    const count = await Item.countDocuments({ companyId: req.user.companyId, productKind: 'SubChildPart' });
-    res.json({ success: true, code: `SCP-${pad3(count + 1)}` });
+    // The highest SCP number any item has + 1 (it was "count + 1", which clashed after
+    // a delete, a hand-typed code or in a second company: codes are unique database-wide).
+    res.json({ success: true, code: await nextSequentialCode('SCP') });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -207,15 +218,11 @@ export const createSubChildPart = async (req, res) => {
     if (err) return res.status(400).json({ success: false, message: err });
 
     const codeTrim = code.trim();
-    const existing = await Item.findOne({ companyId: req.user.companyId, code: codeTrim }).lean();
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: existing.productKind === 'SubChildPart'
-          ? `"${codeTrim}" is already a Sub Child Part.`
-          : `Item code "${codeTrim}" is already in use.`,
-      });
-    }
+    // Codes are unique across the whole database, in any letter case (2026-11-16).
+    const holder = await findCodeHolder(req.user.companyId, codeTrim);
+    if (holder) return res.status(400).json({ success: false, message: codeTakenMessage(codeTrim, holder, 'Code') });
+    const twin = await sameNameSubChildPart(req.user.companyId, name);
+    if (twin) return res.status(400).json({ success: false, message: subChildPartExistsMessage(twin) });
 
     const bought = req.body.makeOrBuy === 'buy';
     const sourceItem = sourceItemId ? await Item.findOne({ _id: sourceItemId, companyId: req.user.companyId }).lean() : null;
@@ -251,6 +258,7 @@ export const createSubChildPart = async (req, res) => {
         unitWeightKg,
         sourceDimensionVariantId: sourceDimensionVariantId || null,
         processDefinition: cleanProcessDefinition(processDefinition),
+        usualPeople: cleanUsualPeople(req.body.usualPeople).value ?? null, // delivery estimate (2026-11-18)
       },
       companyId: req.user.companyId, createdBy: req.user._id,
     });
@@ -261,6 +269,8 @@ export const createSubChildPart = async (req, res) => {
     }
     res.status(201).json({ success: true, data: newItem });
   } catch (err) {
+    const dup = duplicateKeyMessage(err);
+    if (dup) return res.status(400).json({ success: false, message: dup });
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -277,7 +287,14 @@ export const updateSubChildPart = async (req, res) => {
     const shapeBefore = buildShape(item);
 
     const { name, image, specification, sourceItemId, sourceQty, sourceUnit, sourceDimensionVariantId, processDefinition } = req.body;
-    if (name !== undefined) item.name = name.trim();
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ success: false, message: 'Name is required.' });
+      if (name.trim().toLowerCase() !== String(item.name || '').trim().toLowerCase()) {
+        const twin = await sameNameSubChildPart(req.user.companyId, name, item._id);
+        if (twin) return res.status(400).json({ success: false, message: subChildPartExistsMessage(twin) });
+      }
+      item.name = name.trim();
+    }
     if (image !== undefined) {
       if (!image) return res.status(400).json({ success: false, message: 'A Design File (image or PDF) is required.' });
       item.image = image;
@@ -314,6 +331,10 @@ export const updateSubChildPart = async (req, res) => {
       if (err) return res.status(400).json({ success: false, message: err });
       item.subChildPartDetails.processDefinition = cleaned;
     }
+    // Delivery estimate (2026-11-18): usual people at once; not an edit to how it's built.
+    const people = cleanUsualPeople(req.body.usualPeople);
+    if (people.error) return res.status(400).json({ success: false, message: people.error });
+    if (!people.skip) item.subChildPartDetails.usualPeople = people.value;
 
     // Recomputed on every save regardless of which fields actually changed —
     // cheap (one extra lookup at most, only when sourceItemId itself wasn't

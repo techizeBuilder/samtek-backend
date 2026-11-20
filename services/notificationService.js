@@ -138,6 +138,39 @@ class NotificationService {
     );
   }
 
+  // Roles, with the Accounts part by permission: the Accounts roles in `roles` are
+  // replaced by the holders of `holders` (personal entries); every other role stays
+  // role-based. Without a company to look holders up in, it falls back to the roles.
+  async notifyRolesAnd(roles = [], holders = [], notifData = {}, opts = {}) {
+    if (!notifData.targetCompanyId) return this.notifyRoles(roles, notifData);
+    const ACC = ['Accounts', 'Accounts Head', 'Account Employee'];
+    const rest = roles.filter((r) => !ACC.includes(r));
+    const hadAccounts = rest.length < roles.length; // holders replace the Accounts roles only
+    return Promise.all([rest.length ? this.notifyRoles(rest, notifData) : [], hadAccounts ? this.notifyHolders(notifData.targetCompanyId, holders, notifData, opts) : []]);
+  }
+
+  // Purchase separated from Accounts (2026-11-16, docs/purchase-separation/01-logic.md §5):
+  // a notification goes to the people who HOLD a permission, one personal bell entry
+  // each, not to a role — purchasers and accountants share the Accounts roles, so a
+  // role can't tell them apart. holders: [{ module, feature }], e.g.
+  // HOLDERS.purchase / HOLDERS.vendorPayments / HOLDERS.purchaseHead / HOLDERS.accountsSales.
+  // The old single key accounts.purchases (users the one-time migration hasn't reached)
+  // counts as holding Purchase and Vendor Payments, and with the Accounts Head role as
+  // the Purchase Head, so nobody misses a notification during the switch.
+  // except: users who already got their own copy (e.g. a PO's creator), so nobody gets two bells.
+  async notifyHolders(targetCompanyId, holders = [], notifData = {}, { except = [] } = {}) {
+    if (!targetCompanyId || !holders.length) return [];
+    const has = (module, feature) => ({ 'permissions.modules': { $elemMatch: { name: new RegExp(`^${module}$`, 'i'), features: { $elemMatch: { key: feature, view: true } } } } });
+    const or = holders.map((h) => has(h.module, h.feature));
+    const legacy = has('accounts', 'purchases');
+    if (holders.some((h) => (h.module === 'purchase' && h.feature === 'purchases') || (h.module === 'accounts' && h.feature === 'vendorPayments'))) or.push(legacy);
+    if (holders.some((h) => h.module === 'purchase' && h.feature === 'purchaseHead')) or.push({ role: 'Accounts Head', ...legacy });
+    const skip = except.filter(Boolean).map(String);
+    const users = (await User.find({ companyId: targetCompanyId, isActive: { $ne: false }, $or: or }).select('_id').lean())
+      .filter((u) => !skip.includes(String(u._id)));
+    return Promise.all(users.map((u) => this.createNotification({ ...notifData, targetRole: null, targetUserId: u._id, targetCompanyId })));
+  }
+
   // ============================================================
   // GET NOTIFICATIONS FOR USER
   // ============================================================
@@ -304,7 +337,7 @@ class NotificationService {
     const common = { targetUnit, targetCompanyId };
 
     if (action === 'order_created') {
-      return this.notifyRoles(['Sales Head', 'Accounts Head', 'Account Employee', 'Superadmin'], {
+      return this.notifyRolesAnd(['Sales Head', 'Accounts Head', 'Account Employee', 'Superadmin'], HOLDERS.accountsSales, {
         title: 'New Order Created',
         message: `Order ${orderData.orderCode} placed for ${orderData.customerName || 'customer'}`,
         type: 'order', icon: 'shopping-cart', priority: 'high',
@@ -333,7 +366,7 @@ class NotificationService {
     }
 
     if (action === 'lead_won') {
-      return this.notifyRoles(['Sales Head', 'Accounts Head', 'Account Employee', 'Superadmin'], {
+      return this.notifyRolesAnd(['Sales Head', 'Accounts Head', 'Account Employee', 'Superadmin'], HOLDERS.accountsSales, {
         title: 'Lead Won - Deal Closed',
         message: `Lead ${orderData?.leadCode} has been won. Order created.`,
         type: 'lead', icon: 'check-circle', priority: 'high',
@@ -343,7 +376,7 @@ class NotificationService {
 
     if (action === 'payment_check_requested') {
       // Sales ne Account ko request kiya
-      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee', 'Accounts'], HOLDERS.accountsSales, {
         title: 'Payment Check Requested',
         message: `Request received to check payment for Lead ${orderData?.leadCode}`,
         type: 'payment', icon: 'credit-card', priority: 'high',
@@ -376,7 +409,7 @@ class NotificationService {
     }
 
     if (action === 'lead_sent_to_account') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee', 'Accounts'], HOLDERS.accountsSales, {
         title: 'New Lead Received for Payment',
         message: `Lead ${orderData?.leadCode} has been sent to Accounts. Please add advanced payment.`,
         type: 'payment', icon: 'credit-card', priority: 'high',
@@ -394,7 +427,7 @@ class NotificationService {
     }
 
     if (action === 'payment_request_submitted') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.accountsSales, {
         title: 'Payment Request Submitted',
         message: `Sales submitted a payment request for Order ${orderData?.orderCode || ''}`,
         type: 'payment', icon: 'credit-card', priority: 'high',
@@ -410,7 +443,7 @@ class NotificationService {
     const common = { targetUnit, targetCompanyId };
 
     if (action === 'payment_verification_pending') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.accountsSales, {
         title: 'New Payment Pending Verification',
         message: `Payment of ₹${data?.amount || ''} needs verification for ${data?.customerName || 'customer'}`,
         type: 'payment', icon: 'credit-card', priority: 'high',
@@ -442,7 +475,7 @@ class NotificationService {
     }
 
     if (action === 'packed_order_payment_pending') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee', 'Accounts'], HOLDERS.accountsSales, {
         title: '📦 Packed Order - NOC & Payment Required',
         message: `Order ${data?.orderCode || ''} is packed and ready. Please process NOC and collect final payment before dispatch.`,
         type: 'account', icon: 'package', priority: 'urgent',
@@ -451,7 +484,7 @@ class NotificationService {
     }
 
     if (action === 'purchase_request_for_approval') {
-      return this.notifyRoles(['Accounts Head'], {
+      return this.notifyRolesAnd(['Accounts Head'], HOLDERS.purchaseHead, {
         title: 'Purchase Request for Approval',
         message: `New purchase request ${data?.requestId} submitted for approval`,
         type: 'purchase', icon: 'shopping-cart', priority: 'high',
@@ -460,7 +493,7 @@ class NotificationService {
     }
 
     if (action === 'rfq_vendor_bid_received') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.purchase, {
         title: 'Vendor Bid Received',
         message: `Vendor submitted a bid for RFQ ${data?.rfqNumber || ''}`,
         type: 'purchase', icon: 'file-text', priority: 'medium',
@@ -469,7 +502,7 @@ class NotificationService {
     }
 
     if (action === 'noc_request') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.accountsSales, {
         title: 'NOC Request Received',
         message: `NOC requested for Order ${data?.orderCode || ''}`,
         type: 'account', icon: 'file-text', priority: 'high',
@@ -478,7 +511,7 @@ class NotificationService {
     }
 
     if (action === 'order_form_submitted') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee', 'Accounts'], HOLDERS.accountsSales, {
         title: '📝 Sales Order Form Submitted',
         message: `Order Form for ${data?.orderCode || 'order'} has been submitted by ${data?.submittedBy || 'Sales'}. Ready for review.`,
         type: 'account', icon: 'file-text', priority: 'medium',
@@ -487,7 +520,7 @@ class NotificationService {
     }
 
     if (action === 'sub_child_job_work_created') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee', 'Accounts'], HOLDERS.purchase, {
         title: 'New Sub Child Job Work Order',
         message: `${data?.itemName || 'Sub Child Part'} needs outsourced job work (${(data?.jobWorkTypes || []).join(', ')}) — Order ${data?.orderId}`,
         type: 'purchase', icon: 'shopping-cart', priority: 'high',
@@ -497,13 +530,29 @@ class NotificationService {
       });
     }
 
+    // Sent by purchaseExchangeController but never handled before (2026-11-16): to Purchase.
+    if (action === 'purchase_exchange_needs_vendor') {
+      return this.notifyHolders(targetCompanyId, HOLDERS.purchase, {
+        title: 'Exchange needs a vendor',
+        message: `QC rejected ${data?.qty ?? ''} ${data?.itemName || 'item'} for exchange: pick the vendor to replace it.`,
+        type: 'purchase', icon: 'refresh-cw', priority: 'high', data, ...common,
+      });
+    }
+    if (action === 'purchase_exchange_accepted') {
+      return this.notifyHolders(targetCompanyId, HOLDERS.purchase, {
+        title: 'Vendor accepted the exchange',
+        message: `The vendor accepted the exchange for ${data?.itemName || 'the item'}.`,
+        type: 'purchase', icon: 'check-circle', priority: 'medium', data, ...common,
+      });
+    }
+
     // Phase 2 — Production explicitly requested a hand-off for a Child
     // Part/Machine/hybrid Sub Child Part order's Out Source step(s), via
     // outsourceWorkController.js's requestOutsourceHandoff. Same recipients
     // as the Sub Child Job Work notification above — Purchase Requests
     // already route through the Accounts role family in this app.
     if (action === 'outsource_handoff_requested') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee', 'Accounts'], HOLDERS.purchase, {
         title: 'Outsource Work Requested',
         message: `${data?.machineName || 'An order'} needs outsourced work (${(data?.stepNames || []).join(', ')}) — Order ${data?.orderCode}`,
         type: 'purchase', icon: 'shopping-cart', priority: 'high',
@@ -567,7 +616,7 @@ class NotificationService {
     }
 
     if (action === 'purchase_request_created') {
-      return this.notifyRoles(['Accounts Head', 'Account Employee', 'Accounts', 'Superadmin'], {
+      return this.notifyRolesAnd(['Accounts Head', 'Account Employee', 'Accounts', 'Superadmin'], HOLDERS.purchase, {
         title: '🛒 New Purchase Request from Store',
         message: `Purchase request ${data?.requestId} for "${data?.productName || 'items'}" has arrived. Priority: ${data?.priority || 'Medium'}. Please review.`,
         type: 'purchase', icon: 'shopping-cart', priority: 'high',
@@ -697,7 +746,7 @@ class NotificationService {
     }
 
     if (action === 'dispatched') {
-      return this.notifyRoles(['Sales Head', 'Sales Employee', 'Accounts Head', 'Superadmin'], {
+      return this.notifyRolesAnd(['Sales Head', 'Sales Employee', 'Accounts Head', 'Superadmin'], HOLDERS.accountsSales, {
         title: 'Order Dispatched',
         message: `Order ${data?.orderCode || ''} has been dispatched to customer`,
         type: 'dispatch', icon: 'truck', priority: 'high',
@@ -706,7 +755,7 @@ class NotificationService {
     }
 
     if (action === 'delivery_confirmed') {
-      return this.notifyRoles(['Sales Head', 'Sales Employee', 'Accounts Head', 'Account Employee', 'Accounts', 'Complaint Management Head', 'Complaint Management Employee', 'Superadmin'], {
+      return this.notifyRolesAnd(['Sales Head', 'Sales Employee', 'Accounts Head', 'Account Employee', 'Accounts', 'Complaint Management Head', 'Complaint Management Employee', 'Superadmin'], HOLDERS.accountsSales, {
         title: '✅ Order Delivered Successfully',
         message: `Order ${data?.orderCode || ''} has been delivered to ${data?.customerName || 'customer'}. Dispatch ID: ${data?.dispatchId || ''}. Please confirm delivery in your module.`,
         type: 'dispatch', icon: 'check-circle', priority: 'high',
@@ -1021,7 +1070,7 @@ class NotificationService {
     }
 
     if (action === 'packing_completed') {
-      return this.notifyRoles(['Dispatch Head', 'Dispatch Employee', 'Accounts Head', 'Account Employee', 'Accounts', 'Superadmin'], {
+      return this.notifyRolesAnd(['Dispatch Head', 'Dispatch Employee', 'Accounts Head', 'Account Employee', 'Accounts', 'Superadmin'], HOLDERS.accountsSales, {
         title: '✅ Packing Completed',
         message: `Packing done for ${data?.dcno || data?.orderCode || ''}. Ready for dispatch and NOC/payment clearance.`,
         type: 'dispatch', icon: 'package', priority: 'high',
@@ -1085,8 +1134,9 @@ class NotificationService {
     // ✅ FIX 3: targetRole:'all' se specific roles pe shift karo + companyId add karo
     // Pehle ye globally sabko dikhti thi, ab sirf Store + Accounts ko dikhegi
     const companyId = targetCompanyId || itemData?.companyId || null;
-    return this.notifyRoles(
-      ['Store Head', 'Store Employee', 'Accounts Head', 'Account Employee'],
+    // Accounts' copy goes to Purchase holders (2026-11-16): low stock is a buying matter.
+    return this.notifyRolesAnd(
+      ['Store Head', 'Store Employee', 'Accounts Head', 'Account Employee'], HOLDERS.purchase,
       {
         title: '⚠️ Low Stock Alert',
         message: `${itemData.name} is running low (${itemData.currentStock ?? itemData.qty} remaining)`,
@@ -1104,3 +1154,11 @@ class NotificationService {
 }
 
 export default new NotificationService();
+
+// Who a notification is for, by permission (Purchase separated from Accounts, 2026-11-16).
+export const HOLDERS = {
+  purchase: [{ module: 'purchase', feature: 'purchases' }],
+  purchaseHead: [{ module: 'purchase', feature: 'purchaseHead' }],
+  vendorPayments: [{ module: 'accounts', feature: 'vendorPayments' }],
+  accountsSales: [{ module: 'accounts', feature: 'sales' }],
+};

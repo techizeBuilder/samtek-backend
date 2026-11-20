@@ -67,8 +67,12 @@ export function dayKinds({ month, today = indiaDate(), person = {}, attendance =
 
 const n = (v) => Number(v) || 0;
 
-/** The month's money from its days. Payroll keeps its old meaning: gross − deduction = net. */
-export function computePay(days, salary = {}) {
+/**
+ * The month's money from its days. Payroll keeps its old meaning: gross − deduction = net.
+ * incentive (feature 10, 2026-11-13): approved incentives for the month, added to what
+ * was earned and to net pay; never affected by loss of pay.
+ */
+export function computePay(days, salary = {}, incentive = 0) {
   const counts = Object.fromEntries(KINDS.map((k) => [k, 0]));
   let payDays = 0, lopDays = 0, workedOnOff = 0;
   for (const d of days) {
@@ -82,10 +86,11 @@ export function computePay(days, salary = {}) {
   const fixedDeduction = n(salary.pf) + n(salary.professionalTax) + n(salary.tds) + n(salary.advance) + n(salary.others);
   const earned = workingDays ? Math.round((gross * payDays) / workingDays) : 0;
   const lopAmount = workingDays ? Math.round((gross * lopDays) / workingDays) : 0;
+  const bonus = Math.max(0, Math.round(n(incentive) * 100) / 100);
   return {
     workingDays, payDays, lopDays, workedOnOff, days: counts,
-    gross, earned, lopAmount, fixedDeduction,
+    gross, earned, lopAmount, fixedDeduction, incentive: bonus,
     deduction: fixedDeduction + (gross - earned),
-    net: Math.max(0, earned - fixedDeduction),
+    net: Math.max(0, earned + bonus - fixedDeduction),
   };
 }

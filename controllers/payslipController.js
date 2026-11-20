@@ -98,6 +98,7 @@ export const generatePayslipsFromPayroll = async (
         ytdOthers: ytd("others"),
 
         // 🔥 Payroll calculation (actual paid)
+        incentive: payroll.incentive || 0, // feature 10
         deduction: payroll.deduction,
         netSalary: payroll.net,
 

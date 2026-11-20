@@ -1,7 +1,17 @@
 import ProductionOrder, { PROCESS_STEPS, PROCESS_TYPE_MAP, buildStepsFromList, stepsForKind } from '../models/ProductionOrder.js';
 import { lostBetween, lostTotal } from '../utils/lostAtVendor.js';
 import ProductionTeam from '../models/ProductionTeam.js';
-import { TeamError, searchTeamPeople, validateTeamBody, decorateTeams, teamIsBusy, assertAssignableTeam } from '../services/productionTeamService.js';
+import { TeamError, searchTeamPeople, validateTeamBody, decorateTeams, teamIsBusy, assertAssignableTeam, skillCatalog, setPersonSkills, skillMatrixRows } from '../services/productionTeamService.js';
+import StepCrewEntry from '../models/StepCrewEntry.js';
+import { CrewError, addToCrew, takeOffCrew, setPlannedHours, stepCrewView, saveLunchAnswers, todayBoard, crewCandidates, alignCrewToStart, crewStartConflicts, closeStartConflicts, crewAbsentToday, teamMembersView, unitLabour, peopleToday } from '../services/crew/crewService.js';
+import { board as planningBoard } from '../services/planning/boardService.js';
+import { actionTime, fmtIndia } from '../utils/actionTime.js';
+import { userHasPermission } from '../middleware/permissions.js';
+import { scores as scoreList, teamScores, scoreMaps, personScore } from '../services/score/scoreService.js';
+import { IncentiveError, requestIncentive, listIncentives, personIncentives } from '../services/incentiveService.js';
+import { eligiblePeopleQuery } from '../services/productionTeamService.js';
+import { productionUserQuery } from './scorecardController.js';
+import User from '../models/User.js';
 import Sale from '../models/Sale.js';
 import QCJob from '../models/QCJob.js';
 import notificationService from '../services/notificationService.js';
@@ -23,7 +33,7 @@ import ChildPartBOM from '../models/ChildPartBOM.js';
 import SubChildPartJobWorkOrder from '../models/SubChildPartJobWorkOrder.js';
 import { findMachineMaterialLines, buildMachineMaterialList, requestMachineMaterial, resolveMachineOrderProcesses, checkMachineAssemblyMaterialAvailability, machineStockProblem, createMachineStockOrder } from '../services/machineReorderService.js';
 import { recalculateChildPartCost } from './childPartBOMController.js';
-import { isLastInHouseStep, saveProductionCost, productionCostOf, pushPartCost, outsourceMoneyFor, unitFinished } from '../services/partCostService.js';
+import { isLastInHouseStep, saveProductionExpense, addProductionExpense, productionExpenseOf, pushPartCost, outsourceMoneyFor, unitFinished } from '../services/partCostService.js';
 import { bomLinesForOrder, stepMaterialPerUnit, lineUsage, returnLimits, addUsageToList } from '../services/stepMaterialService.js';
 import MachineBOM from '../models/MachineBOM.js';
 import { syncMachineBOMPricing } from './machineBOMController.js';
@@ -683,6 +693,24 @@ export async function applyManufacturedFinalCost(order, finalCost, finalExpense)
 
 const VALID_ORDER_STATUSES = ['Pending', 'BOM Pending', 'In Progress', 'On Hold', 'Pending QC', 'Completed'];
 
+// One row of the grouped Orders list. Mirrors getRealOrderId (OrderManagement.jsx)
+// exactly, with one addition: Stock production has no real order at all (that
+// function returns null for it) — grouping literal `null` together would wrongly
+// merge every unrelated Stock entry into one row, so each one gets its own key.
+const orderGroupKey = (o) => {
+  if (o.orderCode) return o.orderCode;
+  if (o.source === 'QC_Rejected') return o.rejectionDetails?.originalOrderId || o.machineCode || `_solo_${o._id}`;
+  if (!o.source || o.source === 'Store') return o.machineCode || `_solo_${o._id}`;
+  return `_solo_${o._id}`; // Stock
+};
+
+// The Orders page's three tabs. Records from before orderKind existed are Machine.
+const ORDER_TABS = {
+  Machine: { $or: [{ orderKind: 'Machine' }, { orderKind: { $exists: false } }] },
+  ChildPart: { orderKind: 'ChildPart' },
+  SubChildPart: { orderKind: 'SubChildPart' },
+};
+
 export const getOrders = async (req, res) => {
   try {
     const companyId = req.user.companyId;
@@ -707,16 +735,13 @@ export const getOrders = async (req, res) => {
     // $and holds the search/source conditions separately since both would
     // otherwise need the top-level `$or` key.
     const andConditions = [];
-    if (search) {
-      andConditions.push({
-        $or: [
-          { orderId: { $regex: search, $options: 'i' } },
-          { orderCode: { $regex: search, $options: 'i' } },
-          { machineCode: { $regex: search, $options: 'i' } },
-          { machineName: { $regex: search, $options: 'i' } },
-        ]
-      });
-    }
+    // Typed text is matched as plain text (escaped), so "(" or "+" can't break the query.
+    const term = String(search || '').trim();
+    const searchRe = term ? new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
+    const searchCond = searchRe
+      ? { $or: [{ orderId: searchRe }, { orderCode: searchRe }, { machineCode: searchRe }, { machineName: searchRe }] }
+      : null;
+    if (searchCond) andConditions.push(searchCond);
     if (source === 'Store') {
       // Legacy records predate the `source` field, so missing == Store.
       andConditions.push({ $or: [{ source: { $exists: false } }, { source: 'Store' }] });
@@ -774,21 +799,9 @@ export const getOrders = async (req, res) => {
         .sort({ createdAt: -1 })
         .lean();
 
-      // Mirrors getRealOrderId (OrderManagement.jsx) exactly, with one
-      // addition: Stock production has no real order at all (that function
-      // returns null for it) — grouping literal `null` together would
-      // wrongly merge every unrelated Stock entry into one row, so each one
-      // gets its own unique key instead, same as it displays today.
-      const groupKeyFor = (o) => {
-        if (o.orderCode) return o.orderCode;
-        if (o.source === 'QC_Rejected') return o.rejectionDetails?.originalOrderId || o.machineCode || `_solo_${o._id}`;
-        if (!o.source || o.source === 'Store') return o.machineCode || `_solo_${o._id}`;
-        return `_solo_${o._id}`; // Stock
-      };
-
       const groupMap = new Map();
       for (const doc of lightDocs) {
-        const key = groupKeyFor(doc);
+        const key = orderGroupKey(doc);
         let g = groupMap.get(key);
         if (!g) { g = { key, ids: [], maxCreatedAt: doc.createdAt }; groupMap.set(key, g); }
         g.ids.push(doc._id);
@@ -830,6 +843,20 @@ export const getOrders = async (req, res) => {
       ]);
     }
 
+    // While searching (Orders page only, 2026-11-14): how many orders match in
+    // each tab, so the page can show the counts on its tabs and open the tab that
+    // has the order. Another tab counts the search alone, because switching tabs
+    // resets status / source. The open tab's count is the list's own total.
+    let searchCounts = null;
+    if (req.query.grouped === 'true' && searchCond && ORDER_TABS[orderKind]) {
+      searchCounts = { search: term, [orderKind]: total };
+      await Promise.all(Object.entries(ORDER_TABS).filter(([k]) => k !== orderKind).map(async ([k, kindMatch]) => {
+        const docs = await ProductionOrder.find({ company: companyId, ...kindMatch, $and: [searchCond] })
+          .select('_id orderCode source machineCode rejectionDetails.originalOrderId').lean();
+        searchCounts[k] = new Set(docs.map(orderGroupKey)).size;
+      }));
+    }
+
     const summaryAgg = await summaryAggPromise;
     const facet = summaryAgg[0] || { statusCounts: [], priorityCounts: [], sourceCounts: [], total: [] };
     const countFrom = (arr, key) => (arr.find(a => a._id === key)?.count) || 0;
@@ -851,6 +878,7 @@ export const getOrders = async (req, res) => {
         orders,
         pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) },
         summary,
+        searchCounts,
       }
     });
   } catch (err) {
@@ -899,20 +927,28 @@ export const getTeamOrderHistory = async (req, res) => {
     const companyId = req.user.companyId;
     const { teamId } = req.params;
 
-    const orders = await ProductionOrder.find({
-      company: companyId,
-      $or: [
-        { 'processes.assignedTeam': teamId },
-        { 'extraUnits.processes.assignedTeam': teamId },
-      ],
-    })
-      .populate('processes.assignedTeam', 'name supervisor members')
-      .populate('extraUnits.processes.assignedTeam', 'name supervisor members')
-      .sort({ createdAt: -1 })
-      .limit(100)
-      .lean();
-
-    res.json({ success: true, data: orders });
+    // Every step the team was put on, newest order first, paged here (2026-11-13;
+    // it used to stop silently at the 100 newest orders).
+    if (!mongoose.isValidObjectId(teamId)) return res.status(404).json({ success: false, message: 'Team not found' });
+    const team = new mongoose.Types.ObjectId(teamId);
+    const pageNum = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const [out] = await ProductionOrder.aggregate([
+      { $match: { company: new mongoose.Types.ObjectId(String(companyId)), $or: [{ 'processes.assignedTeam': team }, { 'extraUnits.processes.assignedTeam': team }] } },
+      { $project: { orderId: 1, machineName: 1, priority: 1, createdAt: 1, units: { $concatArrays: [[{ processes: '$processes' }], { $ifNull: ['$extraUnits', []] }] } } },
+      { $unwind: { path: '$units', includeArrayIndex: 'unitIndex' } },
+      { $unwind: { path: '$units.processes', includeArrayIndex: 'stepIndex' } },
+      { $match: { 'units.processes.assignedTeam': team } },
+      { $sort: { createdAt: -1, _id: -1, unitIndex: 1, stepIndex: 1 } },
+      { $facet: {
+        rows: [{ $skip: (pageNum - 1) * limitNum }, { $limit: limitNum }, { $project: {
+          _id: 0, order: '$_id', orderId: 1, machineName: 1, priority: 1, unit: { $add: ['$unitIndex', 1] },
+          step: '$units.processes.step', startDate: '$units.processes.startDate', endDate: '$units.processes.endDate', status: '$units.processes.status',
+        } }],
+        total: [{ $count: 'n' }],
+      } },
+    ]);
+    res.json({ success: true, data: out?.rows || [], total: out?.total?.[0]?.n || 0, page: pageNum, limit: limitNum });
   } catch (err) {
     console.error('❌ Error in getTeamOrderHistory:', err);
     res.status(500).json({ success: false, message: err.message });
@@ -2413,17 +2449,49 @@ function getUnitNumber(req) {
 // (every later step outsourced), not only at the true last step. Returns
 // { needed, error, cost, expense } — needed: this step asks for it (first
 // time only); error: it's needed but missing / invalid. The caller saves it
-// (saveProductionCost) once the step is accepted.
+// (saveProductionExpense) once the step is accepted.
+// Stage 6 (2026-11-12): only the EXPENSE is asked — the cost is labour, worked
+// out from the crews' hours (docs/client-features-2026-11/02f-labour-cost-logic.md).
+// A productionCost an old screen still sends is ignored.
 function productionCostAsk(order, procs, idx, unitIndex, body) {
   if (!isLastInHouseStep(procs, idx)) return { needed: false };
-  if (productionCostOf(order, order.orderKind === 'SubChildPart' ? 0 : unitIndex).entered) return { needed: false };
+  if (productionExpenseOf(order, order.orderKind === 'SubChildPart' ? 0 : unitIndex).entered) return { needed: false };
   const n = (v) => { const x = Number(v); return v !== '' && v != null && Number.isFinite(x) && x >= 0 ? x : undefined; };
-  const cost = n(body?.productionCost); const expense = n(body?.productionExpense);
-  if (cost === undefined || expense === undefined) {
-    return { needed: true, error: `${procs[idx].step} is the last in-house step — enter your production cost and expense for ${order.orderKind === 'SubChildPart' ? 'the whole batch' : 'this unit'} (the outsourced steps are added automatically).` };
+  const expense = n(body?.productionExpense);
+  if (expense === undefined) {
+    return { needed: true, error: `${procs[idx].step} is the last in-house step — enter your production expense for ${order.orderKind === 'SubChildPart' ? 'the whole batch' : 'this unit'} (labour is worked out from the crew's hours; the outsourced steps are added automatically).` };
   }
-  return { needed: true, cost, expense };
+  return { needed: true, expense };
 }
+
+// Feature 7 (2026-11-12, docs/client-features-2026-11/07-step-times-logic.md):
+// when the step really finished — now, or body.finishedAt typed by Production.
+// Not before this round began (its start, or the last QC submission after a
+// rejection), and not before anyone still on its crew joined. Throws TeamError.
+async function finishTime(req, order, unitIndex, idx, proc) {
+  const s = proc?.startedAt ? new Date(proc.startedAt) : null;
+  const c = proc?.reworks?.length && proc.completedAt ? new Date(proc.completedAt) : null;
+  const roundStart = s && c ? (c > s ? c : s) : (s || c);
+  const t = actionTime(req.body?.finishedAt, { notBefore: roundStart, notBeforeWhy: `${proc?.step || 'the step'} started`, what: 'Finished at' });
+  if (t.backdated) {
+    const late = await StepCrewEntry.findOne({ order: order._id, unitIndex, stepIndex: idx, leftAt: null, joinedAt: { $gt: t.at } })
+      .populate('person', 'fullName username').lean();
+    if (late) {
+      throw new TeamError(400, `${late.person?.fullName || late.person?.username || 'Someone'} joined ${proc.step} at ${fmtIndia(late.joinedAt)}, after that finish. Take them off first, or pick a later time.`);
+    }
+  }
+  return t;
+}
+
+// Marks a step done at that time; a back-dated finish keeps who entered it and when.
+function stampDone(proc, fin, user) {
+  proc.endDate = fin.at.toISOString().split('T')[0];
+  proc.completedAt = fin.at;
+  proc.completedEnteredAt = fin.backdated ? new Date() : null;
+  proc.completedEnteredBy = fin.backdated ? (user?.fullName || user?.username || '') : '';
+}
+
+const timeFail = (res, e) => res.status(e instanceof TeamError ? e.status : 500).json({ success: false, message: e.message });
 
 function getUnitProcesses(order, unitNumber) {
   if (unitNumber <= 1) return order.processes;
@@ -2469,20 +2537,9 @@ function getUnitProcesses(order, unitNumber) {
 // write here would overwrite that with a status the packing gate never
 // accepts, and its QCJob already exists. Only lead-time + notification run.
 async function finalizeMachineOrderCompletion(order, actorName, userId, { perUnitQc = false } = {}) {
-  try {
-    const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
-    const units = [order.processes, ...order.extraUnits.map(u => u.processes)];
-    for (const unitProcs of units) {
-      const starts = unitProcs.map(p => p.startedAt || p.startDate).filter(Boolean).map(d => new Date(d).getTime());
-      const ends = unitProcs.map(p => p.completedAt || p.endDate).filter(Boolean).map(d => new Date(d).getTime());
-      if (!starts.length || !ends.length) continue;
-      const durationDays = Math.max(0, (Math.max(...ends) - Math.min(...starts)) / (1000 * 60 * 60 * 24));
-      await recordLeadTimeSample(order.company, order.machineCode, order.machineName, 'Production', durationDays);
-    }
-  } catch (e) {
-    console.error('Failed to record production lead-time sample:', e.message);
-  }
-
+  // The old delivery estimator's lead-time sample was recorded here; retired
+  // 18 Nov 2026 — the new estimate reads step runs and history directly
+  // (services/estimate/, docs/delivery-estimate/).
   try {
     await notificationService.triggerProductionNotification({
       action: 'production_completed',
@@ -2617,6 +2674,187 @@ export function allUnitsCompleted(order) {
   return mainDone && extraDone;
 }
 
+// Feature 9 (2026-11-12, docs/client-features-2026-11/09-plan-ahead-logic.md):
+// putting people on a step is PLANNING — allowed on any step, before its
+// material arrives or the previous step is done. Start keeps every check
+// (material, previous step, crew, planned hours, nothing held at Store). This
+// only brings QC-passed work back from Store, as assigning always did.
+async function prepareAssign(req, order, procs, idx, unitNumber) {
+  if ((order.workAtStore || []).some(w => w.unitIndex === unitNumber - 1)) {
+    const { autoRequestAtStore } = await import('../services/dispatchTripService.js');
+    await autoRequestAtStore(order.company, order._id, req.user);
+    order = await ProductionOrder.findOne({ _id: order._id, company: req.user.companyId });
+    procs = getUnitProcesses(order, unitNumber);
+  }
+  return { order, procs };
+}
+
+// Loads the order and the unit's steps for a crew call; saves first if the
+// unit's steps had to be created (getUnitProcesses makes them on first use).
+async function loadStep(req, res) {
+  const idx = getStepIndex(req, res);
+  if (idx === -1) return null;
+  const unitNumber = getUnitNumber(req);
+  const order = mongoose.isValidObjectId(req.params.id) && await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+  if (!order) { res.status(404).json({ success: false, message: 'Order not found' }); return null; }
+  const procs = getUnitProcesses(order, unitNumber);
+  if (!procs || idx >= procs.length) { res.status(400).json({ success: false, message: 'Invalid step index for this order.' }); return null; }
+  if (order.isModified()) await order.save();
+  return { idx, unitNumber, unitIndex: unitNumber - 1, order, procs };
+}
+
+const crewFail = (res, err) => {
+  if (err instanceof TeamError) return res.status(err.status).json({ success: false, message: err.message, ...(err.details || {}) });
+  console.error(err);
+  return res.status(500).json({ success: false, message: err.message });
+};
+
+/* ── Stage 5 (2026-11-12): crews on a step — docs/client-features-2026-11/02e-assign-and-hours-logic.md ── */
+
+// GET /orders/:id/processes/:stepIndex/crew?unit=&people=
+export const getStepCrew = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    res.json({ success: true, ...(await stepCrewView(req.user, s.order, s.unitIndex, s.idx, { people: req.query.people, until: req.query.until })) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// POST /orders/:id/processes/:stepIndex/crew  { teamId } or { people: [...] }, confirmMove
+export const addStepCrew = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    const { order } = await prepareAssign(req, s.order, s.procs, s.idx, s.unitNumber);
+    const result = await addToCrew(req.user, order, s.unitIndex, s.idx, {
+      teamId: req.body?.teamId, people: req.body?.people, confirmMove: req.body?.confirmMove === true, since: req.body?.since,
+      teams: req.body?.teams, include: req.body?.include, covers: req.body?.covers, // feature 8
+    });
+    res.json({ success: true, ...result });
+  } catch (err) { crewFail(res, err); }
+};
+
+// GET /orders/:id/processes/:stepIndex/crew/team-members?unit=&teams=a,b — feature 8
+// (2026-11-12): the picked teams' members, with today's attendance, to replace absent ones.
+export const getStepCrewTeamMembers = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    res.json({ success: true, teams: await teamMembersView(req.user.companyId, s.order, s.unitIndex, s.idx, req.query.teams) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// GET /orders/:id/processes/:stepIndex/crew/candidates?unit=&search=
+export const getStepCrewCandidates = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    res.json({ success: true, people: await crewCandidates(req.user.companyId, s.order, s.unitIndex, s.idx, { search: req.query.search, limit: req.query.limit }) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// DELETE /orders/:id/processes/:stepIndex/crew/:personId?unit=
+export const removeStepCrew = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    if (!mongoose.isValidObjectId(req.params.personId)) return res.status(404).json({ success: false, message: "That person isn't on this step." });
+    res.json({ success: true, ...(await takeOffCrew(req.user, s.order, s.unitIndex, s.idx, req.params.personId, { leftAt: req.query.leftAt })) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// PUT /orders/:id/processes/:stepIndex/planned-hours  { hours }
+export const setStepPlannedHours = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    res.json({ success: true, ...(await setPlannedHours(s.order, s.unitIndex, s.idx, req.body?.hours)) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// PUT /orders/:id/processes/:stepIndex/lunch  { answers: [{ person, date, kind, from, to }] }
+export const confirmStepLunch = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    res.json({ success: true, ...(await saveLunchAnswers(req.user, s.order, s.unitIndex, s.idx, req.body?.answers)) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// GET /teams/today: Manpower's "Today" tab.
+export const getTeamsToday = async (req, res) => {
+  try {
+    res.json({ success: true, ...(await todayBoard(req.user.companyId, req.query)) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// GET /teams/matrix?search=&page=&limit= — the Skill Matrix, paged (2026-11-13).
+export const getTeamSkillMatrix = async (req, res) => {
+  try {
+    res.json({ success: true, ...(await skillMatrixRows(req.user.companyId, req.query)) });
+  } catch (err) { crewFail(res, err); }
+};
+
+// Feature 10 (2026-11-13): performance scores — timing + accuracy, replacing
+// efficiency. docs/client-features-2026-11/10-performance-score-logic.md
+const scoreFail = (res, err) => (err instanceof IncentiveError
+  ? res.status(err.status).json({ success: false, message: err.message })
+  : crewFail(res, err));
+
+// GET /planning/board?search=&kind=&team= — Work Planning (feature 11, 2026-11-14):
+// the people strip, then running / planned / ready / waiting / finished today.
+// docs/client-features-2026-11/11-work-planning-board-logic.md
+export const getPlanningBoard = async (req, res) => {
+  try {
+    const [people, data] = await Promise.all([peopleToday(req.user.companyId), planningBoard(req.user.companyId, req.query)]);
+    res.json({ success: true, people, ...data });
+  } catch (err) { crewFail(res, err); }
+};
+
+// GET /teams/scores?month=|from=&to=&search=&page=&sort= — people (paged) and teams
+export const getTeamsScores = async (req, res) => {
+  try {
+    const only = { userQuery: await productionUserQuery(req.user.companyId) }; // feature 13: Production's own people
+    const [people, teams] = await Promise.all([scoreList(req.user.companyId, req.query, only), teamScores(req.user.companyId, req.query, only)]);
+    res.json({ success: true, ...people, teams: teams.teams });
+  } catch (err) { scoreFail(res, err); }
+};
+
+// GET /teams/scores/person/:personId?month= — one person's steps and incentive requests
+export const getTeamsScorePerson = async (req, res) => {
+  try {
+    const s = await personScore(req.user.companyId, req.params.personId, req.query, { userQuery: await productionUserQuery(req.user.companyId) });
+    if (!s) return res.status(404).json({ success: false, message: 'Person not found' });
+    res.json({ success: true, ...s, ...(await personIncentives(req.user, req.params.personId, req.query.incPage)) });
+  } catch (err) { scoreFail(res, err); }
+};
+
+// Production asks HR for an incentive for one of its people.
+async function assertProductionPerson(companyId, personId) {
+  if (!mongoose.isValidObjectId(personId)) throw new IncentiveError(404, 'Person not found');
+  const ok = await User.exists({ ...(await eligiblePeopleQuery(companyId)), _id: personId });
+  if (!ok) throw new IncentiveError(400, 'Only people in Production can be put forward from here.');
+}
+
+// POST /incentives { person, month, reason, suggestedAmount }
+export const requestPersonIncentive = async (req, res) => {
+  try {
+    await assertProductionPerson(req.user.companyId, req.body?.person);
+    res.status(201).json({ success: true, data: await requestIncentive(req.user, req.body || {}) });
+  } catch (err) { scoreFail(res, err); }
+};
+
+// GET /incentives?status=&page= — incentives for Production's people
+export const getProductionIncentives = async (req, res) => {
+  try {
+    const ids = (await User.find(await eligiblePeopleQuery(req.user.companyId)).select('_id').lean()).map((u) => u._id);
+    res.json({ success: true, ...(await listIncentives(req.user, { ...req.query, persons: ids })) });
+  } catch (err) { scoreFail(res, err); }
+};
+
+// The old one-team route (kept for anything still calling it): sets the step's
+// team as before, and since 2026-11-12 also puts that team's people on the crew.
+// No team = take everyone off.
 export const assignTeam = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
@@ -2685,6 +2923,8 @@ export const assignTeam = async (req, res) => {
 
     procs[idx].assignedTeam = teamId || null;
     await order.save();
+    if (teamId) await addToCrew(req.user, order, unitNumber - 1, idx, { teamId, confirmMove: true, legacy: true });
+    else await takeOffCrew(req.user, order, unitNumber - 1, idx, null);
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
     res.json({ success: true, data: order });
@@ -2693,14 +2933,119 @@ export const assignTeam = async (req, res) => {
   }
 };
 
+// ── Start's own checks, shared with the Work Planning board (2026-11-14) ──
+// docs/client-features-2026-11/11-work-planning-board-logic.md §5. Each returns
+// null or { key, message }, with the exact message Start has always given. Start
+// runs them in its own order (crew / planned hours stay inline there); the board
+// runs them all through startBlockers to say whether a step can start, so the two
+// can never disagree.
+export function storeHold(order, unitIndex) {
+  if ((order.workAtStore || []).some(w => w.unitIndex === unitIndex)) {
+    return { key: 'store', message: `Unit ${unitIndex + 1}'s outsourced work is still at Store (in QC, out for rework, or waiting for its next outsource trip) — it comes to Production by itself once QC passes it.` };
+  }
+  return null;
+}
+
+// An order built from the BOM's Process Definition: its steps carry their category
+// (processStepBuilderService); the old fixed-step pipelines (Job Work, Assembly…) don't.
+export const isProcessDefinitionOrder = (order) => (order?.processes || []).some((p) => p?.category);
+
+// bomVerified / materialIssued only mean anything for a Machine order (see startProcess).
+// 19 Nov 2026 (docs/delivery-estimate/01-logic.md §11.3): the order-wide
+// materialIssued flag ("nothing requested is still waiting") blocked EVERY step
+// of EVERY unit while any one request was outstanding — a top-up of bolts for
+// unit 2 stopped unit 1 — and only a top-up turned it off, not a new line. A
+// Process-Definition order doesn't need it: each step's own picks are checked
+// per unit by materialGate, the same as a Child Part. Old fixed-step orders keep it.
+export function machineGate(order) {
+  if (order.orderKind !== 'Machine') return null;
+  if (!order.bomVerified) return { key: 'bom', message: 'Cannot start process: BOM has not been verified by R&D yet.' };
+  if (!order.materialIssued && !isProcessDefinitionOrder(order)) return { key: 'material', message: 'Cannot start process: All required materials have not been issued yet.' };
+  return null;
+}
+
+// The step's own material: Job Work's whole-order list and a MachineBOM
+// Assembly's ledger (Machine only), then the step's materialRefs lines.
+// Returns { block, materialLines } — Start commits the lines once every gate passes.
+export async function materialGate(order, procs, idx, companyId) {
+  const isMachine = order.orderKind === 'Machine';
+  const unissuedMsg = (names) => ({ key: 'material', message: `Material not yet received in Production: ${names.join(', ')}.` });
+  if (isMachine && procs[idx].step === 'Job Work') {
+    const unissued = await getUnissuedMaterials(order, companyId);
+    if (unissued.length > 0) return { block: unissuedMsg(unissued), materialLines: [] };
+  } else if (isMachine && procs[idx].step === 'Assembly' && isMachineBOMPipeline(procs)) {
+    const unissued = getUnissuedMachineBOMMaterials(order);
+    if (unissued.length > 0) return { block: unissuedMsg(unissued), materialLines: [] };
+  }
+  const materialLines = await resolveStepMaterialLines(order, procs[idx], companyId);
+  const unissuedLines = materialLines.filter(l => l.demandStatus !== 'Issued').map(l => l.name);
+  return { block: unissuedLines.length ? unissuedMsg(unissuedLines) : null, materialLines };
+}
+
+// The previous step of this unit must be completed.
+export function prevStepGate(procs, idx) {
+  if (idx > 0 && procs[idx - 1].status !== 'Completed') {
+    return { key: 'prev', message: `Cannot start ${procs[idx].step}: ${procs[idx - 1].step} not yet completed` };
+  }
+  return null;
+}
+
+// A unit's steps without creating anything: units 2..N not opened yet look like
+// a fresh copy of unit 1 (what getUnitProcesses would make).
+export function unitProcessesView(order, unitIndex) {
+  if (unitIndex === 0) return order.processes || [];
+  return order.extraUnits?.[unitIndex - 1]?.processes || (order.processes?.length ? buildFreshUnitProcesses(order.processes) : []);
+}
+
+// The automatic BOM / design tick Process Execution gives a Machine order when it
+// opens it (getBomDesignStatus → applyAutoVerify), for the Work Planning board
+// (2026-11-14) — so the board doesn't call an approved BOM "not verified" just
+// because nobody has opened the order yet. Returns the order's bomVerified.
+// dryRun (feature 12, the order tracker, 2026-11-14): only says whether the tick
+// would be given, and saves nothing (the tracker never changes an order).
+export async function autoVerifyMachineOrder(orderId, companyId, { dryRun = false } = {}) {
+  const order = await ProductionOrder.findOne({ _id: orderId, company: companyId });
+  if (!order || order.orderKind !== 'Machine') return !!order?.bomVerified;
+  if (order.bomVerified && order.designVerified) return true;
+  const machineItem = await Item.findOne({ code: order.machineCode, companyId, productKind: 'Machine' }).lean();
+  if (!machineItem) return false;
+  const found = await findMachineMaterialLines(machineItem._id, companyId);
+  const bomLocked = !!found?.bom?.isLocked;
+  const designApproved = isPurchaseMachine(machineItem) ? true : (await computeDesignReadiness(machineItem, companyId)).ok;
+  if (dryRun) return !!order.bomVerified || (bomLocked && designApproved);
+  await applyAutoVerify(order, bomLocked, designApproved);
+  return !!order.bomVerified;
+}
+
+/** Everything Start checks except the crew and planned hours: null, or the first { key, message }. */
+export async function startBlockers(order, unitIndex, idx, companyId) {
+  const procs = unitProcessesView(order, unitIndex);
+  if (!procs[idx]) return { key: 'missing', message: 'Step not found.' };
+  return storeHold(order, unitIndex)
+    || machineGate(order)
+    || (await materialGate(order, procs, idx, companyId)).block
+    || prevStepGate(procs, idx);
+}
+
 export const startProcess = async (req, res) => {
   try {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
     const unitNumber = getUnitNumber(req);
 
-    const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
+    let order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    // Feature 9 (2026-11-12): work held at Store is checked at Start now (people
+    // can be planned on the step before it comes back). QC-passed work is
+    // brought back first, as assigning used to.
+    if ((order.workAtStore || []).some(w => w.unitIndex === unitNumber - 1)) {
+      const { autoRequestAtStore } = await import('../services/dispatchTripService.js');
+      await autoRequestAtStore(order.company, order._id, req.user);
+      order = await ProductionOrder.findOne({ _id: order._id, company: req.user.companyId });
+      const held = storeHold(order, unitNumber - 1);
+      if (held) return res.status(400).json({ success: false, message: held.message });
+    }
 
     // ─────────────────────────────────────────────────────────────
     // NEW GATEKEEPERS: BOM & Material Issue Validation
@@ -2723,21 +3068,9 @@ export const startProcess = async (req, res) => {
     // that genuinely does mean Child Part specifically.
     const isMachine = order.orderKind === 'Machine';
     const isChildPart = order.orderKind === 'ChildPart';
-    if (isMachine) {
-      if (!order.bomVerified) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cannot start process: BOM has not been verified by R&D yet.'
-        });
-      }
-
-      if (!order.materialIssued) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cannot start process: All required materials have not been issued yet.'
-        });
-      }
-    }
+    // Shared with the Work Planning board (machineGate, 2026-11-14).
+    const machineBlock = machineGate(order);
+    if (machineBlock) return res.status(400).json({ success: false, message: machineBlock.message });
     // ─────────────────────────────────────────────────────────────
 
     const procs = getUnitProcesses(order, unitNumber);
@@ -2749,40 +3082,16 @@ export const startProcess = async (req, res) => {
     // nothing Job Work itself needs is still unreceived. Name-based (not
     // idx===0) since a MachineBOM-driven order's own idx 0 is 'Assembly',
     // not 'Job Work' — see the isMachineBOMPipeline branch right below.
-    if (isMachine && procs[idx].step === 'Job Work') {
-      if (!procs[idx].assignedTeam) {
-        return res.status(400).json({ success: false, message: 'Assign a team to Job Work before starting it.' });
-      }
-      const unissued = await getUnissuedMaterials(order, req.user.companyId);
-      if (unissued.length > 0) {
-        return res.status(400).json({ success: false, message: `Material not yet received in Production: ${unissued.join(', ')}.` });
-      }
-    } else if (isMachine && procs[idx].step === 'Assembly' && isMachineBOMPipeline(procs)) {
-      // MachineBOM-driven order's own Assembly — same belt-and-braces
-      // assign-time + start-time double-check Job Work's own gate uses,
-      // against the new Material List's own live ledger (confirmed with
-      // the user 2026-09-17). Team-assignment itself is still covered by
-      // the generic stepNeedsTeamGate below (Assembly isn't excluded from
-      // it) — only the extra material check is specific to this branch.
-      const unissued = getUnissuedMachineBOMMaterials(order);
-      if (unissued.length > 0) {
-        return res.status(400).json({ success: false, message: `Material not yet received in Production: ${unissued.join(', ')}.` });
-      }
+    if (isMachine && procs[idx].step === 'Job Work' && !procs[idx].assignedTeam) {
+      return res.status(400).json({ success: false, message: 'Assign a team to Job Work before starting it.' });
     }
-
-    // Generalized twin of the two branches above, for a dynamic Process
-    // Definition step (2026-09-23, extended same day to resolve full rows
-    // instead of a bare boolean — see resolveStepMaterialLines's own
-    // comment). A safe no-op for anything already covered by name above
-    // (legacy steps never carry materialRefs). materialLines is captured
-    // here (not just the issuance boolean) so it can be committed further
-    // down, once every other gate for this step has passed — see
+    // Material for this step — Job Work's whole-order list, a MachineBOM
+    // Assembly's ledger, then the step's own materialRefs lines (materialGate,
+    // shared with the Work Planning board, 2026-11-14). materialLines is kept so
+    // it can be committed further down, once every other gate has passed — see
     // commitStepMaterialConsumption's own call site below.
-    const materialLines = await resolveStepMaterialLines(order, procs[idx], req.user.companyId);
-    const unissuedMaterialLines = materialLines.filter(l => l.demandStatus !== 'Issued').map(l => l.name);
-    if (unissuedMaterialLines.length) {
-      return res.status(400).json({ success: false, message: `Material not yet received in Production: ${unissuedMaterialLines.join(', ')}.` });
-    }
+    const { block: materialBlock, materialLines } = await materialGate(order, procs, idx, req.user.companyId);
+    if (materialBlock) return res.status(400).json({ success: false, message: materialBlock.message });
     // Child Part order — Fabrication (idx 0, the first real step now that
     // Job Work is dropped) runs PER UNIT with its own team, same as every
     // other step (generic stepNeedsTeamGate below). Legacy-shape-only
@@ -2815,7 +3124,14 @@ export const startProcess = async (req, res) => {
     // a team the same way now.
     const stepNeedsTeamGate = isChildPart || !['Job Work', 'Fabrication'].includes(procs[idx].step);
     if (stepNeedsTeamGate && !procs[idx].assignedTeam) {
-      return res.status(400).json({ success: false, message: `Assign a team to ${procs[idx].step} before starting it.` });
+      // Same words as the crew check below: there's no Assign Team button any more.
+      return res.status(400).json({ success: false, message: `Put at least one person on ${procs[idx].step} before starting it.` });
+    }
+    // Stage 5 (2026-11-12): someone on the crew, and the planned hours typed.
+    if (stepNeedsTeamGate) {
+      const onCrew = await StepCrewEntry.exists({ order: order._id, unitIndex: unitNumber - 1, stepIndex: idx, leftAt: null });
+      if (!onCrew) return res.status(400).json({ success: false, message: `Put at least one person on ${procs[idx].step} before starting it.` });
+      if (!(procs[idx].plannedHours > 0)) return res.status(400).json({ success: false, message: `Type the planned hours for ${procs[idx].step} before starting it.` });
     }
 
     // Gate: previous step (of this same unit) must be completed. Child
@@ -2826,11 +3142,27 @@ export const startProcess = async (req, res) => {
     // step names directly, not stepsForKind(order.orderKind)[idx] — that
     // static lookup can't tell a MachineBOM-driven order's real shape from
     // an old-RDBOM one (both share orderKind:'Machine').
-    if (idx > 0 && procs[idx - 1].status !== 'Completed') {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot start ${procs[idx].step}: ${procs[idx - 1].step} not yet completed`
+    const prevBlock = prevStepGate(procs, idx); // shared with the Work Planning board (2026-11-14)
+    if (prevBlock) return res.status(400).json({ success: false, message: prevBlock.message });
+
+    // Feature 7 (2026-11-12): when the work really started — now, or an earlier
+    // time; not before the previous step finished (or the order was made).
+    let st;
+    try {
+      const prevDone = idx > 0 ? procs[idx - 1].completedAt : null;
+      st = actionTime(req.body?.startedAt, {
+        notBefore: prevDone || order.createdAt || null,
+        notBeforeWhy: prevDone ? `${procs[idx - 1].step} finished` : 'the order was made',
+        what: 'Started at',
       });
+    } catch (e) { return timeFail(res, e); }
+
+    // Feature 9: someone planned here who is still working on another running
+    // step — asked first; confirmed, their time there ends at this start.
+    const conflicts = await crewStartConflicts(order, unitNumber - 1, idx);
+    if (conflicts.length && req.body?.confirmMove !== true) {
+      const where = conflicts.map(c => `${c.name} is working on ${c.orderNo} · ${c.stepName}${c.unit > 1 ? ` (unit ${c.unit})` : ''}`).join('; ');
+      return res.status(409).json({ success: false, message: `${where}. Move them here?`, moves: conflicts });
     }
 
     // Bookkeeping, not a gate (2026-09-23) — records this unit's own use of
@@ -2843,15 +3175,22 @@ export const startProcess = async (req, res) => {
     if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
 
     procs[idx].status = 'In Progress';
-    procs[idx].startDate = today(); // Assuming today() is defined in your file
-    procs[idx].startedAt = new Date(); // precise timestamp, see ProcessStepSchema comment
+    procs[idx].startDate = st.at.toISOString().split('T')[0];
+    procs[idx].startedAt = st.at; // precise timestamp, see ProcessStepSchema comment
+    procs[idx].startedEnteredAt = st.backdated ? new Date() : null;
+    procs[idx].startedEnteredBy = st.backdated ? (req.user.fullName || req.user.username || '') : '';
     order.status = 'In Progress';
 
     await order.save();
+    // The crew counts from the start time given (planned people included);
+    // anyone moved here leaves their other step at that time.
+    if (conflicts.length) await closeStartConflicts(conflicts, st.at, req.user);
+    await alignCrewToStart(order, unitNumber - 1, idx, st.at);
+    const absentWarnings = await crewAbsentToday(order, unitNumber - 1, idx);
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
 
-    res.json({ success: true, data: order });
+    res.json({ success: true, data: order, moved: conflicts.map(c => ({ name: c.name, from: `${c.orderNo} · ${c.stepName}` })), absentWarnings });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -2870,13 +3209,17 @@ export const markProcessComplete = async (req, res) => {
 
     const proc = procs[idx];
 
+    // Feature 7: when it really finished (now, or body.finishedAt).
+    let fin;
+    try { fin = await finishTime(req, order, unitNumber - 1, idx, proc); } catch (e) { return timeFail(res, e); }
+
     // Slice 4 (2026-10-24): the unit's last in-house step (the outsourced
     // steps after it are costed automatically) asks for Production's own
     // cost / expense, once. The true last step keeps its own dialogs.
     if (proc?.status === 'In Progress' && idx !== procs.length - 1) {
       const ask = productionCostAsk(order, procs, idx, unitNumber - 1, req.body);
       if (ask.error) return res.status(400).json({ success: false, message: ask.error });
-      if (ask.needed) await saveProductionCost(order._id, order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1, ask.cost, ask.expense, req.user.fullName || req.user.username || '');
+      if (ask.needed) await saveProductionExpense(order._id, order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1, ask.expense, req.user.fullName || req.user.username || '');
     }
 
     // ── Child Part order — its own trimmed pipeline (Fabrication →
@@ -2927,8 +3270,7 @@ export const markProcessComplete = async (req, res) => {
           return res.status(400).json({ success: false, message: 'Complete this final step through the cost-capture action, not this endpoint.' });
         }
         proc.status = 'Completed';
-        proc.endDate = today();
-        proc.completedAt = new Date();
+        stampDone(proc, fin, req.user);
         // No auto-advance of the next step (2026-09-24, fixed — found live:
         // completing this step was silently skipping team-assignment AND
         // the startProcess gate for whatever came next, checkpoint or not,
@@ -2949,8 +3291,7 @@ export const markProcessComplete = async (req, res) => {
       }
 
       proc.status = 'QC Pending';
-      proc.endDate = today();
-      proc.completedAt = new Date();
+      stampDone(proc, fin, req.user);
       await order.save();
       await order.populate('processes.assignedTeam', 'name supervisor members');
       await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
@@ -2998,8 +3339,7 @@ export const markProcessComplete = async (req, res) => {
         proc.qcStatus = 'Approved';
         proc.qcBy = 'Sub Child Part QC';
         proc.qcDate = today();
-        proc.endDate = today();
-        proc.completedAt = new Date();
+        stampDone(proc, fin, req.user);
         if (allUnitsCompleted(order)) {
           order.status = 'Completed';
         }
@@ -3029,8 +3369,7 @@ export const markProcessComplete = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Assembly is not in progress.' });
       }
       proc.status = 'Completed';
-      proc.endDate = today();
-      proc.completedAt = new Date();
+      stampDone(proc, fin, req.user);
       await order.save();
       await order.populate('processes.assignedTeam', 'name supervisor members');
       await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
@@ -3073,8 +3412,7 @@ export const markProcessComplete = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Complete this final step through the cost-capture action, not this endpoint.' });
       }
       proc.status = 'Completed';
-      proc.endDate = today();
-      proc.completedAt = new Date();
+      stampDone(proc, fin, req.user);
       // No auto-advance of the next step (2026-09-24, fixed) — see the
       // matching comment in the ChildPart branch above for the full
       // reasoning; same fix, same rationale, for every other order kind.
@@ -3085,8 +3423,7 @@ export const markProcessComplete = async (req, res) => {
     }
 
     proc.status = 'QC Pending';
-    proc.endDate = today();
-    proc.completedAt = new Date(); // precise timestamp, see ProcessStepSchema comment
+    stampDone(proc, fin, req.user);
     await order.save();
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
@@ -3147,9 +3484,10 @@ export const approveQC = async (req, res) => {
     const isLastStep = idx === procs.length - 1;
     const n = (v) => { const x = Number(v); return v !== '' && v != null && Number.isFinite(x) && x >= 0 ? x : undefined; };
     const costUnitIdx = order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1;
-    const costGiven = isLastStep && n(req.body.productionCost) !== undefined && n(req.body.productionExpense) !== undefined;
+    // Stage 6: the expense only; the cost is the crews' labour.
+    const costGiven = isLastStep && n(req.body.productionExpense) !== undefined;
     if (costGiven) {
-      await saveProductionCost(order._id, order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1, n(req.body.productionCost), n(req.body.productionExpense), req.user.fullName || req.user.username || '');
+      await saveProductionExpense(order._id, order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1, n(req.body.productionExpense), req.user.fullName || req.user.username || '');
     }
 
     const wasCompleted = order.status === 'Completed';
@@ -3179,7 +3517,7 @@ export const approveQC = async (req, res) => {
     await order.save();
     // Only when a cost is on the order — an older order approved without one
     // keeps its BOM as it was (never zeroed).
-    if (isLastStep && (costGiven || productionCostOf(order, costUnitIdx).entered)) await pushPartCost(order._id, costUnitIdx);
+    if (isLastStep && (costGiven || productionExpenseOf(order, costUnitIdx).entered)) await pushPartCost(order._id, costUnitIdx);
     await order.populate('processes.assignedTeam', 'name supervisor members');
     await order.populate('extraUnits.processes.assignedTeam', 'name supervisor members');
 
@@ -3258,9 +3596,24 @@ export const getUnitCost = async (req, res) => {
     const finished = unitFinished(order, unitIndex);
     // Outsourced steps whose money isn't in yet: not completed on this unit.
     const toCome = procs.filter(p => p.type === 'Outsourcing' && p.status !== 'Completed').map(p => p.step);
+    // Labour so far on this unit / batch (13 Nov 2026, the user's ask): the order's
+    // total only — never per person or per step — and only to someone who can edit
+    // Production orders (the Production Head). Everyone else keeps hours only:
+    // one person's cost ÷ their hours would show their pay.
+    let labour = null;
+    if (userHasPermission(req.user, 'production', 'orders', 'edit')) {
+      const l = await unitLabour(req.user.companyId, order._id, unitIndex);
+      if (l.runs > 0) labour = { soFar: l.labour, steps: l.runs, missing: l.missing };
+    }
     res.json({ success: true, data: {
       unitIndex, finished, jobWorkSoFar: money, waitingFor, outsourcedStepsToCome: toCome,
-      production: entry?.productionCost != null ? { cost: entry.productionCost, expense: entry.productionExpense, by: entry.enteredBy } : null,
+      production: entry?.productionExpense != null ? {
+        expense: entry.productionExpense, by: entry.enteredBy,
+        // What QC redos added (13 Nov 2026); the rest is the first amount entered.
+        redoExtra: (entry.expenseLog || []).filter(l => l.redo).reduce((t, l) => t + (Number(l.amount) || 0), 0),
+      } : null,
+      labour,
+      labourOnBom: true,
       pushedAt: entry?.pushedAt || null,
     } });
   } catch (err) {
@@ -3283,10 +3636,10 @@ export const completeFinalProcessStep = async (req, res) => {
     const idx = getStepIndex(req, res);
     if (idx === -1) return;
     const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
-    const productionCost = toNonNegNumber(req.body.productionCost);
+    // Stage 6 (2026-11-12): the expense only — the cost is the crews' labour.
     const productionExpense = toNonNegNumber(req.body.productionExpense);
-    if (productionCost === undefined || productionExpense === undefined) {
-      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to complete this step.' });
+    if (productionExpense === undefined) {
+      return res.status(400).json({ success: false, message: "productionExpense (a non-negative number) is required to complete this step. Labour is worked out from the crew's hours." });
     }
     const unitNumber = getUnitNumber(req);
     const order = await ProductionOrder.findOne({ _id: req.params.id, company: req.user.companyId });
@@ -3313,17 +3666,18 @@ export const completeFinalProcessStep = async (req, res) => {
     if (proc.status !== 'In Progress') {
       return res.status(400).json({ success: false, message: `${proc.step} is not in progress.` });
     }
+    let fin;
+    try { fin = await finishTime(req, order, unitNumber - 1, idx, proc); } catch (e) { return timeFail(res, e); }
 
     proc.status = 'Completed';
     proc.qcStatus = 'Approved';
-    proc.endDate = today();
-    proc.completedAt = new Date();
+    stampDone(proc, fin, req.user);
 
     // Slice 4 (2026-10-24): Production's cost goes on the order; the push
     // (after the save) puts it + the outsourced money on the BOM — for all
     // three kinds (a Sub Child Part's typed cost used to be dropped here).
     const costUnit = order.orderKind === 'SubChildPart' ? 0 : unitNumber - 1;
-    await saveProductionCost(order._id, costUnit, productionCost, productionExpense, req.user.fullName || req.user.username || '');
+    await saveProductionExpense(order._id, costUnit, productionExpense, req.user.fullName || req.user.username || '');
 
     if (order.orderKind === 'ChildPart') {
       if (!order.subChildPartItem) return res.status(400).json({ success: false, message: 'This order has no linked Child Part Item.' });
@@ -3413,15 +3767,17 @@ export const submitBatchQcStep = async (req, res) => {
 
     const isTrueLastStep = idx === procs.length - 1;
     const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
-    const productionCost = toNonNegNumber(req.body.productionCost);
+    // Stage 6 (2026-11-12): the expense only — the cost is the crews' labour.
     const productionExpense = toNonNegNumber(req.body.productionExpense);
+    let fin;
+    try { fin = await finishTime(req, order, 0, idx, proc); } catch (e) { return timeFail(res, e); }
 
     const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
     const existing = qcJob.batchSteps.find(b => b.category === proc.category && b.stepName === proc.step);
     const isFirstSubmission = !existing || existing.attempts.length === 0;
 
-    if (isTrueLastStep && isFirstSubmission && (productionCost === undefined || productionExpense === undefined)) {
-      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this step.' });
+    if (isTrueLastStep && isFirstSubmission && productionExpense === undefined) {
+      return res.status(400).json({ success: false, message: "productionExpense (a non-negative number) is required to submit this step. Labour is worked out from the crew's hours." });
     }
     // Slice 4 (2026-10-24): the batch's last in-house step (outsourced steps
     // after it) asks too — once. Saved on the order (unitCosts, batch = 0).
@@ -3434,15 +3790,19 @@ export const submitBatchQcStep = async (req, res) => {
     // out into qcStepService.js so both read the exact same accounting.
     let entry;
     try {
-      ({ entry } = submitBatchStepForQC(qcJob, order, procs, idx, req.user.fullName || req.user.username || 'Production'));
+      ({ entry } = submitBatchStepForQC(qcJob, order, procs, idx, req.user.fullName || req.user.username || 'Production', { at: fin.at }));
+      if (fin.backdated) { proc.completedEnteredAt = new Date(); proc.completedEnteredBy = req.user.fullName || req.user.username || ''; }
     } catch (e) {
       return res.status(e.status || 500).json({ success: false, message: e.message });
     }
     if (isTrueLastStep && isFirstSubmission) {
-      entry.pendingProductionCost = productionCost;
       entry.pendingProductionExpense = productionExpense;
     }
-    if (costAsk.needed) await saveProductionCost(order._id, 0, costAsk.cost, costAsk.expense, req.user.fullName || req.user.username || '');
+    if (costAsk.needed) await saveProductionExpense(order._id, 0, costAsk.expense, req.user.fullName || req.user.username || '');
+    // A redo (13 Nov 2026): any extra expense is ADDED to the one already entered.
+    else if (!isFirstSubmission && productionExpense > 0 && isLastInHouseStep(procs, idx) && productionExpenseOf(order, 0).entered) {
+      await addProductionExpense(order._id, 0, productionExpense, req.user.fullName || req.user.username || '');
+    }
 
     await qcJob.save();
     await order.save();
@@ -3484,8 +3844,10 @@ export const submitUnitQcStep = async (req, res) => {
 
     const isTrueLastStep = idx === procs.length - 1;
     const toNonNegNumber = (v) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : undefined; };
-    const productionCost = toNonNegNumber(req.body.productionCost);
+    // Stage 6 (2026-11-12): the expense only — the cost is the crews' labour.
     const productionExpense = toNonNegNumber(req.body.productionExpense);
+    let fin;
+    try { fin = await finishTime(req, order, unitNumber - 1, idx, proc); } catch (e) { return timeFail(res, e); }
 
     const qcJob = await ensureQCJobForOrder(order, req.user.fullName || req.user.username, req.user._id);
     const unit = qcJob.unitChecks.find(u => u.unitNumber === unitNumber);
@@ -3493,20 +3855,24 @@ export const submitUnitQcStep = async (req, res) => {
     const existing = unit.steps.find(s => s.category === proc.category && s.stepName === proc.step);
     const isFirstSubmission = !existing || existing.attempts.length === 0;
 
-    if (isTrueLastStep && isFirstSubmission && (productionCost === undefined || productionExpense === undefined)) {
-      return res.status(400).json({ success: false, message: 'productionCost and productionExpense (non-negative numbers) are required to submit this step.' });
+    if (isTrueLastStep && isFirstSubmission && productionExpense === undefined) {
+      return res.status(400).json({ success: false, message: "productionExpense (a non-negative number) is required to submit this step. Labour is worked out from the crew's hours." });
     }
     // Slice 4 (2026-10-24): the unit's last in-house step (outsourced steps
     // after it) asks too — once. Saved on the order (unitCosts).
     const costAsk = isFirstSubmission ? productionCostAsk(order, procs, idx, unitNumber - 1, req.body) : { needed: false };
     if (costAsk.error) return res.status(400).json({ success: false, message: costAsk.error });
 
-    const entry = submitUnitStepForQC(qcJob, unit, proc, req.user.fullName || req.user.username || 'Production');
+    const entry = submitUnitStepForQC(qcJob, unit, proc, req.user.fullName || req.user.username || 'Production', { at: fin.at });
+    if (fin.backdated) { proc.completedEnteredAt = new Date(); proc.completedEnteredBy = req.user.fullName || req.user.username || ''; }
     if (isTrueLastStep && isFirstSubmission) {
-      entry.pendingProductionCost = productionCost;
       entry.pendingProductionExpense = productionExpense;
     }
-    if (costAsk.needed) await saveProductionCost(order._id, unitNumber - 1, costAsk.cost, costAsk.expense, req.user.fullName || req.user.username || '');
+    if (costAsk.needed) await saveProductionExpense(order._id, unitNumber - 1, costAsk.expense, req.user.fullName || req.user.username || '');
+    // A redo (13 Nov 2026): any extra expense is ADDED to the one already entered.
+    else if (!isFirstSubmission && productionExpense > 0 && isLastInHouseStep(procs, idx) && productionExpenseOf(order, unitNumber - 1).entered) {
+      await addProductionExpense(order._id, unitNumber - 1, productionExpense, req.user.fullName || req.user.username || '');
+    }
 
     await qcJob.save();
     await order.save();
@@ -3659,7 +4025,15 @@ export const getTeams = async (req, res) => {
       assignmentStats: statsByTeam[String(t._id)] || { total: 0, completed: 0 },
     }));
 
-    res.json({ success: true, data: await decorateTeams(companyId, teamsWithStats) });
+    // This month's performance score (feature 10, 2026-11-13; replaced efficiency):
+    // { score, band, timing, accuracy, measured, enough, qcMissing } — score null under 3 steps.
+    const sc = await scoreMaps(companyId, {}, { userQuery: await productionUserQuery(companyId) });
+    const decorated = (await decorateTeams(companyId, teamsWithStats)).map((t) => ({
+      ...t,
+      score: sc.teams[String(t._id)] || null,
+      peopleInfo: (t.peopleInfo || []).map((p) => ({ ...p, score: sc.people[String(p._id)] || null })),
+    }));
+    res.json({ success: true, data: decorated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -3692,7 +4066,21 @@ export const getTeamPeople = async (req, res) => {
   } catch (err) { teamFail(res, err); }
 };
 
-// PUT /teams/:teamId: rename, change people, supervisor or skills.
+// GET /teams/skills: the skill list, from the Process Templates (2026-11-12).
+export const getTeamSkills = async (req, res) => {
+  try {
+    res.json({ success: true, skills: await skillCatalog(req.user.companyId) });
+  } catch (err) { teamFail(res, err); }
+};
+
+// PUT /teams/people/:userId/skills: Production sets one person's skills.
+export const setTeamPersonSkills = async (req, res) => {
+  try {
+    res.json({ success: true, ...(await setPersonSkills(req.user.companyId, req.params.userId, req.body?.skills, { by: req.user._id })) });
+  } catch (err) { teamFail(res, err); }
+};
+
+// PUT /teams/:teamId: rename, change people or supervisor. Skills come from the people.
 export const updateTeam = async (req, res) => {
   try {
     const team = mongoose.isValidObjectId(req.params.teamId)

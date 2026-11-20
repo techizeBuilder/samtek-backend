@@ -3,7 +3,7 @@ import { authenticateToken } from '../middleware/auth.js';
 import { checkPermission, checkAnyPermission } from '../middleware/permissions.js';
 import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
-  getMachines, createMachine, updateMachine, getMachineMaterialGrades,
+  getMachines, createMachine, updateMachine, getMachineMaterialGrades, getFreeProductCode,
   discontinueMachine, reactivateMachine,
   getBOMCostByMachineCode,
   getPrototypes, createPrototype, updatePrototype,
@@ -197,6 +197,7 @@ router.delete('/expenses/:id', expensesDelete, deleteRDExpense);
 router.get('/machines', productMasterView, getMachines);
 // Material Grades used by the products of a classification (filter list, 2026-10-19).
 router.get('/machines/material-grades', productMasterView, getMachineMaterialGrades);
+router.get('/machines/free-code', productMasterView, getFreeProductCode);
 router.post('/machines', productMasterAdd, createMachine);
 router.put('/machines/:id', productMasterEdit, updateMachine);
 router.put('/machines/:id/discontinue', productMasterEdit, discontinueMachine);
@@ -371,6 +372,7 @@ router.put('/process-category-options/:id', bomManagementEdit, updateProcessCate
 router.delete('/process-category-options/:id', bomManagementDelete, deleteProcessCategoryOption);
 router.post('/process-category-options/:id/internal-processes', bomManagementAdd, addInternalProcessOption);
 router.put('/process-category-options/:id/internal-processes/rename', bomManagementEdit, renameInternalProcessOption);
+// (The usual days away moved to Purchase → Inventory → Job Work Time, 19 Nov 2026: PUT /api/accounts/purchases/job-work-time.)
 router.delete('/process-category-options/:id/internal-processes/:name', bomManagementDelete, deleteInternalProcessOption);
 
 // Sub Child Part Master — the new, standalone leaf node (see

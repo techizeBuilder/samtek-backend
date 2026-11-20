@@ -46,6 +46,9 @@ const MachineBOMSchema = new mongoose.Schema({
   // ProcessDefinitionSchema.js) — an OutSource internal process's
   // materialRefs points at entries in materials[] above.
   processDefinition: { type: [ProcessCategorySchema], default: [] },
+  // Delivery estimate (2026-11-18, decision M): R&D's usual number of people working on
+  // this part at once, used until crew history exists. null = not typed.
+  usualPeople: { type: Number, default: null, min: 1 },
   // Assembly labor / one-off build cost — same manual-estimate shape as the
   // OLD RDBOM's own Production Cost card. productionCostSource stays
   // 'Manual' in this pass — no Production-side write path to this new model
@@ -61,6 +64,10 @@ const MachineBOMSchema = new mongoose.Schema({
   jobWorkCostUpdatedAt: { type: Date, default: null },
   // Still waiting for a per minute / per hour time on these Outsource Orders.
   jobWorkWaitingFor: { type: [String], default: [] },
+  // Stage 6 (2026-11-12): productionCost above is now LABOUR (crew hours ×
+  // rate), worked out from the build in costFrom. People it counted ₹0 for
+  // (no salary entered) — the price is provisional until HR enters it.
+  labourMissing: { type: [String], default: [] },
   // The build that last set the actual cost ("the latest build wins").
   costFrom: {
     orderId: { type: String, default: null },

@@ -1,11 +1,12 @@
 import PurchaseExpense, { PURCHASE_EXPENSE_CATEGORIES } from '../models/PurchaseExpense.js';
+import { isPurchaseHead } from '../middleware/purchaseGates.js';
 
 const cid = (req) => req.user.companyId;
 
-const HEAD_ROLES = ['Accounts Head', 'Superadmin', 'Super Admin'];
-
+// The Purchase Head (purchase.purchaseHead, 2026-11-16) manages anyone's expense;
+// it was the Accounts Head role, which may now run finance only.
 const canManage = (req, expense) => {
-  if (HEAD_ROLES.includes(req.user.role)) return true;
+  if (isPurchaseHead(req.user)) return true;
   return expense.addedBy.toString() === req.user._id.toString();
 };
 

@@ -19,7 +19,7 @@ import { postEntry, gstLines } from './purchaseLedgerService.js';
 import { fullDueDate, poPaymentStatus, startOfDay } from './purchaseBillService.js';
 import { logPoEvent, inr } from './purchaseAuditService.js';
 import { fmtDay } from './deliveryFollowUpService.js';
-import notificationService from './notificationService.js';
+import notificationService, { HOLDERS } from './notificationService.js';
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 export const prIdsOfLine = (line) => (line?.purchaseRequests?.length ? line.purchaseRequests : (line?.purchaseRequest ? [line.purchaseRequest] : [])).map(id => String(id?._id || id));
@@ -245,12 +245,12 @@ export async function settleIfFullyAccepted(po, bill, user = null, req = null) {
   });
   if (balance > 0) {
     try {
-      await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], {
+      await notificationService.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.vendorPayments, {
         title: 'Purchase ready for full payment',
         message: `${po.purchaseOrderNumber} from ${vendorName}: everything is received and QC-passed — ${inr(balance)} due ${doc.creditDays ? fmtDay(doc.dueDate) : 'now'}.`,
         type: 'purchase',
         ...accountsAudience(po),
-        data: { purchaseId: String(po._id), billId: String(doc._id), fullyAccepted: true },
+        data: { purchaseId: String(po._id), billId: String(doc._id), vendorId: String(po.supplier?._id || po.supplier || ''), fullyAccepted: true },
       });
     } catch (err) {
       console.error('Notify Accounts of a fully accepted PO failed:', err.message);
@@ -268,19 +268,19 @@ export async function runPaymentOverdueSweep(now = new Date(), { companyId = nul
   if (unit) query.unit = unit;
   const bills = await PurchaseInvoice.find(query)
     .populate({ path: 'purchaseOrder', select: 'purchaseOrderNumber companyId supplier', populate: { path: 'supplier', select: 'supplierName' } })
-    .populate({ path: 'outsourceOrder', select: 'orderNo vendorName' });
+    .populate({ path: 'outsourceOrder', select: 'orderNo vendorName vendor' });
   let flagged = 0;
   for (const b of bills) {
     const oso = b.outsourceOrder;
     if (oso) {
       await PurchaseInvoice.updateOne({ _id: b._id }, { overdueNotifiedAt: now });
       try {
-        await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], {
+        await notificationService.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.vendorPayments, {
           title: 'Outsource payment overdue',
           message: `${oso.orderNo} from ${oso.vendorName || 'the vendor'}: ${inr(b.totalAmount - b.paidAmount)} was due ${fmtDay(b.dueDate)}.`,
           type: 'purchase',
           targetCompanyId: b.companyId,
-          data: { outsourceOrderId: String(oso._id), billId: String(b._id), paymentOverdue: true },
+          data: { outsourceOrderId: String(oso._id), billId: String(b._id), vendorId: String(oso.vendor || ''), paymentOverdue: true },
         });
       } catch (err) {
         console.error('Outsource payment overdue notification failed:', err.message);
@@ -293,12 +293,12 @@ export async function runPaymentOverdueSweep(now = new Date(), { companyId = nul
     await mongoose.model('Purchase').updateOne({ _id: po._id }, { paymentStatus: 'Overdue' });
     await PurchaseInvoice.updateOne({ _id: b._id }, { overdueNotifiedAt: now });
     try {
-      await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], {
+      await notificationService.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.vendorPayments, {
         title: 'Purchase payment overdue',
         message: `${po.purchaseOrderNumber} from ${po.supplier?.supplierName || 'the vendor'}: ${inr(b.totalAmount - b.paidAmount)} was due ${fmtDay(b.dueDate)}.`,
         type: 'purchase',
         targetCompanyId: b.companyId,
-        data: { purchaseId: String(po._id), billId: String(b._id), paymentOverdue: true },
+        data: { purchaseId: String(po._id), billId: String(b._id), vendorId: String(po.supplier?._id || po.supplier || ''), paymentOverdue: true },
       });
     } catch (err) {
       console.error('Payment overdue notification failed:', err.message);

@@ -38,6 +38,9 @@ const stepsForKind = (orderKind) => orderKind === 'ChildPart' ? SUB_CHILD_PART_S
 const ReworkSchema = new mongoose.Schema({
   date: { type: String, default: null },
   reason: { type: String, default: '' },
+  // How many pieces a batch QC sent back (2026-11-13). Empty on a unit and on
+  // reworks recorded before it was kept.
+  qty: { type: Number, default: null },
   rejectedBy: { type: String, default: '' },
   // QC's photos of what it rejected (urls) and the failed checks' names +
   // remarks (2026-10-30) — Production sees why next to the reason.
@@ -85,6 +88,7 @@ const ProcessStepSchema = new mongoose.Schema({
   // Operations per piece (2026-10-22, outsource "per job work" pricing) —
   // snapshot of the BOM step's own, so a later BOM edit doesn't change it.
   operation: { type: StepOperationSchema, default: null },
+  usualHoursPerPiece: { type: Number, default: null }, // copied from the BOM step (delivery estimate, 2026-11-18)
   // Only meaningful when type === 'Outsourcing' — drives the "waiting on
   // outsource" vs "send for outsourcing" UI (ProcessExecution.jsx, Stage 5).
   // Advanced by outsourceWorkController.js (Stage 3), never by the generic
@@ -110,6 +114,20 @@ const ProcessStepSchema = new mongoose.Schema({
   notes: { type: String, default: '' },
   reworks: { type: [ReworkSchema], default: [] },
   subEntries: { type: [SubEntrySchema], default: [] },
+  // Stage 5 (2026-11-12): who works the step is in StepCrewEntry. Production
+  // types the planned hours (required to start); the lunches inside the step
+  // are confirmed when it's completed.
+  plannedHours: { type: Number, default: null },
+  lunchConfirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  lunchConfirmedByName: { type: String, default: '' },
+  lunchConfirmedAt: { type: Date, default: null },
+  // Feature 7 (2026-11-12): startedAt / completedAt may be the real time
+  // Production typed ("started at 09:00"); when back-dated, the moment it was
+  // entered and by whom (null = entered at that time).
+  startedEnteredAt: { type: Date, default: null },
+  startedEnteredBy: { type: String, default: '' },
+  completedEnteredAt: { type: Date, default: null },
+  completedEnteredBy: { type: String, default: '' },
 }, { _id: false });
 
 // One Production-initiated (or, for Sub Child Part's auto-routed first
@@ -498,6 +516,9 @@ const ProductionOrderSchema = new mongoose.Schema({
       productionExpense: { type: Number, default: null },
       enteredAt: { type: Date, default: null },
       enteredBy: { type: String, default: '' },
+      // Each amount that makes up productionExpense (2026-11-13): the first one,
+      // then any extra a QC redo cost — added, never replacing what was entered.
+      expenseLog: { type: [{ amount: Number, by: String, at: Date, redo: Boolean, _id: false }], default: [] },
       finishedAt: { type: Date, default: null },
       finishedQty: { type: Number, default: null },
       jobWorkCost: { type: Number, default: null },
@@ -618,6 +639,8 @@ const ProductionOrderSchema = new mongoose.Schema({
 ProductionOrderSchema.index({ company: 1, status: 1 });
 ProductionOrderSchema.index({ company: 1, priority: 1 });
 ProductionOrderSchema.index({ company: 1, createdAt: -1 });
+// The scorecard's open-steps check reads orders still open, or changed since a period began (17 Nov 2026).
+ProductionOrderSchema.index({ company: 1, updatedAt: -1 });
 
 // Releases any MaterialReservation this order holds once it's genuinely
 // done — schema-level so every current AND future path that flips
@@ -636,6 +659,21 @@ ProductionOrderSchema.post('save', async function (doc) {
     await releaseReservationsForOrder(doc._id);
   } catch (err) {
     console.error(`[ProductionOrder] Failed to release material reservations for ${doc.orderId}:`, err);
+  }
+});
+
+// Stage 6 (2026-11-12): a step that just finished closes its crew at once
+// (leftAt = its completedAt) and saves its run. Before, crews closed only when
+// someone next opened a crew, and a QC pass re-stamps completedAt — so a crew
+// read only after the QC pass stretched everyone's hours over the QC wait.
+// Same schema-level pattern as above: every path that saves the order is
+// covered. One cheap query when the order has no open crew.
+ProductionOrderSchema.post('save', async function (doc) {
+  try {
+    const { closeFinishedCrews } = await import('../services/crew/crewService.js');
+    await closeFinishedCrews(doc.company, { orderId: doc._id });
+  } catch (err) {
+    console.error(`[ProductionOrder] Failed to close finished crews for ${doc.orderId}:`, err.message);
   }
 });
 

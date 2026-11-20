@@ -146,7 +146,9 @@ productionBatchSchema.index(
 );
 
 // PRE-SAVE MIDDLEWARE
-productionBatchSchema.pre('save', function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+productionBatchSchema.pre('save', function () {
   try {
     // Auto-calculate qtyAchieved based on: (totalBatchAdjusted × qtyPerBatch) - productionLoss
     if (this.isModified('qtyPerBatch') || this.isModified('productionLoss') || this.isModified('totalBatchAdjusted') || this.isNew) {
@@ -172,9 +174,8 @@ productionBatchSchema.pre('save', function(next) {
       this.productionDate.setUTCHours(0, 0, 0, 0);
     }
     
-    next();
   } catch (error) {
-    next(error);
+    throw error;
   }
 });
 

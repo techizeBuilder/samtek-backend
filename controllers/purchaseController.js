@@ -12,6 +12,7 @@ import { purchaseOrderPdfFor } from '../services/purchaseOrderPdf.js';
 import { DEPARTMENTS, reportMissingMailbox } from '../config/mailAccounts.js';
 import { USER_ROLES } from '../shared/schema.js';
 import { applyPricingToItem, cascadeRecalculateToConsumers } from '../services/itemPricingService.js';
+import { buyDaysInfo, jobWorkTimeRows, setJobWorkDays, setUsualDaysToBuy, PurchaseDaysError } from '../services/purchaseDaysService.js';
 import notificationService from '../services/notificationService.js';
 import { getOrCreateSettings } from './purchaseSettingsController.js';
 import { eligibleVendorError } from '../services/vendorApprovalService.js';
@@ -440,6 +441,19 @@ export async function finalizePurchase(purchase, user, req = null) {
   });
   // Store expected receipts (2026-10-10): Store hears about it now.
   await notifyStoreOfIncomingPO(purchase);
+  // An advance on a real PO: Accounts pays it (2026-11-16, Purchase separated from
+  // Accounts — the buyer may no longer be the one who pays).
+  const advancePct = Number(purchase.paymentTerms?.advancePercent) || 0;
+  if (advancePct > 0) {
+    try {
+      const [{ notifyAdvanceToPay }, { advanceAmountOf }] = await Promise.all([import('../services/moneyNotices.js'), import('../services/purchaseBillService.js')]);
+      const vendor = await Supplier.findById(purchase.supplier?._id || purchase.supplier).select('supplierName').lean();
+      await notifyAdvanceToPay({
+        companyId, number: purchase.purchaseOrderNumber, vendorName: vendor?.supplierName, percent: advancePct,
+        amount: advanceAmountOf(purchase.grandTotal, advancePct), data: { purchaseId: String(purchase._id), vendorId: String(purchase.supplier?._id || purchase.supplier || '') },
+      });
+    } catch (err) { console.error('Advance-to-pay notice failed:', err.message); }
+  }
 }
 
 // Emails the PO to its vendor (procurement-v2, 2026-10-08) — since 2026-10-29
@@ -1167,15 +1181,20 @@ const companyScopeFilter = (req) => {
   };
 };
 
-// GET /api/accounts/purchases/inventory?productKind=none|Machine|Motor&search=
+// GET /api/accounts/purchases/inventory?productKind=none|Machine|Motor|ChildPart|SubChildPart&search=&page=&limit=
+// Paged in the database (19 Nov 2026, delivery estimate §13): total and the tab's
+// stock value come from the database too, and each row says what the delivery
+// estimate uses for its days to buy (buyDays) — read for this page only.
 export const getPurchaseInventoryItems = async (req, res) => {
   try {
     const { productKind, search = '' } = req.query;
     const scope = companyScopeFilter(req);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
 
     // No company on this user => no items, never leak un-scoped data.
     if (!scope) {
-      return res.json({ success: true, items: [] });
+      return res.json({ success: true, items: [], total: 0, page: 1, pages: 1, limit, stockValue: 0 });
     }
 
     const filter = {
@@ -1195,15 +1214,66 @@ export const getPurchaseInventoryItems = async (req, res) => {
       delete filter.$or;
     }
 
-    const items = await Item.find(filter)
-      .select('_id name code category subCategory unit qty purchaseCost weightUnitPrice fabricationRef dimensionVariants mrp salePrice profitPercent discountPercent productKind updatedAt pricePending purchaseCostKind purchaseCostAt')
-      .sort({ name: 1 })
-      .lean();
+    // Stock value: cost × qty; a fabrication item: price per kg × Σ size stock × kg per piece.
+    const kgOf = { $reduce: { input: { $ifNull: ['$dimensionVariants', []] }, initialValue: 0, in: { $add: ['$$value', { $multiply: [{ $ifNull: ['$$this.subStock', 0] }, { $ifNull: ['$$this.weightPerPieceKg', 0] }] }] } } };
+    const [items, [totals = { total: 0, stockValue: 0 }] = []] = await Promise.all([
+      Item.find(filter)
+        .select('_id name code category subCategory unit qty purchaseCost weightUnitPrice fabricationRef dimensionVariants mrp salePrice profitPercent discountPercent productKind updatedAt pricePending purchaseCostKind purchaseCostAt leadTime')
+        .sort({ name: 1, _id: 1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Item.aggregate([
+        { $match: filter },
+        { $group: { _id: null, total: { $sum: 1 }, stockValue: { $sum: { $cond: [{ $ifNull: ['$fabricationRef', false] }, { $multiply: [{ $ifNull: ['$weightUnitPrice', 0] }, kgOf] }, { $multiply: [{ $ifNull: ['$purchaseCost', 0] }, { $ifNull: ['$qty', 0] }] }] } } } },
+      ]),
+    ]);
+    const buyDays = await buyDaysInfo(req.user.companyId, items);
+    for (const it of items) it.buyDays = buyDays.get(String(it._id)) || null;
 
-    res.json({ success: true, items });
+    res.json({ success: true, items, total: totals.total, page, pages: Math.max(1, Math.ceil(totals.total / limit)), limit, stockValue: Math.round(totals.stockValue * 100) / 100 });
   } catch (error) {
     console.error('❌ Get purchase inventory items error:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch inventory items', error: error.message });
+  }
+};
+
+// PUT /api/accounts/purchases/inventory/:id/usual-days { days } — the item's usual
+// days to buy for Sales' delivery estimate (19 Nov 2026, §13). Only leadTime
+// changes: no re-pricing, the cost and its kind stay as they are.
+export const updateUsualDaysToBuy = async (req, res) => {
+  try {
+    const scope = companyScopeFilter(req);
+    if (!scope) return res.status(404).json({ success: false, message: 'Item not found' });
+    const item = await setUsualDaysToBuy(scope, req.params.id, req.body?.days);
+    res.json({ success: true, message: 'Usual days to buy saved', item });
+  } catch (error) {
+    if (error instanceof PurchaseDaysError) return res.status(error.status).json({ success: false, message: error.message });
+    console.error('❌ Update usual days to buy error:', error);
+    res.status(500).json({ success: false, message: 'Failed to save usual days to buy', error: error.message });
+  }
+};
+
+// GET /api/accounts/purchases/job-work-time — the Job Work Time tab (19 Nov 2026, §13).
+export const getJobWorkTime = async (req, res) => {
+  try {
+    if (!req.user.companyId) return res.json({ success: true, rows: [] });
+    res.json({ success: true, rows: await jobWorkTimeRows(req.user.companyId) });
+  } catch (error) {
+    console.error('❌ Get job work time error:', error);
+    res.status(500).json({ success: false, message: 'Failed to load job work time', error: error.message });
+  }
+};
+
+// PUT /api/accounts/purchases/job-work-time { process, days } — moved from R&D's process templates.
+export const setJobWorkTime = async (req, res) => {
+  try {
+    if (!req.user.companyId) return res.status(404).json({ success: false, message: 'Process not found.' });
+    res.json({ success: true, data: await setJobWorkDays(req.user.companyId, req.body?.process, req.body?.days) });
+  } catch (error) {
+    if (error instanceof PurchaseDaysError) return res.status(error.status).json({ success: false, message: error.message });
+    console.error('❌ Set job work time error:', error);
+    res.status(500).json({ success: false, message: 'Failed to save job work time', error: error.message });
   }
 };
 

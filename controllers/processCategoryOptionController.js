@@ -9,6 +9,7 @@ import ProcessCategoryOption from '../models/ProcessCategoryOption.js';
 import { Item } from '../models/Inventory.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
 import MachineBOM from '../models/MachineBOM.js';
+import { followTemplateRename } from '../services/productionTeamService.js';
 
 const BOM_LEVELS = ['SubChildPart', 'ChildPart', 'Machine'];
 
@@ -154,6 +155,7 @@ export const renameInternalProcessOption = async (req, res) => {
     }
 
     option.internalProcesses = option.internalProcesses.map(p => (p === oldName ? trimmedNew : p));
+    option.usualDays = (option.usualDays || []).map(u => (u.process === oldName ? { process: trimmedNew, days: u.days } : u));
     await option.save();
 
     const src = BOM_LEVEL_SOURCES[option.bomLevel];
@@ -165,12 +167,17 @@ export const renameInternalProcessOption = async (req, res) => {
       { $set: { [`${src.path}.$[cat].internalProcesses.$[proc].name`]: trimmedNew } },
       { arrayFilters: [{ 'cat.label': option.label }, { 'proc.name': oldName }] }
     );
+    // People's production skills follow, once no template has the old name (2026-11-12).
+    await followTemplateRename(companyId, oldName, trimmedNew);
 
     res.json({ success: true, data: option });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// (The usual days a process spends away when sent out moved to Purchase → Inventory →
+// Job Work Time on 19 Nov 2026 — services/purchaseDaysService.js setJobWorkDays.)
 
 // DELETE /api/rd/process-category-options/:id/internal-processes/:name —
 // blocked while any BOM at this level still has this internal process
@@ -197,6 +204,7 @@ export const deleteInternalProcessOption = async (req, res) => {
     }
 
     option.internalProcesses = option.internalProcesses.filter(p => p !== name);
+    option.usualDays = (option.usualDays || []).filter(u => u.process !== name); // its usual days go with it
     await option.save();
     res.json({ success: true, data: option });
   } catch (err) {

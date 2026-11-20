@@ -210,7 +210,9 @@ dispatchConsoleSchema.virtual('isVerified').get(function() {
 });
 
 // Auto-calculate dependent fields before saving
-dispatchConsoleSchema.pre('save', function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+dispatchConsoleSchema.pre('save', function () {
   // Calculate totalAvailableStock = packing + closing + returns
   this.totalAvailableStock = 
     (this.packedQuantityReadyForDispatch || 0) + 
@@ -232,11 +234,12 @@ dispatchConsoleSchema.pre('save', function(next) {
     (this.closingStockEndOfDayBalance || 0) - 
     (this.physicalStockEntryManualVerification || 0);
   
-  next();
 });
 
 // Auto-calculate fields when updating
-dispatchConsoleSchema.pre('findOneAndUpdate', function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+dispatchConsoleSchema.pre('findOneAndUpdate', function () {
   const update = this.getUpdate();
   
   if (update.$set) {
@@ -274,7 +277,6 @@ dispatchConsoleSchema.pre('findOneAndUpdate', function(next) {
     }
   }
   
-  next();
 });
 
 // Static method to generate next DCno

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Samtek Remaining Work</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Figtree:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+  /* Layout: one reading column. Status, kya banana baaki hai, aapse sawal, chhote items. */
+  :root {
+    --bg: #F3F5F7;
+    --surface: #FFFFFF;
+    --fg: #17202B;
+    --muted: #5A6576;
+    --line: #DDE2E8;
+    --accent: #0D6B65;
+    --accent-soft: #E0F0EE;
+    --good: #16703D;
+    --good-soft: #E2F2E7;
+    --warn: #975207;
+    --warn-soft: #FAEDDA;
+    --info: #2E5C99;
+    --info-soft: #E5EDF8;
+    --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+    --body: "Figtree", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11161C; --surface: #19202A; --fg: #E5E9EF; --muted: #98A2B2; --line: #29313D;
+      --accent: #4CC0B5; --accent-soft: #15302E;
+      --good: #5CCB8A; --good-soft: #142E1F; --warn: #EFA64F; --warn-soft: #36260F;
+      --info: #8FB4EA; --info-soft: #18263A;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #11161C; --surface: #19202A; --fg: #E5E9EF; --muted: #98A2B2; --line: #29313D;
+    --accent: #4CC0B5; --accent-soft: #15302E;
+    --good: #5CCB8A; --good-soft: #142E1F; --warn: #EFA64F; --warn-soft: #36260F;
+    --info: #8FB4EA; --info-soft: #18263A;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.6;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 32px 64px;
+  }
+  .page { max-width: 780px; margin-inline: auto; display: grid; gap: 40px; }
+
+  header { display: grid; gap: 6px; }
+  .eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+  h1 { font-size: clamp(30px, 6vw, 42px); line-height: 1.1; }
+  .lede { color: var(--muted); margin: 4px 0 0; max-width: 64ch; }
+
+  section { display: grid; gap: 14px; }
+  section > h2 { font-size: 24px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  section > h2 .en { font-family: var(--body); font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+  .sub { color: var(--muted); margin: -6px 0 0; max-width: 64ch; }
+  p { margin: 0; }
+  strong { font-weight: 600; }
+
+  .stages { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+  .stage { display: grid; gap: 4px; align-content: start; padding: 10px 8px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); min-width: 0; }
+  .stage .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .stage .t { font-size: 13px; line-height: 1.3; font-weight: 600; overflow-wrap: anywhere; }
+  .stage.done { background: var(--good-soft); border-color: transparent; }
+  .stage.done .n { color: var(--good); }
+  .stage.check { background: var(--warn-soft); border-color: transparent; }
+  .stage.check .n { color: var(--warn); }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; background: var(--surface); border: 1px solid var(--line); }
+  .legend .l-done::before { background: var(--good-soft); border-color: var(--good); }
+  .legend .l-check::before { background: var(--warn-soft); border-color: var(--warn); }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; min-width: 560px; }
+  th, td { text-align: left; padding: 12px 14px; vertical-align: top; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: 0; }
+  th { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .chip { display: inline-block; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; white-space: nowrap; }
+  .chip.good { background: var(--good-soft); color: var(--good); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+  .chip.info { background: var(--info-soft); color: var(--info); }
+
+  .builds { list-style: none; margin: 0; padding: 0; display: grid; border-top: 1px solid var(--line); }
+  .build { display: grid; grid-template-columns: 72px 1fr; gap: 14px; padding-block: 18px; border-bottom: 1px solid var(--line); }
+  .build .tag { font-family: var(--mono); font-size: 13px; color: var(--accent); padding-top: 3px; }
+  .build-body { min-width: 0; display: grid; gap: 8px; }
+  .build h3 { font-size: 18px; line-height: 1.3; }
+  .build ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  .build .needs { font-size: 14px; color: var(--muted); }
+
+  .qgroup { display: grid; gap: 10px; }
+  .qgroup h3 { font-size: 17px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .qgroup h3 .for { font-family: var(--body); font-size: 13px; font-weight: 500; color: var(--muted); }
+  .qs { margin: 0; padding-left: 26px; display: grid; gap: 8px; }
+  .qs li { padding-left: 4px; }
+  .qs li::marker { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .qs .why { display: block; color: var(--muted); font-size: 14px; }
+
+  .box { border-radius: 12px; padding: 16px 18px; display: grid; gap: 8px; }
+  .box h3 { font-size: 17px; }
+  .box ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+  .box.small { background: var(--info-soft); }
+  .box.small h3 { color: var(--info); }
+
+  @media (max-width: 620px) {
+    .stages { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 480px) {
+    body { font-size: 15px; }
+    .build { grid-template-columns: 1fr; gap: 4px; }
+  }
+</style>
+
+<div class="page">
+  <header>
+    <span class="eyebrow">Samtek ERP · 12 November 2026 tak ka status</span>
+    <h1>Baaki kaam</h1>
+    <p class="lede">3 November ki meeting me teen cheezen maangi gayi thi: machines ka low-stock sweep, manpower ke saath attendance aur labour cost, aur roles se departments. Departments poora ho gaya. Machine sweep ban gaya hai, final check baaki hai. Manpower sabse bada kaam hai: abhi ke 6 stages me se 4 ban gaye, 2 baaki hain. Baaki kaam ke liye kuch jawab aapse chahiye, wo section 3 me hain.</p>
+  </header>
+
+  <section>
+    <h2>1. Abhi kahan hain <span class="en">Where things stand</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Feature</th><th>Status</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>Roles se departments</td><td><span class="chip good">Complete</span></td><td>Bana aur check ho gaya.</td></tr>
+          <tr><td>Machines ka low-stock sweep</td><td><span class="chip warn">Final check</span></td><td>Bana hai. Machine minimum stock se neeche jaaye to apne aap stock order banta hai, jaise Child aur Sub Child Part me hota hai. Screen pe final check baaki hai.</td></tr>
+          <tr><td>Manpower, attendance aur labour cost</td><td><span class="chip info">6 me se 4 stages</span></td><td>Neeche stages dekhiye.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <ol class="stages" aria-label="Manpower ke stages">
+      <li class="stage done"><span class="n">1</span><span class="t">Bina login ke workers</span></li>
+      <li class="stage done"><span class="n">2</span><span class="t">Device se attendance</span></li>
+      <li class="stage done"><span class="n">3</span><span class="t">Payroll</span></li>
+      <li class="stage check"><span class="n">4</span><span class="t">Logon se team</span></li>
+      <li class="stage"><span class="n">5</span><span class="t">Kaam assign, hours ke saath</span></li>
+      <li class="stage"><span class="n">6</span><span class="t">Labour cost price me</span></li>
+    </ol>
+    <div class="legend"><span class="l-done">Bana aur check hua</span><span class="l-check">Bana, final check baaki</span><span>Banana baaki</span></div>
+
+    <p><strong>Manpower me jo ho chuka:</strong> HR bina login ke workers add karta hai. Attendance aapke attendance device se aati hai, half day aur weekly off ke saath. Payroll ab working days ki salary deta hai: half day, Paid ya Unpaid holiday, HR ki daali hui leave, aur payslip pe sahi pay days. Production team sirf HR ke daale logon se banata hai. Saath me HR ki permissions aur approvals ki kuch gaps bhi band ki.</p>
+  </section>
+
+  <section>
+    <h2>2. Banana baaki <span class="en">Still to build</span></h2>
+    <ol class="builds">
+      <li class="build"><span class="tag">Stage 5</span><div class="build-body">
+        <h3>Kaam ek aadmi ya poori team ko, hours ke saath</h3>
+        <ul>
+          <li>Production step ko team ke ek aadmi ya poori team ko deta hai, aur planned hours likhta hai.</li>
+          <li>Step khatam hone pe system asli hours record karta hai, sirf utna time jitna har aadmi device ke hisaab se present tha.</li>
+          <li>Assign karte waqt dikhega aaj kaun present hai.</li>
+          <li>Team efficiency planned aur asli hours se nikalegi, type nahi hogi.</li>
+        </ul>
+        <p class="needs">Iske liye section 3 me "Hours aur cost" ke jawab chahiye.</p>
+      </div></li>
+      <li class="build"><span class="tag">Stage 6</span><div class="build-body">
+        <h3>Labour cost part aur machine ki price me</h3>
+        <ul>
+          <li>Asli hours × har aadmi ka rate (salary se) = kaam ki cost.</li>
+          <li>Ye cost part ki cost me, phir BOM me, phir machine ki MRP tak jaati hai, usi automatic price update se jo pehle se bana hai.</li>
+          <li>Aaj haath se type hone wali production cost ki jagah lega.</li>
+        </ul>
+        <p class="needs">Iske liye section 3 me "Hours aur cost" ke jawab chahiye.</p>
+      </div></li>
+      <li class="build"><span class="tag">Device</span><div class="build-body">
+        <h3>Live attendance device ka link chalu karna</h3>
+        <ul>
+          <li>Aapke e-timeoffice account ka link ban gaya aur test ho gaya. Aapke chune din pe saath me chalu karenge, phir har device code ko uske aadmi se match karenge.</li>
+        </ul>
+      </div></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>3. Aapse sawal <span class="en">Questions for you</span></h2>
+    <p class="sub">Jo bina in jawabon ke ban sakta tha, wo bana diya. Ye jawab tay karenge ki stage 5 aur 6 kaise kaam karein, aur attendance aur pay aur sahi ho.</p>
+
+    <div class="qgroup">
+      <h3>Attendance aur pay <span class="for">stage 2 aur 3 ko fine-tune karne ke liye</span></h3>
+      <ol class="qs">
+        <li>Device ke saare day status ki list bhej sakte hain? Half day, holiday, leave, aur "---CF" ka matlab kya hai. <span class="why">Abhi tak sirf P, A aur WO dikhe hain.</span></li>
+        <li>Agar punch bhool gaye, sirf in ya sirf out record hua, to kya hona chahiye?</li>
+        <li>Device ka overtime pay hota hai? Hota hai to kis rate pe?</li>
+        <li>Sunday ya holiday pe kaam karne ki extra pay milti hai? <span class="why">Abhi system wo din gin ke dikhata hai, par kuch add nahi karta.</span></li>
+        <li>Late aana half day me badalna chahiye? Jaise 3 late = aadha din.</li>
+        <li>Saturday se Monday ki leave me Sunday leave balance se katna chahiye? <span class="why">Abhi katta hai. Pay dono tarah same hai.</span></li>
+        <li>Koi labour daily pay pe hai, monthly ki jagah?</li>
+        <li>Kya sab device pe punch karte hain, office staff aur Heads bhi? Koi field staff hai jo device tak nahi pahunchta, jaise service technician?</li>
+        <li>Device me 13 log October ke end se punch nahi kar rahe. Kya wo chhod chuke hain?</li>
+        <li>Factory se bahar kaam karne walon ke liye "Mark Attendance" page rehna chahiye?</li>
+      </ol>
+    </div>
+
+    <div class="qgroup">
+      <h3>Hours aur cost <span class="for">stage 5 aur 6 se pehle chahiye</span></h3>
+      <ol class="qs">
+        <li>Lunch kitne baje hota hai, aur kya shift ke hisaab se alag hai? <span class="why">Workers lunch pe punch nahi karte, isliye pata hona chahiye ki step ke hours se kab ka time nikalna hai.</span></li>
+        <li>Kaun kaun si shifts hain aur kaun kis shift me hai? Koi 9 ghante ki duty pe hai? <span class="why">Device ka data dikhata hai ki kuch log hain.</span></li>
+        <li>Hourly rate hamesha 8 ghante pe nikale, ya har aadmi ki apni shift ke hisaab se?</li>
+        <li>Ek step team ke do logon ko de sakte hain, ya sirf ek aadmi ya poori team?</li>
+        <li>Poori team ki cost me supervisor bhi gina jaaye?</li>
+        <li>Ek aadmi ek saath do steps pe ho to doosra rokna hai, ya uska time dono me baantna hai?</li>
+        <li>Step ko pause kar sakte hain, jaise material ka wait?</li>
+        <li>Absent aadmi ko assign kar sakte hain, ya sirf warning ke saath? Koi step ke beech me chhod de to?</li>
+        <li>QC rejection ke baad rework ke hours price me gine jaayein?</li>
+        <li>Abhi aakhri build price set karti hai. Wahi rakhein, ya pichhle kuch builds ka average?</li>
+        <li>Labour cost nikalne ke baad haath se type hone wali production cost hata dein? Typed expense rahega?</li>
+        <li>Labour cost kaun dekh sakta hai? <span class="why">Hours aur cost se kisi ki salary nikali ja sakti hai.</span></li>
+        <li>Jis worker ki salary nahi daali, uski cost ₹0 ginegi. Price pe warning dikhaye, "Price provisional" jaisi?</li>
+      </ol>
+    </div>
+
+    <div class="qgroup">
+      <h3>Pichhle kaam ke khule sawal</h3>
+      <ol class="qs">
+        <li>Accounts → Sales Invoice → "New Invoice" se koi seedha bill banata hai? <span class="why">Ye bina QC, dispatch ya serial number ke stock kam karta hai. Use nahi hota to chhupa denge.</span></li>
+        <li>Material QC pass hone ke baad kharab nikle, to aaj vendor ko wapas kaise jaata hai?</li>
+        <li>Outsource hua Child Part ya Machine unit QC me reject ho, to rework ke liye wapas kaise jaaye? <span class="why">Sub Child Part batch ka rework rasta hai, single unit ka abhi nahi.</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <div class="box small">
+      <h3>Chhote known items</h3>
+      <ul>
+        <li><strong>Automatic part orders ki delivery date</strong> banne wale din ki hi lagti hai, isliye wo turant "Overdue" dikhte hain. Unhe us order ki date leni chahiye jiske liye ban rahe hain.</li>
+        <li><strong>Payroll Run ka "PDF Slip" button</strong> payslip nahi dhoondta. Payslips page se download chalta hai.</li>
+        <li><strong>Company Admin, HR-Admin aur MIS Admin</strong> ka apna self-service menu abhi nahi hai (apni profile, attendance, payslips).</li>      </ul>
+    </div>
+  </section>
+</div>
+
+</html>

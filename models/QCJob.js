@@ -139,6 +139,8 @@ const StepAttemptSchema = new mongoose.Schema({
   decidedBy: { type: String, default: '' },
   decision: { type: String, enum: ['', 'Pass', 'Reject'], default: '' },
   rejectReason: { type: String, default: '' },
+  // How bad a reject is (feature 13, 2026-11-17: the employee scorecard's accuracy). null = not graded (counted as Major).
+  severity: { type: String, enum: ['Minor', 'Major', 'Critical', null], default: null },
   ...rejectionEvidence(), // on a Reject (2026-10-30)
 }, { _id: true, timestamps: true });
 
@@ -235,6 +237,8 @@ const BatchStepAttemptSchema = new mongoose.Schema({
   reworkQty: { type: Number, default: null },
   scrapQty: { type: Number, default: null },
   reason: { type: String, default: '' },
+  // How bad the rework / scrap is (feature 13, 2026-11-17). null = not graded (counted as Major).
+  severity: { type: String, enum: ['Minor', 'Major', 'Critical', null], default: null },
   ...rejectionEvidence(), // when anything goes to rework / scrap (2026-10-30)
 }, { _id: true, timestamps: true });
 
@@ -437,5 +441,7 @@ const QCJobSchema = new mongoose.Schema({
 
 QCJobSchema.index({ company: 1, status: 1 });
 QCJobSchema.index({ company: 1, source: 1 });
+// Delivery estimate (2026-11-18): the latest decided production checkpoints (the usual QC wait).
+QCJobSchema.index({ company: 1, source: 1, decidedAt: -1 });
 
 export default mongoose.model('QCJob', QCJobSchema);

@@ -8,7 +8,7 @@
 import { Item } from '../models/Inventory.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
 import MachineBOM from '../models/MachineBOM.js';
-import notificationService from './notificationService.js';
+import notificationService, { HOLDERS } from './notificationService.js';
 import { validateProcessDefinition } from '../utils/processDefinitionValidation.js';
 
 export const PART_KINDS = ['ChildPart', 'SubChildPart'];
@@ -54,7 +54,9 @@ export const needsEstimate = (item) => isBought(item) && !(Number(item.purchaseC
 
 async function notify(roles, companyId, title, message, data) {
   try {
-    await notificationService.notifyRoles(roles, {
+    // The Accounts roles in `roles` mean Purchase now (2026-11-16): the estimate is
+    // typed on Purchase → Inventory. Other roles (R&D, Company Admin) stay as they are.
+    await notificationService.notifyRolesAnd(roles, HOLDERS.purchase, {
       title, message, type: 'purchase', icon: 'package', priority: 'medium', data, targetCompanyId: companyId,
     });
   } catch (err) { console.error('[MakeBuy] notify failed:', err.message); }

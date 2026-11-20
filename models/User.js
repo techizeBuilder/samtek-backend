@@ -42,6 +42,19 @@ const userSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Production steps this person can do (2026-11-12): Process Template step
+  // names, set by Production on the Manpower page. Separate from the service
+  // technicians' own skills.
+  productionSkills: {
+    type: [String],
+    default: []
+  },
+  // When each skill was added (feature 13, 2026-11-17): the scorecard's Learning
+  // counts a new skill in the last 3 months. Skills from before have no entry.
+  productionSkillsAdded: {
+    type: [{ _id: false, skill: String, at: Date, by: { type: mongoose.Schema.Types.ObjectId, ref: 'User' } }],
+    default: []
+  },
   fullName: {
     type: String,
     trim: true

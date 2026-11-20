@@ -50,6 +50,8 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Aadhaar, PAN and the like aren't public: they open through GET /api/documents/file/:docId.
 app.use('/uploads/documents', (req, res) => res.status(403).json({ message: 'Open this document from inside the app.' }));
+// Conduct notes' files (feature 13) are about people: opened only through the API.
+app.use('/uploads/conduct-notes', (req, res) => res.status(403).json({ message: 'Open this file from inside the app.' }));
 // Serve static files from uploads directory (for company logos and other uploads) with CORS enabled
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
     setHeaders: (res) => {
@@ -72,8 +74,11 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
         }
         // HR permissions that were impossible to give (2026-11-11): once per user.
         try {
-            const { backfillHrPermissions } = await import('./services/hrPermissionBackfill.js');
+            const { backfillHrPermissions, grantHrFeatureOnce, grantModuleFeatureOnce, ORDER_TRACKING_GRANTS, separatePurchaseOnce } = await import('./services/hrPermissionBackfill.js');
             await backfillHrPermissions();
+            await grantHrFeatureOnce('manpowerScore', 'hrManpowerScoreGrantedAt'); // feature 10, 2026-11-13
+            await grantModuleFeatureOnce('orderTracking', 'orderTrackingGrantedAt', ORDER_TRACKING_GRANTS); // feature 12, 2026-11-14
+            await separatePurchaseOnce(); // Purchase separated from Accounts, 2026-11-16 (docs/purchase-separation)
         }
         catch (permError) {
             console.error('HR permission backfill failed:', permError.message);
@@ -243,6 +248,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const complaintRoutes = (await import('./routes/complaintServiceRoutes.js')).default;
             app.use('/api/complaints', complaintRoutes);
             console.log('Complaint and Service routes registered at /api/complaints');
+            // Order tracker (feature 12, 2026-11-14): Complaint team + Sales Head.
+            const orderTrackingRoutes = (await import('./routes/orderTrackingRoutes.js')).default;
+            app.use('/api/order-tracking', orderTrackingRoutes);
             // training management routes
             const trainingRoutes = (await import('./routes/trainingManagementRoutes.js')).default;
             app.use('/api/training', trainingRoutes);
@@ -526,6 +534,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.use('/api/attendance-device', (await import('./routes/attendanceDevice.routes.js')).default);
             app.use('/api/holidays', holidayRouter);
             app.use('/api/payroll', payrollRouter);
+            app.use('/api/manpower-score', (await import('./routes/manpowerScore.routes.js')).default); // feature 10
+            app.use('/api/scorecard-settings', (await import('./routes/scorecardSettings.routes.js')).default); // feature 13
             app.use('/api/payslips', payslipRouter);
             app.use('/api/job-openings', jobOpeningRouter);
             app.use('/api/candidates', candidateRouter);

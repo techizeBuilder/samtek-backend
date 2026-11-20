@@ -52,6 +52,8 @@ const PayrollSchema = new Schema(
     lopAmount: { type: Number },
     workedOnOff: { type: Number },
     days: { type: Schema.Types.Mixed },
+    // Feature 10 (2026-11-13): approved incentives paid with this month (in net, not in gross).
+    incentive: { type: Number, default: 0 },
 
     rejectReason: {
       type: String,

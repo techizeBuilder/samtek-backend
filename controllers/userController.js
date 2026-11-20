@@ -120,6 +120,11 @@ export const getUsers = async (req, res) => {
     // People with no login (2026-11-06). Older records have no canLogin: they can.
     if (login === 'no') query.canLogin = false;
     else if (login === 'yes') query.canLogin = { $ne: false };
+    // Roles & Permissions' role filter (2026-11-14): every role among the people
+    // this list can show (same company / manager / unit / login scope), before
+    // the search, role and status filters narrow it.
+    const roleScope = { ...query };
+    delete roleScope.$or;
     // Attendance Device's person picker: people still without a code.
     if (deviceCode === 'none') query.deviceCode = { $in: [null, ''] };
 
@@ -240,6 +245,10 @@ export const getUsers = async (req, res) => {
       }
     ]);
 
+    const roles = req.query.withRoles === 'yes'
+      ? (await User.distinct('role', roleScope)).filter(Boolean).sort((a, b) => a.localeCompare(b))
+      : undefined;
+
     const summaryData = stats[0] || { totalUsers: 0, activeUsers: 0, roleBreakdown: [] };
     const roleStats = {};
     if (summaryData.roleBreakdown) {
@@ -252,6 +261,7 @@ export const getUsers = async (req, res) => {
     res.status(200).json({
       success: true,
       users,
+      ...(roles && { roles }),
       data: {
         users,
         pagination: {

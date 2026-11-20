@@ -74,6 +74,13 @@ const orderSchema = new mongoose.Schema({
     enum: ['pending', 'pending_service_approval', 'rejected_by_service', 'approved', 'rejected', 'in_production', 'completed', 'cancelled'],
     default: 'pending'
   },
+  // Order Tracking (17 Nov 2026): when the tracker first found every unit
+  // delivered. Kept so the Open list never re-reads all dispatch history; set
+  // only by services/orderTracking/trackerService.js. null = not (yet) delivered.
+  trackingDeliveredAt: {
+    type: Date,
+    default: null
+  },
   priority: {
     type: String,
     enum: ['Low', 'Medium', 'High'],
@@ -228,6 +235,9 @@ orderSchema.index({ orderDate: -1 });
 orderSchema.index({ status: 1 });
 orderSchema.index({ priority: 1 });
 orderSchema.index({ orderFormCompleted: 1 });
+// Order Tracking (17 Nov 2026): a company's orders newest first, and its open / delivered lists.
+orderSchema.index({ companyId: 1, createdAt: -1 });
+orderSchema.index({ companyId: 1, trackingDeliveredAt: 1, createdAt: -1 });
 
 // Update status history when status changes
 orderSchema.pre('save', async function () {

@@ -53,7 +53,35 @@ export const updateAttendancePolicy = async (req, res) => {
       overtimeAfter,
       overtimeType,
       weeklyOffDays,
+      shifts,
     } = req.body;
+
+    // Shifts (2026-11-12): name, start, end, lunch from–to, all HH:MM. Lunch must
+    // fall inside the shift; an end before the start crosses midnight.
+    let cleanShifts;
+    if (shifts !== undefined) {
+      const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+      const min = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+      const mod = (n) => ((n % 1440) + 1440) % 1440;
+      if (!Array.isArray(shifts) || shifts.length > 10) return res.status(400).json({ message: "Shifts must be a list of up to 10" });
+      const names = new Set();
+      cleanShifts = [];
+      for (const s of shifts) {
+        const name = String(s?.name || "").trim();
+        if (!name) return res.status(400).json({ message: "Each shift needs a name" });
+        if (names.has(name.toLowerCase())) return res.status(400).json({ message: `Two shifts are called "${name}"` });
+        names.add(name.toLowerCase());
+        for (const f of ["start", "end", "lunchFrom", "lunchTo"]) {
+          if (!HHMM.test(String(s?.[f] || ""))) return res.status(400).json({ message: `${name}: times must look like 09:00 (start, end, lunch from and to)` });
+        }
+        if (s.start === s.end) return res.status(400).json({ message: `${name}: start and end can't be the same` });
+        const length = mod(min(s.end) - min(s.start));
+        const lunchAt = mod(min(s.lunchFrom) - min(s.start));
+        const lunchLen = mod(min(s.lunchTo) - min(s.lunchFrom));
+        if (!lunchLen || lunchAt + lunchLen > length) return res.status(400).json({ message: `${name}: lunch must fall inside the shift` });
+        cleanShifts.push({ name, start: s.start, end: s.end, lunchFrom: s.lunchFrom, lunchTo: s.lunchTo });
+      }
+    }
 
     // 0 = Sunday … 6 = Saturday; none at all is allowed (2026-11-11).
     if (weeklyOffDays !== undefined) {
@@ -71,6 +99,7 @@ export const updateAttendancePolicy = async (req, res) => {
     if (overtimeAfter !== undefined) updateData.overtimeAfter = overtimeAfter;
     if (overtimeType !== undefined) updateData.overtimeType = overtimeType;
     if (weeklyOffDays !== undefined) updateData.weeklyOffDays = [...weeklyOffDays].sort((a, b) => a - b);
+    if (cleanShifts !== undefined) updateData.shifts = cleanShifts;
 
     const policy = await AttendancePolicy.findOneAndUpdate(
       { companyId },

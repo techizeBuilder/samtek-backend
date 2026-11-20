@@ -21,6 +21,31 @@ const VALID_MATERIAL_SOURCES = ['ExplicitMaterials', 'AssembledPart'];
 // materialQuantities is coerced the same defensive way — kept only for a
 // ref that's also present in materialRefs, with a real positive number.
 // Does NOT validate — call validateProcessDefinition on the result before saving.
+/**
+ * The steps without the delivery estimate's own numbers (usual hours per piece,
+ * 2026-11-18): typing those is not a change to how the part is made, so it
+ * must never pull a product back to approval. Compare these, not the raw steps.
+ */
+export function stepsForChangeCheck(cleaned) {
+  return JSON.stringify((cleaned || []).map((c) => ({
+    ...c,
+    internalProcesses: (c.internalProcesses || []).map(({ usualHoursPerPiece, ...rest }) => rest),
+  })));
+}
+
+/**
+ * Delivery estimate (2026-11-18, decision M): the "usual people at once" box.
+ * undefined = not sent (leave as is); '' / null = cleared; else a whole number ≥ 1.
+ * Returns { value } or { error }.
+ */
+export function cleanUsualPeople(raw) {
+  if (raw === undefined) return { skip: true };
+  if (raw === null || String(raw).trim() === '') return { value: null };
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 100) return { error: 'Usual people at once must be a whole number from 1 to 100, or empty.' };
+  return { value: n };
+}
+
 export function cleanProcessDefinition(raw) {
   if (!Array.isArray(raw)) return [];
   const cleaned = raw
@@ -50,6 +75,9 @@ export function cleanProcessDefinition(raw) {
               operation: (p?.operation && (String(p.operation.name ?? '').trim() || (p.operation.perPiece !== '' && p.operation.perPiece != null)))
                 ? { name: String(p.operation.name ?? '').trim(), perPiece: Number(p.operation.perPiece) }
                 : null,
+              // Delivery estimate (2026-11-18): In-House only; empty = not typed.
+              usualHoursPerPiece: (p?.type === 'InHouse' && Number(p?.usualHoursPerPiece) > 0)
+                ? Math.round(Number(p.usualHoursPerPiece) * 1000) / 1000 : null,
             };
           })
           .filter(p => p.name)

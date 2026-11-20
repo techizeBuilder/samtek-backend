@@ -8,6 +8,7 @@ import {
   getItemById,
   getItemByCode,
   createItem,
+  getFreeItemCode,
   updateItem,
   deleteItem,
   bulkDeleteItems,
@@ -91,6 +92,7 @@ const inventoryDelete = checkAnyPermission(inventoryPairs, 'delete');
 
 // Item routes
 router.get('/items/by-code', auth, getItemByCode);
+router.get('/items/free-code', auth, getFreeItemCode);
 router.get('/items/variants-prefill', auth, getVariantsByItemCode);
 router.get('/items/sellable', auth, getSellableItemsForUser);
 router.get('/items', auth, getItems);

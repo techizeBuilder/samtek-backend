@@ -99,14 +99,15 @@ ledgerEntrySchema.index({ status: 1 });
 // unique for the whole database, so a second company's first entry
 // (LE-000001 again) failed to save, and a deleted entry made the next number
 // collide too. Numeric ordering so LE-1000000 sorts after LE-999999.
-ledgerEntrySchema.pre('validate', async function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+ledgerEntrySchema.pre('validate', async function () {
   if (!this.entryNumber) {
     const last = await mongoose.model('LedgerEntry').findOne({ entryNumber: /^LE-\d+$/ })
       .sort({ entryNumber: -1 }).collation({ locale: 'en', numericOrdering: true }).select('entryNumber').lean();
     const n = last ? Number(last.entryNumber.slice(3)) + 1 : 1;
     this.entryNumber = `LE-${String(n).padStart(6, '0')}`;
   }
-  if(next) next();
 });
 
 export default mongoose.model('LedgerEntry', ledgerEntrySchema);

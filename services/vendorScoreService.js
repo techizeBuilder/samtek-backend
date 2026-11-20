@@ -471,7 +471,7 @@ export async function computeVendorItemPricing({ companyId, vendorId, itemObject
 export async function runVendorScoreSweep(now = new Date(), { companyId = null } = {}) {
   const Supplier = mongoose.model('Supplier');
   const VendorScore = (await import('../models/VendorScore.js')).default;
-  const notificationService = (await import('./notificationService.js')).default;
+  const { default: notificationService, HOLDERS } = await import('./notificationService.js');
   const filter = { approvalStatus: 'Approved' };
   if (companyId) filter.companyId = companyId;
   const vendors = await Supplier.find(filter).select('supplierName companyId').lean();
@@ -500,7 +500,7 @@ export async function runVendorScoreSweep(now = new Date(), { companyId = null }
         );
         if (below && !prev?.belowThreshold) {
           alerts += 1;
-          await notificationService.notifyRoles(['Company Admin', 'Accounts Head'], {
+          await notificationService.notifyRolesAnd(['Company Admin', 'Accounts Head'], HOLDERS.purchase, {
             title: 'Vendor score below the Watchlist line',
             message: `${v.supplierName}'s vendor score is ${s.score} / 100 (below ${watchlistBelow}) — they're on the Watchlist. See Purchase → Vendor Ratings for why.`,
             type: 'purchase',

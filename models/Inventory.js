@@ -200,6 +200,7 @@ const itemSchema = new mongoose.Schema({
     // for an OutSource-first pipeline, so internalProcesses[].materialRefs
     // stays empty here (there is no materials[] array to reference into).
     processDefinition: { type: [ProcessCategorySchema], default: [] },
+    usualPeople: { type: Number, default: null, min: 1 }, // delivery estimate (2026-11-18): R&D's usual people at once
     // Manual-only for now (confirmed 2026-09-13) — R&D's own estimate of what
     // Job Work costs to build/outsource one unit. Same "Manual -> Actual"
     // mechanic RDBOM.productionCost already uses: once Purchase (outsourced)
@@ -217,6 +218,9 @@ const itemSchema = new mongoose.Schema({
     productionExpense: { type: Number, default: null, min: 0 },
     productionCostSource: { type: String, enum: ['Manual', 'Actual'], default: 'Manual' },
     productionCostUpdatedAt: { type: Date, default: null },
+    // Stage 6 (2026-11-12): productionCost is now LABOUR per piece; people its
+    // build counted ₹0 for (no salary entered).
+    labourMissing: { type: [String], default: [] },
     // The build that last set the actual cost ("the latest build wins").
     costFrom: {
       orderId: { type: String, default: null },
@@ -440,6 +444,9 @@ const itemSchema = new mongoose.Schema({
   pricePending: { type: Boolean, default: false },
   priceProvisional: {
     parts: { type: [String], default: [] },
+    // Stage 6 (2026-11-12): "CODE: names" — a build counted labour ₹0 for
+    // these people (no salary entered), here or in a part it uses.
+    labour: { type: [String], default: [] },
   },
   // Set when R&D switches a part's make / buy: its QC List sign-off and
   // Release were pulled back, and the Approval page flags it until it's

@@ -3,8 +3,12 @@
 // level and every way an order can finish.
 //
 // Three numbers per build:
-//   - Production cost / expense — typed by Production at the unit's LAST
-//     IN-HOUSE step (saveProductionCost); ₹0 when it had none.
+//   - Production cost = LABOUR (stage 6, 2026-11-12 —
+//     docs/client-features-2026-11/02f-labour-cost-logic.md): the crews' hours
+//     × each person's rate, summed from the unit's step runs (crewService
+//     unitLabour). Never typed.
+//   - Production expense — typed by Production at the unit's LAST IN-HOUSE
+//     step (saveProductionExpense); ₹0 when it had none.
 //   - Job work (outsource) cost — never typed: the accepted money on the
 //     Outsource Orders (line amount ÷ qty per accepted piece / unit, no GST)
 //     + its line's share of the order's charges (no GST). Freight isn't in it.
@@ -108,23 +112,37 @@ export async function outsourceMoneyFor({ productionOrder = null, jobWorkOrder =
 
 // ── Production's own cost ─────────────────────────────────────────────────
 
-// Stores what Production typed for a unit (a Sub Child Part: 0 = the batch).
-// Atomic, so it never fights the caller's own save of the order.
-export async function saveProductionCost(orderId, unitIndex, productionCost, productionExpense, byName = '') {
-  const set = { productionCost: Number(productionCost) || 0, productionExpense: Number(productionExpense) || 0, enteredAt: new Date(), enteredBy: byName };
+// Stores the expense Production typed for a unit (a Sub Child Part: 0 = the
+// batch). Atomic, so it never fights the caller's own save of the order. The
+// cost itself is labour now (stage 6), never typed.
+export async function saveProductionExpense(orderId, unitIndex, productionExpense, byName = '') {
+  const set = { productionExpense: Number(productionExpense) || 0, enteredAt: new Date(), enteredBy: byName };
+  const log = { amount: set.productionExpense, by: byName, at: set.enteredAt, redo: false };
   const r = await ProductionOrder.updateOne({ _id: orderId, 'unitCosts.unitIndex': unitIndex },
-    { $set: Object.fromEntries(Object.entries(set).map(([k, v]) => [`unitCosts.$.${k}`, v])) });
-  if (!r.matchedCount) await ProductionOrder.updateOne({ _id: orderId }, { $push: { unitCosts: { unitIndex, ...set } } });
+    { $set: { ...Object.fromEntries(Object.entries(set).map(([k, v]) => [`unitCosts.$.${k}`, v])), 'unitCosts.$.expenseLog': [log] } });
+  if (!r.matchedCount) await ProductionOrder.updateOne({ _id: orderId }, { $push: { unitCosts: { unitIndex, ...set, expenseLog: [log] } } });
 }
 
-export function productionCostOf(order, unitIndex) {
+// A QC redo's extra expense (2026-11-13): ADDED to what's already entered for
+// the unit / batch, never replacing it, and logged as a redo amount.
+export async function addProductionExpense(orderId, unitIndex, extra, byName = '') {
+  const amount = Number(extra) || 0;
+  if (!(amount > 0)) return;
+  const log = { amount, by: byName, at: new Date(), redo: true };
+  const r = await ProductionOrder.updateOne({ _id: orderId, 'unitCosts.unitIndex': unitIndex },
+    { $inc: { 'unitCosts.$.productionExpense': amount }, $push: { 'unitCosts.$.expenseLog': log } });
+  if (!r.matchedCount) await ProductionOrder.updateOne({ _id: orderId }, { $push: { unitCosts: { unitIndex, productionExpense: amount, enteredAt: log.at, enteredBy: byName, expenseLog: [log] } } });
+}
+
+// The expense Production typed for a unit; entered = it's been asked.
+export function productionExpenseOf(order, unitIndex) {
   const e = (order.unitCosts || []).find(u => u.unitIndex === unitIndex);
-  if (e?.productionCost != null) return { cost: Number(e.productionCost) || 0, expense: Number(e.productionExpense) || 0, entered: true };
-  return { cost: 0, expense: 0, entered: false };
+  if (e?.productionExpense != null) return { expense: Number(e.productionExpense) || 0, entered: true };
+  return { expense: 0, entered: false };
 }
 
 // Before slice 4 the true last step's cost sat on its QC entry
-// (pendingProductionCost) — still read, for anything entered that way.
+// (pendingProductionExpense) — still read, for anything entered that way.
 async function legacyPendingCost(order, unitIndex) {
   const { qcJobSourceForOrder } = await import('../controllers/productionMfgController.js');
   const job = await QCJob.findOne({ source: qcJobSourceForOrder(order), sourceRefId: order.orderId, company: order.company }).lean();
@@ -135,8 +153,8 @@ async function legacyPendingCost(order, unitIndex) {
   const entry = order.orderKind === 'SubChildPart'
     ? (job.batchSteps || []).find(b => b.category === last.category && b.stepName === last.step)
     : (job.unitChecks || []).find(u => u.unitNumber === unitIndex + 1)?.steps?.find(s => s.category === last.category && s.stepName === last.step);
-  if (entry?.pendingProductionCost == null) return null;
-  return { cost: Number(entry.pendingProductionCost) || 0, expense: Number(entry.pendingProductionExpense) || 0 };
+  if (entry?.pendingProductionExpense == null) return null;
+  return { expense: Number(entry.pendingProductionExpense) || 0 };
 }
 
 // A Sub Child Part batch's finished pieces — what went into stock: the last
@@ -183,8 +201,12 @@ export async function pushPartCost(orderRef, unitIndex = 0, { live = null } = {}
     let entry = (order.unitCosts || []).find(x => x.unitIndex === u);
     if (!entry) { order.unitCosts.push({ unitIndex: u }); entry = order.unitCosts[order.unitCosts.length - 1]; }
     if (!entry.finishedAt) entry.finishedAt = new Date();
-    let prod = productionCostOf(order, u);
-    if (!prod.entered) prod = (await legacyPendingCost(order, u)) || prod;
+    let typed = productionExpenseOf(order, u);
+    if (!typed.entered) typed = (await legacyPendingCost(order, u)) || typed;
+    // Stage 6: the cost is the crews' labour, priced once per step run.
+    const { unitLabour } = await import('./crew/crewService.js');
+    const lab = await unitLabour(order.company, order._id, u);
+    const prod = { cost: lab.labour, expense: typed.expense };
     const { money, waitingFor } = await outsourceMoneyFor({ productionOrder: order, unitIndex: isScp ? null : u, live });
     entry.jobWorkCost = money;
     entry.waitingFor = waitingFor;
@@ -208,6 +230,7 @@ export async function pushPartCost(orderRef, unitIndex = 0, { live = null } = {}
           jobWorkCost: round2(money / qty), jobWorkCostSource: 'Actual', jobWorkCostUpdatedAt: new Date(),
           productionCost: round2(prod.cost / qty), productionExpense: round2(prod.expense / qty),
           productionCostSource: 'Actual', productionCostUpdatedAt: new Date(), costFrom: from,
+          labourMissing: lab.missing,
         });
         item.markModified('subChildPartDetails');
         await item.save();
@@ -237,7 +260,7 @@ export async function pushPartCost(orderRef, unitIndex = 0, { live = null } = {}
           productionCost: round2(prod.cost), productionExpense: round2(prod.expense),
           productionCostSource: 'Actual', productionCostUpdatedAt: new Date(),
           jobWorkCost: money, jobWorkCostSource: 'Actual', jobWorkCostUpdatedAt: new Date(),
-          jobWorkWaitingFor: waitingFor, costFrom: from,
+          jobWorkWaitingFor: waitingFor, costFrom: from, labourMissing: lab.missing,
         });
         await refreshBomMaterialLines(bom, companyId);
         await bom.save();
@@ -256,7 +279,7 @@ export async function pushPartCost(orderRef, unitIndex = 0, { live = null } = {}
         if (m) await cascade.onMachineChanged(m._id, companyId);
       }
     }
-    return { money, waitingFor, production: prod, wrote };
+    return { money, waitingFor, production: prod, labourMissing: lab.missing, wrote };
   } catch (e) {
     console.error('[PartCost] push failed:', e.message);
     return null;
@@ -286,6 +309,7 @@ export async function pushJobWorkCost(jobWorkOrderRef, { live = null } = {}) {
       Object.assign(d, {
         jobWorkCost: round2(money / qty), jobWorkCostSource: 'Actual', jobWorkCostUpdatedAt: new Date(),
         productionCost: 0, productionExpense: 0, productionCostSource: 'Actual', productionCostUpdatedAt: new Date(),
+        labourMissing: [],
         costFrom: { orderId: jw.orderId, unitIndex: 0, finishedAt, waiting: waitingFor.length > 0 },
       });
       item.markModified('subChildPartDetails');
@@ -323,5 +347,30 @@ export async function refreshCostsAfterAcceptance(outsourceOrder) {
     }
   } catch (e) {
     console.error('[PartCost] refresh after acceptance failed:', e.message);
+  }
+}
+
+// Stage 6 (2026-11-12): HR entered a salary for someone a build counted ₹0 →
+// price their saved hours and push each of those builds again. The latest-build
+// rule (mayReplace) leaves a build a newer one replaced alone, so only a part
+// whose CURRENT cost came from it changes. Never throws to its caller.
+export async function onSalarySaved(companyId, personId) {
+  try {
+    if (!companyId || !personId) return 0;
+    const { refillMissingLabour } = await import('./crew/crewService.js');
+    const builds = await refillMissingLabour(companyId, personId);
+    let pushed = 0;
+    for (const b of builds) {
+      const order = await ProductionOrder.findOne({ _id: b.order, company: companyId }).select('orderKind processes extraUnits').lean();
+      if (!order) continue;
+      const u = order.orderKind === 'SubChildPart' ? 0 : b.unitIndex;
+      if (!unitFinished(order, u)) continue; // not finished: its push comes when it is
+      const r = await pushPartCost(b.order, u);
+      if (r?.wrote) pushed += 1;
+    }
+    return pushed;
+  } catch (e) {
+    console.error('[PartCost] salary refill failed:', e.message);
+    return 0;
   }
 }

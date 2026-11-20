@@ -31,7 +31,7 @@ import { sendLineRequests, receiveRequestCore, markVendorReady, requestNeeds, de
 import { roundStepIndices, autoRequestOutsourceRuns, notifyAutoRequests, splitHandoffByUnits } from '../controllers/outsourceWorkController.js';
 import { RecordSet, withVendorQty, takenBackQty, allBack } from './outsourceRequestService.js';
 import { materialShortfall, shortText } from './outsourceMaterialReadyService.js';
-import notificationService from './notificationService.js';
+import notificationService, { HOLDERS } from './notificationService.js';
 import { lineIsReceived } from './deliveryFollowUpService.js';
 import { lostTotal } from '../utils/lostAtVendor.js';
 
@@ -1271,7 +1271,7 @@ export async function markCollected(trip, stop, job, counts, user) {
   const partial = checked.filter(c => c.part && c.rest > 0);
   if (partial.length) {
     try {
-      await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], {
+      await notificationService.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.purchase, {
         title: 'Outsource work back in part',
         message: `${job.orderNo} · ${job.itemName}: ${partial.map(c => `${c.e.orderCode} ${fmt(c.count)} back, ${fmt(c.rest)} still with ${stop.vendorName}`).join('; ')}.`,
         type: 'purchase', icon: 'package', priority: 'medium',
@@ -1322,7 +1322,7 @@ export async function reportShort(trip, stop, job, requestId, { count, note } = 
     if (leaves) {
       // Fewer came from the vendor (Dispatch's count, or Store's with no
       // Dispatch count) — Purchase sorts it out with the vendor.
-      await notificationService.notifyRoles(['Accounts Head', 'Account Employee'], {
+      await notificationService.notifyRolesAnd(['Accounts Head', 'Account Employee'], HOLDERS.purchase, {
         title: 'Outsource work short', message: `${msg} Please sort it out with the vendor.`,
         type: 'purchase', icon: 'alert-triangle', priority: 'high',
         data: { outsourceOrderId: String(order._id), orderNo: order.orderNo }, targetCompanyId: trip.company,

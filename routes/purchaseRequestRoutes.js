@@ -21,6 +21,8 @@ import { authenticateToken as authenticateUser } from '../middleware/auth.js';
 import { warrantyUpload } from '../middleware/warrantyUpload.js';
 import { receiveUpload } from '../middleware/receiveUpload.js';
 import { checkAnyPermission } from '../middleware/permissions.js';
+// Purchase separated from Accounts (2026-11-16): docs/purchase-separation/01-logic.md.
+import { purchaseGate, buyOrPayView, purchaseOrStorePairs, purchaseSettingsGate, purchaseAuditGate } from '../middleware/purchaseGates.js';
 
 const router = express.Router();
 
@@ -31,7 +33,7 @@ router.use(authenticateUser);
 // 'purchaseOrders') — either grant is enough to pass the route; which
 // specific actions a role may perform is enforced inside the controllers
 // (see e.g. editFabricationLines/storeApproveRequest's own role checks).
-const purchaseRequestModules = [['accounts', 'purchases'], ['Store', 'purchaseOrders']];
+const purchaseRequestModules = purchaseOrStorePairs;
 const purchasesView = checkAnyPermission(purchaseRequestModules, 'view');
 const purchasesAdd = checkAnyPermission(purchaseRequestModules, 'add');
 const purchasesEdit = checkAnyPermission(purchaseRequestModules, 'edit');

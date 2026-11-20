@@ -166,10 +166,11 @@ PackingSheetSchema.methods.calculateTotalPacked = function() {
 };
 
 // Pre-save middleware
-PackingSheetSchema.pre('save', function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+PackingSheetSchema.pre('save', function () {
   // Auto-calculate total packed quantity
   this.totalPackedQty = this.items.reduce((total, item) => total + item.packedQty, 0);
-  next();
 });
 
 // Static method to get next available serial number

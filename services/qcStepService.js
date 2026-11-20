@@ -132,7 +132,8 @@ const today = () => new Date().toISOString().split('T')[0];
 // rework-resend case, where the exact quantity was already snapshotted at
 // hand-off request time (see OutsourceHandoffSchema.subChildPartQty) —
 // omitted, it auto-computes exactly like a normal Production submission.
-export function submitBatchStepForQC(qcJob, order, procs, idx, submittedBy, { qtyOverride } = {}) {
+// at (feature 7, 2026-11-12): when the work really finished; default now.
+export function submitBatchStepForQC(qcJob, order, procs, idx, submittedBy, { qtyOverride, at = null } = {}) {
   const proc = procs[idx];
   const entry = findOrCreateStepEntry(qcJob.batchSteps, proc.category, proc.step, {
     qtyEnteringStep: null, passedQty: 0, scrapQty: 0, reworkPendingQty: 0, attempts: [],
@@ -187,8 +188,9 @@ export function submitBatchStepForQC(qcJob, order, procs, idx, submittedBy, { qt
   });
 
   proc.status = 'QC Pending';
-  proc.endDate = today();
-  proc.completedAt = new Date();
+  const when = at || new Date();
+  proc.endDate = when.toISOString().split('T')[0];
+  proc.completedAt = when;
 
   markJobStarted(qcJob);
   return { entry, isFirstSubmission };
@@ -201,7 +203,7 @@ export function submitBatchStepForQC(qcJob, order, procs, idx, submittedBy, { qt
 // principle the old flat unitChecks[] already followed). `unit` is one
 // entry of qcJob.unitChecks (already resolved by the caller), `proc` is that
 // same unit's own process step object.
-export function submitUnitStepForQC(qcJob, unit, proc, submittedBy) {
+export function submitUnitStepForQC(qcJob, unit, proc, submittedBy, { at = null } = {}) {
   const entry = findOrCreateStepEntry(unit.steps, proc.category, proc.step, {
     finalQc: !!proc.finalQc, status: 'Awaiting Production', attempts: [],
     pendingProductionCost: null, pendingProductionExpense: null,
@@ -215,8 +217,9 @@ export function submitUnitStepForQC(qcJob, unit, proc, submittedBy) {
   entry.status = 'QC Pending';
 
   proc.status = 'QC Pending';
-  proc.endDate = today();
-  proc.completedAt = new Date();
+  const when = at || new Date();
+  proc.endDate = when.toISOString().split('T')[0];
+  proc.completedAt = when;
 
   markJobStarted(qcJob);
   return entry;

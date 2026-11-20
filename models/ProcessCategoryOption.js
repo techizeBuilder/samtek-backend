@@ -17,6 +17,9 @@ const ProcessCategoryOptionSchema = new mongoose.Schema({
   bomLevel: { type: String, enum: ['SubChildPart', 'ChildPart', 'Machine'], required: true },
   label: { type: String, required: true, trim: true },
   internalProcesses: { type: [String], default: [] },
+  // Delivery estimate (2026-11-18, decision H): the usual days a process spends away
+  // when it's sent out for job work, typed once; history (3+ trips) replaces it.
+  usualDays: { type: [{ _id: false, process: { type: String, required: true }, days: { type: Number, required: true, min: 0 } }], default: [] },
 }, { timestamps: true });
 
 ProcessCategoryOptionSchema.index({ companyId: 1, bomLevel: 1, label: 1 }, { unique: true });

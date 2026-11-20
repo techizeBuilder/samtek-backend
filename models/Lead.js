@@ -41,6 +41,12 @@ const leadSchema = new mongoose.Schema({
   // handleSendEmail). Used to auto-fill the Sales Order Form's item table.
   quotationItems: { type: mongoose.Schema.Types.Mixed, default: [] },
   quotationCharges: { type: mongoose.Schema.Types.Mixed, default: [] },
+  // Delivery estimate (2026-11-18, decision I): "Use this date" saves the estimate
+  // here (likely, date to commit, delivered by, what decided it, how sure, who and
+  // when); the last 10 earlier ones stay in the history so a re-estimate shows what
+  // moved. The Order Form's delivery date starts from deliveredBy.
+  deliveryEstimate: { type: mongoose.Schema.Types.Mixed, default: null },
+  deliveryEstimateHistory: { type: mongoose.Schema.Types.Mixed, default: [] },
   productRequired: {
     type: String,
     required: true

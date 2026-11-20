@@ -97,6 +97,8 @@ const PHOTO_REQUIRED = 'Add at least one photo of the rejected material.';
 // Purchase / store QC of more than one piece rejects as LINES; one REJ per line.
 const LINE_SOURCES = ['Purchase', 'Store'];
 const worstSeverity = (lines) => ['Critical', 'Major', 'Minor'].find(s => lines.some(l => l.severity === s)) || 'Major';
+// Feature 13 (2026-11-17): QC's grade of a production reject (Minor / Major / Critical), Major when not sent.
+const rejectSeverity = (v) => (['Minor', 'Major', 'Critical'].includes(v) ? v : 'Major');
 const linesSummary = (lines) => lines.map(l => `${l.qty} × ${l.parameter} — ${l.remark}`).join('; ');
 const lineCheck = (line, checklist, user) => {
   const row = line.other ? null : (checklist || []).find(c => c.parameter === line.parameter);
@@ -2294,6 +2296,7 @@ async function decideChildPartUnitStep(req, res, { job, order, procs, unitNumber
     if (decision === 'Reject') { // its evidence (2026-10-30)
       attempt.photos = req.rejectionPhotos || [];
       attempt.failedChecks = failedChecksOf(attempt.rows);
+      attempt.severity = rejectSeverity(req.body.severity); // feature 13
     }
 
     const procIdx = procs.findIndex(p => p.category === category && p.step === step);
@@ -2423,6 +2426,7 @@ export const submitBatchQcDecision = async (req, res) => {
     if (reworkQty > 0 || scrapQty > 0) { // its evidence (2026-10-30)
       attempt.photos = req.rejectionPhotos || [];
       attempt.failedChecks = failedChecksOf(attempt.rows);
+      attempt.severity = rejectSeverity(req.body.severity); // feature 13
     }
 
     entry.passedQty += passedQty;
@@ -2458,7 +2462,7 @@ export const submitBatchQcDecision = async (req, res) => {
           }
         }
         if (reworkQty > 0) {
-          proc.reworks.push({ date: today(), reason: reason.trim(), rejectedBy: req.user.fullName || req.user.username || 'QC', photos: photoUrls(attempt.photos), failedChecks: failedCheckLines(attempt.failedChecks) });
+          proc.reworks.push({ date: today(), reason: reason.trim(), qty: reworkQty, rejectedBy: req.user.fullName || req.user.username || 'QC', photos: photoUrls(attempt.photos), failedChecks: failedCheckLines(attempt.failedChecks) });
         }
         if (resolved) {
           proc.status = 'Completed';

@@ -91,11 +91,12 @@ const manufacturingSchema = new mongoose.Schema({
   timestamps: true
 });
 
-manufacturingSchema.pre('save', function (next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+manufacturingSchema.pre('save', function () {
   if (!this.jobNumber) {
     this.jobNumber = `JOB-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
   }
-  next();
 });
 
 export default mongoose.model('Manufacturing', manufacturingSchema);

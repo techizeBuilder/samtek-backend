@@ -67,6 +67,40 @@ export async function departmentsFromRoles(companyId) {
   return ROLE_DEPARTMENTS.map((d) => ({ ...d, exists: have.has(nameKey(d.name)) }));
 }
 
+// Older role names the Dispatch side still uses (Notification's role list).
+const ROLE_ALIASES = {
+  'Packing Head': 'Packing and Dispatch', 'Packing Employee': 'Packing and Dispatch',
+  'Dispatch Head': 'Packing and Dispatch', 'Dispatch Employee': 'Packing and Dispatch',
+};
+
+/** The department a role belongs to by name, or null (custom roles, Manager, Employee…). */
+export function departmentNameForRole(role) {
+  if (!role) return null;
+  return ROLE_ALIASES[role] || ROLE_DEPARTMENTS.find((d) => d.roles.includes(role))?.name || null;
+}
+
+/** A company's departments, for departmentOf. Small, so loaded whole. */
+export async function companyDepartments(companyId) {
+  return Department.find({ companyId }).select('name status').lean();
+}
+
+/**
+ * A person's department (18 Nov 2026): the one set on them, else the company's
+ * department named after their role (most people have no department set: only
+ * Production's workers do, for teams). Returns { _id, name, fromRole } or null.
+ */
+export function departmentOf(user, depts) {
+  if (user?.departmentId) {
+    const d = depts.find((x) => String(x._id) === String(user.departmentId));
+    return { _id: user.departmentId, name: d?.name || '', fromRole: false };
+  }
+  const name = nameKey(departmentNameForRole(user?.role));
+  if (!name) return null;
+  const matches = depts.filter((x) => nameKey(x.name) === name);
+  const d = matches.find((x) => x.status !== 'inactive' && x.status !== 'Inactive') || matches[0];
+  return d ? { _id: d._id, name: d.name, fromRole: true } : null;
+}
+
 // Adds only names on the list that the company doesn't have yet.
 export async function addDepartmentsFromRoles(companyId, names) {
   const picked = new Set((Array.isArray(names) ? names : []).map(nameKey));

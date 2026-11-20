@@ -3,6 +3,15 @@
 import SalaryStructure from "../models/SalaryStructure.js";
 import User from "../models/User.js";
 import { isInMyCompany, isPlatformAdmin } from "../utils/companyScope.js";
+import { onSalarySaved } from "../services/partCostService.js";
+
+// Stage 6 (2026-11-12): a salary entered for someone a finished build counted
+// labour ₹0 for → that build is priced again, if it still sets its part's cost
+// (docs/client-features-2026-11/02f-labour-cost-logic.md §7). Never throws.
+async function refillLabour(employeeId) {
+  const u = await User.findById(employeeId).select("companyId").lean();
+  if (u?.companyId) await onSalarySaved(u.companyId, employeeId);
+}
 
 /**
  * ➕ Add Salary Structure
@@ -39,6 +48,8 @@ export const addSalaryStructure = async (req, res) => {
       advance,
       others
     });
+
+    await refillLabour(employee);
 
     res.status(201).json({
       message: "Salary structure added successfully",
@@ -196,6 +207,7 @@ export const updateSalaryStructure = async (req, res) => {
     if (!salary) {
       return res.status(404).json({ message: "Salary structure not found" });
     }
+    await refillLabour(current.employee);
 
     res.json({
       message: "Salary structure updated successfully",

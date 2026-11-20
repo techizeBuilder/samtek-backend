@@ -93,7 +93,9 @@ ungroupedItemProductionSchema.index(
 );
 
 // Pre-save middleware to calculate qtyAchieved
-ungroupedItemProductionSchema.pre('save', function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+ungroupedItemProductionSchema.pre('save', function () {
   // Auto-calculate qtyAchieved = qtyPerBatch - productionLoss
   this.qtyAchieved = Math.max(0, (this.qtyPerBatch || 0) - (this.productionLoss || 0));
   
@@ -106,7 +108,6 @@ ungroupedItemProductionSchema.pre('save', function(next) {
     this.status = 'not_started';
   }
   
-  next();
 });
 
 // Instance method to get formatted timing data

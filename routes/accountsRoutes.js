@@ -2,6 +2,7 @@ import { requestPoCancellation } from '../controllers/poCancellationController.j
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
+import { purchaseGate, vendorPaymentsGate, buyOrPayView, purchaseExpensesGate, tenderExpensesGate } from '../middleware/purchaseGates.js';
 import {
   getCompanySalesInvoices,
   getInvoiceDetail,
@@ -77,6 +78,9 @@ import {
   getPurchaseInventoryItems,
   updatePurchaseItemCost,
   updateWeightUnitPrice,
+  updateUsualDaysToBuy,
+  getJobWorkTime,
+  setJobWorkTime,
   createPurchase,
   getPurchases,
   getPurchaseById,
@@ -122,10 +126,16 @@ const salesmanSettlementEdit = checkPermission('accounts', 'salesmanSettlement',
 
 const damageAndExpiryView = checkPermission('accounts', 'damageAndExpiry', 'view');
 
-const purchasesView = checkPermission('accounts', 'purchases', 'view');
-const purchasesAdd = checkPermission('accounts', 'purchases', 'add');
-const purchasesEdit = checkPermission('accounts', 'purchases', 'edit');
-const purchasesDelete = checkPermission('accounts', 'purchases', 'delete');
+// Purchase separated from Accounts (2026-11-16, docs/purchase-separation/01-logic.md):
+// the buying routes below take the Purchase module, the money ones (bills,
+// payments, outstanding, money back) Accounts' Vendor Payments, look-ups either.
+const purchasesView = purchaseGate('view');
+const purchasesAdd = purchaseGate('add');
+const purchasesEdit = purchaseGate('edit');
+const purchasesDelete = purchaseGate('delete');
+const payView = vendorPaymentsGate('view');
+const payAdd = vendorPaymentsGate('add');
+const payEdit = vendorPaymentsGate('edit');
 
 const gstAndTdsView = checkPermission('accounts', 'gstAndTds', 'view');
 
@@ -319,6 +329,25 @@ accountsRouter.put(
   purchasesEdit,
   updateWeightUnitPrice
 );
+// Delivery estimate (19 Nov 2026, §13): Purchase owns the usual days to buy and job-work time.
+accountsRouter.put(
+  '/purchases/inventory/:id/usual-days',
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
+  purchasesEdit,
+  updateUsualDaysToBuy
+);
+accountsRouter.get(
+  '/purchases/job-work-time',
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
+  purchasesView,
+  getJobWorkTime
+);
+accountsRouter.put(
+  '/purchases/job-work-time',
+  authorizeRoles('Unit Manager', 'Unit Head', 'Superadmin', 'Admin', 'Accounts', 'Accounts Head'),
+  purchasesEdit,
+  setJobWorkTime
+);
 
 import {
   createPurchaseInvoice,
@@ -338,21 +367,21 @@ import {
   uploadVendorPaymentSlip
 } from '../controllers/purchaseInvoiceController.js';
 
-accountsRouter.post('/purchases/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchaseInvoice);
-accountsRouter.get('/purchases/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseInvoices);
+accountsRouter.post('/purchases/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payAdd, createPurchaseInvoice);
+accountsRouter.get('/purchases/invoices', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payView, getPurchaseInvoices);
 // Bill without a PO: suggested GST type for a vendor (bug B9, 2026-10-19).
-accountsRouter.get('/purchases/invoices/gst-type', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getBillGstType);
-accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createVendorPayment);
-accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorOutstanding);
-accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPaymentStats);
-accountsRouter.get('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorPayments);
+accountsRouter.get('/purchases/invoices/gst-type', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payView, getBillGstType);
+accountsRouter.post('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payAdd, createVendorPayment);
+accountsRouter.get('/purchases/outstanding', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payView, getVendorOutstanding);
+accountsRouter.get('/purchases/payments/stats', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payView, getPaymentStats);
+accountsRouter.get('/purchases/payments', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payView, getVendorPayments);
 // Upload a payment slip to an existing vendor payment (2026-10-29).
-accountsRouter.post('/purchases/payments/:id/slip', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, paymentSlipUpload.single('slip'), uploadVendorPaymentSlip);
+accountsRouter.post('/purchases/payments/:id/slip', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payEdit, paymentSlipUpload.single('slip'), uploadVendorPaymentSlip);
 
 // Purchase Orders
 accountsRouter.post('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchase);
-accountsRouter.get('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchases);
-accountsRouter.get('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseById);
+accountsRouter.get('/purchases/orders', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), buyOrPayView, getPurchases);
+accountsRouter.get('/purchases/orders/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), buyOrPayView, getPurchaseById);
 // The old PO edit is retired (bug report B3, 2026-10-19) — a PO is never edited;
 // change = cancel / short close + re-order.
 accountsRouter.put('/purchases/orders/:id', (req, res) => res.status(410).json({ success: false, message: 'A purchase order can\'t be edited. Cancel it (or short close what isn\'t received) and order again.' }));
@@ -379,38 +408,38 @@ accountsRouter.patch('/purchases/orders/:id/lines/:lineId/expected-date', author
 import { listRejections, answerRejection, listMoneyBack, refundReceived, decideLeftover } from '../controllers/purchaseRejectionController.js';
 accountsRouter.get('/purchases/rejections', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, listRejections);
 accountsRouter.put('/purchases/rejections/:id/answer', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, answerRejection);
-accountsRouter.get('/purchases/money-back', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, listMoneyBack);
-accountsRouter.put('/purchases/money-back/:id/refund', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, refundReceived);
-accountsRouter.put('/purchases/money-back/:id/decide', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, decideLeftover);
+accountsRouter.get('/purchases/money-back', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payView, listMoneyBack);
+accountsRouter.put('/purchases/money-back/:id/refund', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payEdit, refundReceived);
+accountsRouter.put('/purchases/money-back/:id/decide', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), payEdit, decideLeftover);
 
 // Purchase Returns
 accountsRouter.post('/purchases/returns', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchaseReturn);
 accountsRouter.get('/purchases/returns', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseReturns);
 accountsRouter.get('/purchases/returns/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseReturnById);
 accountsRouter.put('/purchases/returns/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, updatePurchaseReturn);
-accountsRouter.get('/purchases/vendor-items', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getVendorPurchasedItems);
-accountsRouter.get('/purchases/vendors', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getSuppliersForAccounts);
+accountsRouter.get('/purchases/vendor-items', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), buyOrPayView, getVendorPurchasedItems);
+accountsRouter.get('/purchases/vendors', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), buyOrPayView, getSuppliersForAccounts);
 
 // Purchase Reports
 accountsRouter.get('/purchases/reports/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseSummary);
 
 // Purchase Expenses (job material, tools, machines, assets, etc.)
-accountsRouter.get('/purchases/expenses/categories', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseExpenseCategories);
-accountsRouter.get('/purchases/expenses/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseExpenseSummary);
-accountsRouter.get('/purchases/expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getPurchaseExpenses);
-accountsRouter.post('/purchases/expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createPurchaseExpense);
-accountsRouter.put('/purchases/expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, updatePurchaseExpense);
-accountsRouter.delete('/purchases/expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesDelete, deletePurchaseExpense);
+accountsRouter.get('/purchases/expenses/categories', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchaseExpensesGate('view'), getPurchaseExpenseCategories);
+accountsRouter.get('/purchases/expenses/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchaseExpensesGate('view'), getPurchaseExpenseSummary);
+accountsRouter.get('/purchases/expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchaseExpensesGate('view'), getPurchaseExpenses);
+accountsRouter.post('/purchases/expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchaseExpensesGate('add'), createPurchaseExpense);
+accountsRouter.put('/purchases/expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchaseExpensesGate('edit'), updatePurchaseExpense);
+accountsRouter.delete('/purchases/expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchaseExpensesGate('delete'), deletePurchaseExpense);
 
 // Tender Expenses (EMD, Bank Guarantee, Tender Fee Processing) — procurement/
 // tender-bidding cost tracking; no dedicated feature key exists, closest fit
 // is 'purchases' (same domain as the Purchase Expenses block directly above).
-accountsRouter.get('/tender-expenses/categories', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getTenderExpenseCategories);
-accountsRouter.get('/tender-expenses/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getTenderExpenseSummary);
-accountsRouter.get('/tender-expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesView, getTenderExpenses);
-accountsRouter.post('/tender-expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesAdd, createTenderExpense);
-accountsRouter.put('/tender-expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesEdit, updateTenderExpense);
-accountsRouter.delete('/tender-expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), purchasesDelete, deleteTenderExpense);
+accountsRouter.get('/tender-expenses/categories', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), tenderExpensesGate('view'), getTenderExpenseCategories);
+accountsRouter.get('/tender-expenses/summary', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), tenderExpensesGate('view'), getTenderExpenseSummary);
+accountsRouter.get('/tender-expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), tenderExpensesGate('view'), getTenderExpenses);
+accountsRouter.post('/tender-expenses', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), tenderExpensesGate('add'), createTenderExpense);
+accountsRouter.put('/tender-expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), tenderExpensesGate('edit'), updateTenderExpense);
+accountsRouter.delete('/tender-expenses/:id', authorizeRoles('Accounts', 'Accounts Head', 'Superadmin', 'Unit Head'), tenderExpensesGate('delete'), deleteTenderExpense);
 
 // ==================== SALES ACCOUNTING (NEW MODULE) ====================
 // Sales Invoices

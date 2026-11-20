@@ -14,7 +14,7 @@
 
 ### 2. Manpower starts empty
 1. Log in as **Production Head** (`testproductionhead`) → **Production → Manpower**.
-   - [ ] No team cards. Avg Efficiency says **Not measured yet**.
+   - [ ] No team cards. **Avg team score · this month** says **Not enough work yet** (feature 10 replaced efficiency with the score, 13 Nov).
 
 ### 3. Build a team from people
 1. Click **Add Team**. The form has Team Name, People, Skills, and **no Efficiency box**.
@@ -27,7 +27,7 @@
 6. Pick a skill, such as Assembly, then **Add Team**.
    - [ ] A card for Team One.
      - Members: "Rahul Pramanik · EMP-TES-0039 (supervisor) · no login" and "test production employee · EMP-TES-0024".
-     - Efficiency: **Not measured yet**.
+     - **Score · this month: Not enough work yet,** 0 of 3 steps measured.
      - **Edit** (pencil) and **Retire** (box) buttons.
 
 ### 4. One person, one team
@@ -42,7 +42,7 @@
 
 ### 6. Process Execution still lists teams
 1. **Production → Process Execution.** Open any step's **Assign Team**.
-   - [ ] Team One A and Team Two are listed, with "Efficiency: not measured yet".
+   - [ ] Team One A and Team Two are listed. *(This dialog was replaced by the crew panel on 12 Nov; if it no longer opens, skip this check.)*
    - [ ] **Team A is not listed.**
 2. Find an old order that was worked by Team A.
    - [ ] It still shows **Team A** on its steps.
@@ -52,6 +52,25 @@
    - [ ] The card disappears.
 2. **Add Team** and type `Test Worker`.
    - [ ] Test Worker Two is free again: no "In Team Two".
+
+### 8. Skills per person (added 12 Nov)
+Still as **Production Head**, on **Manpower**, with Team One A from step 5.
+1. On the card, next to **Rahul Pramanik**, click **Skills**.
+   - [ ] A list of every Process Template step: welding, grinding, coating, cutting, drilling, laser cutting, shaft assembly, nut bolting, bairing assembly, assemble, pre painting and post painting. Each says "In-House in: …" or "Not In-House in any BOM yet".
+   - [ ] **The old list (Job Work, Fabrication, Final Testing …) is gone.**
+2. Tick **welding** and **grinding**. **Save Skills**.
+   - [ ] Under Rahul Pramanik: welding and grinding.
+   - [ ] **Process Skills · from its people** shows welding and grinding.
+3. Give **test production employee** **bairing assembly**.
+   - [ ] The team's Process Skills: bairing assembly, grinding, welding.
+4. **Skill Matrix** at the bottom.
+   - [ ] One row per person under "Team One A", with ticks under their own steps.
+5. **Edit** the team (pencil).
+   - [ ] **There's no skill picker.** Process Skills shows the three steps, read-only, "worked out from its people".
+6. **Process Execution → Assign Team** on any step.
+   - [ ] Team One A shows "Skills: bairing assembly, grinding, welding".
+7. **R&D rename** (fixes a typo too): log in as **R&D Head** → **BOM Management → Child Part → Process Templates**. Under **assembly**, rename **bairing assembly** to **bearing assembly**.
+   - [ ] Back on Manpower as Production Head, test production employee now has **bearing assembly**.
 
 ## Not needed on screen
 The `teams` suite covers:
@@ -75,4 +94,10 @@ The `teams` suite covers:
 All six import the assign-team endpoint, which now checks the team.
 
 ## Browser results
-*Not started.*
+**13–14 Nov 2026, test-1.** The teams were built by me through the real routes, at your choice: Team One (Rahul Pramanik's) and Team Two (Test Worker Four's). The screens were then checked:
+- **Skills:** Test Worker Three given **cutting** on the card. The team's Process Skills and the Skill Matrix followed.
+- **Edit:** Team Two renamed **Team Two A**, supervisor changed to Test Worker Five. There's no skill picker; skills are worked out from the people.
+- **Retire:** Team Two A retired. Its people were free again in Add Team (Test Worker Three showed "In Team One", greyed out), and **Team Two** was rebuilt.
+- **R&D rename:** *bairing assembly* → **bearing assembly** reached Rahul's skills, the team skills and the Skill Matrix.
+- **Found and fixed:** a retired team's planned step now credits the people's current team at Start (`09-plan-ahead-changes.md`).
+- **Not seen:** the old Assign Team dialog (no longer opened). Step 1 (HR department) was done on 11 Nov.

@@ -31,7 +31,7 @@ import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSi
 import { activeCost } from '../services/makeBuyService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
 import { applyPricingToItem } from '../services/itemPricingService.js';
-import { cleanProcessDefinition, validateProcessDefinition } from '../utils/processDefinitionValidation.js';
+import { cleanProcessDefinition, validateProcessDefinition, stepsForChangeCheck, cleanUsualPeople } from '../utils/processDefinitionValidation.js';
 import RDDocument from '../models/RDDocument.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
@@ -120,6 +120,13 @@ async function resolveMachineBOMDoc(machineId, companyId) {
 export async function refreshMachineBOMChildParts(bom, companyId) {
   let changed = false;
   const pendingParts = new Set();
+  // Stage 6 (2026-11-12): labour counted ₹0 for someone with no salary — the
+  // Machine's own last build, and its made Child Parts' (and their parts').
+  const labourNotes = new Set();
+  if (bom.labourMissing?.length) {
+    const own = await Item.findOne({ _id: bom.machine, companyId }).select('code').lean();
+    labourNotes.add(`${own?.code || 'This machine'}: ${bom.labourMissing.join(', ')}`);
+  }
   for (const line of bom.childParts) {
     if (line.isDiscontinued) continue;
     const cpResult = await refreshAndComputeChildPart(line.childPart, companyId);
@@ -131,6 +138,7 @@ export async function refreshMachineBOMChildParts(bom, companyId) {
     const unitCost = Math.round(active.cost * 100) / 100;
     if (active.pending) pendingParts.add(cpResult.item.code);
     if (!active.bought) for (const p of cpResult.pendingParts || []) pendingParts.add(p);
+    if (!active.bought) for (const n of cpResult.labourNotes || []) labourNotes.add(n);
     const totalPrice = Math.round(unitCost * line.quantity * 100) / 100;
     const totalWeightKg = Math.round(cpResult.weight.totalWeightKg * line.quantity * 1000) / 1000;
     if (line.unitCost !== unitCost || line.totalPrice !== totalPrice
@@ -148,6 +156,8 @@ export async function refreshMachineBOMChildParts(bom, companyId) {
   if (changed) await bom.save();
   const parts = [...pendingParts];
   await Item.updateOne({ _id: bom.machine, companyId, 'priceProvisional.parts': { $ne: parts } }, { $set: { 'priceProvisional.parts': parts } });
+  const labour = [...labourNotes];
+  await Item.updateOne({ _id: bom.machine, companyId, 'priceProvisional.labour': { $ne: labour } }, { $set: { 'priceProvisional.labour': labour } });
 }
 
 // GET /api/rd/machine-bom/:machineId — tolerates "no BOM yet" (bom: null),
@@ -613,9 +623,14 @@ export const updateMachineBOMProcessDefinition = async (req, res) => {
       materialLineIds, assemblyLineIds, materialLineQuantities, requireAtLeastOneQcStep: true, requireExactlyOneFinalQc: true,
     });
     if (err) return res.status(400).json({ success: false, message: err });
+    // Delivery estimate (2026-11-18): the usual people at once, saved with the steps; not an edit to how it's made.
+    const people = cleanUsualPeople(req.body.usualPeople);
+    if (people.error) return res.status(400).json({ success: false, message: people.error });
+    if (!people.skip) bom.usualPeople = people.value;
 
     // Saving the steps unchanged isn't an edit.
-    const stepsChanged = JSON.stringify(cleaned) !== JSON.stringify(cleanProcessDefinition(bom.toObject().processDefinition));
+    // Usual hours (delivery estimate) aren't a change to how it's made: never pull approval for them.
+    const stepsChanged = stepsForChangeCheck(cleaned) !== stepsForChangeCheck(cleanProcessDefinition(bom.toObject().processDefinition));
     bom.processDefinition = cleaned;
     await bom.save();
     if (stepsChanged) await bomEdited(bom.machine, req, 'process steps changed');

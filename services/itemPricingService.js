@@ -90,7 +90,8 @@ export async function getMachineBillingBOMCost(code, companyId) {
     .select('costSource stdCost billAmountPercent pricePending priceProvisional').lean();
   // Make or buy (2026-10-28): the order form warns when the price is
   // provisional — never blocks.
-  const provisional = { pending: !!machine?.pricePending, parts: machine?.priceProvisional?.parts || [] };
+  // Stage 6 (2026-11-12): labour counted ₹0 for someone with no salary, too.
+  const provisional = { pending: !!machine?.pricePending, parts: machine?.priceProvisional?.parts || [], labour: machine?.priceProvisional?.labour || [] };
   if (!machine || machine.costSource !== 'BOM' || !(machine.stdCost > 0)) {
     return { found: false, totalCost: 0, provisional };
   }

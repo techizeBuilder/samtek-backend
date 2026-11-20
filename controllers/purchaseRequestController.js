@@ -353,16 +353,8 @@ async function applyReceiveSideEffects(request, req, { skipPricingRecalc = false
     // which has no frontend caller at all) — this is the only place
     // that should ever record a Purchase-path sample. Best-effort,
     // never blocks receiving.
-    try {
-      const resolvedCode = request.materialCode || inventoryItem?.code || null;
-      if (resolvedCode) {
-        const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
-        const durationDays = (request.receivedAt.getTime() - new Date(request.requestDate).getTime()) / (1000 * 60 * 60 * 24);
-        await recordLeadTimeSample(request.companyId, resolvedCode, request.productName, 'Purchase', durationDays);
-      }
-    } catch (statsErr) {
-      console.error('❌ Error recording purchase lead-time sample:', statsErr.message);
-    }
+    // (The old delivery estimator's purchase lead-time sample was recorded here;
+    // retired 18 Nov 2026 — the new estimate reads purchase history directly.)
   } catch (invErr) {
     console.error('❌ Error updating inventory item on receive:', invErr);
   }
@@ -450,17 +442,7 @@ async function applyFabricationReceiveSideEffects(request, masterItem, req, { qu
     console.error('❌ Error updating inventory item on fabrication receive:', invErr);
   }
 
-  try {
-    const resolvedCode = request.materialCode || masterItem?.code || null;
-    if (resolvedCode) {
-      const { recordLeadTimeSample } = await import('../utils/leadTimeStats.js');
-      const durationDays = (request.receivedAt.getTime() - new Date(request.requestDate).getTime()) / (1000 * 60 * 60 * 24);
-      await recordLeadTimeSample(request.companyId, resolvedCode, request.productName, 'Purchase', durationDays);
-    }
-  } catch (statsErr) {
-    console.error('❌ Error recording fabrication purchase lead-time sample:', statsErr.message);
-  }
-
+  // (The old delivery estimator's lead-time sample used to be recorded here; retired 18 Nov 2026.)
   await createPurchaseQCJob(request, req, quantityOverride, qcCtx);
 
   try {

@@ -229,10 +229,14 @@ export async function applyCodeQuietly(companyId, deviceCode) {
 }
 
 // Codes on the device that nobody has. Bounded by headcount, so not paged.
+// The codes people already hold are left out inside the query, so it never
+// reads every device day and punch ever stored (17 Nov 2026).
 export async function unmatchedCodes(companyId) {
-  const [days, punches, held] = await Promise.all([
+  const held = await User.distinct('deviceCode', { companyId, deviceCode: { $type: 'string' } });
+  const notHeld = { companyId, code: { $nin: held } };
+  const [days, punches] = await Promise.all([
     DeviceDay.aggregate([
-      { $match: { companyId } },
+      { $match: notHeld },
       { $sort: { date: 1 } },
       { $group: {
         _id: '$code',
@@ -242,11 +246,10 @@ export async function unmatchedCodes(companyId) {
       } },
     ]),
     DevicePunch.aggregate([
-      { $match: { companyId } },
+      { $match: notHeld },
       { $sort: { date: 1 } },
       { $group: { _id: '$code', name: { $last: '$name' }, lastSeen: { $max: '$date' } } },
     ]),
-    User.distinct('deviceCode', { companyId, deviceCode: { $type: 'string' } }),
   ]);
   const heldSet = new Set(held);
   const list = new Map();
@@ -261,7 +264,11 @@ export async function unmatchedCodes(companyId) {
     .sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')) || a.code.localeCompare(b.code));
 }
 
+// Statuses the device sent that we don't know, from the last 90 days only, so
+// the page never reads every device day ever stored (17 Nov 2026).
+export const UNKNOWN_STATUS_DAYS = 90;
 export async function unknownStatuses(companyId) {
-  const statuses = await DeviceDay.distinct('status', { companyId });
+  const since = new Date(Date.now() + 5.5 * 3600 * 1000 - UNKNOWN_STATUS_DAYS * 86400000).toISOString().slice(0, 10);
+  const statuses = await DeviceDay.distinct('status', { companyId, date: { $gte: since } });
   return statuses.filter((s) => s && !isKnownStatus(s)).sort();
 }

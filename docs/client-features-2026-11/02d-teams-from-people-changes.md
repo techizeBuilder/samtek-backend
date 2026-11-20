@@ -58,6 +58,32 @@ The people search returns only name, Employee ID, designation, role, login yes o
 - **Regression, all passing:** `slice7` 31, `stale-atstore` 2, `dispatch-store-part2` 19, `partial-3a` 20, `partial-3c` 16, `people` 123.
 - **Screens:** Manpower and Process Execution compile.
 
+## Skills per person (added 12 November)
+*Logic and your decisions: [02d-teams-from-people-logic.md](02d-teams-from-people-logic.md), §7.*
+
+**Why:** the skill list was a fixed old list (Job Work, Fabrication, Assembly, Painting, Re-Assembly, Final Testing) that matched almost nothing on orders made today, and it was set for the whole team. Stage 5 lets one person be given a step, so each person needs their own skills.
+
+**What changed:**
+- **Each person has their own skills.** A **Skills** link next to each member on the team card opens a list of every Process Template step, with search. Each step shows where a BOM uses it In-House. Production saves it with the manpower edit permission.
+- **The list comes from R&D's Process Templates,** all three levels, each step name once, the same list vendors pick Services from.
+- **A team's skills are worked out** from its people: the card ("from its people"), the team form, the skill matrix and Process Execution's team picker. Skills typed for a team are ignored.
+- **Skill Matrix:** each person against each template step, grouped by team.
+- **R&D renames a step:** if the old name is gone from every template, people's skills follow the new name; if another template still has it, the skill stays.
+- **R&D deletes a step:** people keep it, struck through with "no longer a step in the Process Templates". It can be kept, but not newly given.
+- **Only Production people** can be given skills. Skills are kept on the person, separate from the service technicians' skills.
+
+**Tests:** suite `teams` now has sections 8 and 9: **72 of 72** in all.
+- The list: each name once ignoring case, In-House use, Out Source-only steps, another company's steps left out.
+- Every refusal: not a template step, a duplicate, Store, the Production Head, another company, view-only and add-only.
+- Team skills following members as they're added and removed.
+- Renames through R&D's own rename, and a deleted step.
+
+**Regression:** `people` 123 of 123. No other suite calls the rename.
+
+**Files:**
+- **Backend:** `models/User.js` (`productionSkills`), `services/productionTeamService.js`, `controllers/productionMfgController.js` and `routes/productionMfgRoutes.js` (`GET /teams/skills`, `PUT /teams/people/:userId/skills`), `controllers/processCategoryOptionController.js` (rename follows).
+- **Frontend:** `pages/production/ManpowerTracking.jsx`.
+
 ## Files
 **Backend:**
 - **New:** `services/productionTeamService.js`

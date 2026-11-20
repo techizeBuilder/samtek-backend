@@ -136,6 +136,8 @@ const generatePayslipPDF = async (res, payslip) => {
       ["Basic Salary", payslip.basic],
       ["HRA", payslip.hra],
       ["Other Allowance", payslip.otherAllowance],
+      // Feature 10 (2026-11-13): an approved incentive, only when there is one.
+      ...(Number(payslip.incentive) > 0 ? [["Incentive", payslip.incentive]] : []),
     ],
     L,
     GREEN

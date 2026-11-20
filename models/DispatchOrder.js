@@ -117,5 +117,7 @@ DispatchOrderSchema.index({ company: 1, status: 1, createdAt: -1 });
 // Compound unique: same dispatchId allowed across companies, not within same company
 DispatchOrderSchema.index({ company: 1, dispatchId: 1 }, { unique: true, sparse: true });
 DispatchOrderSchema.index({ company: 1, packagingJobId: 1 }, { unique: true });
+// Order Tracking checks the dispatch lines of particular orders (17 Nov 2026).
+DispatchOrderSchema.index({ company: 1, orderId: 1 });
 
 export default mongoose.model('DispatchOrder', DispatchOrderSchema);

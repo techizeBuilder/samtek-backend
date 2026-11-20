@@ -83,3 +83,21 @@ The people search shows only name, Employee ID, designation, department, login y
 **Regression:** the production and QC suites that assign teams, to confirm assigning still works.
 
 **Browser:** build a team from Rahul Pramanik and Test Worker Two. Try adding the Production Head. Retire it. Check Process Execution still lists teams.
+
+## 7. Skills per person (added 12 Nov, your decisions as recommended)
+**Why:** the skill list on Manpower was a fixed old list (Job Work, Fabrication, Assembly, Painting, Re-Assembly, Final Testing). Those are the step names of orders made before process templates existed. Orders today use the Process Template steps, so the list matched almost nothing. Skills also sat on the whole team, but stage 5 lets one person be given a step, so each person needs their own.
+
+**Your decisions (12 Nov):**
+1. **Production sets a person's skills** on the Manpower page, with the manpower edit permission. HR doesn't.
+2. **The list shows every Process Template step,** Out Source-only ones included, with a note of where a BOM uses each one In-House.
+
+**How it works:**
+- **Skills belong to the person,** not the team, so they move with the person if they change teams. They're kept on the person's record, separate from the service technicians' skills.
+- **The skill list** is every internal process name in the company's Process Templates, across Sub Child Part, Child Part and Machine, each name once (matched ignoring case). This is the same list vendors pick their Services from. On test-1 that's 12: welding, grinding, coating, cutting, drilling, laser cutting, shaft assembly, nut bolting, bairing assembly, assemble, pre painting, post painting. Each shows "In-House in: …" with the BOMs that use it In-House.
+- **A team's skills are worked out:** everything its members can do. They show on the team card, in the skill matrix and in Process Execution's team picker. Nobody types skills for a team any more; anything sent for a team is ignored.
+- **The skill matrix** shows each person against each step, grouped by team.
+- **R&D renames a template step:** if the old name no longer exists in any template, people with that skill get the new name. If the old name still exists in another template, the skill is still valid and stays.
+- **R&D deletes a template step:** people keep the skill, marked "no longer in templates", until Production removes it.
+- **Only Production people** (the team rule: Production department, not the Production Head) can be given skills.
+
+**Stage 5, not now:** giving a step to one person will check they have that step's skill. What a whole team needs is settled in stage 5.

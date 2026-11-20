@@ -76,4 +76,25 @@ Covered by the `machinestock` suite:
 | Regression: `stockorder` 83, `labelbulk` 64, `fabsync` 32, `makebuy-s3` 9, `makebuy-gate` 18, `auto-request` 9, `gc` 40, `s1` 25 | 280 of 280 |
 
 ## Browser results
-Not started.
+**13 Nov 2026** (test-1):
+- **Steps 1–4:** IHT set to Low Flow, Min 1, Order 2, Build Days 10.
+- **Step 5 passed.** The sweep run by hand for test-1 (1 machine scanned, 1 order) raised:
+  - **ORD-2026-112** IHT × 2: Stock, Normal, delivery 23 Nov, steps pre painting → post painting → coating (Final QC)
+  - from the cascade: **ORD-2026-113** Fan × 2 (for ORD-2026-112), **ORD-2026-114** Fan Blade × 12 (for ORD-2026-113), and job work **SCJW-2026-006** (Fan Bush)
+  - reservations labelled MachineCascade
+  - **PR071**, bearing BA-009 × 4, for the Fan order's shortfall
+  - Production's bell shows the three new orders
+- **Seen and settled at step 5:**
+  - **BOM ✗ / Design ✗ on new orders is expected.** They're set the first time the order is opened in Process Execution.
+  - **Fixed:** Order Management showed **"Overdue" on orders due today** from 05:30. `new Date('YYYY-MM-DD')` is midnight UTC; it now compares India dates (`OrderManagement.jsx` `isPastDue`). The old Work Planning page has the same comparison; it's left alone until the Work Planning decision.
+  - **Noted for later (design question, not changed):** cascade orders are due **today** (the part's Build Days are blank), while the machine they're built for is due 23 Nov.
+- **Step 6 passed:** Store's Product Master and R&D's Machines tab both show IHT with Build open ORD-2026-112 (2).
+- **Step 7 passed:** a second sweep raised nothing.
+- **Step 8 passed** (checked on data): BP816 saved as Flow Off with Min 1. The sweep didn't pick it up and raised nothing.
+- **Step 9 passed:**
+  - **The form made ORD-2026-115** (BP816 × 1, Stock, delivery 20 Nov), steps assemble (in, QC) → pre painting (out, QC) → post painting (out, Final QC) → coating (in, QC). It reserved nut bolts 10 and Tool-A 1.
+  - **The toast:** "Part orders: ORD-2026-116 (Fan)". Below that order sit Fan Blade ORD-2026-117 × 6, job work SCJW-2026-007 (Fan Bush × 2) and PR072 (bearing × 2).
+  - **With BP816 on Low Flow,** the sweep raised no second order.
+  - **The list** seemed not to update in the screenshot; it was only reloading. The API shows ORD-2026-115 first, 68 in all.
+- **Left on:** IHT stays on Low Flow (Min 1, Order 2). BP816 goes back to Off.
+- **Feature 1 browser test COMPLETE, 13 Nov.**

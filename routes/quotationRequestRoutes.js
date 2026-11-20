@@ -1,6 +1,8 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
 import { checkAnyPermission } from '../middleware/permissions.js';
+// Purchase separated from Accounts (2026-11-16): docs/purchase-separation/01-logic.md.
+import { purchaseGate, buyOrPayView, purchaseOrStorePairs, purchaseSettingsGate, purchaseAuditGate } from '../middleware/purchaseGates.js';
 import { createQuotationRequest, remindQuotationRequest } from '../controllers/quotationRequestController.js';
 
 // One quotation email per vendor for several items (procurement-v2,
@@ -10,7 +12,7 @@ const router = express.Router();
 router.use(authenticateToken);
 
 // Same permission shape as itemQuoteGroupRoutes.js (Purchase / Accounts dept).
-const purchasesAdd = checkAnyPermission([['accounts', 'purchases'], ['Store', 'purchaseOrders']], 'add');
+const purchasesAdd = checkAnyPermission(purchaseOrStorePairs, 'add');
 router.post('/', purchasesAdd, createQuotationRequest);
 // Point 16 (2026-10-10): re-email the same link as a reminder (once a day).
 router.post('/:id/remind', purchasesAdd, remindQuotationRequest);

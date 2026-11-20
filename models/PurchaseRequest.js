@@ -240,4 +240,9 @@ purchaseRequestSchema.index(
   { unique: true, partialFilterExpression: { saleItemId: { $ne: null } } }
 );
 
+// Delivery estimate (2026-11-18): an item's last received purchases (usual purchase
+// time) and its open POs, read for all of a quote's materials at once.
+purchaseRequestSchema.index({ companyId: 1, materialCode: 1, receivedAt: -1 });
+purchaseRequestSchema.index({ companyId: 1, materialCode: 1, status: 1 });
+
 export default mongoose.model('PurchaseRequest', purchaseRequestSchema);

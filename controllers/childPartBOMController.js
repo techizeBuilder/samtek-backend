@@ -23,10 +23,11 @@
 // Sub Child Part Master record, so there's nothing to keep in sync.
 import { Item } from '../models/Inventory.js';
 import ChildPartBOM from '../models/ChildPartBOM.js';
+import { findCodeHolder, codeTakenMessage, nextSequentialCode, exactRe, duplicateKeyMessage } from '../services/itemCodeService.js';
 import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSizeError } from '../services/fabricationDemandService.js';
 import { activeCost } from '../services/makeBuyService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
-import { cleanProcessDefinition, validateProcessDefinition } from '../utils/processDefinitionValidation.js';
+import { cleanProcessDefinition, validateProcessDefinition, stepsForChangeCheck, cleanUsualPeople } from '../utils/processDefinitionValidation.js';
 import { refreshBomMaterialLines } from '../utils/bomMaterialPrice.js';
 import { invalidateBomApproval } from '../services/productApprovalService.js';
 
@@ -44,6 +45,17 @@ async function pushChildPartPrice(childPartId, companyId) {
 }
 
 const pad3 = (n) => String(n).padStart(3, '0');
+
+// The same Child Part twice (2026-11-16): an active Child Part Master with the same
+// name, ignoring upper / lower case and spaces. Old per-machine Child Parts (no
+// ChildPartBOM) don't count: their names legitimately repeat across machines.
+async function sameNameChildPart(companyId, name, excludeId = null) {
+  const hits = await Item.find({ companyId, productKind: 'ChildPart', isDiscontinued: { $ne: true }, name: exactRe(name), ...(excludeId ? { _id: { $ne: excludeId } } : {}) }).select('name code').lean();
+  if (!hits.length) return null;
+  const bom = await ChildPartBOM.findOne({ company: companyId, childPart: { $in: hits.map(h => h._id) } }).select('childPart').lean();
+  return bom ? hits.find(h => String(h._id) === String(bom.childPart)) : null;
+}
+const childPartExistsMessage = (hit) => `A Child Part named "${hit.name}" already exists (code ${hit.code}). Edit that one instead.`;
 
 const AMOUNT_UNIT_TYPES = ['Length Unit', 'Area Unit', 'Volume Unit'];
 const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNIT_TYPES.includes(sourceItem.unitType);
@@ -130,8 +142,9 @@ function validateChildPartBody(body, { requireImage }) {
 // GET /api/rd/child-part-master/generate-code
 export const generateChildPartMasterCode = async (req, res) => {
   try {
-    const count = await ChildPartBOM.countDocuments({ company: req.user.companyId });
-    res.json({ success: true, code: `CP-${pad3(count + 1)}` });
+    // The highest CP number any item has + 1 (it was "count + 1", which clashed after
+    // a delete, a hand-typed code or in a second company: codes are unique database-wide).
+    res.json({ success: true, code: await nextSequentialCode('CP') });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -177,6 +190,11 @@ export async function refreshAndComputeChildPart(childPartId, companyId) {
 
   let changed = false;
   const pendingParts = [];
+  // Stage 6 (2026-11-12): builds that counted labour ₹0 for someone with no
+  // salary — its own last build, and each made Sub Child Part's — make the
+  // price provisional too ("CODE: names").
+  const labourNotes = [];
+  if (bom.labourMissing?.length) labourNotes.push(`${item.code}: ${bom.labourMissing.join(', ')}`);
   for (const line of bom.subChildParts) {
     if (line.isDiscontinued) continue;
     const src = await Item.findOne({ _id: line.subChildPart, companyId }).select('code productKind partSourcing subChildPartDetails purchase internalManufacturing purchaseCost').lean();
@@ -187,6 +205,7 @@ export async function refreshAndComputeChildPart(childPartId, companyId) {
     const active = activeCost(src, cost.unitCost);
     cost.unitCost = Math.round(active.cost * 100) / 100;
     if (active.pending) pendingParts.push(src.code);
+    if (!active.bought && src.subChildPartDetails?.labourMissing?.length) labourNotes.push(`${src.code}: ${src.subChildPartDetails.labourMissing.join(', ')}`);
     const totalPrice = Math.round(cost.unitCost * line.quantity * 100) / 100;
     const totalWeightKg = Math.round(cost.unitWeightKg * line.quantity * 1000) / 1000;
     if (line.materialsCost !== cost.materialsCost || line.jobWorkCost !== cost.jobWorkCost
@@ -215,13 +234,17 @@ export async function refreshAndComputeChildPart(childPartId, companyId) {
     await Item.updateOne({ _id: item._id }, { $set: { 'priceProvisional.parts': pendingParts } });
     if (item.priceProvisional) item.priceProvisional.parts = pendingParts;
   }
+  if ((item.priceProvisional?.labour || []).join('|') !== labourNotes.join('|')) {
+    await Item.updateOne({ _id: item._id }, { $set: { 'priceProvisional.labour': labourNotes } });
+    if (item.priceProvisional) item.priceProvisional.labour = labourNotes;
+  }
 
   const plainBom = bom.toObject();
   // Decorate each material/tool line's own weight onto the response — never
   // persisted (see materialLineWeightKg's own comment), purely for the
   // Materials/Tools tables' own Weight column to read directly.
   plainBom.materials = (plainBom.materials || []).map(m => ({ ...m, weightKg: materialLineWeightKg(m) }));
-  return { item, bom: plainBom, cost: computeChildPartCost(plainBom), weight: computeChildPartWeight(plainBom), pendingParts };
+  return { item, bom: plainBom, cost: computeChildPartCost(plainBom), weight: computeChildPartWeight(plainBom), pendingParts, labourNotes };
 }
 
 // Called once a Child Part's own build actually completes (one unit's
@@ -277,15 +300,11 @@ export const createChildPartMaster = async (req, res) => {
     if (err) return res.status(400).json({ success: false, message: err });
 
     const codeTrim = code.trim();
-    const existing = await Item.findOne({ companyId: req.user.companyId, code: codeTrim }).lean();
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: existing.productKind === 'ChildPart'
-          ? `"${codeTrim}" is already a Child Part.`
-          : `Item code "${codeTrim}" is already in use.`,
-      });
-    }
+    // Codes are unique across the whole database, in any letter case (2026-11-16).
+    const holder = await findCodeHolder(req.user.companyId, codeTrim);
+    if (holder) return res.status(400).json({ success: false, message: codeTakenMessage(codeTrim, holder, 'Code') });
+    const twin = await sameNameChildPart(req.user.companyId, name);
+    if (twin) return res.status(400).json({ success: false, message: childPartExistsMessage(twin) });
 
     const newItem = await Item.create({
       name: name.trim(), code: codeTrim, image: image || '',
@@ -308,6 +327,8 @@ export const createChildPartMaster = async (req, res) => {
 
     res.status(201).json({ success: true, data: { item: newItem, bom } });
   } catch (err) {
+    const dup = duplicateKeyMessage(err);
+    if (dup) return res.status(400).json({ success: false, message: dup });
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -321,7 +342,14 @@ export const updateChildPartMaster = async (req, res) => {
     const { item } = resolved;
 
     const { name, image, specification } = req.body;
-    if (name !== undefined) item.name = name.trim();
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ success: false, message: 'Name is required.' });
+      if (name.trim().toLowerCase() !== String(item.name || '').trim().toLowerCase()) {
+        const twin = await sameNameChildPart(req.user.companyId, name, item._id);
+        if (twin) return res.status(400).json({ success: false, message: childPartExistsMessage(twin) });
+      }
+      item.name = name.trim();
+    }
     if (image !== undefined) {
       if (!image) return res.status(400).json({ success: false, message: 'A Design File (image or PDF) is required.' });
       item.image = image;
@@ -744,9 +772,14 @@ export const updateChildPartMasterProcessDefinition = async (req, res) => {
       materialLineIds, assemblyLineIds, materialLineQuantities, requireAtLeastOneQcStep: true,
     });
     if (err) return res.status(400).json({ success: false, message: err });
+    // Delivery estimate (2026-11-18): the usual people at once, saved with the steps; not an edit to how it's made.
+    const people = cleanUsualPeople(req.body.usualPeople);
+    if (people.error) return res.status(400).json({ success: false, message: people.error });
+    if (!people.skip) bom.usualPeople = people.value;
 
     // Saving the steps unchanged isn't an edit.
-    const stepsChanged = JSON.stringify(cleaned) !== JSON.stringify(cleanProcessDefinition(bom.toObject().processDefinition));
+    // Usual hours (delivery estimate) aren't a change to how it's made: never pull approval for them.
+    const stepsChanged = stepsForChangeCheck(cleaned) !== stepsForChangeCheck(cleanProcessDefinition(bom.toObject().processDefinition));
     bom.processDefinition = cleaned;
     await bom.save();
     if (stepsChanged) await bomEdited(bom.childPart, req, 'process steps changed');

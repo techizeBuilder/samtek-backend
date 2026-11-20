@@ -84,10 +84,11 @@ ProductionGroupSchema.index({ unitHeadOrManager: 1 });
 ProductionGroupSchema.index({ company: 1, unitHeadOrManager: 1 });
 
 // Pre-save middleware to update metadata
-ProductionGroupSchema.pre('save', function(next) {
+// Mongoose 9 passes no `next` to a pre hook (it gets the call's options), so
+// calling one threw and blocked the save. Rewritten without it, 2026-11-16.
+ProductionGroupSchema.pre('save', function () {
   this.metadata.totalItems = this.items.length;
   this.metadata.lastUpdated = new Date();
-  next();
 });
 
 // Virtual for populated items with images

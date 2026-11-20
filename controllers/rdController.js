@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { Item } from '../models/Inventory.js';
+import { escapeRe, findCodeHolder, findActiveTwin, reactivateTwinMessage } from '../services/itemCodeService.js';
 import RDPrototype from '../models/RDPrototype.js';
 import RDChangeRequest from '../models/RDChangeRequest.js';
 import RDToolProcess from '../models/RDToolProcess.js';
@@ -115,6 +116,7 @@ const toMachineResponse = (item) => ({
   // Make or buy (2026-10-28): price provisional — Sales is warned.
   pricePending: !!item.pricePending,
   priceProvisionalParts: item.priceProvisional?.parts || [],
+  priceProvisionalLabour: item.priceProvisional?.labour || [], // stage 6: labour ₹0, no salary
   stdCost: item.stdCost ?? 0,
   purchaseCost: item.purchaseCost ?? 0,
   salePrice: item.salePrice ?? 0,
@@ -459,6 +461,61 @@ export const getMachines = async (req, res) => {
 
 
 // ─── 1. CREATE MACHINE ─────────────────────────────────────────────────────────
+// Who already has this code, ignoring upper / lower case and surrounding spaces;
+// excludeId = the item being edited. Product Master, Motor and Inventory codes are
+// one Item collection, and Item.code is unique in the WHOLE database (schema
+// `unique: true`): every company, and discontinued products too. This check used to
+// look at this company's active products only, so a code held by a discontinued
+// product (or another company) passed it, then failed in the database with a
+// duplicate-key error that nobody saw (2026-11-16). Returns { name, mine, discontinued }.
+// The lookup is shared with Inventory / Child Part / Sub Child Part (services/itemCodeService.js).
+const escapeCode = escapeRe;
+const findItemByCode = findCodeHolder;
+// The sentence for a taken code (never names another company's product).
+const codeTakenMessage = (code, hit) => {
+  const c = String(code).trim();
+  if (!hit.mine) return `Product Code "${c}" is already used. Codes must be unique: choose another.`;
+  if (hit.discontinued) return `Product Code "${c}" belongs to the discontinued product "${hit.name}". Reactivate it, or choose another code.`;
+  return `Product Code "${c}" is already used by "${hit.name}". Codes must be unique.`;
+};
+
+// The same product twice under two codes (2026-11-16): a product is its Category,
+// Sub Category, Name and Variant (the four choices at the top of the Add form).
+// Once Generate always finds a free code (AM6X12, AM6X12-2), a clashing code no
+// longer stops anyone saving the same product again, so this does. An active
+// product only: a discontinued one with the same identity is a past version.
+// Source Type is how it is sourced, not what it is, so it isn't part of it.
+const identityRe = (v) => new RegExp(`^${escapeCode(v)}$`, 'i');
+const findProductByIdentity = ({ companyId, pType, subCategory, name, variant }, excludeId = null) => Item.findOne({
+  companyId, productKind: 'Machine', isDiscontinued: false,
+  category: identityRe(pType || ''), subCategory: identityRe(subCategory || ''), name: identityRe(name || ''),
+  ...(String(variant || '').trim() ? { 'machineDetails.variant': identityRe(variant) } : { 'machineDetails.variant': { $in: ['', null] } }),
+  ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+}).select('name code').lean();
+const productExistsMessage = (hit) => `This product already exists as "${hit.name}" (code ${hit.code}): same Category, Sub Category, Name and Variant. Edit that one instead.`;
+
+// GET /api/rd/machines/free-code?base=AM6X12 → { code }: the base if no product
+// uses it, else base-2, base-3, … (the Generate button; 2026-11-16). With
+// pType / category / name / variant it also says whether that product already exists.
+export const getFreeProductCode = async (req, res) => {
+  try {
+    const base = String(req.query.base || '').trim().toUpperCase();
+    if (!base) return res.status(400).json({ success: false, message: 'Nothing to base a code on yet: type the Name first.' });
+    if (req.query.name) {
+      // excludeId: the product being edited is not a twin of itself.
+      const dup = await findProductByIdentity({ companyId: req.user.companyId, pType: req.query.pType, subCategory: req.query.category, name: req.query.name, variant: req.query.variant }, req.query.excludeId || null);
+      if (dup) return res.json({ success: true, exists: { name: dup.name, code: dup.code }, message: productExistsMessage(dup) });
+    }
+    for (let n = 1; n <= 200; n++) {
+      const candidate = n === 1 ? base : `${base}-${n}`;
+      if (!(await findItemByCode(req.user.companyId, candidate))) return res.json({ success: true, code: candidate, taken: n > 1 });
+    }
+    res.status(409).json({ success: false, message: 'Too many products share this code: type one by hand.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 export const createMachine = async (req, res) => {
   try {
     const {
@@ -497,16 +554,17 @@ export const createMachine = async (req, res) => {
     // sharing a code silently shadows the first one everywhere it's looked up
     // by code (BOM/R&D approval, autofill, etc.). Also covers Motor/Inventory
     // codes now, since it's all one Item collection.
-    const existing = await Item.findOne({ code: code.trim(), companyId: req.user.companyId, isDiscontinued: false });
+    // Case-insensitive since 2026-11-16: "am6" and "AM6" are the same code.
+    const existing = await findItemByCode(req.user.companyId, code);
     if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: `Product Code "${code}" is already used by "${existing.name}". Codes must be unique.`
-      });
+      return res.status(400).json({ success: false, message: codeTakenMessage(code, existing) });
     }
 
+    const sameProduct = await findProductByIdentity({ companyId: req.user.companyId, pType, subCategory: category, name, variant });
+    if (sameProduct) return res.status(400).json({ success: false, message: productExistsMessage(sameProduct) });
+
     const machine = await Item.create({
-      code,
+      code: code.trim(),
       name,
       description: description || '',
       type: 'Product',
@@ -591,6 +649,33 @@ export const updateMachine = async (req, res) => {
     if (purchase !== undefined && internalManufacturing !== undefined && !!purchase === !!internalManufacturing) {
       return res.status(400).json({ success: false, message: 'Choose either Purchasable (Vendor) or Internal Manufacturing.' });
     }
+    // Changing the code to one another product already uses would make two
+    // products share it (2026-11-16: only Add checked this before).
+    if (typeof req.body.code === 'string') {
+      if (!req.body.code.trim()) return res.status(400).json({ success: false, message: 'Product Code cannot be empty.' });
+      const clash = await findItemByCode(req.user.companyId, req.body.code, req.params.id);
+      if (clash) {
+        return res.status(400).json({ success: false, message: codeTakenMessage(req.body.code, clash) });
+      }
+    }
+    // Same product twice: only when one of its four identity fields CHANGES, so a
+    // product that is already duplicated can still be edited for anything else.
+    const { pType: nPType, category: nSub, name: nName, variant: nVariant } = req.body;
+    if ([nPType, nSub, nName, nVariant].some((v) => v !== undefined)) {
+      const cur = await Item.findOne({ _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' }).select('category subCategory name machineDetails.variant isDiscontinued').lean();
+      if (cur && !cur.isDiscontinued) {
+        const next = {
+          pType: nPType ?? cur.category, subCategory: nSub ?? cur.subCategory, name: nName ?? cur.name, variant: nVariant ?? cur.machineDetails?.variant ?? '',
+        };
+        const norm = (v) => String(v ?? '').trim().toLowerCase();
+        const changed = norm(next.pType) !== norm(cur.category) || norm(next.subCategory) !== norm(cur.subCategory)
+          || norm(next.name) !== norm(cur.name) || norm(next.variant) !== norm(cur.machineDetails?.variant);
+        if (changed) {
+          const same = await findProductByIdentity({ companyId: req.user.companyId, ...next }, req.params.id);
+          if (same) return res.status(400).json({ success: false, message: productExistsMessage(same) });
+        }
+      }
+    }
     const before = (purchase !== undefined || internalManufacturing !== undefined)
       ? await Item.findOne({ _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' }).select('purchase internalManufacturing').lean()
       : null;
@@ -610,6 +695,7 @@ export const updateMachine = async (req, res) => {
     }
     res.json({ success: true, data: toMachineResponse(machine) });
   } catch (err) {
+    if (err.code === 11000) return res.status(400).json({ success: false, message: 'Product Code already exists.' });
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -1236,6 +1322,13 @@ export const discontinueMachine = async (req, res) => {
 
 export const reactivateMachine = async (req, res) => {
   try {
+    // Not if the same product is active again under another code (2026-11-16).
+    const cur = await Item.findOne({ _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' }).lean();
+    if (!cur) return res.status(404).json({ success: false, message: 'Machine not found' });
+    if (cur.isDiscontinued) {
+      const twin = await findActiveTwin(cur);
+      if (twin) return res.status(400).json({ success: false, message: reactivateTwinMessage(twin) });
+    }
     const machine = await Item.findOneAndUpdate(
       { _id: req.params.id, companyId: req.user.companyId, productKind: 'Machine' },
       { $set: { isDiscontinued: false } },

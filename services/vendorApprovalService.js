@@ -10,7 +10,7 @@
 import Supplier from '../models/Supplier.js';
 import Purchase from '../models/Purchase.js';
 import PurchaseRequest from '../models/PurchaseRequest.js';
-import notificationService from './notificationService.js';
+import notificationService, { HOLDERS } from './notificationService.js';
 import { effectiveDocumentTypes, missingTypesFor } from './vendorDocumentRulesService.js';
 import { computeVendorScores, scoreSettingsOf, MIN_HISTORY_EVENTS } from './vendorScoreService.js';
 
@@ -305,7 +305,7 @@ export async function runVendorDocumentExpirySweep() {
       const when = `${d}/${m}/${y}`;
       const phrase = dayKey < todayKey ? `expired on ${when}` : dayKey === todayKey ? `expires today (${when})` : `expires on ${when}`;
       try {
-        await notificationService.notifyRoles(['Accounts', 'Accounts Head', 'Company Admin'], {
+        await notificationService.notifyRolesAnd(['Accounts', 'Accounts Head', 'Company Admin'], HOLDERS.purchase, {
           title: dayKey < todayKey ? 'Vendor document expired' : 'Vendor document expiring',
           message: `${vendor.supplierName}: ${doc.docType} ${phrase}`,
           type: 'purchase',

@@ -1048,7 +1048,6 @@ const getDefaultPermissionsByRole = (role) => {
           { key: 'repairProduction', view: true, add: true, edit: true, delete: false },
           { key: 'workPlanning', view: true, add: true, edit: true, delete: false },
           { key: 'processQc', view: true, add: true, edit: true, delete: false },
-          { key: 'jobCards', view: true, add: true, edit: true, delete: false },
           { key: 'manpower', view: true, add: true, edit: true, delete: false },
           { key: 'expenses', view: true, add: true, edit: true, delete: false }
         ]

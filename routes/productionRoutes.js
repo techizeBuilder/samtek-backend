@@ -32,7 +32,7 @@ const expensesDelete = checkPermission('production', 'expenses', 'delete');
 // NOTE: Dashboard / Reports / Production-Shift / Ungrouped-Items routes below are
 // intentionally left WITHOUT checkPermission — the 'production' module's grantable
 // feature catalogue (roleModulesConfig.js) only defines: orders, repairProduction,
-// workPlanning, processQc, jobCards, manpower, expenses, lms. There is no 'dashboard'
+// workPlanning, processQc, manpower, expenses, lms. There is no 'dashboard'
 // or generic overview feature key, and the frontend sidebar entry for '/production/dashboard'
 // carries no `feature` at all (see moduleRoutes.js), confirming this is an intentionally
 // ungated overview. Gating these with an invented key would 403 them for every non-Superadmin
