@@ -103,6 +103,15 @@ const InternalProcessSchema = new mongoose.Schema({
   // Delivery estimate (2026-11-18, decision D): R&D's usual hours per piece for an
   // In-House step, used until the step has 3 finished runs. null = not typed.
   usualHoursPerPiece: { type: Number, default: null, min: 0 },
+  // Feature 19 (client, 20 Nov 2026 — docs/client-features-2026-11/19-standard-hours-logic.md):
+  // R&D's standard for this In-House step. usualHoursPerPiece above = hours per piece
+  // WITH standardCrew people; setupHours counts once per step; splitAnswer = "Do more
+  // people make this step faster?" (Yes / Partly / Hardly / No → σ). The Company Admin
+  // approves them into a StepStandard before Production is measured on them.
+  standardCrew: { type: Number, default: null, min: 1 },
+  setupHours: { type: Number, default: null, min: 0 },
+  splitAnswer: { type: String, enum: ['Yes', 'Partly', 'Hardly', 'No', null], default: null },
+  standardEditedAt: { type: Date, default: null }, // when R&D last changed any of the four
 }, { _id: true, timestamps: false });
 
 const ProcessCategorySchema = new mongoose.Schema({

@@ -13,7 +13,7 @@
 | Kept, link cleared | 118 records: delivered orders' packing and dispatch, received POs, quote groups (8 left empty became Cancelled), lunch overrides, freight expenses, warranty claims, 3 sold or rejected serial units |
 | Money | 66 postings reversed. All 9 accounts landed exactly as planned (e.g. Job Work Charges ₹9,630 → ₹0; SBI −₹13,420.94 net) |
 | Stock | 0 on every item and every fabrication size. No serial unit left in Stock |
-| Sweeps | Off on the 18 watched items. **Put them back after the test** from `changed-before.items.json` (materialFlow fields). *(19 Nov, B5: the two part sweeps are off too. Put minStock back from `b5.changed-before.items.json`)* |
+| Sweeps | Off on the 18 watched items. **Put them back after the test** from `changed-before.items.json` (materialFlow fields). *(19 Nov, B5: the two part sweeps are off too. Put minStock back from `b5.changed-before.items.json`. 21 Nov: also the Low Flow set in the client demo on BP816, ROU-001 and T, from `test-1-clean-2026-11-21/changed-before.items.json`)* |
 | Second dry run | Nothing left to delete, no money left to reverse, no link left pointing at a deleted record |
 
 **Empty check:** 0 production orders, reservations, step runs, crew entries, outsource orders, job-work orders, open customer orders, open purchase requests and open POs.
@@ -145,6 +145,146 @@ Job work: laser cutting 2 · welding 2 · grinding 1 · pre painting 2 days.
   - No "counted on" (nobody builds it). Rough (a typed number). No BOM warning.
 - **3c, PMT × 1 and Aata machine × 1 together:** the order's date is the later one, so likely **Wed 9 Dec** (Aata: "sets the date"), commit **Sat 12 Dec**, delivered by Mon 14 Dec. PMT's own line: likely Fri 27 Nov. The BOM warning is back (for the Aata machine).
 
+**Browser (20 Nov; today Fri 20, so 3b moves one day):**
+- **3a:** "Can't estimate yet" with exactly that line ✓.
+- **3b:** likely Sat 28 Nov, buffer 2, commit Tue 1 Dec, delivered by Thu 3 Dec; "Purchase's usual 7 days to buy — Fri 27 Nov" ✓.
+- **3c:** likely Wed 9 Dec (the Aata line "sets the date"), commit Sat 12 Dec, delivered by Mon 14 Dec. PMT's line: Sat 28 Nov ✓.
+  - 3c was worked out after it was pressed. C channel now arrives Mon 23, where on 19 Nov it arrived Sun 22 but was usable Mon 23 anyway, so the chain is the same.
+  - The Test Motor arriving Wed 25 isn't needed before Sat 5 Dec.
+  - 16 working days → buffer 3.
+- **Run 3 PASSED.** Found I5 (below), fixed.
+
+### Run 4: a machine in stock (case 0), worked by hand BEFORE pressing Estimate (20 Nov)
+*Setup by script: Aata machine stock 0 → **1**. Set back to 0 after runs 4.*
+- **4a, Aata machine × 1:** taken from stock, nothing built.
+  - Ready today → packing Fri 20, dispatch **Sat 21 Nov** = likely.
+  - 1 working day → buffer = the minimum **2** → commit **Tue 24 Nov**. Delivered by **Thu 26 Nov**.
+  - Decided by: "Aata machine: in stock".
+  - **No BOM warning** (nothing to build), no "counted on". How sure: **Good** (no typed numbers).
+- **4b, Aata machine × 2:** 1 from stock, 1 built.
+  - The built one decides: as run 1 → likely **Wed 9 Dec**, commit **Sat 12 Dec**, delivered by Mon 14 Dec.
+  - The BOM warning is back, and Rough.
+
+**Browser:**
+- **4a:** commit Tue 24 Nov, likely Sat 21 + 2, delivered by Thu 26; "Aata machine: in stock — Fri 20 Nov"; Good; no warning, no "counted on" ✓.
+- **4b:** commit Sat 12 Dec, likely Wed 9 Dec, delivered by Mon 14; BOM warning, Rough, the built machine's chain ✓.
+- **Run 4 PASSED.** Suggested I6 (below).
+
+### Run 5: a Child Part in stock (case 1), worked by hand BEFORE pressing Estimate (20 Nov)
+*Setup by script: Aata machine back to **0**; Chamber (CP-002) stock 0 → **1**.*
+
+**Aata machine × 1:** the Chamber comes from stock, so no Chamber, Chamber frame, Motor Mount or Test Sensor is built or bought. Only the machine's own steps.
+
+| Day | What happens |
+|---|---|
+| Wed 25 Nov | Test Motor in (Purchase's usual 5 days) → **assemble** 4 h ÷ 2 people = 2 h (Rahul + Test Worker Two) → **pre painting** out (2 days) |
+| Fri 27 | Back → **post painting** 2 h (Test Worker Four) → final QC by the end of the day |
+| Sat 28 | Ready → packing |
+| **Mon 30 Nov** | **Dispatch** (Sunday off) |
+
+**Expected:**
+- **Likely:** Mon 30 Nov.
+- **Buffer:** 8 working days × 15% = 1.2 → the minimum **2**.
+- **Commit:** **Wed 2 Dec**. **Delivered by:** **Fri 4 Dec**.
+- **Decided by:** "Test Motor: to buy, Purchase's usual 5 days to buy (needed for assemble) — Wed 25 Nov"; pre painting out Wed 25, back Fri 27.
+- **Counted on:** Team One (1 person) and Team Two (2 people), from Wed 25 Nov.
+- **BOM warning:** yes. **How sure:** Rough.
+- **Script check (20 Nov):** all of the above matched ✓.
+
+**Re-worked for Sat 21 Nov, BEFORE pressing (the browser run is on the 21st):**
+- **The plan:**
+  - Test Motor bought today (5 days) → **Thu 26 Nov** → assemble 2 h, 2 people → pre painting out Thu 26, back **Sat 28**
+  - post painting 2 h (Test Worker Four) → final QC Saturday evening → Sunday off
+  - **Mon 30** packing → **Tue 1 Dec** dispatch
+- **Expected:**
+  - **Likely:** Tue 1 Dec.
+  - **Buffer:** 8 working days → **2**.
+  - **Commit:** **Thu 3 Dec**. **Delivered by:** **Sat 5 Dec**.
+  - **Decided by:** Test Motor (Thu 26 Nov, needed for assemble); pre painting out Thu 26, back Sat 28.
+  - **Counted on:** Team One (1) and Team Two (2), from Thu 26 Nov. BOM warning; Rough.
+
+**21 Nov, the client demo's data:**
+- **What happened:** on 20 Nov, for the client meeting, the Blower Pulverizer, ROU-001 and T were set to Low Flow. The Blower Pulverizer's save raised ORD-2026-019 (for stock) with its Fan, Fan Blade, a job-work order and purchase requests. As work in hand it changed run 5's "counted on" (Team Two 3); the dates stayed right.
+- **Your choice:** remove it. Cleaned with the reset script into a **separate** backup, `D:\cs\db-backups\test-1-clean-2026-11-21\`:
+  - 3 orders, 1 job-work order, 1 crew entry, 7 reservations and 9 requests deleted
+  - the sweeps off on BP816, ROU-001 and T
+  - a check run afterwards: nothing left
+- **Run 5 by script after the clean-up:** likely Tue 1 Dec, commit Thu 3 Dec, delivered by Sat 5 Dec; counted on Team One (1) + Team Two (2) from Thu 26 Nov. **Matches the hand working exactly** ✓.
+
+**Browser (21 Nov):** commit Thu 3 Dec, likely Tue 1 Dec + 2, delivered by Sat 5 Dec. Decided by: Test Motor (Thu 26, needed for assemble) and pre painting out Thu 26, back Sat 28. Counted on: Team One (1) + Team Two (2) from Thu 26. BOM warning, Rough. No Chamber chain (from stock). **Run 5 PASSED.** The Chamber's stock was set back to 0.
+
+### Run 6: Blower Pulverizer × 1, worked by hand BEFORE pressing Estimate (21 Nov)
+**Setup, by script at your ask** (old values in `test-1-clean-2026-11-21/run6-before.json`):
+- BP assemble 6 h and coating 2 h, usual people 2
+- Fan Blade drilling 0.25 h, people 1
+- job work: cutting 1 day, drilling 1 day
+- Fan Bush people 1. The Fan already had people 1.
+
+**As saved now:**
+- **BP:** assemble (6 h, QC; picks Fan, NUT Bolts, Tool-A) → pre painting [job work, QC] → post painting [job work, final QC] → coating (2 h, QC). The BOM is locked.
+- **Fan** (*changed since 19 Nov, probably in the demo*): welding (in-house 1 h, QC; picks Fan Blade × 6, Fan Bush × 2) → grinding (1 h, QC; Tool-A) → coating (2 h, QC; NUT Bolts, bearings) → pre painting + post painting [job work].
+- **Fan Blade × 6** (batch): laser cutting [job work, no QC] → drilling 0.25 h/piece = 1.5 h, QC.
+- **Fan Bush × 2** (batch): cutting + drilling [job work, both QC] = one 1-day trip.
+- **Buying, all raised today:** **ss sheet** (both blades' and bushes' raw material) history **13 days** → **Fri 4 Dec**. NUT Bolts 2 days, bearings 2 and Tool-A 1 → Mon 23 Nov.
+- **Skills:** welding is Test Worker Three only; assemble is Rahul, Test Worker Two or Test Worker Five.
+
+| Day | What happens |
+|---|---|
+| **Fri 4 Dec** | ss sheet in → **Fan Blade laser cutting** out (2 days → Sun 6, so Mon 7). **Fan Bush cutting + drilling** out in one trip (1 day → Sat 5), QC → ready Mon 7 |
+| Mon 7 | Fan Blade **drilling** 1.5 h (Test Production Employee) → QC → ready Tue 8 |
+| Tue 8 | Fan **welding** 1 h (Test Worker Three) → QC |
+| Wed 9 | Fan **grinding** 1 h (Test Worker Three again, he was on its last step) → QC |
+| Thu 10 | Fan **coating** 2 h (1 person, the Fan's usual 1) → QC |
+| Fri 11 | Fan **pre + post painting** out in one trip (2 days → Sun 13, so Mon 14) |
+| Mon 14 | Fan ready → BP **assemble** 6 h ÷ 2 = 3 h (Rahul + Test Worker Two) → QC |
+| Tue 15 | BP **pre + post painting** out in one trip (2 days → Thu 17), QC |
+| Fri 18 | BP **coating** 2 h ÷ 2 = 1 h (Rahul, then Test Production Employee joins) → QC by the end of the day |
+| Sat 19 | Ready → packing |
+| **Mon 21 Dec** | **Dispatch** (Sunday off) |
+
+**Expected:**
+- **Likely:** Mon 21 Dec.
+- **Buffer:** 25 working days × 15% = 3.75 → **4**.
+- **Commit:** **Fri 25 Dec**. **Delivered by:** **Sun 27 Dec**.
+- **Decided by:**
+  - "ss sheet: to buy, usually 13 days (needed for laser cutting) — Fri 4 Dec"
+  - Fan Blade laser cutting out Fri 4, back Sun 6, usable Mon 7
+  - Fan pre painting + post painting out Fri 11, back Sun 13, usable Mon 14
+  - Blower Pulverizer pre painting + post painting out Tue 15, back Thu 17
+- **Counted on:** Team One (3 people) from Mon 7 Dec; Team Two (1 person) from Mon 14 Dec.
+- **How sure:** Rough.
+- **BOM warning:** only if R&D's design approval isn't complete (the BOM is locked).
+
+**Script check:** likely Mon 21 Dec, 25 → 4, commit Fri 25 Dec, delivered by Sun 27 Dec; the 4 decided-by lines; counted on Team One (3) + Team Two (1); no warning ✓.
+
+**Browser (21 Nov):** commit Fri 25 Dec, likely Mon 21 Dec + 4, delivered by Sun 27 Dec. The 4 decided-by lines, counted on Team One (3) from Mon 7 Dec and Team Two (1) from Mon 14 Dec, Rough, no BOM warning. **Run 6 PASSED.**
+
+## Round 1: COMPLETE (21 Nov)
+**All 6 runs** were worked by hand before pressing, and each matched in the browser line by line:
+
+| Run | What it covered | Commit |
+|---|---|---|
+| 1 | Aata × 1, the full cascade with job work and QC | Sat 12 Dec |
+| 2 | Aata × 5: one post-painting person, the cap shared across the order | Tue 15 Dec |
+| 3 | A bought machine: not set → 7 days → together with the Aata machine | Tue 1 Dec / Sat 12 Dec |
+| 4 | A machine in stock; × 2 with one built | Tue 24 Nov / Sat 12 Dec |
+| 5 | A Child Part in stock | Thu 3 Dec |
+| 6 | Blower Pulverizer: the shared Fan, an all-job-work Sub Child Part, a 13-day raw material | Fri 25 Dec |
+
+- **Found and fixed on the way:** B1 attendance, B2 buying time from 3 receipts, B3 no place for days to buy (Purchase → Inventory + Job Work Time), B4 QC after job work, B5 the part sweeps (a reset gap). Wording: I3, I4, I5. D1: the cap stays per order.
+- **Still open:** I6 (say "1 from stock, 1 to build"), Q1 (the wait between steps + Store's issue time), P1 (speed: 3.5–6 s an estimate).
+- **Paused here (21 Nov)** for the client's changes from the 20 Nov meeting. **Next:** round 2 (seeded history).
+- **Changed under round 1 (feature 19, built 21 Nov):** step hours now come from each step's **approved standard** (`client-features-2026-11/19-standard-hours-changes.md`, logic §8).
+  - Each step's most people is its own people count.
+  - An order's cap is its largest step count.
+  - Without an approved standard, R&D's figures are counted as typed (Rough).
+  - History is no longer used for step hours, and the part's "usual people" box is no longer read.
+  - On test-1, 13 steps of 7 parts got their people count from that box (backup `test-1-clean-2026-11-21/std-crew-before.json`). They wait for the Company Admin's approval.
+  - **Before round 2:**
+    1. approve the Aata machine's (and the Blower Pulverizer's) standards
+    2. re-work runs 1 and 2 by hand with the new numbers
+    3. press again
+
 ## Bugs and improvements
 | # | What | Found | Status |
 |---|---|---|---|
@@ -157,6 +297,8 @@ Job work: laser cutting 2 · welding 2 · grinding 1 · pre painting 2 days.
 | I3 | The decided-by line said "lead time 3 days (typed)". It now says "Purchase's usual 3 days to buy" | Round 1, run 1 | Done 19 Nov |
 | I4 | A wait of a few hours on the same day reads oddly: "Chamber — coating: ready from Fri 4 Dec, but people are free only from Fri 4 Dec". Suggested wording: "Chamber — coating: waited a few hours on Fri 4 Dec for people (the order's usual 2 were busy)" | Round 1, run 2 | **Done 19 Nov** (your choice: say it was hours). The reason now carries the hours, e.g. "Chamber — coating: waited 7 h on Fri 4 Dec for people to be free". A wait that crosses days keeps its wording. `planner.js` explain (waitHours) + `DeliveryEstimatorModal.jsx`; estplan +1 |
 | D1 | **The people cap stays per order** for bigger orders (decision N confirmed after run 2: 2 people at once on all 5 machines together) | Round 1, run 2 | Kept as decided |
+| I5 | "Rough because" said "with the hours split evenly across people" for a bought machine, which has no hours. Now only when R&D's typed **step hours** are used (`typedHours` from the work list) | Round 1, run 3 | **Done 20 Nov** (estimate +1) |
+| I6 | When part of an order comes from stock, the item line doesn't say so ("Aata machine × 2 — likely Wed 9 Dec"). Suggested: "(1 from stock, 1 to build)", so Sales can offer the one in stock now | Round 1, run 4 | Suggested, waiting on your view |
 | Q1 | Your question: is counting work hours enough? It's a day-by-day plan with each person's shift × attendance. Still not counted: the **wait between steps** (people are assigned daily) and **Store's issue time** | Round 1 | Waiting on your choice: design now, or after round 1 |
 | S2 | Two teams named "Team One" make "counted on" ambiguous | Plan | Round 1 (tidy) |
 | S3 | `estwork` motor median gave 8 once | Plan | Round 2 |

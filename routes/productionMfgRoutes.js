@@ -5,8 +5,6 @@ import {
   getOrders,
   getActiveOrders,
   getTeamOrderHistory,
-  createOrder,
-  getStockOrderItems,
   verifyBOM,
   verifyDesign,
   getBomDesignStatus,
@@ -37,7 +35,7 @@ import {
   getStepCrewTeamMembers,
   addStepCrew,
   removeStepCrew,
-  setStepPlannedHours,
+  setStepPlannedHours, getStepFlag, flagStep,
   confirmStepLunch,
   getTeamsToday,
   getPlanningBoard,
@@ -118,8 +116,6 @@ const manpowerPick = (req, res, next) => (['add', 'edit'].some((a) => userHasPer
 // ── Orders ──────────────────────────────────────────────────────────────────
 router.get('/orders', ordersView, getOrders);
 router.get('/orders/active', ordersView, getActiveOrders);
-router.post('/orders', ordersAdd, createOrder);
-router.get('/stock-order-items', ordersView, getStockOrderItems);
 router.put('/orders/:id/verify-bom', ordersEdit, verifyBOM);
 router.put('/orders/:id/verify-design', ordersEdit, verifyDesign);
 router.get('/orders/:id/bom-design-status', ordersView, getBomDesignStatus);
@@ -174,6 +170,9 @@ router.get('/orders/:id/processes/:stepIndex/crew/team-members', ordersView, get
 router.post('/orders/:id/processes/:stepIndex/crew', ordersEdit, addStepCrew);
 router.delete('/orders/:id/processes/:stepIndex/crew/:personId', ordersEdit, removeStepCrew);
 router.put('/orders/:id/processes/:stepIndex/planned-hours', ordersEdit, setStepPlannedHours);
+// Feature 19 (2026-11-21): flag an unusual step for the Company Admin (decision D).
+router.get('/orders/:id/processes/:stepIndex/flag', ordersView, getStepFlag);
+router.post('/orders/:id/processes/:stepIndex/flag', ordersEdit, flagStep);
 router.put('/orders/:id/processes/:stepIndex/lunch', ordersEdit, confirmStepLunch);
 router.put('/orders/:id/processes/:stepIndex/start', ordersEdit, startProcess);
 router.put('/orders/:id/processes/:stepIndex/complete', ordersEdit, markProcessComplete);

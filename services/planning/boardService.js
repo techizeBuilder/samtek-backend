@@ -11,12 +11,15 @@ import ProductionTeam from '../../models/ProductionTeam.js';
 import User from '../../models/User.js';
 import { stepHoursSoFar } from '../crew/crewService.js';
 import { timingBand } from '../score/scoreCalc.js';
+import { activeStandardsFor, workingOf, stepKeyOf, flagsFor, piecesFor } from '../standards/standardService.js';
+import { standardHours, crewSegments, earnedHours } from '../standards/standardCalc.js';
 
 const IST = 5.5 * 3600 * 1000;
 const indiaDay = (d) => new Date(new Date(d).getTime() + IST).toISOString().slice(0, 10);
 const startOfIndiaDay = (day) => new Date(`${day}T00:00:00+05:30`);
 const nameOf = (u) => u?.fullName || u?.username || 'Unknown';
 const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
+const r2 = (v) => (v == null ? null : Math.round(v * 100) / 100);
 
 // "Waiting" reasons (logic §4), in the order the board groups them.
 export const WAIT_REASONS = {
@@ -70,6 +73,11 @@ export async function board(companyId, { search = '', kind = '', team = '' } = {
     });
   }
 
+  // Feature 19 (2026-11-21): the approved standards in force, so a planned step with one
+  // can start without typed hours and shows its hours for the crew planned.
+  const standards = await activeStandardsFor(companyId, orders.map((o) => o.machineCode));
+  const flags = await flagsFor(ids);
+
   const running = [], planned = [], ready = [], waiting = [];
   // One order's steps into the sections. Orders are checked side by side (the
   // material checks read the database), each in its own order.
@@ -87,10 +95,13 @@ export async function board(companyId, { search = '', kind = '', team = '' } = {
           priority: o.priority || 'Normal', deliveryDate: o.deliveryDate || null, stepTeam: p.assignedTeam ? String(p.assignedTeam) : null, crew,
         };
         if (p.type === 'In-House' && p.status === 'In Progress') {
-          running.push({ ...row, startedAt: p.startedAt });
+          running.push({ ...row, startedAt: p.startedAt, plannedSource: p.plannedSource || null });
         } else if (p.type === 'In-House' && p.status === 'Pending' && crew.length) {
           const block = await startBlockers(o, u, i, companyId);
-          planned.push({ ...row, canStart: !block && p.plannedHours > 0, block: block ? { key: block.key, reason: block.message } : null, needsPlannedHours: !(p.plannedHours > 0) });
+          const std = workingOf(standards.get(`${o.machineCode}|${stepKeyOf(p.step)}`) || null);
+          if (std) Object.assign(row, { plannedHours: r2(standardHours(std, piecesFor(o, p), crew.length)), plannedSource: 'standard' });
+          const hasPlan = !!std || p.plannedHours > 0;
+          planned.push({ ...row, canStart: !block && hasPlan, block: block ? { key: block.key, reason: block.message } : null, needsPlannedHours: !hasPlan });
         } else if (i === nextIdx) {
           const hold = holdOf(p);
           if (hold) { waiting.push({ ...row, reasonKey: hold.key, reason: hold.detail }); continue; }
@@ -107,7 +118,18 @@ export async function board(companyId, { search = '', kind = '', team = '' } = {
   // Running: hours so far on the current round, and whether they're past the plan.
   const byId = new Map(orders.map((o) => [String(o._id), o]));
   for (const r of running) {
-    const h = await stepHoursSoFar(companyId, byId.get(String(r.order)), r.unit - 1, r.stepIndex);
+    const o = byId.get(String(r.order));
+    const h = await stepHoursSoFar(companyId, o, r.unit - 1, r.stepIndex);
+    // Feature 19: with a standard, the plan is what it has earned for the crew so far
+    // (stretch by stretch); a flag the Company Admin approved: its hours.
+    const p = unitProcessesView(o, r.unit - 1)[r.stepIndex];
+    const flag = flags.get(`${r.order}|${r.unit - 1}|${r.stepIndex}`);
+    if (r.plannedSource === 'standard' && p?.standard?.p1 > 0) {
+      const earned = h.perPerson?.length ? earnedHours(crewSegments(h.perPerson), p.standard, piecesFor(o, p)) : null;
+      if (earned) r.plannedHours = r2(earned);
+      if (flag?.status === 'Approved') r.plannedHours = flag.requestedHours;
+      r.flag = flag ? flag.status : null;
+    }
     Object.assign(r, { since: h.start, soFar: r1(h.personHours), took: r1(h.workingHours), overPlan: r.plannedHours > 0 && h.workingHours > r.plannedHours });
   }
 

@@ -42,13 +42,15 @@ export async function estimateQuote(companyId, { items = [], travelDays } = {}, 
   const r = estimate({ today, calendar, people, jobs: work.jobs, items: work.items, settings, travelDays: travel });
   if (!r.canEstimate) return { ...base, ...r, unknown: dedupe(r.unknown || []) };
 
-  // How sure (decision E and §7): Good = mostly history; Rough = typed numbers or work in hand at 1 day per step.
+  // How sure (decision E and §7): Good = mostly history or approved standards (feature 19);
+  // Rough = typed numbers (R&D's figures not approved yet) or work in hand at 1 day per step.
   const typed = new Set(work.notes.typed);
   const fromHistory = new Set(work.notes.history);
-  const sure = work.notes.roughOrders.length || typed.size > fromHistory.size ? 'Rough' : 'Good';
+  const fromStandard = new Set(work.notes.standard || []);
+  const sure = work.notes.roughOrders.length || typed.size > fromHistory.size + fromStandard.size ? 'Rough' : 'Good';
   return {
     ...base, ...r, sure,
-    typed: [...typed], fromHistory: [...fromHistory],
+    typed: [...typed], fromHistory: [...fromHistory], fromStandard: [...fromStandard], typedHours: [...new Set(work.notes.typedHours || [])], // I5: only these are "split evenly"
     items: r.items.map((x) => ({ ...x, qty: work.items.find((w) => w.key === x.key)?.qty, code: work.items.find((w) => w.key === x.key)?.code })),
   };
 }

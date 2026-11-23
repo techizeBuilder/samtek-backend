@@ -32,7 +32,7 @@ import { COUNTABLE } from '../services/purchasedUnitService.js';
 // Serial number work step 2 (2026-10-31): R&D must say how an item counted in
 // pieces is used in production (D3–D5) — no default. null = fine.
 const PRODUCTION_USES = ['BuiltIn', 'UsedToMake'];
-function productionUseProblem(item) {
+export function productionUseProblem(item) { // exported for the bulk import (feature 20)
   if (item.productionUse === '') item.productionUse = null;
   if (item.productionUse != null && !PRODUCTION_USES.includes(item.productionUse)) return 'Pick how this item is used in production.';
   if (needsProductionUse(item) && !item.productionUse) return 'Pick how this item is used in production: "Built into the product" or "Used to make the product".';
@@ -301,6 +301,7 @@ export const getItems = async (req, res) => {
       quantity, // Add quantity filter
       discontinued,
       needsUsage,
+      awaitingCount, // feature 20
       sortBy = 'name',
       sortOrder = 'asc'
     } = req.query;
@@ -452,6 +453,9 @@ export const getItems = async (req, res) => {
     // counted in pieces that R&D hasn't said how they're used in production.
     const needsUsageMatch = { productKind: null, isDiscontinued: { $ne: true }, productionUse: null, unit: { $regex: COUNTABLE } };
     if (needsUsage === 'true') Object.assign(query, needsUsageMatch);
+    // Feature 20 (decision K): bulk-imported items waiting for Store's first stock count.
+    const awaitingCountMatch = { isDiscontinued: { $ne: true }, awaitingFirstCount: true };
+    if (awaitingCount === 'true') Object.assign(query, awaitingCountMatch);
 
     // Category filter
     if (category) {
@@ -693,6 +697,10 @@ export const getItems = async (req, res) => {
     const needsUsageCount = productKind === 'none'
       ? (req.user.companyId ? await Item.countDocuments({ $or: [{ store: req.user.companyId }, { companyId: req.user.companyId.toString() }, { companyId: req.user.companyId }], ...needsUsageMatch }) : 0)
       : undefined;
+    // Feature 20: the badge count for "Waiting for first stock count" (R&D and Store).
+    const awaitingCountCount = productKind === 'none'
+      ? (req.user.companyId ? await Item.countDocuments({ $or: [{ store: req.user.companyId }, { companyId: req.user.companyId.toString() }, { companyId: req.user.companyId }], ...awaitingCountMatch }) : 0)
+      : undefined;
 
     res.json({
       items: itemsWithCompanyNames,
@@ -700,6 +708,7 @@ export const getItems = async (req, res) => {
       stats: stats[0] || { totalItems: 0, totalValue: 0, lowStockCount: 0 },
       typeStats,
       needsUsageCount,
+      awaitingCountCount,
     });
   } catch (error) {
     console.error('❌ Get items error:', error);
@@ -821,7 +830,9 @@ export const uploadItemBrochure = async (req, res) => {
 
 export const createItem = async (req, res) => {
   try {
-    if (!checkInventoryPermission(req.user, 'add')) {
+    // req.permissionChecked: a page's own route already checked its permission (Motor
+    // Master's /rd/motors, gated by rnd → motorMaster → add, 22 Nov 2026).
+    if (!req.permissionChecked && !checkInventoryPermission(req.user, 'add')) {
       return res.status(403).json({
         success: false,
         message: 'Access denied. Insufficient permissions.'
@@ -1006,7 +1017,8 @@ export const updateItem = async (req, res) => {
       companyObject: req.user.company
     });
 
-    if (!checkInventoryPermission(req.user, 'edit')) {
+    // req.permissionChecked: see createItem (Motor Master's /rd/motors/:id, 22 Nov 2026).
+    if (!req.permissionChecked && !checkInventoryPermission(req.user, 'edit')) {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
@@ -1222,7 +1234,7 @@ export const updateItem = async (req, res) => {
 // it in the payload; omitted fields are left as-is by the DB layer, so there's
 // nothing to validate. On create (isUpdate: false) every required field is
 // always checked, since the item doesn't exist yet.
-const validateItemData = (data, isUpdate = false) => {
+export const validateItemData = (data, isUpdate = false) => { // exported for the bulk import (feature 20)
   const errors = {};
   const has = (key) => !isUpdate || Object.prototype.hasOwnProperty.call(data, key);
 
@@ -1342,7 +1354,7 @@ const validateItemData = (data, isUpdate = false) => {
 };
 
 // ── 5. ENHANCED DATA SANITIZATION HELPER ──
-const sanitizeItemData = (data) => {
+export const sanitizeItemData = (data) => { // exported for the bulk import (feature 20)
   const sanitized = { ...data };
 
   // Trim string fields and ensure they exist
@@ -1769,6 +1781,9 @@ export const adjustStock = async (req, res) => {
     }
 
     item.qty = newQty;
+    // Feature 20 (decision K): Store has now recorded this item's stock, so a bulk-imported
+    // item's reorders start (the low-stock sweep skipped it until now).
+    item.awaitingFirstCount = false;
     await item.save();
 
     res.json({
@@ -1844,6 +1859,9 @@ export const auditStock = async (req, res) => {
     }
 
     const variance = newQty - systemQty;
+    // Feature 20 (decision K): the first count of a bulk-imported item lets its reorders
+    // start (a count of 0 on a genuinely new item starts them too). One size counted is enough.
+    item.awaitingFirstCount = false;
     await item.save();
 
     const StockAudit = (await import('../models/StockAudit.js')).default;

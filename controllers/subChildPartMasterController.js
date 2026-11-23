@@ -11,7 +11,8 @@ import { Item } from '../models/Inventory.js';
 import { findCodeHolder, codeTakenMessage, nextSequentialCode, exactRe, duplicateKeyMessage } from '../services/itemCodeService.js';
 import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSizeError } from '../services/fabricationDemandService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
-import { cleanProcessDefinition, validateProcessDefinition, stepsForChangeCheck, cleanUsualPeople } from '../utils/processDefinitionValidation.js';
+import { cleanProcessDefinition, validateProcessDefinition, stepsForChangeCheck, cleanUsualPeople, stampStandardEdits } from '../utils/processDefinitionValidation.js';
+import { tellStandardEdits } from '../services/standards/standardService.js'; // feature 19
 import { invalidateBomApproval } from '../services/productApprovalService.js';
 
 // What a Sub Child Part is built from. The form sends every field on each save,
@@ -235,6 +236,7 @@ export const createSubChildPart = async (req, res) => {
       ? await computeSourceMetrics(sourceItem, sourceQty, sourceUnit?.trim() || sourceItem.unit || '', sourceDimensionVariantId)
       : { materialsCost: 0, unitWeightKg: 0 };
 
+    const stampAt = new Date(); // feature 19
     const newItem = await Item.create({
       name: name.trim(), code: codeTrim, image: image || '',
       specification: specification?.trim() || '',
@@ -257,7 +259,7 @@ export const createSubChildPart = async (req, res) => {
         materialsCost,
         unitWeightKg,
         sourceDimensionVariantId: sourceDimensionVariantId || null,
-        processDefinition: cleanProcessDefinition(processDefinition),
+        processDefinition: stampStandardEdits(cleanProcessDefinition(processDefinition), [], stampAt), // feature 19: a new part's standards are new
         usualPeople: cleanUsualPeople(req.body.usualPeople).value ?? null, // delivery estimate (2026-11-18)
       },
       companyId: req.user.companyId, createdBy: req.user._id,
@@ -267,6 +269,7 @@ export const createSubChildPart = async (req, res) => {
       const { notifyBoughtNow } = await import('../services/makeBuyService.js');
       await notifyBoughtNow(newItem);
     }
+    tellStandardEdits(req.user.companyId, newItem.name, newItem.subChildPartDetails?.processDefinition, stampAt); // feature 19
     res.status(201).json({ success: true, data: newItem });
   } catch (err) {
     const dup = duplicateKeyMessage(err);
@@ -323,12 +326,14 @@ export const updateSubChildPart = async (req, res) => {
       item.subChildPartDetails.sourceQty = Number(sourceQty);
     }
     if (sourceUnit !== undefined) item.subChildPartDetails.sourceUnit = sourceUnit.trim();
+    const stampAt = new Date(); // feature 19
     if (processDefinition !== undefined) {
       const cleaned = cleanProcessDefinition(processDefinition);
       // A bought part may have none yet — they're asked for when it's switched to Made.
       const bought = item.partSourcing === 'buy';
       const err = validateProcessDefinition(cleaned, { requireAtLeastOne: !bought, requireAtLeastOneQcStep: true });
       if (err) return res.status(400).json({ success: false, message: err });
+      stampStandardEdits(cleaned, item.toObject().subChildPartDetails?.processDefinition || [], stampAt); // feature 19
       item.subChildPartDetails.processDefinition = cleaned;
     }
     // Delivery estimate (2026-11-18): usual people at once; not an edit to how it's built.
@@ -353,6 +358,7 @@ export const updateSubChildPart = async (req, res) => {
     }
 
     await item.save();
+    if (processDefinition !== undefined) tellStandardEdits(req.user.companyId, item.name, item.subChildPartDetails?.processDefinition, stampAt); // feature 19
     if (buildShape(item) !== shapeBefore) await invalidateBomApproval(item._id, req.user.companyId, { byName: req.user.fullName || req.user.username || '', what: 'source material or steps changed' });
     // Slice 4 (2026-10-24): its cost may have changed — climb it to every
     // Child Part / Machine using it (never fails the save).

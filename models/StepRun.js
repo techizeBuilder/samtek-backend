@@ -19,6 +19,11 @@ const StepRunSchema = new mongoose.Schema({
   crewSize: { type: Number, required: true },     // people working at once, on average, rounded
   clockHours: { type: Number, default: 0 },
   plannedHours: { type: Number, default: null },
+  // Feature 19 (2026-11-21): 'standard' = the standard this run earned (stretch by stretch);
+  // 'typed' = Production's hours with no standard (left out of the score); none = before
+  // feature 19 (counted as before). A flag on the step can still replace it (StepFlag).
+  plannedSource: { type: String, enum: ['standard', 'typed', null], default: null },
+  standardId: { type: mongoose.Schema.Types.ObjectId, ref: 'StepStandard', default: null },
   rework: { type: Boolean, default: false },
   startedAt: { type: Date, default: null },
   completedAt: { type: Date, required: true },

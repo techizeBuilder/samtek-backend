@@ -7,6 +7,7 @@
 // or change, so none of those routes needed changing.
 import mongoose from 'mongoose';
 import StepCrewEntry from '../../models/StepCrewEntry.js';
+import StepPlanChange from '../../models/StepPlanChange.js';
 import StepRun from '../../models/StepRun.js';
 import LunchOverride from '../../models/LunchOverride.js';
 import ProductionOrder from '../../models/ProductionOrder.js';
@@ -20,6 +21,8 @@ import SalaryStructure from '../../models/SalaryStructure.js';
 import { weeklyOffDaysFor } from '../payroll/payrollService.js';
 import { personLabour, grossOf } from './labourCalc.js';
 import { actionTime, fmtIndia } from '../../utils/actionTime.js';
+import { crewSegments, earnedHours, standardHours, scoredPlan } from '../standards/standardCalc.js';
+import { standardOfStep, flagOfStep } from '../standards/standardService.js';
 
 /** A refusal with extra data for the screen (e.g. who would be moved). */
 export class CrewError extends TeamError {
@@ -32,6 +35,7 @@ const skillKey = (s) => String(s || '').trim().toLowerCase();
 const nameOf = (u) => u?.fullName || u?.username || 'Unknown';
 const idStr = (v) => String(v?._id || v || '');
 const unitProcs = (order, unitIndex) => (unitIndex === 0 ? order.processes : order.extraUnits?.[unitIndex - 1]?.processes) || [];
+const r2 = (x) => (x == null ? null : Math.round(x * 100) / 100);
 const piecesOf = (order) => (order.orderKind === 'SubChildPart' ? Math.max(1, Number(order.orderQuantity) || 1) : 1);
 const nextDate = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
 const prevDate = (d) => new Date(Date.parse(`${d}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
@@ -131,13 +135,22 @@ async function recordRun(companyId, order, unitIndex, stepIndex) {
   for (const p of perPerson) if (p.team) byTeam.set(String(p.team), (byTeam.get(String(p.team)) || 0) + p.hours);
   // Stage 6 (2026-11-12): priced now, once, with the salary in force.
   const priced = await priceRun(companyId, perPerson);
+  // A batch redo is for the pieces QC sent back (13 Nov 2026), not the whole batch.
+  const pieces = (rework && Number(step.reworks?.[step.reworks.length - 1]?.qty)) || piecesOf(order);
+  // Feature 19 (2026-11-21): a step started with a standard earns it stretch by stretch,
+  // from who really worked when (crew entries + attendance); else Production's typed hours.
+  let plannedHours = step.plannedHours ?? null;
+  if (step.plannedSource === 'standard' && step.standard?.p1 > 0) {
+    const earned = earnedHours(crewSegments(perPerson), step.standard, pieces);
+    if (earned != null) plannedHours = Math.round(earned * 100) / 100;
+  }
   try {
     return await StepRun.create({
       company: companyId, partCode: order.machineCode, partName: order.machineName, stepName: step.step, orderKind: order.orderKind,
-      // A batch redo is for the pieces QC sent back (13 Nov 2026), not the whole batch.
-      order: order._id, orderNo: order.orderId, unitIndex, stepIndex, pieces: (rework && Number(step.reworks?.[step.reworks.length - 1]?.qty)) || piecesOf(order),
+      order: order._id, orderNo: order.orderId, unitIndex, stepIndex, pieces,
       personHours: totals.personHours, workingHours: totals.workingHours, crewSize: totals.crewSize,
-      clockHours: (completedAt - new Date(start)) / H, plannedHours: step.plannedHours ?? null, rework,
+      clockHours: (completedAt - new Date(start)) / H, plannedHours, rework,
+      plannedSource: step.plannedSource || null, standardId: step.standard?.id || null,
       startedAt: start, completedAt,
       byTeam: [...byTeam].map(([team, personHours]) => ({ team, personHours })),
       byPerson: priced.byPerson,
@@ -582,6 +595,18 @@ export async function takeOffCrew(user, order, unitIndex, stepIndex, personId = 
   // worked, so the plan is simply removed.
   const step = unitProcs(order, unitIndex)[stepIndex];
   if (step && step.status === 'Pending' && !step.startedAt) {
+    // Feature 18 (20 Nov): keep the plan change for the step's History before the plan line goes.
+    const planned = await StepCrewEntry.find(q).populate('person', 'fullName username').populate('addedBy', 'fullName username').lean();
+    if (planned.length) {
+      const now = new Date();
+      const who = user.fullName ? user : (await User.findById(user._id).select('fullName username').lean()) || user;
+      await StepPlanChange.insertMany(planned.map((e) => ({
+        company: e.company, order: e.order, orderNo: e.orderNo || order.orderId || '', unitIndex, stepIndex, stepName: e.stepName || step.step || '',
+        person: e.person?._id || e.person, personName: nameOf(e.person),
+        plannedAt: e.createdAt || e.joinedAt || null, plannedBy: e.addedBy?._id || null, plannedByName: e.addedBy ? nameOf(e.addedBy) : '',
+        removedAt: now, removedBy: user._id, removedByName: nameOf(who),
+      })));
+    }
     const d = await StepCrewEntry.deleteMany(q);
     return { takenOff: d.deletedCount, planned: true };
   }
@@ -612,7 +637,9 @@ export async function stepCrewView(user, order, unitIndex, stepIndex, { people, 
   const step = unitProcs(fresh, unitIndex)[stepIndex];
   if (!step) throw new CrewError(404, 'Step not found');
   const entries = await StepCrewEntry.find({ order: order._id, unitIndex, stepIndex })
-    .populate('person', 'fullName username employeeId canLogin productionSkills').populate('team', 'name').populate('forTeam', 'name').sort({ joinedAt: 1 }).lean();
+    .populate('person', 'fullName username employeeId canLogin productionSkills').populate('team', 'name').populate('forTeam', 'name')
+    .populate('addedBy', 'fullName username').populate('removedBy', 'fullName username') // feature 18: who put them on / took them off
+    .sort({ joinedAt: 1 }).lean();
   const att = await todayAttendance(entries.map((e) => e.person?._id).filter(Boolean));
 
   const done = DONE.includes(step.status) && step.completedAt;
@@ -666,12 +693,33 @@ export async function stepCrewView(user, order, unitIndex, stepIndex, { people, 
     borrowed: e.borrowed, joinedAt: e.joinedAt, leftAt: e.leftAt, rework: e.rework,
     covering: e.coveringFor ? { name: e.coveringForName, team: e.forTeam?.name || '' } : null,
     joinedEnteredAt: e.joinedEnteredAt || null, leftEnteredAt: e.leftEnteredAt || null,
+    // Feature 18 (20 Nov): when they were put on the step, and by whom; who took them off.
+    assignedAt: e.createdAt || null, addedByName: e.addedBy ? nameOf(e.addedBy) : '', removedByName: e.removedBy ? nameOf(e.removedBy) : '',
     hasSkill: (e.person?.productionSkills || []).some((s) => skillKey(s) === skillKey(step.step)),
     today: att(e.person?._id),
   });
+  // Feature 19 (2026-11-21): the standard the step goes by (its start snapshot, or the
+  // approved one in force), for the crew on it now and for 1…N people; what it has earned
+  // so far stretch by stretch; and the flag, if any.
+  const stdOf = await standardOfStep(companyId, fresh, step);
+  const flag = await flagOfStep(order, unitIndex, stepIndex);
+  let standard = null;
+  if (stdOf) {
+    const std = stdOf.std;
+    const crewNow = Math.max(1, open.length || std.crew || 1);
+    const earned = start && stdOf.from === 'snapshot' ? earnedHours(crewSegments(hours.perPerson), std, pieces) : null;
+    standard = {
+      from: stdOf.from, approvedAt: std.approvedAt || null, crew: std.crew || 1, setup: std.setup || 0, sigma: std.sigma, p1: std.p1,
+      pieces, crewNow, forCrewNow: r2(standardHours(std, pieces, crewNow)),
+      perPeople: Array.from({ length: maxN }, (_, i) => ({ people: i + 1, hours: r2(standardHours(std, pieces, i + 1)) })),
+      earned: earned == null ? null : r2(earned),
+    };
+  }
+  const plan = scoredPlan({ plannedSource: step.plannedSource || null, plannedHours: step.plannedHours, earned: standard?.earned, flag });
   return {
     step: {
       name: step.step, category: step.category, type: step.type, status: step.status, plannedHours: step.plannedHours ?? null,
+      plannedSource: step.plannedSource || null,
       startedAt: step.startedAt, completedAt: step.completedAt, lunchConfirmedAt: step.lunchConfirmedAt || null,
       startedEnteredAt: step.startedEnteredAt || null, startedEnteredBy: step.startedEnteredBy || '',
       completedEnteredAt: step.completedEnteredAt || null, completedEnteredBy: step.completedEnteredBy || '',
@@ -680,6 +728,9 @@ export async function stepCrewView(user, order, unitIndex, stepIndex, { people, 
     },
     crew: open.map(row),
     history: entries.filter((e) => e.leftAt).map(row),
+    // Feature 18: people planned and removed before the step started (their plan line is deleted).
+    planChanges: (await StepPlanChange.find({ order: order._id, unitIndex, stepIndex }).sort({ removedAt: 1 }).lean())
+      .map((p) => ({ _id: p._id, person: p.person, name: p.personName, plannedAt: p.plannedAt, plannedByName: p.plannedByName, removedAt: p.removedAt, removedByName: p.removedByName })),
     hours: {
       personHours: hours.totals.personHours, workingHours: hours.totals.workingHours, crewSize: hours.totals.crewSize,
       perPerson: [...hoursOf].map(([person, h]) => ({ person, hours: h })),
@@ -687,6 +738,8 @@ export async function stepCrewView(user, order, unitIndex, stepIndex, { people, 
     averages,
     runCount: runs.filter((r) => !r.rework).length,
     lunch,
+    standard, flag,
+    scored: { counted: plan.counted, why: plan.why, planned: plan.planned == null ? null : r2(plan.planned) },
   };
 }
 
@@ -800,8 +853,8 @@ export async function stepHoursSoFar(companyId, order, unitIndex, stepIndex) {
   const { start } = await runWindowStart(order, unitIndex, stepIndex, step, now);
   if (!start) return { personHours: 0, workingHours: 0, start: null };
   const entries = await StepCrewEntry.find({ order: order._id, unitIndex, stepIndex, joinedAt: { $lt: now }, $or: [{ leftAt: null }, { leftAt: { $gt: start } }] }).lean();
-  const { totals } = await crewHours(companyId, entries, [start, now]);
-  return { personHours: totals.personHours, workingHours: totals.workingHours, start };
+  const { perPerson, totals } = await crewHours(companyId, entries, [start, now]);
+  return { personHours: totals.personHours, workingHours: totals.workingHours, start, perPerson }; // perPerson: feature 19 (earned so far)
 }
 
 /**

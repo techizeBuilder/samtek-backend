@@ -89,6 +89,22 @@ const ProcessStepSchema = new mongoose.Schema({
   // snapshot of the BOM step's own, so a later BOM edit doesn't change it.
   operation: { type: StepOperationSchema, default: null },
   usualHoursPerPiece: { type: Number, default: null }, // copied from the BOM step (delivery estimate, 2026-11-18)
+  // Feature 19 (2026-11-21): R&D's standard as typed on the BOM step (copied, like usual hours)…
+  standardCrew: { type: Number, default: null },
+  setupHours: { type: Number, default: null },
+  splitAnswer: { type: String, default: null },
+  // …and the Company Admin-approved standard in force when the step started (snapshot, so a
+  // later approval doesn't change a step already running). plannedSource: where plannedHours
+  // came from — 'standard' (worked out), 'typed' (no standard: not scored), none = before
+  // feature 19 (counted as before).
+  standard: {
+    type: new mongoose.Schema({
+      id: { type: mongoose.Schema.Types.ObjectId, ref: 'StepStandard', default: null },
+      p1: Number, setup: Number, sigma: Number, crew: Number, approvedAt: Date,
+    }, { _id: false }),
+    default: null,
+  },
+  plannedSource: { type: String, enum: ['standard', 'typed', null], default: null },
   // Only meaningful when type === 'Outsourcing' — drives the "waiting on
   // outsource" vs "send for outsourcing" UI (ProcessExecution.jsx, Stage 5).
   // Advanced by outsourceWorkController.js (Stage 3), never by the generic

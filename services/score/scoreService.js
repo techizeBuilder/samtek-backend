@@ -26,6 +26,8 @@ import { TestAttempt } from '../../models/TrainingmanagementModel.js';
 import { loadCompanyInputs } from '../payroll/payrollService.js';
 import { dayKinds, monthDates } from '../payroll/payrollCalc.js';
 import { stepHoursUntil } from '../crew/crewService.js';
+import { flagsFor } from '../standards/standardService.js';
+import { scoredPlan, crewSegments, earnedHours } from '../standards/standardCalc.js';
 import {
   timingPoints, timingBand, unitAccuracy, batchAccuracy, judgingCheck, ftrError,
   attendancePart, punctualityPart, stepParts, conductPart, learningPart, scorecard, teamScore, PARAMS,
@@ -34,6 +36,8 @@ import { settingsFor, thisMonthIndia } from './scorecardSettings.js';
 import { companyDepartments, departmentOf } from '../departmentSeedService.js';
 
 const nameOf = (u) => u?.fullName || u?.username || 'Unknown';
+// The pieces a step's standard is for: a QC redo's pieces, a Sub Child Part batch, else 1.
+const piecesOfStep = (order, p) => ((p.reworks?.length && Number(p.reworks[p.reworks.length - 1]?.qty)) || (order.orderKind === 'SubChildPart' ? Math.max(1, Number(order.orderQuantity) || 1) : 1));
 const unitProcs = (order, unitIndex) => (unitIndex === 0 ? order.processes : order.extraUnits?.[unitIndex - 1]?.processes) || [];
 const IST_MS = 5.5 * 3600 * 1000;
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -108,7 +112,7 @@ const resultLabel = (order, a) => {
 async function productionSource(companyId, from, to, { persons = null } = {}) {
   const q = { company: oid(companyId), completedAt: { $gte: from, $lte: to } };
   if (persons) q['byPerson.person'] = { $in: persons.map(oid) };
-  const runs = await StepRun.find(q).select('order orderNo partName stepName unitIndex stepIndex rework plannedHours workingHours personHours pieces completedAt byPerson.person byPerson.team byPerson.personHours byTeam').lean();
+  const runs = await StepRun.find(q).select('order orderNo partName stepName unitIndex stepIndex rework plannedHours plannedSource workingHours personHours pieces completedAt byPerson.person byPerson.team byPerson.personHours byTeam').lean();
   if (!runs.length) return [];
   const orderIds = [...new Set(runs.map((r) => String(r.order)))];
   const orders = new Map((await ProductionOrder.find({ _id: { $in: orderIds } }).select('orderId orderKind source processes extraUnits').lean()).map((o) => [String(o._id), o]));
@@ -116,6 +120,9 @@ async function productionSource(companyId, from, to, { persons = null } = {}) {
   const jobsList = await QCJob.find({ company: q.company, sourceRefId: { $in: [...orders.values()].map((o) => o.orderId) } }).select('source sourceRefId unitChecks batchSteps').lean();
   const jobOf = (o) => jobsList.find((j) => j.sourceRefId === o.orderId && j.source === qcJobSourceForOrder(o)) || null;
   const wanted = persons ? new Set(persons.map(String)) : null;
+  // Feature 19 (2026-11-21): what each run is scored against — the standard it earned,
+  // a flag's hours, or nothing (typed hours; a flag still waiting). scoredPlan, decisions D/G/H.
+  const flags = await flagsFor(orderIds);
 
   // A run saved before 17 Nov 2026 with more than one team on it doesn't say which
   // team each person worked for. The step's crew list does, as it was then (a cover:
@@ -140,7 +147,9 @@ async function productionSource(companyId, from, to, { persons = null } = {}) {
     const order = orders.get(String(r.order));
     if (!order) continue;
     const procs = unitProcs(order, r.unitIndex);
-    const timing = !r.rework ? timingPoints(r.plannedHours, r.workingHours) : null;
+    const plan = scoredPlan({ plannedSource: r.plannedSource || null, plannedHours: r.plannedHours, flag: r.rework ? null : flags.get(`${r.order}|${r.unitIndex}|${r.stepIndex}`) });
+    const planned = plan.counted ? plan.planned : null;
+    const timing = !r.rework ? timingPoints(planned, r.workingHours) : null;
     let accuracy = null, error = null, qc = null;
     const j = judgingCheck(procs, r.stepIndex);
     if (j != null) {
@@ -158,10 +167,11 @@ async function productionSource(companyId, from, to, { persons = null } = {}) {
       }
     }
     if (timing == null && accuracy == null) continue;
-    const band = !r.rework ? timingBand(r.plannedHours, r.workingHours) : null;
+    const band = !r.rework ? timingBand(planned, r.workingHours) : null;
     const run = {
       order: r.order, orderNo: r.orderNo, partName: r.partName, stepName: r.stepName, unit: r.unitIndex + 1,
-      planned: r.plannedHours ?? null, took: r.workingHours ?? null, rework: !!r.rework,
+      planned: planned ?? (plan.why === 'typed' || plan.why === 'flagWaiting' ? null : r.plannedHours ?? null), took: r.workingHours ?? null, rework: !!r.rework,
+      planWhy: plan.why, // 'standard' | 'flagApproved' | 'flagWaiting' | 'typed' | 'legacy'
       band, timing, accuracy, qc, completedAt: r.completedAt,
     };
     // A run before 17 Nov 2026 has no team per person: its one team, or (several
@@ -174,7 +184,9 @@ async function productionSource(companyId, from, to, { persons = null } = {}) {
         // How much this step counts for them: its planned size × their share of the crew's hours,
         // never the hours it took (that's what is being judged). A redo, or a step with no plan: their hours.
         const share = r.personHours > 0 ? p.personHours / r.personHours : 1;
-        const weight = !r.rework && r.plannedHours > 0 ? r.plannedHours * share : p.personHours;
+        // A flag still waiting weighs by the standard (Production can't move it); typed hours by their hours.
+        const sizeBy = plan.why === 'flagWaiting' ? r.plannedHours : planned;
+        const weight = !r.rework && sizeBy > 0 ? sizeBy * share : p.personHours;
         items.push({ person: String(p.person), team, weight, hours: p.personHours, timing, band, accuracy, error, severity: qc?.severity || null, rework: !!r.rework, run });
       }
     }
@@ -201,9 +213,10 @@ async function productionUnfinished(companyId, from, to, { persons = null } = {}
       { $or: [{ status: { $nin: ['Completed', 'Cancelled'] } }, { updatedAt: { $gte: from } }] },
       { $or: [{ processes: openThen }, { 'extraUnits.processes': openThen }] },
     ],
-  }).select('orderId orderKind processes extraUnits').lean();
+  }).select('orderId orderKind orderQuantity processes extraUnits').lean();
   if (!orders.length) return [];
   const wanted = persons ? new Set(persons.map(String)) : null;
+  const flags = await flagsFor(orders.map((o) => o._id)); // feature 19
   // When only some people are asked for (one person's view, Production's tab), skip
   // the steps none of them was ever on, so their hours aren't worked out for nothing.
   let onStep = null;
@@ -223,12 +236,21 @@ async function productionUnfinished(companyId, from, to, { persons = null } = {}
         if (p.type === 'Outsourcing' || !(p.plannedHours > 0) || !p.startedAt || new Date(p.startedAt) > until) continue;
         if (p.completedAt && new Date(p.completedAt) <= until) continue;
         if (onStep && !onStep.has(`${order._id}|${u}|${s}`)) continue;
+        // Feature 19: typed hours (no standard) and a step flagged and waiting aren't scored.
+        const pre = scoredPlan({ plannedSource: p.plannedSource || null, plannedHours: p.plannedHours, flag: flags.get(`${order._id}|${u}|${s}`) });
+        if (!pre.counted) continue;
         const h = await stepHoursUntil(companyId, order, u, s, until);
-        if (!h || h.rework || !(h.totals.workingHours > p.plannedHours)) continue;
+        if (!h || h.rework) continue;
+        // With a standard: what it has earned for the crew so far (stretch by stretch);
+        // an approved flag: its hours; before standards: the typed hours.
+        const planned = pre.why === 'standard' && p.standard?.p1 > 0
+          ? (earnedHours(crewSegments(h.perPerson), p.standard, piecesOfStep(order, p)) || p.plannedHours)
+          : pre.planned;
+        if (!(h.totals.workingHours > planned)) continue;
         for (const pp of h.perPerson) {
           if (!(pp.hours > 0) || (wanted && !wanted.has(String(pp.person)))) continue;
           const share = h.totals.personHours > 0 ? pp.hours / h.totals.personHours : 1;
-          out.push({ person: String(pp.person), team: pp.team ? String(pp.team) : null, weight: p.plannedHours * share, hours: pp.hours, step: { orderNo: order.orderId, stepName: p.step, unit: u + 1, planned: p.plannedHours, soFar: r1(h.totals.workingHours) } });
+          out.push({ person: String(pp.person), team: pp.team ? String(pp.team) : null, weight: planned * share, hours: pp.hours, step: { orderNo: order.orderId, stepName: p.step, unit: u + 1, planned: r1(planned), soFar: r1(h.totals.workingHours) } });
         }
       }
     }

@@ -31,7 +31,8 @@ import { buildFabricationBomDimensions, resolveFabricationWeight, discontinuedSi
 import { activeCost } from '../services/makeBuyService.js';
 import { resolveLineWeightKg } from '../utils/bomWeightCalc.js';
 import { applyPricingToItem } from '../services/itemPricingService.js';
-import { cleanProcessDefinition, validateProcessDefinition, stepsForChangeCheck, cleanUsualPeople } from '../utils/processDefinitionValidation.js';
+import { cleanProcessDefinition, validateProcessDefinition, stepsForChangeCheck, cleanUsualPeople, stampStandardEdits } from '../utils/processDefinitionValidation.js';
+import { tellStandardEdits } from '../services/standards/standardService.js'; // feature 19
 import RDDocument from '../models/RDDocument.js';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
@@ -631,8 +632,11 @@ export const updateMachineBOMProcessDefinition = async (req, res) => {
     // Saving the steps unchanged isn't an edit.
     // Usual hours (delivery estimate) aren't a change to how it's made: never pull approval for them.
     const stepsChanged = stepsForChangeCheck(cleaned) !== stepsForChangeCheck(cleanProcessDefinition(bom.toObject().processDefinition));
+    const stampAt = new Date();
+    stampStandardEdits(cleaned, bom.toObject().processDefinition, stampAt); // feature 19: when R&D last changed a step's standard
     bom.processDefinition = cleaned;
     await bom.save();
+    tellStandardEdits(req.user.companyId, bom.machine, cleaned, stampAt); // feature 19: the Company Admin approves
     if (stepsChanged) await bomEdited(bom.machine, req, 'process steps changed');
     res.json({ success: true, data: bom });
   } catch (err) {

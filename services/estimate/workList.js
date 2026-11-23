@@ -29,6 +29,8 @@ import StepCrewEntry from '../../models/StepCrewEntry.js';
 import {
   indiaToday, stepRunsFor, stepWork, stepTimes, usualCrew, peopleCapsFor, capFor, purchaseDaysFor, quotedDaysFor, jobworkDaysFor, qcWaitHours, recentCrews,
 } from './history.js';
+import { activeStandardsFor, workingOf, stepKeyOf, piecesFor } from '../standards/standardService.js';
+import { standardFrom, standardHours, crewSegments } from '../standards/standardCalc.js';
 
 const DAY_MS = 864e5;
 const IST_MS = 5.5 * 3600 * 1000;
@@ -57,7 +59,8 @@ export const isBoughtItem = (item) => item.productKind === 'Motor'
  */
 export async function buildWork(companyId, request, { today = indiaToday(), hoursPerDay = 8, now = Date.now() } = {}) {
   const cid = oid(companyId);
-  const notes = { typed: [], history: [], roughOrders: [] };
+  // typedHours: steps on R&D's figures not approved yet (I5); standard: steps on an approved standard (feature 19).
+  const notes = { typed: [], typedHours: [], history: [], standard: [], roughOrders: [] };
   const unknown = [];
   const warnings = []; // e.g. a machine whose BOM R&D hasn't approved yet (§11 change 7)
   const jobs = [];
@@ -148,7 +151,7 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     ...mBoms.flatMap((b) => flatSteps(b.processDefinition)), ...cBoms.flatMap((b) => flatSteps(b.processDefinition)),
     ...allItems.flatMap((i) => flatSteps(i.subChildPartDetails?.processDefinition)),
   ].map((s) => s.name).concat(open.flatMap((o) => [o.processes || [], ...(o.extraUnits || []).map((u) => u.processes || [])].flat().map((s) => s.step)));
-  const [rows, , purchaseHist, quoted, jobworkDays, qcWait, runsMap, caps] = await Promise.all([
+  const [rows, , purchaseHist, quoted, jobworkDays, qcWait, runsMap, caps, standards] = await Promise.all([
     reservedP, incomingP,
     purchaseDaysFor(companyId, allItems.map((i) => i.code)),
     quotedDaysFor(companyId, allItems.map((i) => i.code)),
@@ -156,6 +159,7 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     qcWaitHours(companyId),
     stepRunsFor(companyId, partCodes),
     peopleCapsFor(companyId, partCodes, now),
+    activeStandardsFor(companyId, partCodes), // feature 19: the approved standards in force
   ]);
   for (const r of rows) {
     const k = r._id.v ? keyOf(r._id.i, r._id.v) : keyOf(r._id.i, null);
@@ -197,8 +201,26 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     return { date, why: `${label}: to buy, ${how}`, basis: 'buy' };
   };
 
-  // One BOM step → a planner step.
-  const toStep = (partCode, partLabel, p, piecesPerUnit, maxCrew = 1) => {
+  /**
+   * Feature 19 (21 Nov 2026, logic §8): a step's standard — the approved one in force
+   * (firm), else R&D's figures on the step not approved yet (typed → Rough), else null.
+   * { std: { p1, setup, sigma, crew }, basis: 'standard' | 'typed' }.
+   */
+  const stdFor = (partCode, p) => {
+    const a = standards.get(`${partCode}|${stepKeyOf(p.name ?? p.step)}`);
+    if (a) return { std: workingOf(a), basis: 'standard' };
+    const typed = standardFrom({ hoursPerPiece: p.usualHoursPerPiece, crew: p.standardCrew, setupHours: p.setupHours, splitAnswer: p.splitAnswer });
+    return typed ? { std: typed, basis: 'typed' } : null;
+  };
+  /** Hours with 1…top people — the same formula Production is scored on. */
+  const hoursTable = (std, pieces, top, share = 1) => {
+    const out = {};
+    for (let k = 1; k <= top; k++) out[k] = Math.max(share < 1 ? 0.5 : 0, share * standardHours(std, pieces, k));
+    return out;
+  };
+
+  // One BOM step → a planner step. Its most people: the step's people count (decision F).
+  const toStep = (partCode, partLabel, p, piecesPerUnit) => {
     if (p.type === 'OutSource') {
       const jw = jobworkDays.get(norm(p.name));
       if (jw) (jw.basis === 'history' ? notes.history : notes.typed).push(`${partLabel}: ${p.name}`);
@@ -206,12 +228,13 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
       // (outsource-v2: Store receives → QC → Production), so the next step waits for QC too.
       return { name: p.name, kind: 'jobwork', days: jw ? jw.days : null, qc: !!(p.qcRequired || p.finalQc), qcWaitHours: qcWait.hours };
     }
-    // Revision 19 Nov: hours for 1…maxCrew people (stage 5 decision 5, or typed split evenly).
-    const t = stepTimes(runsMap, partCode, p.name, piecesPerUnit, p.usualHoursPerPiece, maxCrew);
-    if (t.basis === 'history') notes.history.push(`${partLabel}: ${p.name}`);
-    if (t.basis === 'typed') notes.typed.push(`${partLabel}: ${p.name}`);
+    // Feature 19: hours for 1…the step's people count, from its standard (setup once, the split answer).
+    const st = stdFor(partCode, p);
+    if (st?.basis === 'standard') notes.standard.push(`${partLabel}: ${p.name}`);
+    if (st?.basis === 'typed') { notes.typed.push(`${partLabel}: ${p.name}`); notes.typedHours.push(`${partLabel}: ${p.name}`); }
+    const maxCrew = st ? Math.max(1, st.std.crew || 1) : 1;
     return {
-      name: p.name, kind: 'work', skill: p.name, hoursFor: t.hoursFor, maxCrew,
+      name: p.name, kind: 'work', skill: p.name, hoursFor: st ? hoursTable(st.std, piecesPerUnit, maxCrew) : null, maxCrew,
       qc: !!(p.qcRequired || p.finalQc), qcWaitHours: qcWait.hours, refs: (p.materialRefs || []).map(String),
     };
   };
@@ -285,7 +308,7 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
   const buildJob = async (item, qty, depth) => {
     const label = item.name || item.code;
     const kind = item.productKind;
-    let defSteps = [], children = [], typedPeople = null;
+    let defSteps = [], children = [];
     const lineNeeds = new Map();
     if (kind === 'Machine' || kind === 'ChildPart') {
       const bom = kind === 'Machine' ? mBomOf.get(String(item._id)) : cBomOf.get(String(item._id));
@@ -295,7 +318,6 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
         warnings.push({ kind: 'bom', part: label });
       }
       defSteps = flatSteps(bom.processDefinition);
-      typedPeople = bom.usualPeople;
       const lines = ((kind === 'Machine' ? bom.childParts : bom.subChildParts) || []).filter((l) => !l.isDiscontinued);
       for (const l of lines) {
         const sub = itemCache.get(String(kind === 'Machine' ? l.childPart : l.subChildPart));
@@ -312,7 +334,6 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     } else {
       const d = item.subChildPartDetails || {};
       defSteps = flatSteps(d.processDefinition);
-      typedPeople = d.usualPeople;
       const src = d.sourceItem ? itemCache.get(String(d.sourceItem)) : null;
       if (src) {
         const r = await computeSubChildPartRawMaterialAvailability(item, src, qty);
@@ -326,9 +347,10 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     }
     const units = kind === 'SubChildPart' ? 1 : qty;
     const piecesPerUnit = kind === 'SubChildPart' ? qty : 1;
-    // The part's cap first (it's each step's most people too).
-    const c = capFor(caps, item.code, typedPeople, defSteps.map((p) => ({ kind: p.type === 'OutSource' ? 'jobwork' : 'work', crew: usualCrew(runsMap, item.code, p.name) || 1 })));
-    const steps = defSteps.map((p) => toStep(item.code, label, p, piecesPerUnit, c.cap));
+    const steps = defSteps.map((p) => toStep(item.code, label, p, piecesPerUnit));
+    // Feature 19 (logic §8): most people on the order at once = the part's largest step
+    // count (per order, D1). No step with a standard or R&D's figures: history, as before.
+    const c = jobCap(item.code, steps, defSteps);
     if (!steps.length) { unknown.push({ kind: 'part', job: label, what: `${label}: no steps` }); return null; }
     for (const s of steps) {
       if (s.kind === 'work' && s.hoursFor == null) unknown.push({ kind: 'step', job: label, what: s.name });
@@ -339,6 +361,13 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     jobs.push({ id, label, kind, isNew: true, priority: Infinity, units, cap: c.cap, capMost: c.most, capBasis: c.basis, children, materialReady: today, materialWhy: '', steps, code: item.code });
     return id;
   };
+
+  /** The cap for a job: its largest step crew (feature 19), else history / step crews as before. */
+  function jobCap(partCode, steps, defSteps = []) {
+    const crews = steps.filter((x) => x.kind === 'work' && x.hoursFor).map((x) => x.maxCrew || 1);
+    if (crews.length) { const top = Math.max(...crews); return { cap: top, most: top, basis: 'standard' }; }
+    return capFor(caps, partCode, null, defSteps.map((p) => ({ kind: p.type === 'OutSource' ? 'jobwork' : 'work', crew: usualCrew(runsMap, partCode, p.name) || 1 })));
+  }
 
   /**
    * The job that has `need` of `item` ready for the new order → { id, stock } (stock =
@@ -390,11 +419,12 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     if (!plannedOn.has(k)) plannedOn.set(k, new Set());
     plannedOn.get(k).add(String(r.person));
   }
-  // Hours so far on running steps that have a plan (bounded: one step per person), read side by side.
+  // Hours so far on running steps that have a plan (bounded: one step per person), read side by side:
+  // person-hours, and who worked when (feature 19: the share of a standard done so far).
   const soFar = new Map();
   await Promise.all(open.flatMap((o) => [o.processes || [], ...(o.extraUnits || []).map((u) => u.processes || [])].flatMap((list, ui) => list.map((s, si) => [s, ui, si]))
     .filter(([s]) => s.status === 'In Progress' && Number(s.plannedHours) > 0 && s.type !== 'Outsourcing')
-    .map(([, ui, si]) => stepHoursSoFar(companyId, o, ui, si).then((d) => soFar.set(`${o._id}|${ui}|${si}`, Number(d?.personHours) || 0)).catch(() => null))));
+    .map(([, ui, si]) => stepHoursSoFar(companyId, o, ui, si).then((d) => soFar.set(`${o._id}|${ui}|${si}`, d || null)).catch(() => null))));
   const roughOrders = new Set();
   for (const o of open) {
     const partCode = o.machineCode;
@@ -406,7 +436,6 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
     // remaining list (a little cautious when units are uneven).
     let remaining = [];
     const sticky = [...(crews.get(String(o._id)) || [])];
-    const cap = Math.max(capFor(caps, partCode, null, []).cap, sticky.length);
     for (let ui = 0; ui < unitLists.length; ui++) {
       const list = unitLists[ui];
       const left = [];
@@ -424,18 +453,35 @@ export async function buildWork(companyId, request, { today = indiaToday(), hour
         // Production's planned people on a step not started yet are its crew (§11 change 6).
         const planned = s.status === 'Pending' ? [...(plannedOn.get(`${o._id}|${si}`) || [])] : [];
         const base = { name: s.step, kind: 'work', skill: s.step, qc: !!(s.qcRequired || s.finalQc), qcWaitHours: qcWait.hours, planned };
-        if (Number(s.plannedHours) > 0) {
+        // Feature 19 (logic §8): work in hand goes by the standard. Running on its start
+        // snapshot: what's left of it (the share done so far, stretch by stretch). Not started:
+        // the approved one in force (what Start will use). Else typed hours, else R&D's
+        // figures, else 1 working day (decision Q).
+        const n = piecesFor(o, s) || pieces;
+        const snap = s.status === 'In Progress' && s.plannedSource === 'standard' && s.standard?.p1 > 0 ? s.standard : null;
+        const active = s.status === 'Pending' ? standards.get(`${partCode}|${stepKeyOf(s.step)}`) : null;
+        const sf = soFar.get(`${o._id}|${ui}|${si}`);
+        if (snap) {
+          const done = crewSegments(sf?.perPerson || []).reduce((t, x) => t + x.hours / (standardHours(snap, n, x.k) || Infinity), 0);
+          const top = Math.max(1, snap.crew || 1);
+          left.push({ ...base, hoursFor: hoursTable(snap, n, top, Math.max(0, 1 - done)), maxCrew: top });
+        } else if (active) {
+          const std = workingOf(active);
+          left.push({ ...base, hoursFor: hoursTable(std, n, std.crew || 1), maxCrew: Math.max(1, std.crew || 1) });
+        } else if (Number(s.plannedHours) > 0) {
           let ph = Number(s.plannedHours);
-          if (s.status === 'In Progress') ph = Math.max(0.5, ph - (soFar.get(`${o._id}|${ui}|${si}`) || 0));
+          if (s.status === 'In Progress') ph = Math.max(0.5, ph - (Number(sf?.personHours) || 0));
           left.push({ ...base, personHours: ph, crew: 1 });
         } else {
-          const t = stepTimes(runsMap, partCode, s.step, pieces, s.usualHoursPerPiece, cap);
-          if (t.hoursFor) left.push({ ...base, hoursFor: t.hoursFor, maxCrew: cap });
+          const st = stdFor(partCode, s);
+          if (st) left.push({ ...base, hoursFor: hoursTable(st.std, n, st.std.crew || 1), maxCrew: Math.max(1, st.std.crew || 1) });
           else { roughOrders.add(label); left.push({ ...base, personHours: hoursPerDay, crew: 1 }); } // decision Q: 1 working day per step
         }
       }
       if (left.length > remaining.length) remaining = left;
     }
+    // Most people at once: its largest step crew (feature 19), never fewer than those already on it.
+    const cap = Math.max(jobCap(partCode, remaining).cap, sticky.length);
     const id = `W${String(o._id)}`;
     const unitsLeft = sub ? 1 : unitLists.filter((l) => l.some((s) => s.status !== 'Completed')).length;
     jobs.push({

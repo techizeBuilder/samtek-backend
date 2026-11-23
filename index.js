@@ -536,6 +536,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.use('/api/payroll', payrollRouter);
             app.use('/api/manpower-score', (await import('./routes/manpowerScore.routes.js')).default); // feature 10
             app.use('/api/scorecard-settings', (await import('./routes/scorecardSettings.routes.js')).default); // feature 13
+            app.use('/api/standard-hours', (await import('./routes/standardHours.routes.js')).default); // feature 19 (standard hours)
+            app.use('/api/bulk-import', (await import('./routes/bulkImport.routes.js')).default); // feature 20 (R&D bulk import)
             app.use('/api/payslips', payslipRouter);
             app.use('/api/job-openings', jobOpeningRouter);
             app.use('/api/candidates', candidateRouter);

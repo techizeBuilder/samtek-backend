@@ -3,6 +3,8 @@ import { lostBetween, lostTotal } from '../utils/lostAtVendor.js';
 import ProductionTeam from '../models/ProductionTeam.js';
 import { TeamError, searchTeamPeople, validateTeamBody, decorateTeams, teamIsBusy, assertAssignableTeam, skillCatalog, setPersonSkills, skillMatrixRows } from '../services/productionTeamService.js';
 import StepCrewEntry from '../models/StepCrewEntry.js';
+import { activeStandard, workingOf, standardOfStep, raiseFlag, flagOfStep, StandardError } from '../services/standards/standardService.js'; // feature 19
+import { standardHours } from '../services/standards/standardCalc.js'; // feature 19
 import { CrewError, addToCrew, takeOffCrew, setPlannedHours, stepCrewView, saveLunchAnswers, todayBoard, crewCandidates, alignCrewToStart, crewStartConflicts, closeStartConflicts, crewAbsentToday, teamMembersView, unitLabour, peopleToday } from '../services/crew/crewService.js';
 import { board as planningBoard } from '../services/planning/boardService.js';
 import { actionTime, fmtIndia } from '../utils/actionTime.js';
@@ -24,14 +26,10 @@ import { resolveFabricationWeight, dimensionSignature, buildFabricationBomDimens
 import { toMm } from '../utils/unitConversion.js';
 import { getCategoryByKey } from '../utils/fabricationCategories.js';
 import { buildMachineDesignFiles } from './rdController.js';
-import { computeDesignReadiness, isPurchaseMachine, isReleased } from '../services/productApprovalService.js';
-import { buildFreshUnitProcesses, flattenProcessDefinition } from '../services/processStepBuilderService.js';
-import { findSubChildPartMaterialLines, buildSubChildPartMaterialList, requestSubChildPartMaterial, getSubChildPartJobWorkRows, getSubChildPartUnissuedJobWorkMaterials, createChildPartOrderForItem } from '../services/childPartReorderService.js';
-import { createSubChildPartOrderForItem } from '../services/subChildPartOrderService.js';
-import { isBought } from '../services/makeBuyService.js';
-import ChildPartBOM from '../models/ChildPartBOM.js';
-import SubChildPartJobWorkOrder from '../models/SubChildPartJobWorkOrder.js';
-import { findMachineMaterialLines, buildMachineMaterialList, requestMachineMaterial, resolveMachineOrderProcesses, checkMachineAssemblyMaterialAvailability, machineStockProblem, createMachineStockOrder } from '../services/machineReorderService.js';
+import { computeDesignReadiness, isPurchaseMachine } from '../services/productApprovalService.js';
+import { buildFreshUnitProcesses } from '../services/processStepBuilderService.js';
+import { findSubChildPartMaterialLines, buildSubChildPartMaterialList, requestSubChildPartMaterial, getSubChildPartJobWorkRows, getSubChildPartUnissuedJobWorkMaterials } from '../services/childPartReorderService.js';
+import { findMachineMaterialLines, buildMachineMaterialList, requestMachineMaterial, resolveMachineOrderProcesses, checkMachineAssemblyMaterialAvailability } from '../services/machineReorderService.js';
 import { recalculateChildPartCost } from './childPartBOMController.js';
 import { isLastInHouseStep, saveProductionExpense, addProductionExpense, productionExpenseOf, pushPartCost, outsourceMoneyFor, unitFinished } from '../services/partCostService.js';
 import { bomLinesForOrder, stepMaterialPerUnit, lineUsage, returnLimits, addUsageToList } from '../services/stepMaterialService.js';
@@ -951,108 +949,6 @@ export const getTeamOrderHistory = async (req, res) => {
     res.json({ success: true, data: out?.rows || [], total: out?.total?.[0]?.n || 0, page: pageNum, limit: limitNum });
   } catch (err) {
     console.error('❌ Error in getTeamOrderHistory:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// New Stock Order (2026-11-05, docs/production/stock-order-form-2026-11.md): a
-// Released Machine, Child Part or Sub Child Part, built for stock. A customer's
-// machine comes through the Order Form, never here. Each kind goes through the
-// code that already makes that kind of order.
-const STOCK_ORDER_KINDS = ['Machine', 'ChildPart', 'SubChildPart'];
-
-// Why this item can't be ordered, or null. hasBom: its BOM, for a Machine / Child Part.
-const notStockOrderable = (kind, item, hasBom) => {
-  if (kind === 'Machine') return machineStockProblem(item, hasBom);
-  if (!item) return 'This part was not found.';
-  if (item.isDiscontinued) return `${item.name} is discontinued.`;
-  if (isBought(item)) return `${item.name} is bought from a vendor: it goes through Purchase, not a build order.`;
-  if (!isReleased(item)) return `${item.name} isn't released by R&D yet.`;
-  if (kind === 'SubChildPart') {
-    if (!item.subChildPartDetails?.sourceItem) return `${item.name} has no source material yet.`;
-    if (!flattenProcessDefinition(item.subChildPartDetails.processDefinition).length) return `${item.name} has no steps yet.`;
-    return null;
-  }
-  return hasBom ? null : `${item.name} has no BOM yet.`;
-};
-
-// GET /api/production-mfg/stock-order-items?kind= — the form's pick list. All of
-// them, not paged: it's bounded by the product catalog and searched in the
-// dropdown. openOrders: orders of it still open that will add to stock.
-export const getStockOrderItems = async (req, res) => {
-  try {
-    const companyId = req.user.companyId;
-    const kind = STOCK_ORDER_KINDS.includes(req.query.kind) ? req.query.kind : 'Machine';
-    const items = await Item.find({ companyId, productKind: kind, isDiscontinued: { $ne: true } })
-      .select('code name productKind unit isDiscontinued machineDetails childPartDetails subChildPartDetails partSourcing').sort({ name: 1 }).lean();
-    const ids = items.map(i => i._id);
-    const boms = kind === 'Machine'
-      ? await MachineBOM.find({ company: companyId, machine: { $in: ids } }).select('machine isLocked').lean()
-      : kind === 'ChildPart' ? await ChildPartBOM.find({ company: companyId, childPart: { $in: ids } }).select('childPart').lean() : [];
-    const bomOf = new Map(boms.map(b => [String(b.machine || b.childPart), b]));
-    const offered = items.filter(i => !notStockOrderable(kind, i, bomOf.has(String(i._id))));
-
-    const open = { $nin: ['Completed', 'Cancelled'] };
-    const orders = kind === 'Machine'
-      ? await ProductionOrder.find({ company: companyId, source: 'Stock', status: open, machineCode: { $in: offered.map(i => i.code) }, orderKind: { $in: ['Machine', null] } }).select('orderId orderQuantity machineCode').lean()
-      : await ProductionOrder.find({ company: companyId, status: open, orderKind: kind, subChildPartItem: { $in: offered.map(i => i._id) }, deliverToParent: { $ne: true } }).select('orderId orderQuantity subChildPartItem').lean();
-    const jobWork = kind === 'SubChildPart'
-      ? await SubChildPartJobWorkOrder.find({ company: companyId, status: open, subChildPartItem: { $in: offered.map(i => i._id) }, deliverToParent: { $ne: true } }).select('orderId orderQuantity subChildPartItem').lean()
-      : [];
-    const openOf = (i) => [...orders, ...jobWork]
-      .filter(o => (kind === 'Machine' ? o.machineCode === i.code : String(o.subChildPartItem) === String(i._id)))
-      .map(o => ({ orderId: o.orderId, qty: o.orderQuantity || 1 }));
-
-    const data = offered.map(i => ({ code: i.code, name: i.name, bomLocked: kind === 'Machine' ? !!bomOf.get(String(i._id))?.isLocked : true, openOrders: openOf(i) }));
-    res.json({ success: true, data });
-  } catch (err) {
-    console.error('Listing stock order items failed:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// POST /api/production-mfg/orders { orderKind, machineCode, orderQuantity, priority, deliveryDate }
-// machineCode: the item's code, as on every production order.
-export const createOrder = async (req, res) => {
-  try {
-    const companyId = req.user.companyId;
-    const { orderKind = 'Machine', machineCode, orderQuantity, priority, deliveryDate, source, saleId } = req.body;
-    const refuse = (message) => res.status(400).json({ success: false, message });
-    if ((source && source !== 'Stock') || saleId) return refuse('This form makes stock orders only. A customer order comes through the Order Form.');
-    if (!STOCK_ORDER_KINDS.includes(orderKind)) return refuse('Pick Machine, Child Part or Sub Child Part.');
-    if (!machineCode) return refuse(orderKind === 'Machine' ? 'Pick a machine.' : 'Pick a part.');
-    const qty = Number(orderQuantity);
-    if (!Number.isInteger(qty) || qty < 1) return refuse('Quantity must be a whole number, 1 or more.');
-    if (!deliveryDate) return refuse('Enter the delivery date.');
-
-    const item = await Item.findOne({ code: String(machineCode), companyId, productKind: orderKind });
-    const hasBom = !item ? false
-      : orderKind === 'Machine' ? !!(await MachineBOM.exists({ machine: item._id, company: companyId }))
-      : orderKind === 'ChildPart' ? !!(await ChildPartBOM.exists({ childPart: item._id, company: companyId })) : true;
-    const problem = notStockOrderable(orderKind, item, hasBom);
-    if (problem) return refuse(problem);
-    const urgency = priority === 'Urgent' ? 'Urgent' : 'Normal';
-
-    if (orderKind !== 'Machine') {
-      const byHand = { deliveryDate, priority: urgency, createdBy: req.user._id };
-      const create = orderKind === 'ChildPart' ? createChildPartOrderForItem : createSubChildPartOrderForItem;
-      const made = await create(item, companyId, { buildQtyOverride: qty, byHand });
-      if (!made.created) return refuse(`${item.name}: no order was made (${made.reason}).`);
-      const m = made.material || {};
-      return res.status(201).json({
-        success: true, data: made.order, jobWork: made.kind === 'out-source',
-        summary: { checked: !!m.checked, emptyBom: !m.checked && !!m.reason, partOrders: m.partOrders || [], noOrder: m.noOrder || [], purchases: (m.purchases || []).filter(Boolean) },
-      });
-    }
-
-    const { order, material } = await createMachineStockOrder({ item, companyId, qty, deliveryDate, priority: urgency, createdBy: req.user._id });
-
-    const parts = material.childParts || [];
-    const partOrders = parts.filter(p => p.productionOrderCode).map(p => `${p.productionOrderCode} (${p.name})`);
-    const noOrder = parts.filter(p => !p.productionOrderCode).map(p => `${p.name} short ${p.shortfallQty}`);
-    const purchases = (material.needsPurchase || []).map(p => p.purchaseRequestId).filter(Boolean);
-    res.status(201).json({ success: true, data: order, summary: { checked: !!material.checked, emptyBom: !material.checked && !!material.reason, partOrders, noOrder, purchases } });
-  } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -2764,12 +2660,41 @@ export const removeStepCrew = async (req, res) => {
 };
 
 // PUT /orders/:id/processes/:stepIndex/planned-hours  { hours }
+// Feature 19 (2026-11-21): a step with an approved standard has its hours worked out —
+// nothing to type; an unusual job is flagged instead (decision D).
 export const setStepPlannedHours = async (req, res) => {
   try {
     const s = await loadStep(req, res);
     if (!s) return;
+    if (await standardOfStep(req.user.companyId, s.order, s.procs[s.idx])) {
+      return res.status(400).json({ success: false, message: `${s.procs[s.idx].step} has an approved standard: its hours are worked out from it. If this job is unusual, flag it.` });
+    }
     res.json({ success: true, ...(await setPlannedHours(s.order, s.unitIndex, s.idx, req.body?.hours)) });
   } catch (err) { crewFail(res, err); }
+};
+
+// Feature 19 (2026-11-21, decision D): Production flags an unusual step — before, during
+// or after the work. The work never waits; only that step's score waits for the Company Admin.
+const flagFail = (res, err) => (err instanceof StandardError
+  ? res.status(err.status).json({ success: false, message: err.message })
+  : crewFail(res, err));
+
+// GET /orders/:id/processes/:stepIndex/flag?unit=
+export const getStepFlag = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    res.json({ success: true, flag: await flagOfStep(s.order, s.unitIndex, s.idx) });
+  } catch (err) { flagFail(res, err); }
+};
+
+// POST /orders/:id/processes/:stepIndex/flag?unit=  { hours, reason }
+export const flagStep = async (req, res) => {
+  try {
+    const s = await loadStep(req, res);
+    if (!s) return;
+    res.json({ success: true, flag: await raiseFlag(req.user.companyId, req.user, s.order, s.unitIndex, s.idx, req.body || {}) });
+  } catch (err) { flagFail(res, err); }
 };
 
 // PUT /orders/:id/processes/:stepIndex/lunch  { answers: [{ person, date, kind, from, to }] }
@@ -3127,11 +3052,17 @@ export const startProcess = async (req, res) => {
       // Same words as the crew check below: there's no Assign Team button any more.
       return res.status(400).json({ success: false, message: `Put at least one person on ${procs[idx].step} before starting it.` });
     }
-    // Stage 5 (2026-11-12): someone on the crew, and the planned hours typed.
+    // Stage 5 (2026-11-12): someone on the crew. Feature 19 (2026-11-21): with an approved
+    // standard nothing is typed — it's worked out below; without one, typed hours as before
+    // (decision H: that step isn't scored). A QC redo keeps the snapshot of its first start.
+    let stdWorking = null;
     if (stepNeedsTeamGate) {
       const onCrew = await StepCrewEntry.exists({ order: order._id, unitIndex: unitNumber - 1, stepIndex: idx, leftAt: null });
       if (!onCrew) return res.status(400).json({ success: false, message: `Put at least one person on ${procs[idx].step} before starting it.` });
-      if (!(procs[idx].plannedHours > 0)) return res.status(400).json({ success: false, message: `Type the planned hours for ${procs[idx].step} before starting it.` });
+      stdWorking = (procs[idx].plannedSource === 'standard' && procs[idx].standard?.p1 > 0)
+        ? procs[idx].standard
+        : workingOf(await activeStandard(req.user.companyId, order.machineCode, procs[idx].step));
+      if (!stdWorking && !(procs[idx].plannedHours > 0)) return res.status(400).json({ success: false, message: `Type the planned hours for ${procs[idx].step} before starting it (it has no approved standard yet).` });
     }
 
     // Gate: previous step (of this same unit) must be completed. Child
@@ -3174,6 +3105,20 @@ export const startProcess = async (req, res) => {
     // legacy Fabrication-only case.
     if (materialLines.length) commitStepMaterialConsumption(order, materialLines);
 
+    // Feature 19: the standard in force goes on the step (a snapshot), and its planned hours
+    // are worked out for the crew planned now; the run later earns it stretch by stretch.
+    if (stepNeedsTeamGate) {
+      if (stdWorking) {
+        const crewN = await StepCrewEntry.countDocuments({ order: order._id, unitIndex: unitNumber - 1, stepIndex: idx, leftAt: null });
+        const redoQty = (procs[idx].reworks?.length && Number(procs[idx].reworks[procs[idx].reworks.length - 1]?.qty)) || 0;
+        const pieces = redoQty || (order.orderKind === 'SubChildPart' ? Math.max(1, Number(order.orderQuantity) || 1) : 1);
+        procs[idx].standard = { id: stdWorking.id || null, p1: stdWorking.p1, setup: stdWorking.setup || 0, sigma: stdWorking.sigma, crew: stdWorking.crew || 1, approvedAt: stdWorking.approvedAt || null };
+        procs[idx].plannedSource = 'standard';
+        procs[idx].plannedHours = Math.round(standardHours(stdWorking, pieces, Math.max(1, crewN)) * 100) / 100;
+      } else {
+        procs[idx].plannedSource = 'typed';
+      }
+    }
     procs[idx].status = 'In Progress';
     procs[idx].startDate = st.at.toISOString().split('T')[0];
     procs[idx].startedAt = st.at; // precise timestamp, see ProcessStepSchema comment

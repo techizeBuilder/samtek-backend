@@ -29,8 +29,34 @@ const VALID_MATERIAL_SOURCES = ['ExplicitMaterials', 'AssembledPart'];
 export function stepsForChangeCheck(cleaned) {
   return JSON.stringify((cleaned || []).map((c) => ({
     ...c,
-    internalProcesses: (c.internalProcesses || []).map(({ usualHoursPerPiece, ...rest }) => rest),
+    // Feature 19 (2026-11-21): the standard's fields have their own approval (the Company
+    // Admin's), so they never pull the product back either.
+    // eslint-disable-next-line no-unused-vars
+    internalProcesses: (c.internalProcesses || []).map(({ usualHoursPerPiece, standardCrew, setupHours, splitAnswer, standardEditedAt, ...rest }) => rest),
   })));
+}
+
+const STANDARD_FIELDS = ['usualHoursPerPiece', 'standardCrew', 'setupHours', 'splitAnswer'];
+const stepKeyOf = (cat, p) => `${String(cat?.label || '').trim().toLowerCase()}|${String(p?.name || '').trim().toLowerCase()}`;
+
+/**
+ * Feature 19 (2026-11-21): stamps standardEditedAt on each cleaned step — kept from the
+ * saved step when R&D's four standard numbers didn't change, now when they did (or a
+ * new step has them). `previous` = the steps as saved before (any shape; cleaned here).
+ * Mutates and returns `cleaned`.
+ */
+export function stampStandardEdits(cleaned, previous = [], now = new Date()) {
+  const before = new Map();
+  for (const cat of previous || []) for (const p of cat?.internalProcesses || []) before.set(stepKeyOf(cat, p), p);
+  for (const cat of cleaned || []) {
+    for (const p of cat.internalProcesses || []) {
+      const old = before.get(stepKeyOf(cat, p));
+      const has = STANDARD_FIELDS.some((f) => p[f] != null);
+      const same = old && STANDARD_FIELDS.every((f) => (old[f] ?? null) === (p[f] ?? null));
+      p.standardEditedAt = same ? (old.standardEditedAt || null) : (has ? now : null);
+    }
+  }
+  return cleaned;
 }
 
 /**
@@ -78,6 +104,13 @@ export function cleanProcessDefinition(raw) {
               // Delivery estimate (2026-11-18): In-House only; empty = not typed.
               usualHoursPerPiece: (p?.type === 'InHouse' && Number(p?.usualHoursPerPiece) > 0)
                 ? Math.round(Number(p.usualHoursPerPiece) * 1000) / 1000 : null,
+              // Feature 19 (2026-11-21): R&D's standard — In-House only; empty = not typed.
+              // standardEditedAt is never taken from the client: stampStandardEdits sets it.
+              standardCrew: (p?.type === 'InHouse' && Number.isInteger(Number(p?.standardCrew)) && Number(p.standardCrew) >= 1 && Number(p.standardCrew) <= 50)
+                ? Number(p.standardCrew) : null,
+              setupHours: (p?.type === 'InHouse' && Number(p?.setupHours) > 0) ? Math.round(Number(p.setupHours) * 1000) / 1000 : null,
+              splitAnswer: (p?.type === 'InHouse' && ['Yes', 'Partly', 'Hardly', 'No'].includes(p?.splitAnswer)) ? p.splitAnswer : null,
+              standardEditedAt: null,
             };
           })
           .filter(p => p.name)

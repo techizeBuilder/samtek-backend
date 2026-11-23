@@ -1,6 +1,9 @@
 import express from 'express';
 import { authenticateToken } from '../middleware/auth.js';
-import { checkPermission, checkAnyPermission } from '../middleware/permissions.js';
+import { checkPermission, checkAnyPermission, userHasPermission } from '../middleware/permissions.js';
+import { createMotor, updateMotor } from '../controllers/motorMasterController.js'; // Motor Master's own saves (22 Nov 2026)
+import { uploadItemImage } from '../controllers/inventoryController.js';
+import { itemUpload } from '../middleware/itemUpload.js';
 import { rdDocumentUpload } from '../middleware/rdDocumentUpload.js';
 import {
   getMachines, createMachine, updateMachine, getMachineMaterialGrades, getFreeProductCode,
@@ -347,6 +350,17 @@ router.delete('/custom-field-templates/:id', productMasterDelete, deleteCustomFi
 
 // ── Plant Master ──────────────────────────────────────────────────────────────
 router.get('/plants', plantMasterView, getPlants);
+// Motor Master saves behind its own permissions (22 Nov 2026). The page used /api/items,
+// which checks the Inventory permission instead, so Motor Master "add" alone couldn't save.
+const motorMasterAdd = checkPermission('rnd', 'motorMaster', 'add');
+const motorMasterEdit = checkPermission('rnd', 'motorMaster', 'edit');
+const motorMasterAddOrEdit = (req, res, next) => (userHasPermission(req.user, 'rnd', 'motorMaster', 'add') || userHasPermission(req.user, 'rnd', 'motorMaster', 'edit')
+  ? next()
+  : res.status(403).json({ success: false, message: 'Access denied. You need Motor Master add or edit permission.' }));
+router.post('/motors/upload-image', motorMasterAddOrEdit, itemUpload.single('image'), uploadItemImage);
+router.post('/motors', motorMasterAdd, createMotor);
+router.put('/motors/:id', motorMasterEdit, updateMotor);
+
 router.post('/plants', plantMasterAdd, createPlant);
 router.put('/plants/:id', plantMasterEdit, updatePlant);
 router.put('/plants/:id/status', plantMasterEdit, setPlantStatus);

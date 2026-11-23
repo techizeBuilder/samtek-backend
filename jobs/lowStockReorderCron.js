@@ -188,6 +188,8 @@ export async function runLowStockReorderSweep({ companyId = null } = {}) {
     ...(companyId ? { companyId } : {}),
     isDiscontinued: { $ne: true },
     purchase: true,
+    // Feature 20 (decision K): a bulk-imported item waits for Store's first stock count.
+    awaitingFirstCount: { $ne: true },
     // A made Child Part / Sub Child Part is built, never bought (make or buy,
     // 2026-10-28) — even if its purchase flag is on from the Item default.
     // Likewise a machine with Forward on: it's built, through the machine sweep

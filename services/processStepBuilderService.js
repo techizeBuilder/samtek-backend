@@ -29,6 +29,7 @@ export function flattenProcessDefinition(processDefinition) {
         finalQc: !!proc.finalQc,
         operation: proc.operation?.perPiece > 0 ? { name: proc.operation.name, perPiece: proc.operation.perPiece } : null,
         usualHoursPerPiece: proc.usualHoursPerPiece > 0 ? proc.usualHoursPerPiece : null,
+        standardCrew: proc.standardCrew ?? null, setupHours: proc.setupHours ?? null, splitAnswer: proc.splitAnswer ?? null, // feature 19
       });
     }
   }
@@ -99,6 +100,7 @@ export function buildOrderStepsFromProcessDefinition(processDefinition) {
     finalQc: step.finalQc,
     operation: step.operation,
     usualHoursPerPiece: step.usualHoursPerPiece ?? null,
+    standardCrew: step.standardCrew ?? null, setupHours: step.setupHours ?? null, splitAnswer: step.splitAnswer ?? null, // feature 19
     outsourceStatus: step.type === 'OutSource' ? 'NotStarted' : 'NotStarted',
     status: 'Pending',
     assignedTeam: null,
@@ -140,6 +142,7 @@ export function buildFreshUnitProcesses(sourceProcesses) {
     finalQc: p.finalQc,
     operation: p.operation?.perPiece > 0 ? { name: p.operation.name, perPiece: p.operation.perPiece } : null,
     usualHoursPerPiece: p.usualHoursPerPiece > 0 ? p.usualHoursPerPiece : null,
+    standardCrew: p.standardCrew ?? null, setupHours: p.setupHours ?? null, splitAnswer: p.splitAnswer ?? null, // feature 19
     outsourceStatus: 'NotStarted',
     status: 'Pending',
     assignedTeam: null,

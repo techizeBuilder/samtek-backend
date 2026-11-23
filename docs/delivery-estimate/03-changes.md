@@ -291,3 +291,9 @@ The estimate now plans the way Production really works.
 - **Also confirmed in run 2:** the people cap stays per order (decision N).
 - **Where:** `services/estimate/planner.js` (explain: `waitHours`), `DeliveryEstimatorModal.jsx`.
 - **Tests:** `estplan` 55 (+1). Test-1's Aata × 5 gives "waited 7 h", matching the hand working.
+
+## Deep-test improvement I5: "split evenly" only for step hours, 20 Nov
+- **Before:** "Rough because" added "with the hours split evenly across people" whenever any typed number was used, even a bought machine's days to buy.
+- **Now:** that clause appears only when R&D's typed **step hours** were used.
+- **Where:** `workList.js` (`notes.typedHours`), `estimateService.js` (returns `typedHours`), `DeliveryEstimatorModal.jsx`.
+- **Tests:** `estimate` 22 (+1), `estwork` 49.

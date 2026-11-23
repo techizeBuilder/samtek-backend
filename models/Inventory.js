@@ -638,6 +638,12 @@ const itemSchema = new mongoose.Schema({
   // receiving the order would immediately re-trigger the same request
   // (enforced in inventoryController.js's validateItemData).
   reorderQty: { type: Number, min: 0, default: 0 },
+  // Feature 20 (2026-11-21, decision K): an item R&D bulk-imported starts at 0 stock
+  // while its real stock may already be on the shelf, so the low-stock sweep leaves
+  // it alone until Store records its stock once (stock audit or adjustment), which
+  // clears this. docs/client-features-2026-11/20-bulk-import-logic.md
+  awaitingFirstCount: { type: Boolean, default: false },
+  awaitingFirstCountSince: { type: Date, default: null },
   // Machines only (2026-11-06): days R&D expects a build to take. The low-stock
   // sweep's order is due today + this; blank means today. Interim: the proper
   // machine time estimate may replace it.
@@ -842,6 +848,8 @@ itemSchema.index({ qty: 1, minStock: 1 });
 itemSchema.index({ order: 1 });
 itemSchema.index({ companyId: 1 });
 itemSchema.index({ store: 1 });
+// Feature 20: the few items waiting for Store's first stock count (only those are indexed).
+itemSchema.index({ companyId: 1, awaitingFirstCount: 1 }, { partialFilterExpression: { awaitingFirstCount: true } });
 // ADD THIS: Ensures category names are unique PER COMPANY, not globally
 categorySchema.index({ name: 1, companyId: 1 }, { unique: true });
 

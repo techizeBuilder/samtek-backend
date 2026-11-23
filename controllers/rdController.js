@@ -154,7 +154,11 @@ const toMachineItemFields = (body) => {
   if (body.materialGrade !== undefined) out.materialGrade = body.materialGrade || '';
   if (body.size !== undefined) out.size = body.size || '';
   if (body.unitWeightValue !== undefined) out.unitWeightValue = body.unitWeightValue !== '' ? Number(body.unitWeightValue) : null;
-  if (body.unitWeightUnitType !== undefined) out.unitWeightUnitType = body.unitWeightUnitType || '';
+  // Product Weight is always a mass (22 Nov 2026, client): the type is Mass Unit whenever
+  // a unit is given; only the unit (Gram, Kilogram …) is chosen.
+  if (body.unitWeightUnit !== undefined || body.unitWeightUnitType !== undefined) {
+    out.unitWeightUnitType = (body.unitWeightUnit ?? '') !== '' ? 'Mass Unit' : '';
+  }
   if (body.unitWeightUnit !== undefined) out.unitWeightUnit = body.unitWeightUnit || '';
   if (body.inputUnitType !== undefined) out.purchaseUnitType = body.inputUnitType || '';
   if (body.inputUnit !== undefined) out.purchaseUnit = body.inputUnit || '';
@@ -576,7 +580,8 @@ export const createMachine = async (req, res) => {
       metrology: metrology || '',
       size: size || '',
       unitWeightValue: unitWeightValue !== undefined && unitWeightValue !== '' ? Number(unitWeightValue) : null,
-      unitWeightUnitType: unitWeightUnitType || '',
+      // Product Weight is always a mass (22 Nov 2026): Mass Unit whenever a unit is given.
+      unitWeightUnitType: unitWeightUnit ? 'Mass Unit' : '',
       unitWeightUnit: unitWeightUnit || '',
       purchaseUnitType: inputUnitType || '',
       purchaseUnit: inputUnit || '',
