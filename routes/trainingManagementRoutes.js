@@ -1,6 +1,7 @@
 import express from 'express';
 import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
-import { checkAnyModuleFeature } from '../middleware/permissions.js';
+import { userHasPermission } from '../middleware/permissions.js';
+import { isSuperAdmin } from '../services/access/companyAccess.js';
 import { lmsUpload } from '../middleware/lmsUpload.js';
 
 // Import all controllers
@@ -43,20 +44,33 @@ const DEPT_HEADS = [
 
 const ALL_MANAGEMENT = [...TOP_ADMINS, ...DEPT_HEADS];
 
-// LMS is duplicated as a feature in every module's roleModulesConfig.js
-// catalog entry, so a management-tier user's real add/edit/delete/view
-// access depends on whichever module they were actually assigned, not one
-// fixed module name — checkAnyModuleFeature scans all of them. Roles with
-// no catalog module at all (Manager, Finance Manager, Unit Head, Unit
-// Manager) keep the authorizeRoles-only access they already had.
-const lmsView = checkAnyModuleFeature('lms', 'view');
-const lmsAdd = checkAnyModuleFeature('lms', 'add');
-const lmsEdit = checkAnyModuleFeature('lms', 'edit');
-const lmsDelete = checkAnyModuleFeature('lms', 'delete');
+// Security re-check M2 (27 Nov 2026, docs/security-checks/2026-11-26-recheck-company-admin-hr.md): the old
+// checkAnyModuleFeature('lms', ...) let anyone WITHOUT an 'lms' switch through ("fail open"), so View-only
+// HR, Managers and (through authorizeRoles' department grouping) employees could create, edit and delete
+// training modules, questions and trainees. Now it fails CLOSED, by who the person is:
+// - the Super Admin: always
+// - HR / the Company Admin: HR's own training switches (hrms: trainees / trainingModules / questionBank),
+//   the ones HR's Training Management menu shows
+// - a department Head: their module's 'lms' switch, with the action
+// - anyone else (Managers, employees): refused. No menu but HR's and the Heads' has these pages.
+const HR_TRAINING_ROLES = ['HR-Admin', 'Hr Admin', 'Company Admin'];
+const lmsGuard = (hrKeys, action) => (req, res, next) => {
+  const u = req.user;
+  if (!u) return res.status(401).json({ message: 'Authentication required', success: false });
+  if (isSuperAdmin(u)) return next();
+  let ok = false;
+  if (HR_TRAINING_ROLES.includes(u.role)) ok = hrKeys.some((k) => userHasPermission(u, 'hrms', k, action));
+  else if (/ Head$/.test(u.role || '')) ok = (u.permissions?.modules || []).some((m) => (m.features || []).some((f) => f?.key === 'lms' && f[action] === true));
+  return ok ? next() : res.status(403).json({ message: "Training Management isn't switched on for you.", success: false });
+};
+const trainees = (a) => lmsGuard(['trainees'], a);
+const modules = (a) => lmsGuard(['trainingModules'], a);
+const questions = (a) => lmsGuard(['questionBank'], a);
+const anyTraining = (a) => lmsGuard(['trainees', 'trainingModules', 'questionBank'], a); // the module list feeds all three pages
 
 // --- 2. Analytics Dashboard Route (Admin/Manager) ---
 
-router.get('/admin/dashboard', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsView, getDashboardAnalytics);
+router.get('/admin/dashboard', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), trainees('view'), getDashboardAnalytics);
 
 
 // ==========================================
@@ -66,27 +80,27 @@ router.get('/admin/dashboard', authenticateToken, authorizeRoles(...ALL_MANAGEME
 router.get('/certificate/download/:id', authenticateToken, downloadCertificate);
 
 // Get fresh hires ready to be staged
-router.get('/available-trainees', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsView, getAvailableTrainees);
+router.get('/available-trainees', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), trainees('view'), getAvailableTrainees);
 
 // Stage a candidate and assign modules
-router.post('/stage-candidate', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsAdd, stageCandidate);
+router.post('/stage-candidate', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), trainees('add'), stageCandidate);
 
 // Get the active trainee list for the table
-router.get('/trainees', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsView, getActiveTrainees);
+router.get('/trainees', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), trainees('view'), getActiveTrainees);
 
 // Get full details for a specific trainee (Progress, Tests, Modules)
-router.get('/trainees/:id', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsView, getTraineeDetails);
+router.get('/trainees/:id', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), trainees('view'), getTraineeDetails);
 
 // Update assigned courses for an already staged trainee
-router.put('/trainees/:id/modules', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsEdit, updateTraineeModules);
+router.put('/trainees/:id/modules', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), trainees('edit'), updateTraineeModules);
 
 // Finalize trainee (Hire or Reject) — restricted to Top Admins only; a
 // candidate's onboarding decision shouldn't be a dept head/manager action,
 // matching the frontend's own canFinalize gate.
-router.post('/trainees/:id/finalize', authenticateToken, authorizeRoles(...TOP_ADMINS), lmsEdit, finalizeTrainee);
+router.post('/trainees/:id/finalize', authenticateToken, authorizeRoles(...TOP_ADMINS), trainees('edit'), finalizeTrainee);
 
 // Hard delete a trainee and all associated LMS data
-router.delete('/trainees/:id', authenticateToken, authorizeRoles(...TOP_ADMINS), lmsDelete, deleteTraineeRecord); // Usually restricted to Top Admins
+router.delete('/trainees/:id', authenticateToken, authorizeRoles(...TOP_ADMINS), trainees('delete'), deleteTraineeRecord); // Usually restricted to Top Admins
 
 
 // ==========================================
@@ -94,25 +108,25 @@ router.delete('/trainees/:id', authenticateToken, authorizeRoles(...TOP_ADMINS),
 // ==========================================
 
 // Create a new module (with file uploads)
-router.post('/modules', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsAdd, lmsUpload.array('files', 5), createTrainingModule);
+router.post('/modules', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), modules('add'), lmsUpload.array('files', 5), createTrainingModule);
 
 // Get all modules
-router.get('/modules', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsView, getModules);
+router.get('/modules', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), anyTraining('view'), getModules);
 
 // Update module details (Title, Category, etc.)
-router.put('/modules/:id', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsEdit, updateTrainingModule);
+router.put('/modules/:id', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), modules('edit'), updateTrainingModule);
 
 // Deactivate a module
-router.delete('/modules/:id', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsDelete, deactivateModule);
+router.delete('/modules/:id', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), modules('delete'), deactivateModule);
 
 // Add new media to an existing module
-router.post('/modules/:id/media', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsEdit, lmsUpload.array('files', 5), addMediaToModule);
+router.post('/modules/:id/media', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), modules('edit'), lmsUpload.array('files', 5), addMediaToModule);
 
 // Remove specific media from a module
-router.delete('/modules/:moduleId/media/:contentId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsEdit, removeMediaFromModule);
+router.delete('/modules/:moduleId/media/:contentId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), modules('edit'), removeMediaFromModule);
 
 // Update a content item's minimum watch time without re-uploading the file
-router.put('/modules/:moduleId/media/:contentId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsEdit, updateMediaWatchTime);
+router.put('/modules/:moduleId/media/:contentId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), modules('edit'), updateMediaWatchTime);
 
 
 // ==========================================
@@ -120,16 +134,16 @@ router.put('/modules/:moduleId/media/:contentId', authenticateToken, authorizeRo
 // ==========================================
 
 // Add a question to a specific module
-router.post('/modules/:moduleId/questions', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsAdd, addQuestionToModule);
+router.post('/modules/:moduleId/questions', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), questions('add'), addQuestionToModule);
 
 // Get all questions for a module (Shows correct answers - MANAGERS ONLY)
-router.get('/modules/:moduleId/questions', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsView, getQuestions);
+router.get('/modules/:moduleId/questions', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), questions('view'), getQuestions);
 
 // Update a specific question
-router.put('/questions/:questionId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsEdit, updateQuestion);
+router.put('/questions/:questionId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), questions('edit'), updateQuestion);
 
 // Delete a question
-router.delete('/questions/:questionId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), lmsDelete, deleteQuestion);
+router.delete('/questions/:questionId', authenticateToken, authorizeRoles(...ALL_MANAGEMENT), questions('delete'), deleteQuestion);
 
 
 // ==========================================

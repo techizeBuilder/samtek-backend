@@ -10,7 +10,7 @@
 //            is Verified at once and HR can replace a Verified one.
 import { userHasPermission } from '../middleware/permissions.js';
 
-const PLATFORM_ROLES = ['Superadmin', 'Super Admin', 'super_user'];
+const PLATFORM_ROLES = ['Superadmin', 'Super Admin']; // super_user removed 26 Nov 2026
 const same = (a, b) => !!a && !!b && String(a) === String(b);
 
 export function documentAccess(actor, target) {

@@ -45,8 +45,9 @@ export const COLUMNS = [
 const TITLE = Object.fromEntries(COLUMNS.map((c) => [c.key, c.title.replace(/\s*\*$/, '')]));
 const ENTRY_KEYS = ['itemName', 'category', 'material', 'density', 'densityUnit', 'isSheetMetal', 'purchaseUnitType', 'purchaseUnit', 'usedUnitType', 'usedUnit', 'receiveUnitType', 'receiveUnit'];
 
-/** "Angle" → "ANG", the page's prefix rule (fabricationMasterController.derivePrefix). */
-const derivePrefix = (name) => (String(name || '').replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase()) || 'ITM';
+// "Angle" → "ANG", the page's prefix rule (fabricationMasterController.derivePrefix); shared with the
+// Inventory import since feature 35 (27 Nov 2026).
+import { derivePrefix } from './codes.js';
 
 async function lists(companyId) {
   const cid = oid(companyId);
@@ -158,7 +159,7 @@ export async function check(companyId, buffer) {
     nextByPrefix.set(prefix, n);
     return `${prefix}-${String(n).padStart(3, '0')}`;
   };
-  const docs = [], preview = [];
+  const docs = [], preview = [], codes = [];
   let sizeCount = 0;
   for (const e of entries.values()) {
     const v = e.values, row = e.first;
@@ -244,12 +245,13 @@ export async function check(companyId, buffer) {
       isDiscontinued: false, company: cid,
     };
     docs.push(doc);
+    codes.push({ row, name: doc.itemName, code, made: !e.code }); // feature 35: the list shown after the import
     sizeCount += dims.length;
     if (preview.length < 50) {
       preview.push({ row, code, generated: !e.code, name: doc.itemName, category: category.label, material, sizes: dims.map((d) => ({ row: d.row, designation: d.designation, values: d.values, kg: r4(d.weightPerPieceKg) })) });
     }
   }
-  return { problems: sortProblems(problems), docs, preview, counts: { entries: docs.length, sizes: sizeCount }, total: rows.length };
+  return { problems: sortProblems(problems), docs, codes, preview, counts: { entries: docs.length, sizes: sizeCount }, total: rows.length };
 }
 
 /** Checks again, then saves every entry or none. */
@@ -270,5 +272,5 @@ export async function importFile(companyId, user, buffer) {
       ? 'A code in the file was taken while importing: nothing was imported. Check the file again.'
       : `Saving failed: nothing was imported (${err.message}).`);
   }
-  return { imported: c.docs.length, sizes: c.counts.sizes, codes: c.docs.map((d) => d.itemCode) };
+  return { imported: c.docs.length, sizes: c.counts.sizes, codes: c.codes }; // feature 35: [{ row, name, code, made }]
 }

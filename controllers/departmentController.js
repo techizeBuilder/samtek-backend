@@ -1,6 +1,14 @@
 /** @format */
 
 import Department from "../models/Department.js";
+// Feature 29 (24 Nov 2026): by id, only the caller's own company's departments (a Super Admin: any).
+import mongoose from "mongoose";
+import { isSuperAdmin } from "../services/access/companyAccess.js";
+const ownOne = (req) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return null;
+  const cid = req.user?.companyId?._id || req.user?.companyId;
+  return isSuperAdmin(req.user) ? { _id: req.params.id } : { _id: req.params.id, companyId: { $in: [cid, String(cid)] } };
+};
 import Branch from "../models/Branch.js";
 import { fixDepartmentBranchIds } from "../scripts/fixDepartmentBranchIds.js";
 import { departmentsFromRoles, addDepartmentsFromRoles } from "../services/departmentSeedService.js";
@@ -98,7 +106,8 @@ export const getDepartments = async (req, res) => {
 
 /* GET BY ID */
 export const getDepartmentById = async (req, res) => {
-  const department = await Department.findById(req.params.id)
+  const q = ownOne(req);
+  const department = q && await Department.findOne(q)
     .populate("companyId", "name unitName")
     .populate("branchId", "name")
     .populate("headEmployeeId", "fullName name email");
@@ -112,18 +121,18 @@ export const getDepartmentById = async (req, res) => {
 
 /* UPDATE */
 export const updateDepartment = async (req, res) => {
-  const department = await Department.findByIdAndUpdate(
-    req.params.id,
-    req.body,
-    { new: true }
-  );
-
+  const q = ownOne(req);
+  const { companyId, _id, ...data } = req.body || {}; // the company never changes in an edit
+  const department = q ? await Department.findOneAndUpdate(q, data, { new: true }) : null;
+  if (!department) return res.status(404).json({ message: "Department not found" });
   res.json(department);
 };
 
 /* DELETE */
 export const deleteDepartment = async (req, res) => {
-  await Department.findByIdAndDelete(req.params.id);
+  const q = ownOne(req);
+  const gone = q ? await Department.findOneAndDelete(q) : null;
+  if (!gone) return res.status(404).json({ message: "Department not found" });
   res.json({ message: "Department deleted" });
 };
 

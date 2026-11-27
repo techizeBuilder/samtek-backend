@@ -98,13 +98,22 @@ const adminSettingsSchema = new mongoose.Schema({
   // (isBuiltIn: true — protected from rename/delete since those exact
   // names are hardcoded across Sidebar/permissions/route-guards elsewhere).
   // Only custom roles added here (isBuiltIn: false) are editable/deletable.
-  // A custom role is a label only — it isn't wired into the Sidebar's
-  // per-role menu or the Roles & Permissions module grid.
+  // Feature 34 (26 Nov 2026): a custom role is a cut-down version of one built-in role (baseRole):
+  // the person's real role is the base role, their permissions never beyond `allowed` (the same
+  // shape as permissions.modules). services/access/customRoles.js
   roles: [{
     name: { type: String, required: true, trim: true },
     isBuiltIn: { type: Boolean, default: false },
-    order: { type: Number, default: 0 }
+    order: { type: Number, default: 0 },
+    baseRole: { type: String, default: '' },
+    allowed: { type: [mongoose.Schema.Types.Mixed], default: [] },
+    needsApproval: { type: Boolean, default: false },
   }],
+
+  // Feature 28 (24 Nov 2026): set once this company's packing checklist, HRMS document types and
+  // custom roles were copied from the platform lists (ids and keys kept). From then on they are
+  // this company's own (Company Admin), and an empty list stays empty.
+  listsCopiedAt: { type: Date, default: null },
 
 }, { timestamps: true });
 

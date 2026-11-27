@@ -5,7 +5,8 @@
 //     cancel (edit), list (view); reads the settings in force
 //   Company Admin: saves a settings version
 import User from '../models/User.js';
-import { ConductError, recordNote, verifyNote, rejectNote, cancelNote, listNotes, noteFile } from '../services/conductNoteService.js';
+import mongoose from 'mongoose';
+import { ConductError, recordNote, verifyNote, rejectNote, cancelNote, listNotes, noteFile, getRules, saveRules, warningState } from '../services/conductNoteService.js';
 import { SettingsError, saveSettings, settingsView } from '../services/score/scorecardSettings.js';
 import { productionDepartmentIds, eligiblePeopleQuery } from '../services/productionTeamService.js';
 import { sendConductFile } from '../middleware/conductNoteUpload.js';
@@ -52,8 +53,35 @@ export const getHrConductNotes = async (req, res) => {
   try { res.json({ success: true, ...(await listNotes(req.user, req.query)) }); } catch (err) { fail(res, err); }
 };
 
+// HR may record immediate action (a concern with no warning first), for the Company Admin to approve (feature 24).
 export const postHrConductNote = async (req, res) => {
-  try { res.status(201).json({ success: true, data: await recordNote(req.user, req.body || {}, { attachment: req.conductAttachment }) }); } catch (err) { fail(res, err); }
+  try { res.status(201).json({ success: true, data: await recordNote(req.user, req.body || {}, { attachment: req.conductAttachment, canImmediate: true }) }); } catch (err) { fail(res, err); }
+};
+
+// ── Feature 24: warnings ─────────────────────────────────────────────────────
+
+// GET / PUT /api/manpower-score/warning-rules — HR (view / edit) and the Company Admin.
+export const getWarningRules = async (req, res) => {
+  try { res.json({ success: true, data: await getRules(req.user.companyId) }); } catch (err) { fail(res, err); }
+};
+export const putWarningRules = async (req, res) => {
+  try { res.json({ success: true, data: await saveRules(req.user, req.body || {}) }); } catch (err) { fail(res, err); }
+};
+
+// A person's warnings per type in the last 3 months (the note dialog). persons limits to a set.
+async function stateFor(req, persons = null) {
+  const person = String(req.query.person || '');
+  if (!mongoose.isValidObjectId(person) || !(await User.exists({ _id: person, companyId: req.user.companyId }))) throw new ConductError(404, 'Person not found');
+  if (persons && !persons.some((p) => String(p) === person)) throw new ConductError(404, 'Person not found');
+  return warningState(req.user.companyId, person);
+}
+// GET /api/manpower-score/conduct-notes/warnings?person=
+export const getHrWarningState = async (req, res) => {
+  try { res.json({ success: true, data: await stateFor(req) }); } catch (err) { fail(res, err); }
+};
+// GET /api/production-mfg/conduct-notes/warnings?person= — Production's own people only.
+export const getProductionWarningState = async (req, res) => {
+  try { res.json({ success: true, data: await stateFor(req, await productionPeople(req.user.companyId)) }); } catch (err) { fail(res, err); }
 };
 
 export const verifyConductNote = async (req, res) => {

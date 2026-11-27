@@ -308,6 +308,9 @@ export const updateThemeSettings = async (req, res) => {
 export const uploadCompanyLogo = async (req, res) => {
   try {
     if (req.user.role !== USER_ROLES.SUPER_ADMIN) {
+      // Security check 25 Nov 2026: the upload is already on disk by now; a refused one is removed
+      // before the reply (as the company stamp / logo routes do).
+      if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { /* already gone */ } }
       return res.status(403).json({ message: 'Access denied' });
     }
 

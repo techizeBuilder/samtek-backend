@@ -23,6 +23,7 @@ import { personLabour, grossOf } from './labourCalc.js';
 import { actionTime, fmtIndia } from '../../utils/actionTime.js';
 import { crewSegments, earnedHours, standardHours, scoredPlan } from '../standards/standardCalc.js';
 import { standardOfStep, flagOfStep } from '../standards/standardService.js';
+import { stepSummary } from '../stepMedia/stepMediaService.js'; // feature 23
 
 /** A refusal with extra data for the screen (e.g. who would be moved). */
 export class CrewError extends TeamError {
@@ -740,6 +741,8 @@ export async function stepCrewView(user, order, unitIndex, stepIndex, { people, 
     lunch,
     standard, flag,
     scored: { counted: plan.counted, why: plan.why, planned: plan.planned == null ? null : r2(plan.planned) },
+    // Feature 23: the step's photos / video (counts, a short list for its History, can more be added).
+    media: await stepSummary(fresh, unitIndex, stepIndex),
   };
 }
 

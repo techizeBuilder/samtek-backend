@@ -13,11 +13,15 @@ export const HR_ADMIN_FEATURES = [
   'companies', 'branches', 'leaveRequests', 'leaveTypes', 'attendanceRecord', 'attendanceRequests',
   'salaryStructure', 'payrollRun', 'payslips', 'statutoryReport', 'jobOpenings', 'candidates',
   'interviewPipeline', 'trainees', 'trainingModules', 'questionBank', 'manpowerScore',
+  'kra', // feature 25 (2026-11-23)
+  // Security re-check M5 (27 Nov 2026): HR's pages that had no switch (any HR could change them).
+  'holidays', 'hrPolicy', 'hrExpenses',
 ];
 
 export const MANAGER_FEATURES = [
   'teamMembers', 'teamAttendance', 'leaveRequests', 'attendanceCorrections', 'overtimeRequests',
   'expenseRequests', 'travelRequests', 'profileRequests', 'interviewFeedback',
+  'taskManagement', // feature 33 (2026-11-25): the Task Management switch
 ];
 
 const FEATURES_FOR = { 'HR-Admin': HR_ADMIN_FEATURES, Manager: MANAGER_FEATURES };
@@ -149,4 +153,89 @@ export async function separatePurchaseOnce({ companyId = null } = {}) {
   }
   if (moved) console.log(`[Permissions] Purchase separated from Accounts for ${moved} user(s).`);
   return { stamped: pending.length, moved };
+}
+
+// Feature 27 (24 Nov 2026): a Company Admin created before this was saved with the hrms module and
+// an EMPTY feature list, so their admin pages were hidden until someone fixed it by hand. Their 9
+// pages now work by role anyway (services/access/companyAccess.js); this also fills the saved
+// permissions so the Roles & Permissions screen shows them. Once per Company Admin.
+export async function grantCompanyAdminPagesOnce() {
+  const { CA_HRMS_FEATURES, COMPANY_ADMIN } = await import('./access/companyAccess.js');
+  const users = mongoose.connection.collection('users');
+  const pending = await users.find({ role: COMPANY_ADMIN, companyAdminPagesGrantedAt: { $exists: false } }).project({ role: 1, permissions: 1 }).toArray();
+  let filled = 0;
+  for (const user of pending) {
+    const modules = [...(user.permissions?.modules || [])];
+    let hrms = modules.find((m) => m.name === 'hrms');
+    if (!hrms) { hrms = { name: 'hrms', dashboard: true, features: [] }; modules.push(hrms); }
+    hrms.features = hrms.features || [];
+    const missing = CA_HRMS_FEATURES.filter((key) => !hrms.features.some((f) => f.key === key));
+    for (const key of missing) hrms.features.push(granted(key));
+    if (missing.length) filled++;
+    await users.updateOne({ _id: user._id }, { $set: { 'permissions.role': user.permissions?.role || COMPANY_ADMIN, 'permissions.modules': modules, companyAdminPagesGrantedAt: new Date() } });
+  }
+  if (filled) console.log(`[HrPermissions] Company Admin pages filled for ${filled} user(s).`);
+  return { checked: pending.length, filled };
+}
+
+// Feature 29 (24 Nov 2026): HR sets designations and sees departments (the Company Admin sets
+// those). An HR-Admin missing either page gets it: departments to view, designations in full.
+// Once per HR-Admin. (Who may write is enforced by role at the routes either way.)
+export async function grantHrOrgPagesOnce() {
+  const users = mongoose.connection.collection('users');
+  const pending = await users.find({ role: 'HR-Admin', hrOrgPagesGrantedAt: { $exists: false } }).project({ role: 1, permissions: 1 }).toArray();
+  let filled = 0;
+  for (const user of pending) {
+    const modules = [...(user.permissions?.modules || [])];
+    let hrms = modules.find((m) => m.name === 'hrms');
+    if (!hrms) { hrms = { name: 'hrms', dashboard: true, features: [] }; modules.push(hrms); }
+    hrms.features = hrms.features || [];
+    let changed = false;
+    if (!hrms.features.some((f) => f.key === 'departments')) { hrms.features.push({ key: 'departments', view: true, add: false, edit: false, delete: false, alter: false }); changed = true; }
+    if (!hrms.features.some((f) => f.key === 'designations')) { hrms.features.push(granted('designations')); changed = true; }
+    if (changed) filled++;
+    await users.updateOne({ _id: user._id }, { $set: { 'permissions.role': user.permissions?.role || 'HR-Admin', 'permissions.modules': modules, hrOrgPagesGrantedAt: new Date() } });
+  }
+  if (filled) console.log(`[HrPermissions] Departments / Designations given to ${filled} HR-Admin(s).`);
+  return { checked: pending.length, filled };
+}
+
+// Feature 30 (24 Nov 2026): the hidden permission role (permissions.role) is the real role. It used
+// to be saved as each screen sent it (e.g. 'research_& development head'), and 'super_admin' there
+// was read as Super Admin. Nothing else reads it. Idempotent, so it simply runs at every start;
+// one update, bounded by headcount.
+export async function syncPermissionRoleOnce() {
+  const users = mongoose.connection.collection('users');
+  const r = await users.updateMany(
+    { role: { $type: 'string' }, $expr: { $ne: ['$permissions.role', '$role'] } },
+    [{ $set: { 'permissions.role': '$role' } }],
+  );
+  if (r.modifiedCount) console.log(`[Permissions] Hidden permission role set to the real role for ${r.modifiedCount} user(s).`);
+  return { fixed: r.modifiedCount };
+}
+
+// Feature 33 (25 Nov 2026): the Task Management switch decides the new Task Management (feature 25).
+// Every module with that page gets a 'taskManagement' entry; so nobody loses access, each person who
+// has one of those modules saved but no entry gets it fully on, once (stamp taskMgmtGrantedAt). An
+// entry already saved (on or off) stays as it is.
+export const TASK_MODULES = ['hrms', 'production', 'packing', 'dispatches', 'sales', 'accounts', 'rnd', 'store', 'quality-control'];
+export async function grantTaskManagementOnce() {
+  const users = mongoose.connection.collection('users');
+  const pending = await users.find({ taskMgmtGrantedAt: { $exists: false } }).project({ permissions: 1 }).toArray();
+  let filled = 0;
+  for (const user of pending) {
+    const modules = [...(user.permissions?.modules || [])].map((m) => ({ ...m, features: [...(m.features || [])] }));
+    let changed = false;
+    for (const m of modules) {
+      if (!TASK_MODULES.includes(String(m.name || '').toLowerCase())) continue;
+      if (m.features.some((f) => f.key === 'taskManagement')) continue;
+      m.features.push(granted('taskManagement'));
+      changed = true;
+    }
+    const set = { taskMgmtGrantedAt: new Date() };
+    if (changed) { set['permissions.modules'] = modules; filled++; }
+    await users.updateOne({ _id: user._id }, { $set: set });
+  }
+  if (filled) console.log(`[Permissions] Task Management switch given to ${filled} user(s).`);
+  return { checked: pending.length, filled };
 }

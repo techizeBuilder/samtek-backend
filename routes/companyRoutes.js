@@ -10,7 +10,6 @@ import {
   deleteCompany,
   getCompanyStats,
   getCompaniesDropdown,
-  getCompaniesSimple
 } from '../controllers/companyController.js';
 import { authenticateToken as authenticateUser } from '../middleware/auth.js';
 
@@ -65,21 +64,22 @@ const logoUpload = multer({
 
 // Only that company's own Company Admin (or Superadmin) may set its logo —
 // same ownership rule as the Cash Password below.
-const assertLogoAccess = (req, res) => {
+const assertLogoAccess = (req, res, what = 'logo') => {
   const isSuperadmin = req.user.role === 'Superadmin' || req.user.role === 'Super Admin';
   if (!isSuperadmin && req.user.companyId?.toString() !== req.params.id) {
     res.status(403).json({ success: false, message: 'Access denied.' });
     return false;
   }
   if (!isSuperadmin && req.user.role !== 'Company Admin') {
-    res.status(403).json({ success: false, message: 'Only the Company Admin can update the company logo.' });
+    res.status(403).json({ success: false, message: `Only the Company Admin can update the company ${what}.` });
     return false;
   }
   return true;
 };
 
-// Public routes (no authentication required)
-router.get('/simple', getCompaniesSimple);
+// Security re-check M3 (27 Nov 2026): the public GET /simple (every active company's name, city, state,
+// unit and type, with no login) was removed. No screen used it.
+// docs/security-checks/2026-11-26-recheck-company-admin-hr.md
 
 // Apply authentication middleware to protected routes
 router.use(authenticateUser);
@@ -89,6 +89,12 @@ router.put('/:id/stamp', stampUpload.single('stamp'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No stamp image uploaded' });
+    }
+    // Feature 27 (24 Nov 2026): only that company's Company Admin (or a Super Admin), as for the
+    // logo; before this, anyone logged in could replace any company's stamp.
+    if (!assertLogoAccess(req, res, 'stamp')) {
+      try { fs.unlinkSync(req.file.path); } catch { /* already gone */ } // sync: gone before the reply reaches the browser
+      return;
     }
     const { Company } = await import('../models/Company.js');
     const stampUrl = `/uploads/company-stamps/${req.file.filename}`;
@@ -112,7 +118,7 @@ router.put('/:id/logo', logoUpload.single('logo'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'No logo image uploaded' });
     }
     if (!assertLogoAccess(req, res)) {
-      fs.unlink(req.file.path, () => {}); // best-effort — reject wrote the file before we could check
+      try { fs.unlinkSync(req.file.path); } catch { /* already gone */ } // the refused upload, removed at once
       return;
     }
     const { Company } = await import('../models/Company.js');

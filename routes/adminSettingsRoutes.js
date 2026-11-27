@@ -76,20 +76,26 @@ router.delete('/sales-checklist/:id', superAdminOnly, salesChecklistCrud.remove)
 
 // ─── Dispatch Checklist ───────────────────────────────────────────────────────
 router.get('/dispatch-checklist', dispatchChecklistCrud.list);
-router.post('/dispatch-checklist', superAdminOnly, dispatchChecklistCrud.add);
-router.put('/dispatch-checklist/:id', superAdminOnly, dispatchChecklistCrud.update);
-router.delete('/dispatch-checklist/:id', superAdminOnly, dispatchChecklistCrud.remove);
+// Feature 28 (24 Nov 2026): per company, set by that company's Company Admin.
+const companyAdminOnly = authorizeRoles('Company Admin');
+router.post('/dispatch-checklist', companyAdminOnly, dispatchChecklistCrud.add);
+router.put('/dispatch-checklist/:id', companyAdminOnly, dispatchChecklistCrud.update);
+router.delete('/dispatch-checklist/:id', companyAdminOnly, dispatchChecklistCrud.remove);
 
 // ─── HRMS: Upload Document Settings ───────────────────────────────────────────
 router.get('/hrms-document-types', hrmsDocumentTypesCrud.list);
-router.post('/hrms-document-types', superAdminOnly, hrmsDocumentTypesCrud.add);
-router.put('/hrms-document-types/:id', superAdminOnly, hrmsDocumentTypesCrud.update);
-router.delete('/hrms-document-types/:id', superAdminOnly, hrmsDocumentTypesCrud.remove);
+router.post('/hrms-document-types', companyAdminOnly, hrmsDocumentTypesCrud.add);
+router.put('/hrms-document-types/:id', companyAdminOnly, hrmsDocumentTypesCrud.update);
+router.delete('/hrms-document-types/:id', companyAdminOnly, hrmsDocumentTypesCrud.remove);
 
 // ─── HRMS: Role Setting ────────────────────────────────────────────────────────
 // Left with its original broader write access (Super Admin / HR-Admin /
 // Company Admin) — unchanged from before this platform-wide migration.
-const canManageRoles = authorizeRoles('Super Admin', 'HR-Admin', 'Company Admin');
+// Feature 28: per company now (the controller works on the caller's own company), so HR-Admin /
+// Company Admin manage only their own company's custom roles.
+// Feature 34 (26 Nov 2026, decision L): only the Company Admin makes and changes custom roles;
+// HR sees them (GET) to give them on Add User.
+const canManageRoles = authorizeRoles('Company Admin');
 router.get('/roles', rolesCrud.list);
 router.post('/roles', canManageRoles, rolesCrud.add);
 router.put('/roles/:id', canManageRoles, rolesCrud.update);

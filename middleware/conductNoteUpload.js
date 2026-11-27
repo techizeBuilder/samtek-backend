@@ -46,7 +46,8 @@ export function conductNoteUpload(req, res, next) {
         return res.status(400).json({ success: false, message: 'The note could not be read.' });
       }
     }
-    req.conductAttachment = req.file ? { file: req.file.filename, name: req.file.originalname } : null;
+    // mime: feature 24 checks a Safety note's file is a photo (not stored).
+    req.conductAttachment = req.file ? { file: req.file.filename, name: req.file.originalname, mime: req.file.mimetype } : null;
     if (req.file) res.on('finish', () => { if (res.statusCode >= 400 && res.statusCode < 500) discard(req); });
     next();
   });

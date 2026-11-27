@@ -34,6 +34,10 @@ import {
 } from './scoreCalc.js';
 import { settingsFor, thisMonthIndia } from './scorecardSettings.js';
 import { companyDepartments, departmentOf } from '../departmentSeedService.js';
+// Feature 25 slice 4 (23 Nov 2026): KRA tasks fill the work parts for people with a KRA.
+import { kraTasksFor, weightsFor } from '../kraTasks/kraScoreSource.js';
+import { itemResults, kraWorkParts } from '../kraTasks/kraScore.js';
+import { getSettings as getTaskSettings } from '../kraTasks/kraTaskService.js';
 
 const nameOf = (u) => u?.fullName || u?.username || 'Unknown';
 // The pieces a step's standard is for: a QC redo's pieces, a Sub Child Part batch, else 1.
@@ -298,14 +302,20 @@ async function monthCards(companyId, q, { userQuery = {}, withDetail = false } =
 
   const months = monthsIn(period);
   const winFrom = rangeOf({ month: addMonths(month, -2) })[0]; // learning: the 3 months to the period's end
-  const [inputsList, policy, work, notes, tests] = await Promise.all([
+  const [inputsList, policy, work, notes, tests, kraTasks, taskSettings] = await Promise.all([
     Promise.all(months.map((m) => loadCompanyInputs(companyId, m, { userIds: ids }))),
     AttendancePolicy.findOne({ companyId }).select('graceTime').lean(),
     workOf(companyId, from, to, { persons: ids }),
     ConductNote.find({ company: oid(companyId), person: { $in: ids }, date: { $gte: fromDate, $lte: toDate }, status: withDetail ? { $in: ['Pending', 'Verified', 'Rejected', 'Cancelled'] } : 'Verified' })
       .sort({ date: -1, createdAt: -1 }).lean(),
     TestAttempt.find({ user: { $in: ids }, isPassed: true, finishedAt: { $gte: winFrom, $lte: to } }).select('user finishedAt').lean(),
+    kraTasksFor(companyId, ids, { from, to, fromDate, toDate }),
+    getTaskSettings(companyId),
   ]);
+  // Feature 25: each person's KRA on the period's last day (none = scored from steps alone, as before).
+  const { kras, dropped } = await weightsFor(companyId, users, toDate, kraTasks);
+  const kraTasksOf = group(kraTasks, 'person');
+  const until = new Date(Math.min(to.getTime(), Date.now()));
   const graceSeconds = (Number(policy?.graceTime ?? 10) || 0) * 60;
   const finishedOf = group(work.finished, 'person'), unfinishedOf = group(work.unfinished, 'person');
   const notesOf = group(notes, 'person'), testsOf = group(tests, 'user');
@@ -335,6 +345,20 @@ async function monthCards(companyId, q, { userQuery = {}, withDetail = false } =
     const punct = punctualityPart(presentRows, graceSeconds);
     const mine = finishedOf.get(id) || [], open = unfinishedOf.get(id) || [];
     const steps = stepParts(mine, open);
+    // Feature 25: with a KRA, the four work parts = KRA weights × each item's result (Step work from
+    // the steps, other items from their tasks); productivity from steps only, when Step work is in the KRA.
+    let work = Object.fromEntries(['noDelay', 'accuracy', 'quality', 'productivity', 'taskCompletion'].map((k) => [k, steps[k]]));
+    let kra = null;
+    const myKra = kras.get(id);
+    const myTasks = kraTasksOf.get(id) || [];
+    if (myKra) {
+      const kp = kraWorkParts({ items: myKra.items, dropped: dropped.get(id) || new Map(), results: itemResults(myTasks, { from, until, settings: taskSettings }), steps });
+      work = { noDelay: kp.noDelay, accuracy: kp.accuracy, quality: kp.quality, productivity: kp.productivity, taskCompletion: kp.taskCompletion };
+      kra = {
+        source: myKra.source, version: myKra.set.version, effectiveFrom: myKra.set.effectiveFrom, rows: kp.rows, counted: kp.counted, enoughTasks: kp.enoughTasks,
+        stepsWithoutStepWork: (steps.measuredSteps || 0) > 0 && !myKra.items.some((i) => i.builtIn === 'stepWork'),
+      };
+    }
     const myNotes = notesOf.get(id) || [];
     const evidence = [
       ...(u.productionSkillsAdded || []).filter((s) => s.at && new Date(s.at) >= winFrom && new Date(s.at) <= to).map((s) => ({ kind: 'skill', label: `New skill: ${s.skill}`, at: s.at })),
@@ -343,17 +367,17 @@ async function monthCards(companyId, q, { userQuery = {}, withDetail = false } =
     const parts = {
       attendance: { share: att.share, present: att.present, eligible: att.eligible, ...(att.why ? { why: att.why } : {}) },
       punctuality: punct,
-      ...Object.fromEntries(['noDelay', 'accuracy', 'quality', 'productivity', 'taskCompletion'].map((k) => [k, steps[k]])),
+      ...work,
       learning: learningPart(evidence),
     };
     for (const p of PARAMS.filter((x) => x.conduct)) {
       parts[p.key] = conductPart(settings.points[p.key], myNotes.filter((n) => n.type === p.conduct), settings.deductions);
     }
     const card = scorecard(parts, settings, { eligibleDays: att.eligible });
-    const hadWork = mine.length || open.length || att.present > 0;
+    const hadWork = mine.length || open.length || myTasks.length || att.present > 0;
     if (u.isActive === false && !hadWork) continue; // left, nothing this month
     cards.push({
-      user: u, card, presentDays: att.present, recorded, measuredSteps: steps.measuredSteps,
+      user: u, card, presentDays: att.present, recorded, measuredSteps: steps.measuredSteps, kra,
       hours: r1(mine.reduce((s, x) => s + x.hours, 0)), items: mine,
       ...(withDetail ? { unfinished: open, notes: myNotes, evidence } : {}),
     });
@@ -472,10 +496,19 @@ export async function personScore(companyId, personId, { month, from: fromQ, to:
     presentDays: c?.presentDays ?? 0, measuredSteps: c?.measuredSteps ?? 0, hours: c?.hours ?? 0,
     notes: (c?.notes || []).map((n) => ({ ...n, attachment: n.attachment ? { name: n.attachment.name } : null })),
     evidence: c?.evidence || [],
+    kra: c?.kra || null, // feature 25: the KRA box
     unfinished: (c?.unfinished || []).map((x) => ({ ...x.step, hours: r1(x.hours) })),
     history,
     ...pagedSteps(c?.items || [], stepsPage, stepsLimit),
   };
+}
+
+/** Feature 25: one person's KRA box for a period — the same numbers as their scorecard. */
+export async function kraBreakdown(companyId, personId, q = {}) {
+  if (!mongoose.isValidObjectId(personId)) return null;
+  const { month, fromDate, toDate, dates, cards } = await monthCards(companyId, q, { userQuery: { _id: oid(personId) } });
+  const c = cards[0];
+  return { month, fromDate, toDate, dates, kra: c?.kra || null, measuredSteps: c?.measuredSteps ?? 0, parts: (c?.card.parts || []).filter((p) => ['noDelay', 'accuracy', 'quality', 'productivity', 'taskCompletion'].includes(p.key)) };
 }
 
 // The steps behind a score, newest first, one page at a time.

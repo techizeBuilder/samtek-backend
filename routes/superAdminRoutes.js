@@ -19,6 +19,12 @@ import {
   getSuperAdminDispatchById
 } from '../controllers/superAdminController.js';
 
+// Feature 26 (24 Nov 2026): the Dashboard / Orders / Sales / Customers per company.
+import {
+  getPickerCompanies, getDashboard, getOrders, getOrderById, getSales, getSalesPerson, getCustomers, getCustomerById,
+} from '../controllers/superAdminPagesController.js';
+import { isSuperAdmin } from '../services/superAdmin/superAdminStats.js';
+
 // Import API Settings functions from leadController
 import { getApiSettings, saveApiSettings } from '../controllers/leadController.js';
 
@@ -64,6 +70,15 @@ const router = express.Router();
 // Apply authentication to all routes
 router.use(authenticateToken);
 
+// Feature 26 (24 Nov 2026): only a Super Admin may use these routes. Two GETs keep their own
+// checks because other screens use them: one company's details (the sidebar and the Company
+// Admin layout read their own company) and the company dropdown (Roles & Permissions).
+router.use((req, res, next) => {
+  if (req.method === 'GET' && (req.path === '/companies/dropdown' || /^\/companies\/[a-f0-9]{24}\/?$/i.test(req.path))) return next();
+  if (!isSuperAdmin(req.user)) return res.status(403).json({ success: false, message: 'Access denied - Super Admin role required' });
+  next();
+});
+
 // Debug logging
 console.log('🔧 Super Admin routes loading...');
 console.log('📁 Available functions:', { 
@@ -89,7 +104,8 @@ router.get('/test', (req, res) => {
 });
 
 // Super Admin Dashboard
-router.get('/dashboard', getSuperAdminDashboard);
+router.get('/dashboard', getDashboard);
+router.get('/picker-companies', getPickerCompanies);
 
 // Role and Permission Management Routes
 router.get('/users', getAllUsers);
@@ -122,16 +138,16 @@ router.get('/role-permission-management', (req, res) => {
 });
 
 // Orders Management
-router.get('/orders', getSuperAdminOrders);
-router.get('/orders/:id', getSuperAdminOrderById);
+router.get('/orders', getOrders);
+router.get('/orders/:id', getOrderById);
 
 // Sales Management  
-router.get('/sales', getSuperAdminSales);
-router.get('/sales-person/:salesPersonId', getSalesPersonById);
+router.get('/sales', getSales);
+router.get('/sales-person/:salesPersonId', getSalesPerson);
 
 // Customers Management
-router.get('/customers', getSuperAdminCustomers);
-router.get('/customers/:id', getSuperAdminCustomerById);
+router.get('/customers', getCustomers);
+router.get('/customers/:id', getCustomerById);
 
 // Company Management Routes
 router.get('/companies/dropdown', getCompaniesDropdown);

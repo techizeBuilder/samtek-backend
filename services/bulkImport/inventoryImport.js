@@ -17,6 +17,7 @@ import { exactRe } from '../itemCodeService.js';
 import { needsProductionUse } from '../serialTrailService.js';
 import { validateItemData, sanitizeItemData, productionUseProblem } from '../../controllers/inventoryController.js';
 import { MAX_ROWS, ImportError, text, matchIn, num, readSheet, workbook, listColumns, sortProblems } from './common.js';
+import { codeKeeper, nextNumbered, derivePrefix } from './codes.js'; // feature 35
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 const FABRICATION = 'Fabrication Item'; // the form's fixed Item Process Type (not a master option)
@@ -47,7 +48,9 @@ export const COLUMNS = [
   { key: 'itemProcessType', title: 'Item Process Type', help: '"Fabrication Item" makes the row a fabrication item (see below). Others: from the list, or a new value.' },
   { key: 'fabricationCode', title: 'Fabrication Master Code (fabrication only)', label: 'Fabrication Master Code', aliases: ['Fabrication Master Code'], help: 'Fabrication rows only (required there): the Fabrication Master entry\'s code.' },
   { key: 'name', title: 'Item Name * (fabrication: blank = from master)', label: 'Item Name', aliases: ['Item Name *'], required: true, help: 'At least 2 characters. Fabrication row: blank takes the master\'s name.' },
-  { key: 'code', title: 'Item Code * (fabrication: blank = from master)', label: 'Item Code', aliases: ['Item Code *'], required: true, help: 'R&D\'s code, unused anywhere (any letter case), not repeated in the file. Fabrication row: blank takes the master\'s code.' },
+  // Feature 35 (27 Nov 2026): a blank code is made on import (normal items), as Fabrication Master does.
+  { key: 'code', title: 'Item Code (blank = made)', label: 'Item Code', aliases: ['Item Code * (fabrication: blank = from master)', 'Item Code *'], required: true,
+    help: 'Typed: unused anywhere (any letter case), not repeated in the file. Blank on a normal item: made on import from the name\'s first 3 letters and the next number (Bearing 6205 → BEA-001), never one that is already used. Fabrication row: blank takes the master\'s code.' },
   { key: 'modelNumber', title: 'Model Number', help: 'Free text.' },
   { key: 'brand', title: 'Brand Name', help: 'Free text.' },
   { key: 'itemCategories', title: 'Item Category', help: 'One or more, separated by commas. A value not in the list yet is added to it on import (the check shows it first).' },
@@ -132,6 +135,7 @@ export async function buildTemplate(companyId) {
     ['One row per item on the "Items" sheet. Keep the header row. Values for the list columns are on the "Lists" sheet (your company\'s own lists, as of the download). A value that isn\'t in its list yet is added to the list when you import; the check shows every new value first, so a typo can be fixed in the file. Unit types and units must already exist.'],
     ['Upload the file: every row is checked first. If any row has a problem, nothing is imported and every problem is listed by row and column. Fix the file and upload it again.'],
     ['New items only: a code that already exists is a problem (edit existing items on the form). Stock starts at 0, as with the form.'],
+    ['Item Code left blank on a normal item: the system makes one on import, from the name\'s first 3 letters and the next free number (e.g. BEA-001), never a code that is already used or typed elsewhere in the file. The check shows each made code first, and the import lists them all with a Copy button.'],
     ['Fabrication items: first add (or import) the entry in Fabrication Master. Then a row with Item Process Type "Fabrication Item" and its Fabrication Master Code: name, code, units, sizes and weights come from the master. The columns marked "(not for fabrication)" come from the master too: leave them blank. If they are filled anyway, they are not used, and the check lists every value that differs from the master. Item Name and Item Code may be left blank to take the master\'s.'],
     ['Purchasable items with a Material Flow are not reordered until Store records their stock once (stock audit). Store sees them under "Waiting for first stock count".'],
     [`Up to ${MAX_ROWS} rows per file.`],
@@ -160,7 +164,6 @@ export async function check(companyId, buffer) {
   const unitTypeOf = (name) => L.unitTypes.find((u) => u.name.toLowerCase() === text(name).toLowerCase()) || null;
 
   // ── Batched reads: codes (global), twins (company), Fabrication Master entries ──
-  const fileCodes = rows.map((r) => text(r.values.code)).filter(Boolean);
   const fabCodes = [...new Set(rows.map((r) => text(r.values.fabricationCode)).filter(Boolean))];
   // Codes are unique across the whole database in any letter case, so the check has to
   // see them all: one index-only read of the code index, compared in memory.
@@ -187,6 +190,11 @@ export async function check(companyId, buffer) {
       for (const h of await Item.find({ code: { $in: clash } }).select('code name companyId isDiscontinued').lean()) takenHolders.set(h.code.toLowerCase(), h);
     }
   }
+  // Feature 35 (27 Nov 2026): codes made for blank normal rows never take one that is used: every Item
+  // code, every Fabrication Master code of the company (a fabrication item takes its master's code),
+  // and every code the file types or brings from a master. services/bulkImport/codes.js
+  const fmCodes = await FabricationMaster.find({ company: cid }).select('itemCode').lean();
+  const keeper = codeKeeper([...allCodes.map((x) => x.code), ...fmCodes.map((m) => m.itemCode), ...rows.map(codeOfRow)]);
 
   // A value that isn't in its dropdown list yet is added to the list when the file is
   // imported (22 Nov 2026: default G changed by the user), and the check shows it first so
@@ -206,7 +214,7 @@ export async function check(companyId, buffer) {
   };
 
   const seenCode = new Map(), seenTwin = new Map(), seenMaster = new Map();
-  const docs = [], preview = [], fromMaster = [];
+  const docs = [], preview = [], fromMaster = [], codes = [];
   let fabricationCount = 0, held = 0;
   for (const r of rows) {
     const v = r.values;
@@ -256,12 +264,15 @@ export async function check(companyId, buffer) {
 
     // Name and code.
     const name = text(v.name) || found?.itemName || '';
-    const code = text(v.code) || found?.itemCode || '';
+    let code = text(v.code) || found?.itemCode || '';
+    // Feature 35: a blank code on a NORMAL item is made (a fabrication item takes its master's code).
+    let made = false;
+    if (!code && !isFab && name.length >= 2) { code = nextNumbered(keeper, derivePrefix(name)); made = true; }
     // A fabrication row whose entry isn't found: that problem already says it all.
     const quiet = isFab && !found;
     if (name.length < 2 && !(quiet && !name)) bad(row, 'name', name ? 'At least 2 characters.' : 'Required.');
-    if (!code) { if (!quiet) bad(row, 'code', 'Required: R&D defines every item code.'); }
-    else {
+    if (!code) { if (!quiet && !isFab) bad(row, 'code', 'Give the item a name, so its code can be made (or type a code).'); }
+    else if (!made) {
       const lower = code.toLowerCase();
       if (seenCode.has(lower)) bad(row, 'code', `"${code}" is also on row ${seenCode.get(lower)}: codes must be unique.`);
       else {
@@ -439,14 +450,15 @@ export async function check(companyId, buffer) {
     doc.awaitingFirstCount = purchase && !!materialFlow && !isDiscontinued;
     doc.awaitingFirstCountSince = doc.awaitingFirstCount ? new Date() : null;
     docs.push(doc);
+    codes.push({ row, name, code, made }); // feature 35: the list shown after the import
     if (isFab) fabricationCount++;
     if (doc.awaitingFirstCount) held++;
     if (preview.length < 50) {
-      preview.push({ row, code, name, fabrication: isFab, sizes: doc.dimensionVariants.length, purchase, unit: used.unit, materialFlow, minStock, held: doc.awaitingFirstCount });
+      preview.push({ row, code, made, name, fabrication: isFab, sizes: doc.dimensionVariants.length, purchase, unit: used.unit, materialFlow, minStock, held: doc.awaitingFirstCount });
     }
   }
   const newValues = [...added.values()].map((a) => ({ list: TITLE[a.key], field: a.field, scope: a.scope, value: a.value, rows: a.rows }));
-  return { problems: sortProblems(problems), docs, preview, newValues, fromMaster, counts: { items: docs.length, fabrication: fabricationCount, held }, total: rows.length };
+  return { problems: sortProblems(problems), docs, codes, preview, newValues, fromMaster, counts: { items: docs.length, fabrication: fabricationCount, held }, total: rows.length };
 }
 
 /**
@@ -482,7 +494,7 @@ export async function importFile(companyId, user, buffer) {
       : 'They start at 0 stock.',
     type: 'inventory', icon: 'package', priority: 'medium', targetCompanyId: companyId, data: { link: '/store/inventory' },
   })).catch((e) => console.error('[bulk-import] notify failed:', e.message));
-  return { imported: c.docs.length, held: c.counts.held, fabrication: c.counts.fabrication, listsAdded, by: user?._id || null };
+  return { imported: c.docs.length, held: c.counts.held, fabrication: c.counts.fabrication, listsAdded, codes: c.codes, by: user?._id || null };
 }
 
 /** Adds new dropdown values (Inventory's own lists and R&D's): how many were added. */

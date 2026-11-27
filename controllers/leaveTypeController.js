@@ -1,6 +1,13 @@
 /** @format */
 
+import mongoose from "mongoose";
 import LeaveType from "../models/LeaveType.js";
+import { companyMatch } from "../utils/companyScope.js";
+
+// Security check day 3 (26 Nov 2026, finding 1): open / edit / delete by id were not limited to the
+// caller's company, so HR in one company could change or delete another company's leave types.
+// Now always within the company (the Super Admin: any). docs/security-checks/2026-11-26-hr-admin.md
+const ownLeaveType = (req) => (mongoose.isValidObjectId(req.params.id) ? { _id: req.params.id, ...companyMatch(req.user) } : null);
 
 // @desc    Add new Leave Type
 // @route   POST /api/leave-types
@@ -63,7 +70,8 @@ export const getAllLeaveTypes = async (req, res) => {
 // @route   GET /api/leave-types/:id
 export const getLeaveTypeById = async (req, res) => {
   try {
-    const leaveType = await LeaveType.findById(req.params.id);
+    const q = ownLeaveType(req);
+    const leaveType = q ? await LeaveType.findOne(q) : null;
     if (!leaveType) {
       return res.status(404).json({ message: "Leave type not found" });
     }
@@ -80,13 +88,15 @@ export const updateLeaveType = async (req, res) => {
   try {
     const { name, code, maxDays, paid, carryForward, isActive } = req.body;
 
-    const leaveType = await LeaveType.findById(req.params.id);
+    const q = ownLeaveType(req);
+    const leaveType = q ? await LeaveType.findOne(q) : null;
     if (!leaveType) {
       return res.status(404).json({ message: "Leave type not found" });
     }
 
     if (code && code !== leaveType.code) {
-      const existingLeaveType = await LeaveType.findOne({ code });
+      // Codes are unique within a company (as on add), not across companies.
+      const existingLeaveType = await LeaveType.findOne({ code, companyId: leaveType.companyId ?? null, _id: { $ne: leaveType._id } });
       if (existingLeaveType) {
         return res.status(400).json({ message: "Leave type with this code already exists" });
       }
@@ -112,7 +122,8 @@ export const updateLeaveType = async (req, res) => {
 // @route   DELETE /api/leave-types/:id
 export const deleteLeaveTypeById = async (req, res) => {
   try {
-    const leaveType = await LeaveType.findByIdAndDelete(req.params.id);
+    const q = ownLeaveType(req);
+    const leaveType = q ? await LeaveType.findOneAndDelete(q) : null;
     if (!leaveType) {
       return res.status(404).json({ message: "Leave type not found" });
     }

@@ -10,13 +10,15 @@ import RDMasterOption from '../../models/RDMasterOption.js';
 import { exactRe } from '../itemCodeService.js';
 import { validateItemData, sanitizeItemData } from '../../controllers/inventoryController.js';
 import { MAX_ROWS, ImportError, text, matchIn, num, readSheet, workbook, listColumns, sortProblems } from './common.js';
+import { codeKeeper, nextNumbered } from './codes.js'; // feature 35
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 const lower = (v) => text(v).toLowerCase();
 const hpToKwh = (hp) => Math.round(hp * 0.746 * 100) / 100; // the form's rule
 
 export const COLUMNS = [
-  { key: 'code', title: 'Motor Code *', required: true, help: 'Unused anywhere (any letter case), not repeated in the file.' },
+  // Feature 35 (27 Nov 2026): a blank code is made on import.
+  { key: 'code', title: 'Motor Code (blank = made)', label: 'Motor Code', aliases: ['Motor Code *'], required: true, help: 'Typed: unused anywhere (any letter case), not repeated in the file. Blank: made on import, the next free MTR number (MTR-001, MTR-002 …).' },
   { key: 'name', title: 'Motor Name *', required: true, help: 'At least 2 characters. The same name as an active motor, or another row, is refused.' },
   { key: 'modelNumber', title: 'Model Number', help: 'Free text.' },
   { key: 'serialNumber', title: 'Serial Number', help: 'Free text.' },
@@ -33,7 +35,7 @@ export const COLUMNS = [
   { key: 'status', title: 'Motor Status', help: 'Continue (default) or Discontinue.' },
   { key: 'sourcing', title: 'Sourcing', help: 'Purchasable (Vendor) or Internal Manufacturing. Blank: Purchasable, the form\'s pre-selected choice.' },
 ];
-const TITLE = Object.fromEntries(COLUMNS.map((c) => [c.key, c.title.replace(/\s*\*$/, '')]));
+const TITLE = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label || c.title.replace(/\s*\*$/, '')]));
 
 const motorTypesOf = async (companyId) => [...new Set((await RDMasterOption.find({ company: oid(companyId), field: 'MotorType' }).select('value').lean()).map((o) => o.value))]
   .sort((a, b) => a.localeCompare(b));
@@ -80,14 +82,18 @@ export async function check(companyId, buffer) {
     productKind: { $nin: ['Machine', 'SubChildPart', 'ChildPart'] }, type: exactRe('Product'), itemType: { $in: ['', null] }, name: { $in: names.map(exactRe) },
   }).select('name code').lean() : [];
   const twinOf = new Map(twins.map((t) => [lower(t.name), t.code]));
+  // Feature 35: made codes never take a used one, nor one typed elsewhere in the file. bulkImport/codes.js
+  const keeper = codeKeeper([...allCodes.map((x) => x.code), ...rows.map((r) => text(r.values.code))]);
 
   const seenCode = new Map(), seenName = new Map();
-  const docs = [], preview = [];
+  const docs = [], preview = [], codes = [];
   for (const r of rows) {
     const v = r.values, row = r.row;
     const before = problems.length;
-    const code = text(v.code), name = text(v.name);
-    if (!code) bad(row, 'code', 'Required.');
+    const name = text(v.name);
+    let code = text(v.code), made = false;
+    if (!code) { code = nextNumbered(keeper, 'MTR'); made = true; } // feature 35
+    if (made) { /* free by construction */ }
     else if (seenCode.has(lower(code))) bad(row, 'code', `"${code}" is also on row ${seenCode.get(lower(code))}: codes must be unique.`);
     else {
       seenCode.set(lower(code), row);
@@ -153,10 +159,11 @@ export async function check(companyId, buffer) {
     doc.store = String(companyId);
     doc.variants = [];
     docs.push(doc);
-    if (preview.length < 50) preview.push({ row, code, name, motorType, hp: motorDetails.hp, kwh: motorDetails.kwh, rpm: motorDetails.rpm, purchase, discontinued: doc.isDiscontinued });
+    codes.push({ row, name, code, made }); // feature 35: the list shown after the import
+    if (preview.length < 50) preview.push({ row, code, made, name, motorType, hp: motorDetails.hp, kwh: motorDetails.kwh, rpm: motorDetails.rpm, purchase, discontinued: doc.isDiscontinued });
   }
   const newValues = [...typePlan.values()].map((t) => ({ list: 'Motor Type', value: t.value, under: '', rows: t.rows }));
-  return { problems: sortProblems(problems), docs, preview, newValues, types: [...typePlan.values()], counts: { motors: docs.length, types: typePlan.size }, total: rows.length };
+  return { problems: sortProblems(problems), docs, codes, preview, newValues, types: [...typePlan.values()], counts: { motors: docs.length, types: typePlan.size }, total: rows.length };
 }
 
 /** Checks again; adds the new Motor Types, then the motors — all or nothing. */
@@ -185,5 +192,5 @@ export async function importFile(companyId, user, buffer) {
       ? 'A code or Motor Type in the file was added by someone else while importing: nothing was imported. Check the file again.'
       : `Saving failed: nothing was imported (${err.message}).`);
   }
-  return { imported: c.docs.length, added: { types: c.counts.types }, by: user?._id || null };
+  return { imported: c.docs.length, added: { types: c.counts.types }, codes: c.codes, by: user?._id || null };
 }

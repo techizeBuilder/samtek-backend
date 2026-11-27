@@ -3,19 +3,32 @@ import Manufacturing from '../models/Manufacturing.js';
 import Dispatch from '../models/Dispatch.js';
 import Sale from '../models/Sale.js';
 import { Item } from '../models/Inventory.js';
-import { USER_ROLES } from '../shared/schema.js';
+import mongoose from 'mongoose';
+import { isSuperAdmin, COMPANY_ADMIN } from '../services/access/companyAccess.js';
+
+// Security fix (26 Nov 2026, docs/security-checks/2026-11-26-super-user-and-dashboard.md): this old
+// dashboard was scoped by unit NAME only. A person without a unit (25 of 84 on dev) saw every
+// company's orders, revenue and stock, and any login could call it. Now:
+// - always the person's own company (+ their unit when they have one); the Super Admin sees all
+// - only for someone who holds at least one page (a custom-role user with none gets nothing)
+// - recent orders at most 20, charts at most 90 days
+const NO_DASHBOARD = "The dashboard isn't available for you. Ask HR or the Company Admin for your pages.";
+const holdsAPage = (u) => (u?.permissions?.modules || []).some((m) => (m.features || []).some((f) => f?.view === true));
+function scopeOf(req, unitField = 'unit') {
+  const u = req.user;
+  if (isSuperAdmin(u)) return req.query.unit ? { [unitField]: String(req.query.unit) } : {};
+  if (!u?.companyId || (u.role !== COMPANY_ADMIN && !holdsAPage(u))) return null;
+  const cid = String(u.companyId);
+  const q = { companyId: { $in: [cid, ...(mongoose.isValidObjectId(cid) ? [new mongoose.Types.ObjectId(cid)] : [])] } };
+  if (u.unit) q[unitField] = u.unit;
+  return q;
+}
+const days = (p) => Math.min(90, Math.max(1, parseInt(p, 10) || 7));
 
 export const getDashboardMetrics = async (req, res) => {
   try {
-    const { unit } = req.query;
-    let query = {};
-
-    // Apply unit filter for non-super users
-    if (req.user.role !== USER_ROLES.SUPER_USER) {
-      query.unit = req.user.unit;
-    } else if (unit) {
-      query.unit = unit;
-    }
+    const query = scopeOf(req);
+    if (!query) return res.status(403).json({ message: NO_DASHBOARD });
 
     // Get date ranges for comparison
     const now = new Date();
@@ -105,18 +118,11 @@ export const getDashboardMetrics = async (req, res) => {
 
 export const getProductionChart = async (req, res) => {
   try {
-    const { unit, period = '7' } = req.query;
-    let query = {};
-
-    if (req.user.role !== USER_ROLES.SUPER_USER) {
-      query.unit = req.user.unit;
-    } else if (unit) {
-      query.unit = unit;
-    }
-
-    const days = parseInt(period);
+    const query = scopeOf(req);
+    if (!query) return res.status(403).json({ message: NO_DASHBOARD });
+    const n = days(req.query.period);
     const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+    startDate.setDate(startDate.getDate() - n);
 
     const productionData = await Manufacturing.aggregate([
       {
@@ -142,7 +148,7 @@ export const getProductionChart = async (req, res) => {
     const productionValues = [];
     const plannedValues = [];
 
-    for (let i = days - 1; i >= 0; i--) {
+    for (let i = n - 1; i >= 0; i--) {
       const date = new Date();
       date.setDate(date.getDate() - i);
       const dateString = date.toISOString().split('T')[0];
@@ -175,18 +181,10 @@ export const getProductionChart = async (req, res) => {
 
 export const getSalesChart = async (req, res) => {
   try {
-    const { unit, period = '7' } = req.query;
-    let query = {};
-
-    if (req.user.role !== USER_ROLES.SUPER_USER) {
-      query.unit = req.user.unit;
-    } else if (unit) {
-      query.unit = unit;
-    }
-
-    const days = parseInt(period);
+    const query = scopeOf(req);
+    if (!query) return res.status(403).json({ message: NO_DASHBOARD });
     const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+    startDate.setDate(startDate.getDate() - days(req.query.period));
 
     // Updated sales trend data to include approved orders
     const salesData = await Order.aggregate([
@@ -225,19 +223,14 @@ export const getSalesChart = async (req, res) => {
 
 export const getRecentOrders = async (req, res) => {
   try {
-    const { unit, limit = 5 } = req.query;
-    let query = {};
-
-    if (req.user.role !== USER_ROLES.SUPER_USER) {
-      query.unit = req.user.unit;
-    } else if (unit) {
-      query.unit = unit;
-    }
+    const query = scopeOf(req);
+    if (!query) return res.status(403).json({ message: NO_DASHBOARD });
+    const limit = Math.min(20, Math.max(1, parseInt(req.query.limit, 10) || 5));
 
     const orders = await Order.find(query)
       .populate('customer', 'customerName name')
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
+      .limit(limit)
       .select('orderCode customer status totalAmount products createdAt orderDate');
 
     // Transform orders to match frontend expectations
@@ -260,14 +253,8 @@ export const getRecentOrders = async (req, res) => {
 
 export const getAlerts = async (req, res) => {
   try {
-    const { unit } = req.query;
-    let query = {};
-
-    if (req.user.role !== USER_ROLES.SUPER_USER) {
-      query.unitName = req.user.unit;
-    } else if (unit) {
-      query.unitName = unit;
-    }
+    const query = scopeOf(req, 'unitName');
+    if (!query) return res.status(403).json({ message: NO_DASHBOARD });
 
     const alerts = [];
 

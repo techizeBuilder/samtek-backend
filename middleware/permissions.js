@@ -1,3 +1,5 @@
+// Feature 27: the Company Admin's own admin pages, by role (services/access/companyAccess.js).
+import { companyAdminGrants } from '../services/access/companyAccess.js';
 // Find a module in a user's permissions, tolerating the same naming
 // variance the frontend's usePermissions.hasFeatureAccess already tolerates
 // (case, e.g. 'Store' vs 'store', and singular/plural, e.g. 'dispatch' vs
@@ -22,7 +24,8 @@ const findUserModule = (modules, moduleName) => {
 // than a response (Super Admin passes, as there).
 export const userHasPermission = (user, module, feature, action) => {
   if (!user) return false;
-  if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') return true;
+  if (user.role === 'Superadmin' || user.role === 'Super Admin') return true;
+  if (companyAdminGrants(user, module, feature, action)) return true; // feature 27 (29: designations view only)
   const found = findUserModule(user.permissions?.modules, module);
   return !!found?.features?.find((f) => f.key === feature)?.[action];
 };
@@ -41,7 +44,13 @@ export const checkPermission = (module, feature, action) => {
       }
 
       // Super Admin has all permissions (both variants)
-      if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') {
+      if (user.role === 'Superadmin' || user.role === 'Super Admin') {
+        return next();
+      }
+
+      // Feature 27 (24 Nov 2026): a Company Admin's own admin pages work by role, so a missing or
+      // edited permission can never lock them out of their company.
+      if (companyAdminGrants(user, module, feature, action)) {
         return next();
       }
 
@@ -117,7 +126,7 @@ export const checkAnyPermission = (moduleFeaturePairs, action) => {
       }
 
       // Super Admin has all permissions (both variants)
-      if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') {
+      if (user.role === 'Superadmin' || user.role === 'Super Admin') {
         return next();
       }
 
@@ -171,24 +180,20 @@ export const checkAnyModuleFeature = (featureKey, action) => {
         });
       }
 
-      if (user.role === 'Superadmin' || user.role === 'Super Admin' || user.permissions?.role === 'super_admin') {
+      if (user.role === 'Superadmin' || user.role === 'Super Admin') {
         return next();
       }
 
-      const modules = user.permissions?.modules;
-      if (!Array.isArray(modules)) {
-        return next();
-      }
-
+      // Security re-check M2 (27 Nov 2026): fails CLOSED now. Someone with no such switch anywhere used
+      // to be let through ("fall through to role access"), which opened training to View-only HR,
+      // Managers and employees. No route uses this any more (training has its own guard); kept closed
+      // so it can't be reused the old way.
+      const modules = Array.isArray(user.permissions?.modules) ? user.permissions.modules : [];
       const relevantFeatures = modules
         .map((m) => m.features?.find((f) => f.key === featureKey))
         .filter(Boolean);
 
-      if (relevantFeatures.length === 0) {
-        return next();
-      }
-
-      const hasAccess = relevantFeatures.some((f) => f[action]);
+      const hasAccess = relevantFeatures.some((f) => f[action] === true);
 
       if (!hasAccess) {
         return res.status(403).json({
@@ -488,4 +493,15 @@ export const getUserPermissions = (user) => {
     canAccessAllUnits: false,
     modules: []
   };
+};
+// Security re-check M5 (27 Nov 2026): an HR page's switch, for HR. The Company Admin and the Super Admin
+// keep these pages by role (their menus show them without a switch); HR needs the switch with the action;
+// anyone else is refused. Put after the route's own role check.
+// docs/security-checks/2026-11-26-recheck-company-admin-hr.md
+export const hrRoleSwitch = (feature, action) => (req, res, next) => {
+  const u = req.user;
+  if (!u) return res.status(401).json({ message: 'Authentication required', success: false });
+  if (['Superadmin', 'Super Admin', 'Company Admin'].includes(u.role)) return next();
+  if (['HR-Admin', 'Hr Admin'].includes(u.role) && userHasPermission(u, 'hrms', feature, action)) return next();
+  return res.status(403).json({ message: `Access denied - No ${action} permission for ${feature}`, success: false });
 };

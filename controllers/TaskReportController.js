@@ -2,6 +2,8 @@
 import Task from "../models/taskManagement.js";
 import * as XLSX from 'xlsx';
 import PDFDocument from 'pdfkit-table';
+// Feature 30 (24 Nov 2026): only a Super Admin sees every company's tasks.
+import { isSuperAdmin } from "../services/access/companyAccess.js";
 
 // ==========================================
 // ROLE HIERARCHY & HELPERS
@@ -83,7 +85,7 @@ const buildDateRange = (req, dateField = 'dueDate') => {
 // ==========================================
 const buildReportQuery = (req) => {
     const query = {};
-    if (!req.user.permissions?.canAccessAllUnits) {
+    if (!isSuperAdmin(req.user)) { // feature 30: own company only, whatever the "all units" tick says
         query.companyId = req.user.companyId;
     }
     const isTopAdmin = TOP_LEVEL_ADMINS.includes(req.user.role);

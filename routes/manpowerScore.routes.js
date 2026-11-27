@@ -9,6 +9,7 @@ import {
 } from '../controllers/manpowerScoreController.js';
 import {
   getHrConductNotes, postHrConductNote, verifyConductNote, rejectConductNote, cancelConductNote, getHrConductFile,
+  getWarningRules, putWarningRules, getHrWarningState,
 } from '../controllers/scorecardController.js';
 import { conductNoteUpload } from '../middleware/conductNoteUpload.js';
 
@@ -29,6 +30,11 @@ router.put('/incentives/:id/reject', authMiddleware, can('edit'), rejectIncentiv
 router.post('/incentives', authMiddleware, can('add'), giveIncentiveDirect);
 // Conduct notes (feature 13, 2026-11-17): HR records about anyone, and verifies / rejects / cancels.
 router.get('/conduct-notes', authMiddleware, can('view'), getHrConductNotes);
+// Feature 24 (2026-11-23): warnings — HR's rules per type, and a person's warnings (the note dialog).
+// Registered before /conduct-notes/:id/... so "warnings" isn't read as a note id.
+router.get('/conduct-notes/warnings', authMiddleware, can('view'), getHrWarningState);
+router.get('/warning-rules', authMiddleware, can('view'), getWarningRules);
+router.put('/warning-rules', authMiddleware, can('edit'), putWarningRules);
 router.get('/conduct-notes/:id/file', authMiddleware, can('view'), getHrConductFile);
 router.post('/conduct-notes', authMiddleware, can('add'), conductNoteUpload, postHrConductNote);
 router.put('/conduct-notes/:id/verify', authMiddleware, can('edit'), verifyConductNote);

@@ -69,8 +69,10 @@ import {
   submitBatchQcStep,
   submitUnitQcStep,
 } from '../controllers/productionMfgController.js';
-import { getProductionConductNotes, postProductionConductNote, getProductionConductFile } from '../controllers/scorecardController.js';
+import { getProductionConductNotes, postProductionConductNote, getProductionConductFile, getProductionWarningState } from '../controllers/scorecardController.js';
 import { conductNoteUpload } from '../middleware/conductNoteUpload.js';
+import { stepMediaUpload } from '../middleware/stepMediaUpload.js'; // feature 23
+import { addStepMedia, removeStepMedia } from '../controllers/stepMediaController.js'; // feature 23
 import {
   assignSubChildPartOrderTeam,
   startSubChildPartOrder,
@@ -174,6 +176,9 @@ router.put('/orders/:id/processes/:stepIndex/planned-hours', ordersEdit, setStep
 router.get('/orders/:id/processes/:stepIndex/flag', ordersView, getStepFlag);
 router.post('/orders/:id/processes/:stepIndex/flag', ordersEdit, flagStep);
 router.put('/orders/:id/processes/:stepIndex/lunch', ordersEdit, confirmStepLunch);
+// Feature 23 (2026-11-23): photos / video at a step's finish (optional), for QC to see.
+router.post('/orders/:id/processes/:stepIndex/media', ordersEdit, stepMediaUpload, addStepMedia);
+router.delete('/orders/:id/processes/:stepIndex/media/:mediaId', ordersEdit, removeStepMedia);
 router.put('/orders/:id/processes/:stepIndex/start', ordersEdit, startProcess);
 router.put('/orders/:id/processes/:stepIndex/complete', ordersEdit, markProcessComplete);
 router.put('/orders/:id/processes/:stepIndex/approve-qc', ordersEdit, approveQC);
@@ -233,6 +238,7 @@ router.get('/incentives', manpowerView, getProductionIncentives);
 router.post('/incentives', manpowerEdit, requestPersonIncentive);
 // Conduct notes (feature 13, 2026-11-17): Production notes its own people; HR verifies.
 router.get('/conduct-notes', manpowerView, getProductionConductNotes);
+router.get('/conduct-notes/warnings', manpowerView, getProductionWarningState); // feature 24: a person's warnings (the note dialog)
 router.get('/conduct-notes/:id/file', manpowerView, getProductionConductFile);
 router.post('/conduct-notes', manpowerEdit, conductNoteUpload, postProductionConductNote);
 router.delete('/teams/:teamId', manpowerDelete, retireTeam);

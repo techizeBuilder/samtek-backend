@@ -4,7 +4,7 @@
 // call sends the same file again, so nothing is kept on the server between the two.
 import { Router } from 'express';
 import multer from 'multer';
-import { authenticateToken } from '../middleware/auth.js';
+import { authenticateToken, authorizeRoles } from '../middleware/auth.js';
 import { checkPermission } from '../middleware/permissions.js';
 import { ImportError } from '../services/bulkImport/common.js';
 import * as inventoryImport from '../services/bulkImport/inventoryImport.js';
@@ -12,6 +12,7 @@ import * as fabricationImport from '../services/bulkImport/fabricationImport.js'
 import * as productMasterImport from '../services/bulkImport/productMasterImport.js'; // feature 21
 import * as motorImport from '../services/bulkImport/motorImport.js'; // feature 22
 import * as plantImport from '../services/bulkImport/plantImport.js'; // feature 22
+import * as peopleImport from '../services/bulkImport/peopleImport.js'; // feature 32
 
 const router = Router();
 router.use(authenticateToken);
@@ -21,6 +22,14 @@ const productMasterAdd = checkPermission('rnd', 'productMaster', 'add');
 // Feature 22: each page's own add permission.
 const motorMasterAdd = checkPermission('rnd', 'motorMaster', 'add');
 const plantMasterAdd = checkPermission('rnd', 'plantMaster', 'add');
+// Feature 32: HR's people import — HR only (not the Company Admin), with Employee Management add.
+const hrPeopleAdd = [authorizeRoles('HR-Admin', 'Super Admin', 'Superadmin'), checkPermission('hrms', 'employeeManagement', 'add')];
+// Feature 32: the import window's starting password and each role's default permissions (sent as JSON).
+const peopleOpts = (req) => {
+  let defaults = {};
+  try { defaults = req.body?.defaults ? JSON.parse(req.body.defaults) : {}; } catch { defaults = {}; }
+  return { password: req.body?.password || '', defaults, actor: req.user };
+};
 
 const XLSX_TYPES = ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'application/octet-stream'];
 const upload = multer({
@@ -49,7 +58,7 @@ const needFile = (req) => {
 };
 
 /** The three routes for one import kind. */
-function mount(kind, svc, filename, gate = rndAdd) {
+function mount(kind, svc, filename, gate = rndAdd, opts = () => ({})) {
   router.get(`/${kind}/template`, gate, async (req, res) => {
     try {
       const buf = await svc.buildTemplate(req.user.companyId);
@@ -60,13 +69,13 @@ function mount(kind, svc, filename, gate = rndAdd) {
   });
   router.post(`/${kind}/check`, gate, fileOnly, async (req, res) => {
     try {
-      const c = await svc.check(req.user.companyId, needFile(req));
+      const c = await svc.check(req.user.companyId, needFile(req), opts(req));
       res.json({ success: true, ok: c.problems.length === 0, total: c.total, problems: c.problems, preview: c.preview, counts: c.counts, newValues: c.newValues || [], fromMaster: c.fromMaster || [] });
     } catch (err) { fail(res, err); }
   });
   router.post(`/${kind}/import`, gate, fileOnly, async (req, res) => {
     try {
-      res.json({ success: true, ...(await svc.importFile(req.user.companyId, req.user, needFile(req))) });
+      res.json({ success: true, ...(await svc.importFile(req.user.companyId, req.user, needFile(req), opts(req))) });
     } catch (err) { fail(res, err); }
   });
 }
@@ -76,5 +85,6 @@ mount('fabrication', fabricationImport, 'fabrication-master-import-template.xlsx
 mount('product-master', productMasterImport, 'product-master-import-template.xlsx', productMasterAdd);
 mount('motor-master', motorImport, 'motor-master-import-template.xlsx', motorMasterAdd);
 mount('plant-master', plantImport, 'plant-master-import-template.xlsx', plantMasterAdd);
+mount('people', peopleImport, 'people-import-template.xlsx', hrPeopleAdd, peopleOpts);
 
 export default router;

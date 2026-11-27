@@ -1,6 +1,14 @@
 /** @format */
 
 import Designation from "../models/Designation.js";
+// Feature 29 (24 Nov 2026): by id, only the caller's own company's designations (a Super Admin: any).
+import mongoose from "mongoose";
+import { isSuperAdmin } from "../services/access/companyAccess.js";
+const ownOne = (req) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return null;
+  const cid = req.user?.companyId?._id || req.user?.companyId;
+  return isSuperAdmin(req.user) ? { _id: req.params.id } : { _id: req.params.id, companyId: { $in: [cid, String(cid)] } };
+};
 
 export const createDesignation = async (req, res) => {
   try {
@@ -69,24 +77,24 @@ export const getDesignations = async (req, res) => {
 };
 
 export const getDesignationById = async (req, res) => {
-  const data = await Designation.findById(req.params.id)
+  const q = ownOne(req);
+  const data = q ? await Designation.findOne(q)
     .populate("companyId", "name")
-    .populate("departmentId", "name");
-
+    .populate("departmentId", "name") : null;
+  if (!data) return res.status(404).json({ message: "Designation not found" });
   res.json(data);
 };
 
 export const updateDesignation = async (req, res) => {
   try {
-    const data = { ...req.body };
+    const q = ownOne(req);
+    // The company never changes in an edit (feature 29).
+    const { companyId, _id, ...data } = req.body || {};
     if (data.departmentId === "") {
       data.departmentId = null;
     }
-    const updated = await Designation.findByIdAndUpdate(
-      req.params.id,
-      data,
-      { new: true }
-    );
+    const updated = q ? await Designation.findOneAndUpdate(q, data, { new: true }) : null;
+    if (!updated) return res.status(404).json({ message: "Designation not found" });
     res.json(updated);
   } catch (err) {
     res.status(400).json({ message: "Update failed", error: err.message });
@@ -94,6 +102,8 @@ export const updateDesignation = async (req, res) => {
 };
 
 export const deleteDesignation = async (req, res) => {
-  await Designation.findByIdAndDelete(req.params.id);
+  const q = ownOne(req);
+  const gone = q ? await Designation.findOneAndDelete(q) : null;
+  if (!gone) return res.status(404).json({ message: "Designation not found" });
   res.json({ message: "Deleted successfully" });
 };

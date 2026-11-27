@@ -443,5 +443,8 @@ QCJobSchema.index({ company: 1, status: 1 });
 QCJobSchema.index({ company: 1, source: 1 });
 // Delivery estimate (2026-11-18): the latest decided production checkpoints (the usual QC wait).
 QCJobSchema.index({ company: 1, source: 1, decidedAt: -1 });
+// A production order's QC job is looked up by its order number (feature 23's attempt lookup and
+// the production controller's own findOne calls).
+QCJobSchema.index({ company: 1, sourceRefId: 1 });
 
 export default mongoose.model('QCJob', QCJobSchema);

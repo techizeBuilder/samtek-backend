@@ -3,7 +3,7 @@
 // employee they belong to.
 import User from '../models/User.js';
 
-const PLATFORM_ROLES = ['Superadmin', 'Super Admin', 'super_user'];
+const PLATFORM_ROLES = ['Superadmin', 'Super Admin']; // super_user removed 26 Nov 2026
 
 export const isPlatformAdmin = (user) => PLATFORM_ROLES.includes(user?.role);
 

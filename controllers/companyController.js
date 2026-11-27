@@ -10,6 +10,7 @@ import { Item } from '../models/Inventory.js';
 import DispatchOrder from '../models/DispatchOrder.js';
 import { seedCompanyDepartments } from '../services/departmentSeedService.js';
 import ServiceTicket from '../models/ComplaintServiceModel.js';
+import { isSuperAdmin, sameCompany, seedCompanyAdminPermissions } from '../services/access/companyAccess.js';
 
 // Helper function to check company permissions
 const checkCompanyPermission = (user, action) => {
@@ -25,7 +26,10 @@ const checkCompanyPermission = (user, action) => {
   }
   // HR-Admin / Company Admin are governed by their saved hrms > My Company
   // checkbox (roleModulesConfig.js), not an automatic role bypass.
-  if (user?.role === 'HR-Admin' || user?.role === 'Company Admin') {
+  // Feature 27 (24 Nov 2026): a Company Admin's My Company works by role (their own company only:
+  // updateCompany and the logo / stamp routes check the company).
+  if (user?.role === 'Company Admin') return true;
+  if (user?.role === 'HR-Admin') {
     const permAction = action === 'create' ? 'add' : action;
     const hrmsModule = user?.permissions?.modules?.find(m => (m?.name || '').toLowerCase() === 'hrms');
     const myCompanyFeature = hrmsModule?.features?.find(f => f.key === 'myCompany');
@@ -60,7 +64,7 @@ export const getCompanies = async (req, res) => {
     const filter = {};
 
     // Role-based filtering for non-super admins
-    if (req.user.role !== 'Superadmin' && req.user.role !== 'Super Admin' && req.user.role !== 'super_user') {
+    if (req.user.role !== 'Superadmin' && req.user.role !== 'Super Admin') {
       if (req.user.companyId) {
         filter._id = req.user.companyId;
         console.log('Restricting companies to assigned company:', req.user.companyId);
@@ -194,8 +198,10 @@ export const createCompany = async (req, res) => {
     console.log('adminEmail:', req.body.adminEmail);
     console.log('adminName:', req.body.adminName);
 
-    if (!checkCompanyPermission(req.user, 'create') || req.user.role === 'Company Admin') {
-      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+    // Security check 25 Nov 2026: a whole new company is the Super Admin's to make. HR with the
+    // My Company "add" tick could make one before.
+    if (!isSuperAdmin(req.user)) {
+      return res.status(403).json({ message: 'Only a Super Admin can create a company.' });
     }
 
     const companyData = req.body;
@@ -288,13 +294,8 @@ export const createCompany = async (req, res) => {
         role: USER_ROLES.COMPANY_ADMIN,
         companyId: company._id,
         unit: company.unitName,
-        permissions: {
-          role: USER_ROLES.COMPANY_ADMIN,
-          canAccessAllUnits: false,
-          modules: [
-            { name: 'hrms', dashboard: true, features: [] }
-          ]
-        }
+        // Feature 27: the Company Admin's 9 admin pages (they also work by role).
+        permissions: seedCompanyAdminPermissions()
       };
 
       console.log('\n=== ADMIN DATA BEING SAVED ===');
@@ -404,6 +405,10 @@ export const updateCompany = async (req, res) => {
         message: 'Invalid company ID format'
       });
     }
+    // Feature 27 (24 Nov 2026): only their own company (a Super Admin: any).
+    if (!sameCompany(req.user, id)) {
+      return res.status(403).json({ success: false, message: 'You can only edit your own company.' });
+    }
 
     // Auto-generate name from unitName if name is not provided but unitName is
     if (!updateData.name && updateData.unitName) {
@@ -486,7 +491,8 @@ export const updateCompany = async (req, res) => {
 // Delete company
 export const deleteCompany = async (req, res) => {
   try {
-    if (!checkCompanyPermission(req.user, 'delete') || req.user.role === 'Company Admin') {
+    // Feature 27 (24 Nov 2026): deleting a company is the Super Admin's alone.
+    if (!isSuperAdmin(req.user)) {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
@@ -514,7 +520,9 @@ export const deleteCompany = async (req, res) => {
 // Get company statistics
 export const getCompanyStats = async (req, res) => {
   try {
-    if (!checkCompanyPermission(req.user, 'view')) {
+    // Security check 25 Nov 2026: these are every company's totals, cities and units (the Super
+    // Admin's Companies page). A Company Admin or HR could read them before.
+    if (!isSuperAdmin(req.user)) {
       return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
@@ -722,7 +730,9 @@ export const getCompanyReport = async (req, res) => {
       { $group: { _id: '$status', count: { $sum: 1 } } },
       { $sort: { count: -1 } }
     ]);
-    const dealWonLeads = leadsByStatus.find(l => l._id === 'Deal Won')?.count || 0;
+    // Feature 26 (24 Nov 2026): a won lead has status "Won" (markLeadAsWon) or the stage "Deal Won";
+    // the old check looked for status "Deal Won", which no lead has, so it always showed 0.
+    const dealWonLeads = await Lead.countDocuments({ companyId: id, $or: [{ status: 'Won' }, { stage: 'Deal Won' }] });
 
     // ─── CUSTOMERS ───
     const totalCustomers = await Customer.countDocuments({ companyId: id });

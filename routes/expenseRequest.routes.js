@@ -17,7 +17,10 @@ import { checkPermission, checkAnyPermission } from "../middleware/permissions.j
 // Approving and listing other people's requests needs a permission (2026-11-11).
 const can = (feature, action) => checkPermission("hrms", feature, action);
 const canAny = (features, action) => checkAnyPermission(features.map((f) => ["hrms", f]), action);
-const hrOrAccounts = authorizeRoles("HR-Admin", "Hr Admin", "Company Admin", "Superadmin", "Super Admin", "Accounts Head");
+// Security re-check M1 (27 Nov 2026): the Accounts Expenses page (/accounts/expenses, open to the whole
+// Accounts department) lists and pays these, and authorizeRoles used to let Account Employees in through the
+// Accounts Head; they're named here so that keeps working now that a Head role means only the Head.
+const hrOrAccounts = authorizeRoles("HR-Admin", "Hr Admin", "Company Admin", "Superadmin", "Super Admin", "Accounts Head", "Account Employee");
 
 const ExpenseRequestRouter = Router();
 

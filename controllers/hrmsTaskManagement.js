@@ -4,6 +4,8 @@ import path from "path";
 import { sendTaskEmail } from "../utils/taskEmail.js";
 import { DEPARTMENTS, mailboxWarning } from "../config/mailAccounts.js";
 import notificationService from "../services/notificationService.js";
+// Feature 30 (24 Nov 2026): only a Super Admin sees every company's tasks.
+import { isSuperAdmin } from "../services/access/companyAccess.js";
 
 // --- ROLE HIERARCHY & HELPERS ---
 const TOP_LEVEL_ADMINS = ['HR-Admin', 'MIS Admin', 'Company Admin', 'Super Admin'];
@@ -188,7 +190,7 @@ export const getAllTasks = async (req, res) => {
 
     const query = {};
 
-    if (!req.user.permissions?.canAccessAllUnits) {
+    if (!isSuperAdmin(req.user)) { // feature 30: own company only, whatever the "all units" tick says
       query.companyId = req.user.companyId;
     }
 
@@ -284,7 +286,7 @@ export const getTaskById = async (req, res) => {
 
     let query = { _id: taskId };
 
-    if (!req.user.permissions?.canAccessAllUnits) {
+    if (!isSuperAdmin(req.user)) { // feature 30: own company only, whatever the "all units" tick says
       query.companyId = req.user.companyId;
     }
 
@@ -342,7 +344,7 @@ export const deleteTask = async (req, res) => {
 
     // Build query with companyId check for non-SuperAdmins
     const query = { _id: taskId };
-    if (!req.user.permissions?.canAccessAllUnits) {
+    if (!isSuperAdmin(req.user)) { // feature 30: own company only, whatever the "all units" tick says
       query.companyId = req.user.companyId;
     }
 
@@ -411,7 +413,7 @@ export const updateTask = async (req, res) => {
     // Scope the lookup to the caller's company (unless they hold cross-unit access)
     // so a task ID from another company can never be targeted here.
     const query = { _id: taskId };
-    if (!req.user.permissions?.canAccessAllUnits) {
+    if (!isSuperAdmin(req.user)) { // feature 30: own company only, whatever the "all units" tick says
       query.companyId = req.user.companyId;
     }
 
@@ -522,7 +524,7 @@ export const getDashboardStats = async (req, res) => {
 
     let query = {};
 
-    if (!req.user.permissions?.canAccessAllUnits) {
+    if (!isSuperAdmin(req.user)) { // feature 30: own company only, whatever the "all units" tick says
       query.companyId = req.user.companyId;
     }
 
@@ -640,7 +642,7 @@ export const addComment = async (req, res) => {
     // Scope the lookup to the caller's company (unless they hold cross-unit access)
     // so a task ID from another company can never be targeted here.
     const query = { _id: taskId };
-    if (!req.user.permissions?.canAccessAllUnits) {
+    if (!isSuperAdmin(req.user)) { // feature 30: own company only, whatever the "all units" tick says
       query.companyId = req.user.companyId;
     }
 

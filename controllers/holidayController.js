@@ -147,9 +147,11 @@ export const getAllHolidays = async (req, res) => {
  */
 export const getHolidayById = async (req, res) => {
     try {
-        const holiday = await Holiday.findById(req.params.id);
+        // Security check day 3 (26 Nov 2026, finding 4): another company's holiday is "not found" here
+        // too, as on edit / delete.
+        const holiday = await Holiday.findById(req.params.id).catch(() => null);
 
-        if (!holiday) {
+        if (!holiday || !holidayInScope(holiday, req.user)) {
             return res.status(404).json({ message: "Holiday not found" });
         }
 

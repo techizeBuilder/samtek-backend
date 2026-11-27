@@ -72,61 +72,34 @@ const authorizeRoles = (...roles) => {
     // Case-insensitive role matching with group expansion
     const userRoleLower = (req.user.role || '').toLowerCase().trim();
     
-    // Expand route-required roles to include equivalent sub-roles/department roles
+    // Expand route-required roles to their department, in ONE direction only.
+    // Security re-check M1 (27 Nov 2026, docs/security-checks/2026-11-26-recheck-company-admin-hr.md): a
+    // Head role used to bring in the whole department, so every route meant for e.g. the Sales Head also
+    // let Sales Employees in. Now:
+    // - a department name ("Sales", "Accounts", ...) still means the whole department
+    // - an Employee role also lets that department's Head in (a Head can do their people's work)
+    // - a Head role means only the Head
+    const DEPARTMENT_ROLES = [
+      { names: ['sales', 'sales person', 'salesman'], head: 'sales head', employees: ['sales employee', 'sales person', 'salesman'] },
+      { names: ['accounts'], head: 'accounts head', employees: ['accounts employee', 'account employee'] },
+      { names: ['production'], head: 'production head', employees: ['production employee'] },
+      { names: ['packing'], head: 'packing head', employees: ['packing employee'] },
+      { names: ['dispatch'], head: 'dispatch head', employees: ['dispatch employee'] },
+    ];
     const expandedRoles = new Set();
     roles.forEach(role => {
       const rLower = role.toLowerCase().trim();
       expandedRoles.add(rLower);
-
-      // Accounts department mappings
-      if (rLower === 'accounts' || rLower === 'accounts head' || rLower === 'accounts employee' || rLower === 'account employee') {
-        expandedRoles.add('accounts');
-        expandedRoles.add('accounts head');
-        expandedRoles.add('accounts employee');
-        expandedRoles.add('account employee');
-      }
-
-      // Sales department mappings
-      if (rLower === 'sales' || rLower === 'sales person' || rLower === 'salesman' || rLower === 'sales head' || rLower === 'sales employee') {
-        expandedRoles.add('sales');
-        expandedRoles.add('sales person');
-        expandedRoles.add('salesman');
-        expandedRoles.add('sales head');
-        expandedRoles.add('sales employee');
-      }
-
-      // Production department mappings
-      if (rLower === 'production' || rLower === 'production head' || rLower === 'production employee') {
-        expandedRoles.add('production');
-        expandedRoles.add('production head');
-        expandedRoles.add('production employee');
-      }
-
-      // Packing department mappings
-      if (rLower === 'packing' || rLower === 'packing head' || rLower === 'packing employee') {
-        expandedRoles.add('packing');
-        expandedRoles.add('packing head');
-        expandedRoles.add('packing employee');
-      }
-
-      // Dispatch department mappings
-      if (rLower === 'dispatch' || rLower === 'dispatch head' || rLower === 'dispatch employee') {
-        expandedRoles.add('dispatch');
-        expandedRoles.add('dispatch head');
-        expandedRoles.add('dispatch employee');
+      for (const d of DEPARTMENT_ROLES) {
+        if (d.names.includes(rLower)) [...d.names, d.head, ...d.employees].forEach((r) => expandedRoles.add(r));
+        else if (d.employees.includes(rLower)) [d.head, ...d.employees].forEach((r) => expandedRoles.add(r));
       }
     });
 
     if (!expandedRoles.has(userRoleLower)) {
       console.log(`❌ Auth - Role mismatch! User role: "${req.user.role}", Required roles: [${roles.join(', ')}]`);
-      return res.status(403).json({
-        message: 'Access denied. Insufficient permissions.',
-        debug: {
-          userRole: req.user.role,
-          requiredRoles: roles,
-          path: req.originalUrl
-        }
-      });
+      // M1: no longer sends back the required roles and the path.
+      return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
     }
 
     console.log(`✅ Auth - Role authorized: "${req.user.role}"`);

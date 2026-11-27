@@ -193,7 +193,7 @@ export const getAllDocuments = async (req, res) => {
     // Scoped via the employee's own companyId rather than UserDocument.companyId
     // directly — documents uploaded before that field existed have no value
     // there, so filtering on it alone would silently hide them.
-    if (!["Superadmin", "Super Admin", "super_user"].includes(req.user.role) && req.user.companyId) {
+    if (!["Superadmin", "Super Admin"].includes(req.user.role) && req.user.companyId) {
       const companyUsers = await User.find({ companyId: req.user.companyId }).select('_id').lean();
       query.userId = { $in: companyUsers.map(u => u._id) };
     }
@@ -216,16 +216,20 @@ export const setDocumentStatus = async (req, res) => {
       return res.status(400).json({ message: "Status must be VERIFIED or REJECTED" });
     }
 
-    const doc = await UserDocument.findById(docId);
+    const doc = await UserDocument.findById(docId).catch(() => null);
     if (!doc) {
       return res.status(404).json({ message: "Document not found" });
     }
 
-    // Restrict to the caller's own company (unless platform-wide admin).
-    if (!["Superadmin", "Super Admin", "super_user"].includes(req.user.role)
-      && doc.companyId && req.user.companyId
-      && doc.companyId.toString() !== req.user.companyId.toString()) {
-      return res.status(403).json({ message: "Access denied" });
+    // Restrict to the caller's own company (unless platform-wide admin). Security check day 3
+    // (26 Nov 2026, finding 5): a document with no company saved was let through; its company is
+    // now taken from its employee, as the list does, and a caller without a company gets nothing.
+    if (!["Superadmin", "Super Admin"].includes(req.user.role)) {
+      let docCompany = doc.companyId;
+      if (!docCompany) docCompany = (await User.findById(doc.userId).select('companyId').lean())?.companyId;
+      if (!req.user.companyId || !docCompany || docCompany.toString() !== req.user.companyId.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
     }
 
     doc.status = status;

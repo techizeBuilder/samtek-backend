@@ -70,7 +70,7 @@ const itemNeedsAmount = (sourceItem) => !sourceItem.fabricationRef && AMOUNT_UNI
 // unitWeightKg is a fourth, similarly independently-maintained number (see
 // subChildPartMasterController.js's computeSourceMetrics) — passed through
 // unchanged, no summing needed for a single number.
-function subChildPartLineCostFrom(sourceItem) {
+export function subChildPartLineCostFrom(sourceItem) {
   const d = sourceItem.subChildPartDetails || {};
   const materialsCost = d.materialsCost || 0;
   const jobWorkCost = d.jobWorkCost || 0;

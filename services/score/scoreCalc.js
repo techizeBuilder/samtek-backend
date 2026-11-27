@@ -208,7 +208,8 @@ export function stepParts(items = [], unfinished = []) {
  */
 export function conductPart(points, notes = [], deductions = { minor: 25, major: 50, serious: 100 }) {
   let off = 0;
-  const counted = notes.filter((n) => n.status === 'Verified' && n.kind !== 'Appreciation');
+  // Only concerns take points off: a warning (feature 24) and an appreciation never do.
+  const counted = notes.filter((n) => n.status === 'Verified' && (n.kind || 'Concern') === 'Concern');
   for (const n of counted) off += points * (Number(deductions[String(n.severity || '').toLowerCase()]) || 0) / 100;
   const earned = Math.max(0, points - off);
   return { share: points > 0 ? earned / points : null, notes: counted.length, off: r3(Math.min(points, off)) };

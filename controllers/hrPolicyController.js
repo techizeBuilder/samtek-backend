@@ -2,6 +2,12 @@
 import { HrPolicy } from "../models/HrPolicy.js";
 import fs from "fs";
 import path from "path";
+import mongoose from "mongoose";
+import { companyMatch } from "../utils/companyScope.js";
+
+// Security check day 3 (26 Nov 2026, finding 2): a policy by id, within the caller's company only
+// (the Super Admin: any). docs/security-checks/2026-11-26-hr-admin.md
+const ownPolicy = (req, id) => (mongoose.isValidObjectId(id) ? HrPolicy.findOne({ _id: id, ...companyMatch(req.user) }) : null);
 
 const DEFAULT_POLICIES = [
   {
@@ -231,8 +237,12 @@ export const uploadHrPolicyDocument = async (req, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ message: "No file uploaded" });
 
-    const policy = await HrPolicy.findById(policyId);
-    if (!policy) return res.status(404).json({ message: "Policy not found" });
+    // Finding 2 (26 Nov 2026): only the caller's own company's policy; a refused upload is removed.
+    const policy = await ownPolicy(req, policyId);
+    if (!policy) {
+      try { fs.unlinkSync(file.path); } catch { /* already gone */ }
+      return res.status(404).json({ message: "Policy not found" });
+    }
 
     // Remove old file if exists
     if (policy.documentUrl) {
@@ -259,11 +269,12 @@ export const uploadHrPolicyDocument = async (req, res) => {
 export const removeHrPolicyDocument = async (req, res) => {
   try {
     const { policyId } = req.params;
-    const policy = await HrPolicy.findById(policyId);
+    const policy = await ownPolicy(req, policyId); // finding 2: the caller's own company only
     if (!policy) return res.status(404).json({ message: "Policy not found" });
 
     if (policy.documentUrl) {
-      const filePath = policy.documentUrl;
+      // Only ever a file in the policy folder, whatever the saved path says.
+      const filePath = path.join("uploads/hr-policies", path.basename(policy.documentUrl));
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     }
 

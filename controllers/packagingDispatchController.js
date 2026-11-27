@@ -723,7 +723,10 @@ export const completePacking = async (req, res) => {
     const job = await PackagingJob.findOne({ _id: req.params.id, company: req.user.companyId });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
-    const settings = await GlobalAdminSettings.findOne();
+    // Feature 28 (24 Nov 2026): the packing checklist is the job's company's own (ids kept from the
+    // platform list, so jobs ticked before the move still match).
+    const { getOrCreateSettings } = await import('./adminSettingsController.js');
+    const settings = await getOrCreateSettings(job.company);
     const checklistItems = settings?.dispatchChecklist || [];
     const cl = job.checklist || {};
     const allDone = checklistItems.every(item => cl[item._id.toString()]);

@@ -10,6 +10,10 @@ Parked so the client's procurement changes go first; pick up from here.*
 |---|---|
 | 2 — Inventory form changes price without the push | **Not a gap.** The R&D Inventory form has no price fields; the Excel import only creates new items; only Accounts' purchase-inventory screen sets a price, and it pushes. |
 | 3 — a raw material's size / weight change doesn't reach the cost | **Built 2026-10-28** — [fabrication-size-sync-2026-10.md](fabrication-size-sync-2026-10.md), change report [fabrication-size-sync-changes-2026-10.md](fabrication-size-sync-changes-2026-10.md). Browser check pending. |
+| 1 — old data never caught up | **Dropped (user, 2026-11-24).** Only dev data is stale; the client's live server has product master data only, with no BOMs, so every live price will be set while the push exists. |
+| 4 — opening a BOM only partly self-heals | **Dropped (user, 2026-11-24).** The self-heal was only a safety net for a missed push. Every price change now pushes: the purchase-inventory price (`itemPricingService`), the fabrication rate / size (`fabricationSyncService`), Sub Child Part / Child Part edits, finished builds and job-work bills (`partCostService`), and make ↔ buy (`makeBuyService`). The only data that missed it is gap 1's dev data. |
+| 5 — stock value shows ₹0 | **Built 2026-11-24** — the system copies the item's real cost into Standard Cost (purchase price; Sub Child Part unit cost; bought parts' purchase cost). [stock-value-std-cost-2026-11.md](stock-value-std-cost-2026-11.md). |
+| 6 — minimum-bill check skips Motors | **Not a gap (user, 2026-11-24).** The check compares with the BOM price saved on the Machine; a Motor has no BOM, so there's nothing to check. The other gap 6 items are left as they are for now. |
 
 ## Open
 

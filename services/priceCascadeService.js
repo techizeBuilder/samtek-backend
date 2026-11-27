@@ -56,7 +56,11 @@ async function recomputeChildPart(childPartId, companyId, visiting) {
   if (await refreshBomMaterialLines(bom, companyId)) await bom.save();
   const cost = cp.computeChildPartCost(bom.toObject());
   if (cost.totalCost > 0) {
-    const total = round2(cost.totalCost);
+    // Price gap 5 (2026-11-24): a bought Child Part's Standard Cost is its purchase cost
+    // (activeCost), so its stock value matches what it cost; a made one keeps its BOM total.
+    const { activeCost } = await import('./makeBuyService.js');
+    const cpItem = await Item.findOne({ _id: childPartId, companyId }).select('productKind partSourcing purchase internalManufacturing purchaseCost').lean();
+    const total = round2(cpItem ? activeCost(cpItem, cost.totalCost).cost : cost.totalCost);
     await Item.updateOne({ _id: childPartId, companyId, stdCost: { $ne: total } },
       { $set: { stdCost: total, costSource: 'BOM', costResolvedAt: new Date() } });
   }
@@ -69,6 +73,18 @@ async function childPartsUsingSubChildPart(scpId, companyId, visiting) {
   for (const b of boms) await recomputeChildPart(b.childPart, companyId, visiting);
 }
 
+// Price gap 5 (2026-11-24): a Sub Child Part's Standard Cost = its unit cost (the same formula
+// Child Part BOM lines use), or its purchase cost when bought — a copy for stock value only;
+// costSource is left alone and nothing is priced from it. Written only when it changed and > 0.
+async function syncSubChildPartStdCost(scpId, companyId) {
+  const { cp } = await controllers();
+  const { activeCost } = await import('./makeBuyService.js');
+  const scp = await Item.findOne({ _id: scpId, companyId }).select('productKind partSourcing purchase internalManufacturing purchaseCost stdCost subChildPartDetails').lean();
+  if (!scp) return;
+  const unit = round2(activeCost(scp, cp.subChildPartLineCostFrom(scp).unitCost).cost);
+  if (unit > 0 && unit !== round2(scp.stdCost)) await Item.updateOne({ _id: scpId, companyId }, { $set: { stdCost: unit } });
+}
+
 const safe = (name, fn) => async (...args) => {
   try { return await fn(...args); } catch (e) { console.error(`[PriceCascade] ${name} failed:`, e.message); return null; }
 };
@@ -79,6 +95,7 @@ export const onSubChildPartChanged = safe('onSubChildPartChanged', async (scpId,
   const k = key('scp', scpId);
   if (visiting.has(k)) return;
   visiting.add(k);
+  await syncSubChildPartStdCost(scpId, companyId);
   await childPartsUsingSubChildPart(scpId, companyId, visiting);
 });
 

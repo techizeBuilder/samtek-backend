@@ -245,6 +245,9 @@ export async function applyPricingToItem(item, cost, source, rawPurchaseUnitPric
   if (source === 'BOM') item.stdCost = round2(cost);
   if (source === 'Purchase') {
     item.purchaseCost = round2(cost);
+    // Price gap 5 (2026-11-24): Standard Cost = the item's current cost, so stock value
+    // (qty × stdCost) isn't ₹0 for bought items. A copy only; no price is worked out from it.
+    item.stdCost = round2(cost);
     if (item.fabricationRef && rawPurchaseUnitPrice > 0) {
       const perKg = priceToPerKg(rawPurchaseUnitPrice, item.purchaseUnit);
       if (perKg > 0) item.weightUnitPrice = round2(perKg);

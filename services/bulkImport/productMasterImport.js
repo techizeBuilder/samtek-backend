@@ -13,7 +13,8 @@ import RDMasterOption from '../../models/RDMasterOption.js';
 import RDCustomFieldTemplate from '../../models/RDCustomFieldTemplate.js';
 import { exactRe } from '../itemCodeService.js';
 import { MAX_ROWS, ImportError, text, matchIn, num, openWorkbook, readSheet, workbook, listColumns } from './common.js';
-import { makeTree, insertPlanned, plannedValues } from './tree.js'; // shared with the Plant Master import (feature 22)
+import { makeTree, insertPlanned, plannedValues } from './tree.js';
+import { codeKeeper, freeFrom, productCodeBase } from './codes.js'; // feature 35 // shared with the Plant Master import (feature 22)
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 const lower = (v) => text(v).toLowerCase();
@@ -34,7 +35,10 @@ export const COLUMNS = [
   { key: 'name', title: 'Product Name *', required: true, help: 'Under that Sub Category; it is the product\'s name. A new one is added there.' },
   { key: 'variant', title: 'Variant', help: 'Under that Product Name (optional). A new one is added there.' },
   { key: 'source', title: 'Product Source Type *', required: true, help: 'Under that Sub Category. A new one is added there.' },
-  { key: 'code', title: 'Product Code *', required: true, help: 'Unused anywhere (any letter case), not repeated in the file.' },
+  // Feature 35 (27 Nov 2026): a blank code is made on import (the Generate button's rule), and a Ref links
+  // the Specifications / Custom Fields rows of a product whose code isn't known yet (as Plant Ref does).
+  { key: 'ref', title: 'Product Ref', help: 'Optional: your own label for this product in the file (P1, P2 …), unique in the file, not the same as any code. The Specifications and Custom Fields rows can point at it. It isn\'t saved. Needed when the code is left blank and the product has rows on those sheets.' },
+  { key: 'code', title: 'Product Code (blank = made)', label: 'Product Code', aliases: ['Product Code *'], required: true, help: 'Typed: unused anywhere (any letter case), not repeated in the file. Blank: made on import like the Generate button: the initials of the Product Name, the Metrology and the Variant\'s digits (Impact Pulverizer + MS + 6x12 → IPMS612), with -2, -3 … when taken.' },
   { key: 'productionRate', title: 'Production', help: 'Free text, e.g. 200 Kg/hr.' },
   { key: 'size', title: 'Product Size', help: 'Free text, e.g. 500x300x200mm.' },
   { key: 'metrology', title: 'Metrology', help: 'From the list, or a new value (added, shown first).' },
@@ -62,12 +66,12 @@ export const COLUMNS = [
   { key: 'forward', title: 'Forward to Design & Prototype', help: 'Yes or No (default No): the form\'s tick box.' },
 ];
 export const SPEC_COLUMNS = [
-  { key: 'code', title: 'Product Code', required: true, help: 'A code from the Products sheet.' },
+  { key: 'code', title: 'Product Ref or Code', aliases: ['Product Code'], required: true, help: 'A Product Ref from the Products sheet, or a code typed there. (A code left blank there is made on import: give that product a Ref.)' },
   { key: 'key', title: 'Key', required: true, help: 'e.g. Power.' },
   { key: 'value', title: 'Value', required: true, help: 'e.g. 5 kW.' },
 ];
 export const CF_COLUMNS = [
-  { key: 'code', title: 'Product Code', required: true, help: 'A code from the Products sheet.' },
+  { key: 'code', title: 'Product Ref or Code', aliases: ['Product Code'], required: true, help: 'A Product Ref from the Products sheet, or a code typed there. (A code left blank there is made on import: give that product a Ref.)' },
   { key: 'group', title: 'Group', required: true, help: 'A group of the template for that product\'s Category / Sub Category / Source Type; a new one is added to it.' },
   { key: 'field', title: 'Field', required: true, help: 'A field in that group; a new one is added to it.' },
   { key: 'value', title: 'Value', required: true, help: 'The value for this product.' },
@@ -120,7 +124,8 @@ export async function buildTemplate(companyId) {
   const how = [
     ['How to fill the Product Master import'],
     ['"Products": one row per product. Its Category, Sub Category, Product Name, Variant and Product Source Type are its place in the tree (Manage Classifications). A value the tree doesn\'t have yet is added under that row\'s own path; the check shows every one first, so a typo can be fixed in the file.'],
-    ['"Specifications": one row per key and value, with the product\'s code. "Custom Fields": one row per field value, with the product\'s code; a group or field the template for that product\'s Category / Sub Category / Source Type doesn\'t have yet is added to the template (shown first).'],
+    ['Product Code left blank: the system makes one on import, like the Generate button on the page (Name initials + Metrology + Variant digits, e.g. IPMS612; -2, -3 … when taken). The check shows each made code first, and the import lists them all with a Copy button. To give such a product Specifications or Custom Fields, give it a Product Ref (P1, P2 …) and use that Ref on those sheets; the Ref isn\'t saved.'],
+    ['"Specifications": one row per key and value, with the product\'s Ref or code. "Custom Fields": one row per field value, with the product\'s Ref or code; a group or field the template for that product\'s Category / Sub Category / Source Type doesn\'t have yet is added to the template (shown first).'],
     ['Upload: every row of every sheet is checked first. If anything has a problem, nothing is imported and every problem is listed by sheet, row and column. New products only; they start Draft / Not Released, as with the form.'],
     ['Metrology, Material Grade and Power Source: from the lists, or a new value (added, shown first). Product Weight and its unit: only for a Purchasable (Vendor) product, as on the form (leave both blank for Internal Manufacturing); the unit must be a Mass Unit unit. The sheets "Tree" and "Templates" show what you have today.'],
     [`Up to ${MAX_ROWS} products per file.`],
@@ -185,9 +190,13 @@ export async function check(companyId, buffer) {
   const activeOf = new Map(actives.map((m) => [identityKey(m.category, m.subCategory, m.name, m.machineDetails?.variant), m.code]));
   const clash = [...new Set(prod.rows.map((r) => text(r.values.code)).filter((c) => codeByLower.has(c.toLowerCase())).map((c) => codeByLower.get(c.toLowerCase())))];
   const holders = new Map(clash.length ? (await Item.find({ code: { $in: clash } }).select('code name companyId isDiscontinued').lean()).map((h) => [h.code.toLowerCase(), h]) : []);
+  // Feature 35: made codes never take a used one, nor one typed elsewhere in the file. bulkImport/codes.js
+  const keeper = codeKeeper([...allCodes.map((x) => x.code), ...prod.rows.map((r) => text(r.values.code))]);
+  const typedInFile = new Set(prod.rows.map((r) => lower(r.values.code)).filter(Boolean));
 
   // ── Products ──
-  const products = new Map(); // lower(code) → { row, doc, combo, ok }
+  const products = new Map(); // key (ref:… or code:…) → { row, doc, combo, ok, made }
+  const byRef = new Map(), byTypedCode = new Map(); // what the Specifications / Custom Fields rows may point at
   const seenIdentity = new Map();
   for (const r of prod.rows) {
     const v = r.values, row = r.row;
@@ -203,10 +212,16 @@ export async function check(companyId, buffer) {
     if (name && variantRaw) variant = resolve(TREE.variant, name, variantRaw, row);
     if (category && sourceRaw) source = resolve(TREE.source, category, sourceRaw, row);
 
-    // Code.
-    const code = text(v.code);
-    if (!code) badP(row, 'code', 'Required.');
-    else if (products.has(lower(code))) badP(row, 'code', `"${code}" is also on row ${products.get(lower(code)).row}: codes must be unique.`);
+    // Code: typed (checked here) or blank (made below, once Metrology and Variant are read). Ref: file-only.
+    let code = text(v.code), made = false;
+    const ref = text(v.ref);
+    let refOk = !!ref;
+    if (ref) {
+      if (byRef.has(lower(ref))) { badP(row, 'ref', `"${ref}" is also on row ${byRef.get(lower(ref)).row}: a Ref must be unique in the file.`); refOk = false; }
+      else if (typedInFile.has(lower(ref))) { badP(row, 'ref', `"${ref}" is also a Product Code in the file: use a Ref that isn't a code.`); refOk = false; }
+    }
+    if (!code) { /* made below */ }
+    else if (byTypedCode.has(lower(code))) badP(row, 'code', `"${code}" is also on row ${byTypedCode.get(lower(code)).row}: codes must be unique.`);
     else if (codeByLower.has(lower(code))) {
       const h = holders.get((codeByLower.get(lower(code)) || '').toLowerCase());
       badP(row, 'code', !h || String(h.companyId) !== String(companyId)
@@ -243,6 +258,11 @@ export async function check(companyId, buffer) {
     // Lists.
     const metrology = text(v.metrology) ? listValue(LISTS.metrology, text(v.metrology), row) : '';
     const materialGrade = text(v.materialGrade) ? listValue(LISTS.materialGrade, text(v.materialGrade), row) : '';
+    // Feature 35: a blank code made like the Generate button (Name initials + Metrology + Variant digits).
+    if (!code) {
+      const base = productCodeBase({ name: name?.value || nameRaw, metrology, variant: variant?.value || variantRaw });
+      if (base) { code = freeFrom(keeper, base); made = true; } else badP(row, 'code', 'Give the product a Product Name, so its code can be made (or type a code).');
+    }
 
     // Power requirements: up to 3.
     const powerRequirements = [];
@@ -270,9 +290,10 @@ export async function check(companyId, buffer) {
       .filter((x, i, all) => all.findIndex((y) => y.toLowerCase() === x.toLowerCase()) === i);
 
     const ok = problems.length === before;
-    if (code && !products.has(lower(code))) {
-      products.set(lower(code), {
-        row, ok, combo: pType && category && source ? { pType: pType.value, category: category.value, pSourceType: source.value } : null,
+    const pkey = refOk ? `ref:${lower(ref)}` : `code:${lower(code)}`;
+    if (code && !products.has(pkey) && !(!made && byTypedCode.has(lower(code)))) {
+      const entry = {
+        row, ok, made, combo: pType && category && source ? { pType: pType.value, category: category.value, pSourceType: source.value } : null,
         specs: [], cf: [],
         doc: {
           code, name: name?.value || nameRaw, description: text(v.description), type: 'Product', productKind: 'Machine',
@@ -290,16 +311,23 @@ export async function check(companyId, buffer) {
           },
           companyId: cid, store: String(companyId),
         },
-      });
+      };
+      products.set(pkey, entry);
+      if (refOk) byRef.set(lower(ref), entry);
+      if (!made) byTypedCode.set(lower(code), entry);
     }
   }
+  // A product's Specifications / Custom Fields rows point at its Ref, or at a code typed on Products
+  // (a made code isn't known when the file is written, so it can't be pointed at).
+  const productOf = (x) => byRef.get(lower(x)) || byTypedCode.get(lower(x)) || null;
+  const unknownRef = (x) => `"${text(x)}" isn't a Product Ref or a code typed on the Products sheet. (A product whose code is left blank needs a Product Ref.)`;
 
   // ── Specifications ──
   for (const r of specs.rows) {
     const v = r.values;
-    const p = products.get(lower(v.code));
+    const p = productOf(v.code);
     if (!text(v.code)) { bad('Specifications', r.row, SPEC_TITLE.code, 'Required.'); continue; }
-    if (!p) { bad('Specifications', r.row, SPEC_TITLE.code, `"${text(v.code)}" isn't a product code in the Products sheet.`); continue; }
+    if (!p) { bad('Specifications', r.row, SPEC_TITLE.code, unknownRef(v.code)); continue; }
     if (!text(v.key)) bad('Specifications', r.row, SPEC_TITLE.key, 'Required.');
     if (!text(v.value)) bad('Specifications', r.row, SPEC_TITLE.value, 'Required.');
     if (text(v.key) && text(v.value)) p.specs.push({ key: text(v.key), value: text(v.value) });
@@ -318,9 +346,9 @@ export async function check(companyId, buffer) {
   };
   for (const r of cfs.rows) {
     const v = r.values;
-    const p = products.get(lower(v.code));
+    const p = productOf(v.code);
     if (!text(v.code)) { bad('Custom Fields', r.row, CF_TITLE.code, 'Required.'); continue; }
-    if (!p) { bad('Custom Fields', r.row, CF_TITLE.code, `"${text(v.code)}" isn't a product code in the Products sheet.`); continue; }
+    if (!p) { bad('Custom Fields', r.row, CF_TITLE.code, unknownRef(v.code)); continue; }
     for (const k of ['group', 'field', 'value']) if (!text(v[k])) bad('Custom Fields', r.row, CF_TITLE[k], 'Required.');
     if (!text(v.group) || !text(v.field) || !text(v.value) || !p.combo) continue;
     const plan = planFor(p.combo);
@@ -343,7 +371,7 @@ export async function check(companyId, buffer) {
   }
 
   // ── The products, with every field of their combination's template (as the form seeds them) ──
-  const docs = [], preview = [];
+  const docs = [], preview = [], codes = [];
   for (const p of products.values()) {
     if (!p.ok) continue;
     const plan = p.combo ? (tplPlan.get(comboKey(p.combo.pType, p.combo.category, p.combo.pSourceType)) || null) : null;
@@ -354,9 +382,10 @@ export async function check(companyId, buffer) {
     })));
     const doc = { ...p.doc, specifications: p.specs, customFields };
     docs.push(doc);
+    codes.push({ row: p.row, name: [doc.name, doc.machineDetails.variant].filter(Boolean).join(' '), code: doc.code, made: p.made }); // feature 35
     if (preview.length < 50) {
       preview.push({
-        row: p.row, code: doc.code, path: [doc.category, doc.subCategory, doc.name].join(' › '), variant: doc.machineDetails.variant,
+        row: p.row, code: doc.code, made: p.made, path: [doc.category, doc.subCategory, doc.name].join(' › '), variant: doc.machineDetails.variant,
         source: doc.productSourceType, purchase: doc.purchase, specs: p.specs.length, customFields: p.cf.length,
       });
     }
@@ -370,7 +399,7 @@ export async function check(companyId, buffer) {
   const SHEET_ORDER = { '': 0, Products: 1, Specifications: 2, 'Custom Fields': 3 };
   problems.sort((a, b) => (SHEET_ORDER[a.sheet] ?? 9) - (SHEET_ORDER[b.sheet] ?? 9) || (a.row || 0) - (b.row || 0) || String(a.column).localeCompare(String(b.column)));
   return {
-    problems, docs, preview, newValues,
+    problems, docs, codes, preview, newValues,
     plan: { tree: planned(), lists: [...listPlan.values()], templates: [...tplPlan.values()].filter((t) => t.added.size) },
     counts: { products: docs.length, tree: planned().length, templateFields: newValues.filter((n) => n.list === 'Custom field').length, lists: listPlan.size },
     total: prod.rows.length,
@@ -424,5 +453,5 @@ export async function importFile(companyId, user, buffer) {
       ? 'A code or value in the file was added by someone else while importing: nothing was imported. Check the file again.'
       : `Saving failed: nothing was imported (${err.message}).`);
   }
-  return { imported: c.docs.length, added: { tree: c.counts.tree, templateFields: c.counts.templateFields, lists: c.counts.lists } };
+  return { imported: c.docs.length, added: { tree: c.counts.tree, templateFields: c.counts.templateFields, lists: c.counts.lists }, codes: c.codes };
 }

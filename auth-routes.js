@@ -13,7 +13,9 @@ import {
   updateUserPassword,
   getNextEmployeeId,
   createManpower,
-  giveLogin
+  giveLogin,
+  listHeadApprovals,
+  decideHeadApproval
 } from './controllers/userController.js';
 import {
   getSettings,
@@ -193,6 +195,8 @@ router.post('/auth/login', async (req, res) => {
     }
 
     if (!user.isActive) {
+      // Feature 31: a new Head from HR, waiting for the Company Admin.
+      if (user.headApproval?.status === 'pending') return res.status(401).json({ message: "Your account is waiting for the Company Admin's approval." });
       return res.status(401).json({ message: 'Account is disabled' });
     }
 
@@ -242,6 +246,7 @@ router.post('/auth/login', async (req, res) => {
       mobile: user.mobile || '',
       profilePicture: user.profilePicture ? `/uploads/profiles/${user.profilePicture}` : null,
       role: user.role,
+      customRoleName: user.customRoleName || undefined, // feature 34: shown instead of the role
       permissions: filteredPermissions,
       unit: user.unit || user.companyId?.unitName || 'Main Unit',
       companyId: user.companyId?._id,
@@ -297,6 +302,7 @@ router.get('/auth/me', authenticateToken, async (req, res) => {
       mobile: user.mobile || '',
       profilePicture: user.profilePicture ? `/uploads/profiles/${user.profilePicture}` : null,
       role: user.role,
+      customRoleName: user.customRoleName || undefined, // feature 34: shown instead of the role
       permissions: user.permissions,
       unit: user.unit || user.companyId?.unitName || 'Main Unit',
       companyId: user.companyId?._id,
@@ -394,6 +400,9 @@ const gateEmployeeEdit = (req, res, next) => {
 
 router.get('/users', verifyToken, getUsers);
 router.get('/users/generate-employee-id', verifyToken, getNextEmployeeId);
+// Feature 31 (25 Nov 2026): Head roles from HR wait for the Company Admin (checked in the controller).
+router.get('/users/head-approvals', verifyToken, listHeadApprovals);
+router.post('/users/:id/head-approval', verifyToken, decideHeadApproval);
 router.get('/users/:id', verifyToken, getUserById);
 // profileUpload.single() parses multipart/form-data so req.body is populated
 router.post('/users', verifyToken, authorizeRoles(...ADMIN_TIER_ROLES), employeeManagementAdd, profileUpload.single('profilePicture'), createUser);
@@ -410,9 +419,7 @@ router.put('/users/:id/password', verifyToken, authorizeRoles(...ADMIN_TIER_ROLE
 
 // Settings Routes (Super Admin Only)
 router.get('/settings', verifyToken, getSettings);
-router.get('/settings/debug', (req, res) => {
-  res.json({ message: 'Debug endpoint working', timestamp: new Date().toISOString() });
-});
+// Security check 25 Nov 2026: the open /settings/debug address (no login) was removed.
 router.put('/settings/company', verifyToken, updateCompanySettings);
 router.put('/settings/system', verifyToken, updateSystemSettings);
 router.put('/settings/notifications', verifyToken, updateNotificationSettings);

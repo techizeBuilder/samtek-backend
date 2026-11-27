@@ -66,6 +66,7 @@ export const getProfile = async (req, res) => {
       username: user.username,
       email: user.email,
       fullName: user.fullName,
+      mobile: user.mobile || '',
       profilePicture: user.profilePicture ? `/uploads/profiles/${user.profilePicture}` : null,
       role: user.role,
       unit: user.unit,
@@ -90,7 +91,7 @@ export const getProfile = async (req, res) => {
 // Update profile (fullName and email)
 export const updateProfile = async (req, res) => {
   try {
-    const { fullName, email } = req.body;
+    const { fullName, email, mobile } = req.body;
     
     // Handle different user ID formats from auth middleware
     const userId = req.user?.userId || req.user?.id || req.user?._id;
@@ -110,6 +111,14 @@ export const updateProfile = async (req, res) => {
     const updateData = {};
     if (fullName !== undefined) updateData.fullName = fullName;
     if (email !== undefined) updateData.email = email;
+    // Feature 27 (24 Nov 2026): the Company Admin (and everyone) keeps their own phone up to date.
+    if (mobile !== undefined) {
+      const m = String(mobile || '').trim();
+      if (m.length > 20 || (m && !/^[0-9+\-\s()]+$/.test(m))) {
+        return res.status(400).json({ message: 'Enter a valid phone number (digits, +, -, spaces).' });
+      }
+      updateData.mobile = m;
+    }
     
     const user = await User.findByIdAndUpdate(
       userId,
@@ -128,6 +137,7 @@ export const updateProfile = async (req, res) => {
         username: user.username,
         email: user.email,
         fullName: user.fullName,
+        mobile: user.mobile || '',
         profilePicture: user.profilePicture ? `/uploads/profiles/${user.profilePicture}` : null,
         role: user.role,
         unit: user.unit,

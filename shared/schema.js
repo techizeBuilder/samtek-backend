@@ -1,6 +1,8 @@
 export const USER_ROLES = {
   SUPER_ADMIN: 'Super Admin',
-  SUPER_USER: 'super_user',
+  // 'super_user' REMOVED 26 Nov 2026 (security): nobody had it, yet it acted like a Super Admin
+  // and HR could give it. Without the constant, every old `role !== USER_ROLES.SUPER_USER`
+  // check takes the restricted path. docs/security-checks/2026-11-26-super-user-and-dashboard.md
   PRODUCTION: 'Production',
   PACKING: 'Packing',
   DISPATCH: 'Dispatch',

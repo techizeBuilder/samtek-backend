@@ -11,13 +11,25 @@ import mongoose from 'mongoose';
 export const CONDUCT_TYPES = ['Behaviour', 'Discipline', 'Teamwork', 'Ownership', 'Safety'];
 export const CONDUCT_SEVERITIES = ['Minor', 'Major', 'Serious'];
 export const CONDUCT_STATUSES = ['Pending', 'Verified', 'Rejected', 'Cancelled'];
+// Feature 24 (2026-11-23): a Warning comes before any concern (no direct action). It takes
+// nothing off. HR's rules (ConductWarningRules) say how many per type, and whether one counts
+// at once or after HR approves. docs/client-features-2026-11/24-conduct-warnings-logic.md
+export const CONDUCT_KINDS = ['Concern', 'Warning', 'Appreciation'];
 
 const ConductNoteSchema = new mongoose.Schema({
   company: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   person: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   personName: { type: String, default: '' },
   department: { type: mongoose.Schema.Types.ObjectId, ref: 'Department', default: null },
-  kind: { type: String, enum: ['Concern', 'Appreciation'], default: 'Concern' },
+  kind: { type: String, enum: CONDUCT_KINDS, default: 'Concern' },
+  // Feature 24: a warning's place, fixed when recorded ("Warning 1 of 2").
+  warningNumber: { type: Number, default: null },
+  warningsAllowed: { type: Number, default: null },
+  autoCounted: { type: Boolean, default: false }, // a warning counted at once (HR's rule), not verified by a person
+  // Immediate action: a concern HR writes without a warning first, because it can't wait.
+  // The Company Admin approves it (not HR); until then it doesn't count.
+  immediate: { type: Boolean, default: false },
+  immediateReason: { type: String, default: '' },
   type: { type: String, enum: CONDUCT_TYPES, required: true },
   severity: { type: String, enum: [...CONDUCT_SEVERITIES, null], default: null }, // Concern only
   date: { type: String, required: true }, // 'YYYY-MM-DD' (India), the day it happened
@@ -39,5 +51,6 @@ const ConductNoteSchema = new mongoose.Schema({
 ConductNoteSchema.index({ company: 1, person: 1, date: 1 });
 ConductNoteSchema.index({ company: 1, status: 1, createdAt: -1 });
 ConductNoteSchema.index({ company: 1, createdAt: -1 }); // the list with no status filter, newest first
+ConductNoteSchema.index({ company: 1, person: 1, kind: 1, date: 1 }); // feature 24: a person's warnings in the last 3 months
 
 export default mongoose.model('ConductNote', ConductNoteSchema);

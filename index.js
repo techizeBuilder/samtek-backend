@@ -77,8 +77,30 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             const { backfillHrPermissions, grantHrFeatureOnce, grantModuleFeatureOnce, ORDER_TRACKING_GRANTS, separatePurchaseOnce } = await import('./services/hrPermissionBackfill.js');
             await backfillHrPermissions();
             await grantHrFeatureOnce('manpowerScore', 'hrManpowerScoreGrantedAt'); // feature 10, 2026-11-13
+            await grantHrFeatureOnce('kra', 'hrKraGrantedAt'); // feature 25, 2026-11-23
+            // Security re-check M5, 2026-11-27: the new switches for Holidays / HR Policy / HR Expenses, fully on
+            // for every HR once, so nobody loses a page they had.
+            await grantHrFeatureOnce('holidays', 'hrHolidaysGrantedAt');
+            await grantHrFeatureOnce('hrPolicy', 'hrPolicyGrantedAt');
+            await grantHrFeatureOnce('hrExpenses', 'hrExpensesGrantedAt');
+            const { grantCompanyAdminPagesOnce } = await import('./services/hrPermissionBackfill.js');
+            await grantCompanyAdminPagesOnce(); // feature 27, 2026-11-24: Company Admins saved with no pages
+            const { grantHrOrgPagesOnce } = await import('./services/hrPermissionBackfill.js');
+            await grantHrOrgPagesOnce(); // feature 29, 2026-11-24: HR sees Departments, sets Designations
+            const { copyPlatformListsOnce } = await import('./controllers/adminSettingsController.js');
+            await copyPlatformListsOnce(); // feature 28, 2026-11-24: packing checklist / document types / custom roles per company
             await grantModuleFeatureOnce('orderTracking', 'orderTrackingGrantedAt', ORDER_TRACKING_GRANTS); // feature 12, 2026-11-14
             await separatePurchaseOnce(); // Purchase separated from Accounts, 2026-11-16 (docs/purchase-separation)
+            const { grantTaskManagementOnce } = await import('./services/hrPermissionBackfill.js');
+            await grantTaskManagementOnce(); // feature 33, 2026-11-25: the Task Management switch, kept on for everyone who has the page
+            const { syncPermissionRoleOnce } = await import('./services/hrPermissionBackfill.js');
+            await syncPermissionRoleOnce(); // feature 30, 2026-11-24: hidden permission role = real role (last, after the grants above)
+            // Feature 34, 2026-11-26: the grants above give pages by role; nobody on a custom role keeps more than it allows.
+            const { trimAllCustomRoleUsersAtStart } = await import('./services/access/customRoles.js');
+            await trimAllCustomRoleUsersAtStart();
+            // 26 Nov 2026: Store holds only R&D's two views (machines, sub child parts); the grants above can add more.
+            const { applyRoleLimitsAtStart } = await import('./services/access/roleLimits.js');
+            await applyRoleLimitsAtStart();
         }
         catch (permError) {
             console.error('HR permission backfill failed:', permError.message);
@@ -538,6 +560,9 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.use('/api/scorecard-settings', (await import('./routes/scorecardSettings.routes.js')).default); // feature 13
             app.use('/api/standard-hours', (await import('./routes/standardHours.routes.js')).default); // feature 19 (standard hours)
             app.use('/api/bulk-import', (await import('./routes/bulkImport.routes.js')).default); // feature 20 (R&D bulk import)
+            app.use('/api/step-media', (await import('./routes/stepMedia.routes.js')).default); // feature 23 (step photos / videos)
+            app.use('/api/kra', (await import('./routes/kra.routes.js')).default); // feature 25 (KRAs)
+            app.use('/api/kra-tasks', (await import('./routes/kraTasks.routes.js')).default); // feature 25 slice 2 (tasks on KRAs)
             app.use('/api/payslips', payslipRouter);
             app.use('/api/job-openings', jobOpeningRouter);
             app.use('/api/candidates', candidateRouter);
@@ -579,9 +604,10 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             app.use('/api/dispatches', dispatchRoutes);
             console.log('Dispatch routes registered at /api/dispatches');
             // Hrms routes
-            const hrmsTaskManagementRoutes = (await import('./routes/hrmsTaskManagementRoutes.js')).default;
-            app.use('/api/hrms/tasks', hrmsTaskManagementRoutes);
-            console.log('HRMS Task Management routes registered at /api/hrms/tasks');
+            // Security re-check M6 (27 Nov 2026): the old Task Management API (/api/hrms/tasks) is no longer
+            // mounted. Feature 25 replaced its pages (/api/kra-tasks; old tasks show under "Before KRA" through
+            // /api/kra-tasks/legacy), no screen called it, and its Head-only guards let department employees in.
+            // routes/hrmsTaskManagementRoutes.js is kept for reference only.
             // Add direct routes for specific endpoints
             const { authenticateToken } = await import('./middleware/auth.js');
             const { getAllOrders } = await import('./controllers/unitManagerController.js');
@@ -1077,6 +1103,24 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads'), {
             }
             catch (cronError) {
                 console.warn('⚠️ Sub Child Part (leaf) order cron job setup warning:', cronError.message);
+            }
+            // ─── Feature 25 slice 3 (23 Nov 2026): KRA routine items + task reminders (India time) ──
+            try {
+                const cron = (await import('node-cron')).default;
+                const { runRoutineDay, catchUpOnStart, runReminders } = await import('./services/kraTasks/kraRoutineService.js');
+                const { withCronLock } = await import('./services/cronLockService.js');
+                const guarded = (name, fn) => async () => {
+                    try { await withCronLock(name, 20 * 60 * 1000, fn); }
+                    catch (e) { console.error(`[CRON] ${name} failed:`, e.message); }
+                };
+                cron.schedule('10 0 * * *', guarded('kraRoutineDay', () => runRoutineDay()), { timezone: 'Asia/Kolkata' });
+                cron.schedule('30 9 * * *', guarded('kraRemindMorning', () => runReminders('morning')), { timezone: 'Asia/Kolkata' });
+                cron.schedule('30 17 * * *', guarded('kraRemindEvening', () => runReminders('evening')), { timezone: 'Asia/Kolkata' });
+                setTimeout(guarded('kraRoutineCatchUp', () => catchUpOnStart()), 30 * 1000);
+                console.log('✅ KRA routine items (00:10) and task reminders (09:30, 17:30) scheduled');
+            }
+            catch (cronError) {
+                console.warn('⚠️ KRA routine cron setup warning:', cronError.message);
             }
         }
         catch (error) {

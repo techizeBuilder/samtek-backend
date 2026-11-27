@@ -19,20 +19,12 @@ export const generateEmployeeId = async (companyId) => {
 
   const prefix = `EMP-${abbr}-`;
 
-  const lastUser = await User.findOne({
-    employeeId: { $regex: `^${prefix}` },
-  })
-    .sort({ createdAt: -1 })
-    .select("employeeId");
+  // 27 Nov 2026: the highest number in use + 1, as HR's bulk import does (services/bulkImport/peopleImport.js
+  // nextEmployeeIds). It used to take the most recently CREATED user's number: after an import (several
+  // people saved at the same moment) that could be a lower one, and the next Add User failed with
+  // "employeeId already exists". Bounded by the prefix (one company's people), on the employeeId index.
+  const used = await User.distinct("employeeId", { employeeId: { $regex: `^${prefix}` } });
+  const high = Math.max(0, ...used.map((id) => parseInt(String(id).split("-").pop(), 10)).filter((n) => !Number.isNaN(n)));
 
-  let nextNumber = 1;
-
-  if (lastUser?.employeeId) {
-    const parts = lastUser.employeeId.split("-");
-    const lastNumStr = parts[parts.length - 1];
-    const lastNum = parseInt(lastNumStr, 10);
-    if (!isNaN(lastNum)) nextNumber = lastNum + 1;
-  }
-
-  return `${prefix}${String(nextNumber).padStart(4, "0")}`;
+  return `${prefix}${String(high + 1).padStart(4, "0")}`;
 };

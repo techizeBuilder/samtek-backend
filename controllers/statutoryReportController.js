@@ -13,7 +13,7 @@ export const getStatutoryReports = async (req, res) => {
 
     // Company-wise isolation — HR-Admin / Company Admin only see their own
     // company's employees. Platform-wide admins see everything.
-    if (!["Superadmin", "Super Admin", "super_user"].includes(req.user.role) && req.user.companyId) {
+    if (!["Superadmin", "Super Admin"].includes(req.user.role) && req.user.companyId) {
       const companyUsers = await User.find({ companyId: req.user.companyId }).select("_id").lean();
       filter.user = { $in: companyUsers.map((u) => u._id) };
     }
@@ -75,7 +75,7 @@ export const generateStatutoryReports = async (req, res) => {
     const { month } = req.body;
 
     const filter = { month };
-    if (!["Superadmin", "Super Admin", "super_user"].includes(req.user.role) && req.user.companyId) {
+    if (!["Superadmin", "Super Admin"].includes(req.user.role) && req.user.companyId) {
       const companyUsers = await User.find({ companyId: req.user.companyId }).select("_id").lean();
       filter.user = { $in: companyUsers.map((u) => u._id) };
     }

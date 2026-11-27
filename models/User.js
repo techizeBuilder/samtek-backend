@@ -210,10 +210,48 @@ const userSchema = new mongoose.Schema({
   },
   lastLogin: {
     type: Date
+  },
+  // 25 Nov 2026: the employment status HR keeps on a person's profile (Probation & Confirmation,
+  // Resigned / Terminated). The profile screens always sent these, but nothing stored them, so
+  // every person read PROBATION and the Save buttons did nothing. Missing = on probation.
+  employmentStatus: { type: String, enum: ['PROBATION', 'CONFIRMED'] },
+  probationEndDate: Date,
+  confirmationDate: Date,
+  probationJustification: String,
+  isResigned: Boolean,
+  isTerminated: Boolean,
+  terminationDate: Date,
+  terminationReason: String,
+  // Feature 31 (25 Nov 2026): a Department Head role given by HR waits for the Company Admin
+  // (services/access/headApproval.js). kind: new = a new user (saved inactive), roleChange = an
+  // existing person's role, login = Give Login. The waiting role / permissions / login live here
+  // and only reach the person on approval.
+  // Feature 34 (26 Nov 2026): the custom role this person is on (their `role` is its base role).
+  // customRoleName is shown everywhere and kept in step on a rename. services/access/customRoles.js
+  customRoleId: { type: mongoose.Schema.Types.ObjectId },
+  customRoleName: { type: String },
+  headApproval: {
+    status: { type: String, enum: ['pending', 'approved', 'rejected'] },
+    kind: { type: String, enum: ['new', 'roleChange', 'login'] },
+    role: String,
+    customRoleId: mongoose.Schema.Types.ObjectId, // feature 34: the custom role the request is for
+    customRoleName: String,
+    permissions: mongoose.Schema.Types.Mixed,
+    login: {
+      email: String,
+      passwordHash: { type: String, select: false },
+    },
+    requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    requestedAt: Date,
+    decidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    decidedAt: Date,
+    reason: String,
   }
 }, {
   timestamps: true
 });
+userSchema.index({ companyId: 1, 'headApproval.status': 1 }); // the Company Admin's waiting list
+userSchema.index({ companyId: 1, customRoleId: 1 }, { partialFilterExpression: { customRoleId: { $type: 'objectId' } } }); // feature 34
 
 userSchema.index({ email: 1 }, {
   name: 'email_unique_when_set', unique: true, partialFilterExpression: { email: { $type: 'string' } },
@@ -244,6 +282,7 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 userSchema.methods.toJSON = function () {
   const user = this.toObject();
   delete user.password;
+  if (user.headApproval?.login) delete user.headApproval.login.passwordHash; // feature 31
   return user;
 };
 
